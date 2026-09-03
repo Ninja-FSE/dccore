@@ -41,6 +41,7 @@ Full guide, including configuring it by hand and upgrading from an older install
 | [WINDOWS.md](docs/WINDOWS.md) | the Windows guide |
 | [CONVENTIONS.md](docs/CONVENTIONS.md) | how this codebase is written, if you want to contribute |
 | [UPDATES.md](docs/UPDATES.md) | changelog |
+| [SECURITY.md](docs/SECURITY.md) | how to report a vulnerability |
 
 ## How it is put together
 
