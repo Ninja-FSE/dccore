@@ -1,0 +1,18 @@
+# DCCore - runtime dependencies for the daemon itself.
+#
+# There are none. Every module the bot needs to connect to IRC, serve files
+# over DCC, pack albums with rar, run the queues and run the admin console is
+# in the Python standard library.
+#
+#     pip install -r requirements.txt
+#
+# succeeds and installs nothing. That is deliberate, and worth keeping: an IRC
+# file server is a long-lived process on someone else's machine, and every
+# package added here is another thing that can break it on an upgrade, or need
+# a compiler on a platform nobody tested.
+#
+# The one optional extra is the web dashboard, which needs Flask. It is opt-in
+# and lives in requirements-web.txt, so a headless install stays dependency
+# free. See docs/README.md.
+#
+# Python 3.10 or newer.

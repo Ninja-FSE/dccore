@@ -1,0 +1,67 @@
+name: tests
+
+# Runs on both platforms deliberately. The daemon lives on Linux today, but the
+# suite is stdlib-only precisely so it also runs on Windows - which is where a
+# future port is headed, and which is the only thing that can prove a change has
+# not quietly broken the other side.
+on:
+  # Long-lived branches only, so a feature branch does not get a push run AND a
+  # pull_request run for the same commit.
+  push:
+    branches: [main]
+
+  # Every pull request, whatever it targets.
+  #
+  # This list used to name branches, which created a chicken-and-egg trap:
+  # GitHub evaluates a pull_request trigger using the workflow file on the BASE
+  # branch, not the PR's own copy. So a PR opening against a branch that was not
+  # yet in this list could not run CI - including the PR that would have added
+  # it. #54 hit exactly that and had to be verified by hand instead.
+  pull_request:
+    branches: ['**']
+
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 3.10 is what production runs; 3.12 catches anything the newer
+        # interpreter tightens before it becomes a surprise.
+        python: ["3.10", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # Optional dependency (see requirements-web.txt) - the daemon itself needs
+      # nothing and runs fine without this. Installed here so the suite exercises
+      # webserver.py's real Flask routes rather than always taking the
+      # @skipUnless(webserver.HAVE_FLASK, ...) path: those routes had gone
+      # untested in CI since the day they were added, on every PR, because
+      # nothing here ever installed Flask.
+      - name: Install the optional web dashboard dependency
+        run: pip install -r requirements-web.txt
+
+      - name: Every module imports cleanly
+        # Catches a syntax error or a bad import before the suite even starts.
+        #
+        # The list used to be written out here by hand, and had drifted: it named
+        # 11 modules, preflight named 12, and the project had 14 - adminchat.py
+        # and oserve.py were in neither. scripts/check_imports.py derives the list
+        # from the filesystem instead, so a new module is covered the moment it
+        # exists.
+        run: python scripts/check_imports.py
+
+      - name: Compile every source file
+        run: python -m compileall -q .
+
+      - name: Run the regression suite
+        run: python -m unittest discover -s tests -t . -v

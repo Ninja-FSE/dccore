@@ -1,0 +1,115 @@
+# admin_config.py.sample - copy this to admin_config.py and fill in your own values.
+#
+# admin_config.py is gitignored and imported by defaults.py at startup via
+# `from admin_config import *` (see defaults.py's "LOCAL OVERRIDES" section), so
+# anything set here overrides the tracked default of the same name for this one
+# machine, without ever showing up as a diff.
+#
+# Any name from defaults.py can be overridden this way, but the ones below are the
+# ones actually meant to live here - see docs/ADMIN-CONSOLE.md for the full
+# setup guide.
+
+# ---------------------------------------------------------------------
+# YOUR IDENTITY - CHANGE ALL OF THESE FIRST
+# ---------------------------------------------------------------------
+# NICKNAME, CHANNEL and ADMIN_NICK ship blank on purpose - nothing here can
+# accidentally join anyone else's channels or hand out control of your own
+# !ban/!rehash/!update/!clearqueue commands (is_admin() is a plain nick
+# comparison), because the daemon simply refuses to start until you pick
+# your own. Uncomment and fill in every line below; these can also be set
+# in settings.conf instead (see settings.conf.sample) if you prefer
+# configuring them from the web dashboard or CLI rather than by hand.
+#
+# NICKNAME, CHANNEL and ADMIN_NICK are not just recommended - oserve.startup()
+# refuses to boot (sys.exit(1), naming every one still unconfigured) while any
+# of them is still blank. See settings_file.REQUIRED if you want the full,
+# authoritative list. SERVER and DEBUG_CHANNEL are NOT in that list even
+# though they matter - their shipped defaults ("irc.undernet.org",
+# blank DEBUG_CHANNEL) are already right for almost every install, and forcing
+# them blank too would make those correct, intended values impossible to set
+# explicitly (the gate cannot tell "left at default" apart from "deliberately
+# confirmed the default is right"). FILE_DIRECTORY is also not in that list,
+# deliberately: requiring it would block the daemon from ever reaching the
+# web dashboard, the one place that is genuinely easier to set it from - a
+# blank one only warns, both at boot and from configure.py.
+#
+# NICKNAME = "YourBotName"
+# ALT_NICKNAME = "YourBotName_"
+# CHANNEL = "#your-test-channel"
+# DEBUG_CHANNEL = "#your-debug-channel"
+# ADMIN_NICK = "YourNick"
+# LIST_BASE_NAME = "YourBotName"
+# FILE_DIRECTORY = "D:\\Music"          # start with a small test folder
+
+# Empty list = console disabled, and every DCC CHAT request is ignored.
+#
+# Each entry is a HOST pattern - the part after the last "@" of an IRC
+# hostmask. On Undernet, log into X and set usermode +x, and the server
+# replaces your host with "<your-account>.users.undernet.org". That is what
+# goes here, not your nick.
+ADMIN_HOSTMASKS = [""]
+
+# Generate with:  python adminchat.py
+ADMIN_PASSWORD_HASH = ""
+
+# How the DCC CHAT connection gets made:
+#
+#   "auto"     dial the client, and listen instead if that fails.  (default)
+#   "listen"   always listen and offer the connection back.
+#   "connect"  only ever dial the client; never listen.
+#
+# "auto" is right for most setups. Choose "listen" when the client is behind a
+# VPN, a router that does not forward the port, or a firewall that drops
+# rather than rejects - all of which show up as a TIMEOUT on the dial and then
+# cost the full connect timeout on every login before the fallback takes over.
+ADMIN_CHAT_MODE = "listen"
+
+
+# ---------------------------------------------------------------------
+# ONCE THE CONSOLE IS TRUSTED
+# ---------------------------------------------------------------------
+# Whether !ban, !unban, !rehash, !update and !clearqueue still work when typed
+# in a channel. Set False and admin authority rests entirely on the services
+# host plus the password, never on a nick someone can take while you are
+# offline. The user commands (!list, !ping, @find, the queue triggers) are not
+# affected.
+ADMIN_CHANNEL_COMMANDS = True
+
+# Where the daemon's running commentary goes - transfers, joins, bans, pack
+# failures. Both on by default.
+#
+# Set DEBUG_TO_CHANNEL = False once the console is doing the job, and the
+# daemon's internals stop being published to a channel other people can sit in.
+#
+# Neither switch can lose a line: with the channel off and no console connected,
+# send_debug falls back to stdout, so the LXC console and the journal always
+# have it.
+DEBUG_TO_CHANNEL = True
+DEBUG_TO_CONSOLE = True
+
+
+# ---------------------------------------------------------------------
+# WEB DASHBOARD
+# ---------------------------------------------------------------------
+# A status page (search / queue / file lists / cross-bot fetch) served by
+# webserver.py. Flask is optional - if it is not installed, the dashboard
+# logs a line and stays off; it never stops the daemon from starting.
+WEBUI_ENABLED = True
+
+# EVERY ROUTE REQUIRES A LOGIN, including static assets - see webserver.py's
+# module docstring for the detail. The password is the same one
+# ADMIN_PASSWORD_HASH above uses for the DCC CHAT console (generate it with
+# `python adminchat.py`); start() refuses to run at all while that hash is
+# empty, so there is no window where the dashboard is reachable
+# unauthenticated.
+#
+# "127.0.0.1" is the tracked default: safe out of the box, reachable only
+# from this machine. Set this to "0.0.0.0" here if you want it reachable
+# from other devices on your LAN (phone, laptop).
+#
+#   DO NOT PORT-FORWARD THIS PORT TO THE INTERNET. A login gate does not
+#   stop someone who shares the network segment from reading the password
+#   or the session cookie off the wire - there is no TLS here. DO NOT put
+#   this host on any network you do not trust.
+WEBUI_HOST = "127.0.0.1"
+WEBUI_PORT = 8420

@@ -1,0 +1,90 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Ignore everything inside lists/ and data/
+lists/*
+data/*
+
+# ...but do NOT ignore the .gitkeep files that keep those directories
+!lists/.gitkeep
+!data/.gitkeep
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before launching pyinstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.toml
+.cache
+.pytest_cache/
+.testmondata
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.border
+*.log
+-junit.xml
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# macOS system files
+.DS_Store
+
+# Claude Code local config (machine-specific hooks, session data, cache)
+.claude/
+CLAUDE.md
+
+# Per-machine config overrides (paths, nick, channels)
+admin_config.py
+# local_config.py is the old, pre-#170 name. Kept ignored permanently, not
+# just during the rename: it is gitignored, so it was never in the
+# repository for git to rename along with config.py -> defaults.py. An
+# operator upgrading a real install keeps their old local_config.py on
+# disk for years after defaults.py's own migration renames it once - see
+# defaults.py's _migrate_local_config_to_admin_config(). An ignore rule
+# for a file the project no longer reads costs nothing; the alternative is
+# a credential file (it can hold ADMIN_PASSWORD_HASH) turning up as an
+# untracked file the moment this line is ever removed.
+local_config.py
+settings.conf
