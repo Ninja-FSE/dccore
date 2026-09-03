@@ -12,11 +12,11 @@ listens on IRC and, optionally, a web dashboard, both of which take
 untrusted network input, so a public issue is a public exploit
 announcement before a fix ships.
 
-Instead, use GitHub's private vulnerability reporting for this repository
-(**Security** tab → **Report a vulnerability**), once it is enabled here.
-Until then, or if that is not available to you, email the maintainer at
-the address on the [GitHub profile](https://github.com/Ninja-FSE) linked
-to this repository.
+Instead, email **dccore@proton.me**. (GitHub's own private vulnerability
+reporting — **Security** tab → **Report a vulnerability** — only works on
+public repositories, so it isn't available here yet; once this repository
+is public, that becomes the preferred channel and this section will say
+so.)
 
 Include what you'd include in a bug report: what you did, what happened,
 what you expected, and the version/commit you tested against. A proof of
