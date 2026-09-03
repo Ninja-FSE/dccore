@@ -84,9 +84,7 @@ This matters most as a prerequisite: step 1 above refactors seven modules that c
 
 ### From the audits, not yet done
 
-- **`!rehash` rebinds every module-level lock**, so a thread inside a critical section loses mutual exclusion. `runtime.py` already solves this for the containers; the locks need the same treatment.
-- **Timed bans grow without bound** — the flood sweep covers two of the three tracking structures.
-- Roughly forty further verified findings, from a false "MasterList missing" during a concurrent search to a queued `!rar` pack that is never re-dispatched.
+- **`banned_users` grows without bound.** The flood sweep prunes the other two tracking structures — `user_requests` and `muted_until` — once a minute, but nothing expires entries from the third, so a long-running bot accumulates them for the life of the process.
 
 ### Smaller things worth having
 
