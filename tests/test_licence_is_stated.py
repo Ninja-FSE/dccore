@@ -89,12 +89,24 @@ class TheReadmeStatesTheLicenceAndTheCopyright(unittest.TestCase):
 
     def test_the_holder_is_not_an_individual_identity(self):
         """Consistent with the rest of the pre-publication work: the published
-        code does not tie itself to one person's handle or nick."""
-        section = self.section().lower()
+        code does not tie itself to one person's handle or nick.
 
-        for handle in ("chchatzop", "ninja-fse", "flac", "samoth"):
-            with self.subTest(handle=handle):
-                self.assertNotIn(handle, section)
+        Asserted POSITIVELY - the holder must be the collective phrase - rather
+        than by listing the handles to keep out.
+
+        The list version spelled four real identities into a file that ships,
+        so the test scrubbing for them was itself the thing carrying them. It
+        survived every sweep, including the final pre-extraction one, because
+        every sweep read the code and the docs and nobody thought to read the
+        scrubber. A denylist of identities cannot live in the artifact it is
+        protecting.
+        """
+        section = self.section()
+
+        self.assertRegex(
+            section, r"Copyright \(C\) \d{4} The DCCore contributors",
+            "the copyright line should name the project's contributors "
+            "collectively, not a person")
 
     def test_the_summary_does_not_overstate_the_licence(self):
         """GPLv3's obligations attach to DISTRIBUTION, not to use. Saying that
