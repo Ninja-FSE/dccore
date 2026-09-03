@@ -1,0 +1,21 @@
+# DCCore - the OPTIONAL web dashboard (webserver.py).
+#
+#     pip install -r requirements-web.txt
+#
+# Install this only if you want the dashboard. The daemon itself needs nothing
+# (see requirements.txt) and starts perfectly well without Flask: webserver.py
+# catches the ImportError, logs "[WEBUI] Flask not installed; dashboard
+# disabled." and the bot carries on. A headless, pure-CLI install is a
+# first-class way to run this.
+
+-r requirements.txt
+
+# A floor rather than a pin. The dashboard uses only the long-stable parts of
+# the API - Flask(), @app.route, request.args, request.get_json, jsonify - all
+# unchanged across 2.x and 3.x, so pinning would age badly and force upgrades
+# on people for no reason. Tested against 3.1.
+Flask>=2.0
+
+# NOTE: the dashboard serves over Flask's built-in development server
+# (app.run()). That is fine for the localhost-only default it ships with, and
+# is a known item to revisit if it is ever exposed on a LAN.

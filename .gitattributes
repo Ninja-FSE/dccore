@@ -1,0 +1,40 @@
+# =====================================================================
+# LINE ENDINGS
+# =====================================================================
+# Windows ends a line with CR+LF, Linux with LF alone. Git stores bytes,
+# so the same text saved on two machines is two different files as far as
+# a diff is concerned - every line reads as changed.
+#
+# Without this file that is decided by each contributor's local
+# core.autocrlf setting, which is why this repository ended up storing
+# four files as CRLF and eleven as LF, and why a six-line fix to db.py
+# rendered on GitHub as "2 insertions, 176 deletions".
+#
+# .gitattributes is committed, so it applies to everyone who clones -
+# unlike core.autocrlf, which only ever applied to one machine.
+#
+# Everything is normalised to LF in the repository. The daemon runs on
+# Linux, Python does not care either way, and every current editor on
+# Windows handles LF correctly.
+# ---------------------------------------------------------------------
+
+* text=auto eol=lf
+
+# Source and documentation: always LF, never converted.
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+
+# Windows batch files. cmd.exe is happier with CRLF, and these are only
+# ever run on Windows, so they are the one exception to the LF rule above.
+*.bat   text eol=crlf
+
+# Binary: never touch the bytes. Newline conversion inside an archive or
+# an audio file would corrupt it silently and permanently.
+*.zip   binary
+*.rar   binary
+*.flac  binary
+*.mp3   binary
+*.png   binary
+*.jpg   binary
+*.ico   binary

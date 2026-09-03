@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DCCore Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<script>
+  // Runs before the body exists, on purpose: a stored choice has to be on the
+  // root element before the first paint, or the page renders in the operating
+  // system's theme and then swaps to the chosen one - a flash on every single
+  // load for anyone whose choice differs from their machine's.
+  //
+  // No stored choice means no attribute, which is the state style.css leaves
+  // to prefers-color-scheme. localStorage throws rather than returning null in
+  // a browser set to block site data, so this cannot be an unguarded read.
+  try {
+    var saved = localStorage.getItem("dccore-theme");
+    if (saved === "dark" || saved === "light") {
+      document.documentElement.setAttribute("data-theme", saved);
+    }
+  } catch (e) { /* no stored preference is a perfectly good answer */ }
+</script>
+</head>
+<body>
+
+<div class="shell">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <span class="brand-name" id="brand-name">DCCore</span>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item is-active" data-view="search">
+        <span class="nav-icon">&#9906;</span> Search
+      </button>
+      <button class="nav-item" data-view="queue">
+        <span class="nav-icon">&#8801;</span> Queue
+      </button>
+      <button class="nav-item" data-view="download">
+        <span class="nav-icon">&#8595;</span> Download
+      </button>
+      <button class="nav-item" data-view="filelists">
+        <span class="nav-icon">&#9776;</span> File Lists
+      </button>
+      <button class="nav-item" data-view="tools">
+        <span class="nav-icon">&#9881;</span> Tools
+      </button>
+      <button class="nav-item" data-view="settings">
+        <span class="nav-icon">&#9998;</span> Settings
+      </button>
+      <button class="nav-item" data-view="stats">
+        <span class="nav-icon">&#9673;</span> Stats
+      </button>
+    </nav>
+
+    <div class="status-card">
+      <div class="status-row">
+        <span class="status-label">Status</span>
+        <span class="status-value">
+          <span class="status-dot" id="conn-dot"></span>
+          <span id="conn-text">connecting&hellip;</span>
+        </span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Slots</span>
+        <span class="status-value" id="status-slots">&mdash;</span>
+      </div>
+      <div class="status-row">
+        <span class="status-label">Queued</span>
+        <span class="status-value" id="status-queued">&mdash;</span>
+      </div>
+    </div>
+
+    <div class="sidebar-foot">
+      Logged in &middot; LAN only
+      <div class="theme-switch" role="group" aria-label="Colour theme">
+        <button type="button" class="theme-btn" id="theme-dark" data-theme-choice="dark">
+          &#9790; Dark
+        </button>
+        <button type="button" class="theme-btn" id="theme-light" data-theme-choice="light">
+          &#9788; Light
+        </button>
+      </div>
+      <form method="post" action="/logout">
+        <button type="submit" class="logout-btn">Log out</button>
+      </form>
+    </div>
+  </aside>
+
+  <div class="main">
+
+    <header class="topbar">
+      <h1 class="topbar-title" id="page-title">Search</h1>
+      <p class="topbar-sub" id="page-sub">Find a file across the current master list.</p>
+    </header>
+
+    <section class="view is-active" id="view-search">
+      <form class="search-bar" id="search-form">
+        <input type="text" id="search-input" class="search-input"
+               placeholder="Search by filename&hellip; (min 1 word)" autocomplete="off">
+        <button type="submit" class="btn btn-accent">Search</button>
+        <button type="button" id="broadcast-btn" class="btn">Search all bots</button>
+      </form>
+
+      <p class="broadcast-note">
+        "Search all bots" sends <code>@find</code> into the configured broadcast channel and
+        listens for 30 seconds. Anyone logged into this dashboard can trigger it - there is no
+        separate confirmation beyond the login you already used to see this page.
+      </p>
+      <p class="broadcast-status" id="broadcast-status"></p>
+
+      <div class="table-wrap broadcast-wrap" id="broadcast-wrap" style="display:none;">
+        <div class="panel-bar">
+          <span class="panel-bar-label">Replies from other bots</span>
+          <button type="button" id="download-selected-btn" class="btn btn-accent" disabled>Download selected</button>
+        </div>
+        <table class="data-table" id="broadcast-table">
+          <thead>
+            <tr>
+              <th class="col-check"></th>
+              <th>From</th>
+              <th>Reply</th>
+            </tr>
+          </thead>
+          <tbody id="broadcast-body">
+            <tr class="empty-row"><td colspan="3">No replies yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="search-table">
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Path</th>
+              <th>Size</th>
+              <th>Channel</th>
+            </tr>
+          </thead>
+          <tbody id="search-body">
+            <tr class="empty-row"><td colspan="4">Type something and press Search.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="view" id="view-queue">
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-value" id="stat-slots">&mdash;</div>
+          <div class="stat-label">Active slots</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-files">&mdash;</div>
+          <div class="stat-label">Files queued</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-users">&mdash;</div>
+          <div class="stat-label">Users waiting</div>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="queue-table">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Next file</th>
+              <th>Count</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="queue-body">
+            <tr class="empty-row"><td colspan="4">Loading&hellip;</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="view" id="view-download">
+      <div class="table-wrap bulk-fetch-wrap">
+        <form id="bulk-fetch-form" class="bulk-fetch-form">
+          <p class="broadcast-note">
+            One request per line, in the exact shape a real IRC channel command uses -
+            <code>!&lt;bot&gt; &lt;filename&gt;</code> - the same shape the Search view's
+            broadcast-result "Download" buttons produce under the hood. Example:
+          </p>
+          <p class="broadcast-note">
+            <code>!goodbot Song One.mp3</code><br>
+            <code>!otherbot Some Album Track.flac</code>
+          </p>
+          <textarea id="bulk-fetch-textarea" class="bulk-fetch-textarea" rows="6"
+                    placeholder="!goodbot Song One.mp3&#10;!otherbot Some Album Track.flac"
+                    autocomplete="off"></textarea>
+          <div class="bulk-fetch-actions">
+            <button type="submit" class="btn btn-accent">Queue requests</button>
+          </div>
+          <div id="bulk-fetch-errors" class="bulk-fetch-errors"></div>
+        </form>
+      </div>
+
+      <h2 class="panel-title">Downloads (fetched from other bots)</h2>
+      <div class="table-wrap">
+        <table class="data-table" id="downloads-table">
+          <thead>
+            <tr>
+              <th>Bot</th>
+              <th>File</th>
+              <th>State</th>
+              <th>Progress</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="downloads-body">
+            <tr class="empty-row"><td colspan="5">Nothing queued yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="view" id="view-filelists">
+      <div class="filelists-toolbar">
+        <form id="filelists-fetch-form" class="filelists-fetch-form">
+          <input type="text" id="filelists-fetch-input" class="search-input"
+                 placeholder="Fetch a bot's list&hellip; (nick)" autocomplete="off">
+          <button type="submit" class="btn btn-accent">Fetch</button>
+        </form>
+        <div class="filelists-switcher">
+          <label for="filelists-source-select">Showing</label>
+          <select id="filelists-source-select">
+            <option value="__own__">Our own list</option>
+          </select>
+        </div>
+      </div>
+      <p class="broadcast-status" id="filelists-fetch-status"></p>
+
+      <div class="folder-controls">
+        <button type="button" class="btn btn-small" id="filelists-expand-all">Expand all</button>
+        <button type="button" class="btn btn-small" id="filelists-collapse-all">Collapse all</button>
+        <button type="button" class="btn btn-accent btn-small" id="filelists-download-selected-btn" disabled>Download selected</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="filelists-table">
+          <thead>
+            <tr>
+              <th class="col-check"></th>
+              <th>Title</th>
+              <th>Size</th>
+              <th>Format</th>
+              <th>Source</th>
+            </tr>
+          </thead>
+          <tbody id="filelists-body">
+            <tr class="empty-row"><td colspan="5">Loading&hellip;</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="filelists-pager">
+        <button type="button" class="btn btn-small" id="filelists-prev-btn">Prev</button>
+        <span class="filelists-pager-info" id="filelists-page-info"></span>
+        <button type="button" class="btn btn-small" id="filelists-next-btn">Next</button>
+      </div>
+    </section>
+
+    <section class="view" id="view-tools">
+      <div class="tool-card">
+        <div class="tool-head">
+          <h2 class="tool-name">Update list</h2>
+          <button type="button" class="btn btn-accent" id="update-list-run-btn">Run</button>
+        </div>
+        <p class="tool-what">
+          Rebuilds the master list by walking the whole music directory again
+          &mdash; the same rebuild <code>!update</code> triggers over IRC.
+          Worth running here right after setting or changing the music
+          directory from the Settings page, since nothing else prompts for
+          it automatically.
+        </p>
+        <p class="tool-status" id="update-list-status"></p>
+      </div>
+      <div class="tool-card">
+        <div class="tool-head">
+          <h2 class="tool-name">Verify list</h2>
+          <button type="button" class="btn btn-accent" id="verify-run-btn">Run</button>
+        </div>
+        <p class="tool-what">
+          Reads the master list and reports any filename that appears under more
+          than one folder. A request that names a file alone reaches only the
+          first copy listed under that name &mdash; the rest are shadowed by it.
+          Pasting a search result&rsquo;s whole line, size included, reaches the
+          copy that size names.
+        </p>
+        <p class="tool-status" id="verify-status"></p>
+        <div class="verify-results" id="verify-results"></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <div class="settings-layout">
+        <nav class="settings-rail" id="settings-rail">
+          <div class="settings-rail-empty">Loading&hellip;</div>
+        </nav>
+        <div class="settings-panel">
+          <div class="settings-fields" id="settings-fields"></div>
+
+          <div class="settings-savebar">
+            <span class="settings-savebar-text" id="settings-savebar-text">All changes saved</span>
+            <button type="button" class="btn btn-accent" id="settings-save-btn" disabled>Save &amp; rehash</button>
+          </div>
+          <p class="settings-note" id="settings-restart-note" style="display:none;"></p>
+          <p class="settings-note" id="settings-save-error" style="display:none;"></p>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-stats">
+      <div class="stat-group-label">Transfer</div>
+      <div class="stat-row is-wide">
+        <div class="stat-card"><div class="stat-value" id="st-speed">&mdash;</div><div class="stat-label">Speed now</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-record">&mdash;</div><div class="stat-label">Record</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-sending">&mdash;</div><div class="stat-label">Sending</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-queued">&mdash;</div><div class="stat-label" id="st-queued-label">Queued</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-uptime">&mdash;</div><div class="stat-label">Uptime</div></div>
+      </div>
+
+      <div class="stat-group-label">Sent</div>
+      <div class="stat-row is-wide">
+        <div class="stat-card"><div class="stat-value" id="st-sent-total">&mdash;</div><div class="stat-label" id="st-sent-total-files">Total</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-sent-today">&mdash;</div><div class="stat-label" id="st-sent-today-files">Today</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-sent-yesterday">&mdash;</div><div class="stat-label" id="st-sent-yesterday-files">Yesterday</div></div>
+      </div>
+
+      <div class="stat-group-label">Library</div>
+      <div class="stat-row is-wide">
+        <div class="stat-card"><div class="stat-value" id="st-files">&mdash;</div><div class="stat-label">Files shared</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-size">&mdash;</div><div class="stat-label">Size</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-albums">&mdash;</div><div class="stat-label">Album folders (!rar)</div></div>
+        <div class="stat-card"><div class="stat-value stat-value-sm" id="st-built">&mdash;</div><div class="stat-label">List built</div></div>
+      </div>
+
+
+      <div class="stat-group-label">Most downloaded &mdash; files</div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>File</th><th class="col-num">Times sent</th></tr></thead>
+          <tbody id="st-top-files"></tbody>
+        </table>
+      </div>
+
+      <div class="stat-group-label" id="st-top-albums-label">Most downloaded &mdash; album folders</div>
+      <div class="table-wrap" id="st-top-albums-wrap">
+        <table>
+          <thead><tr><th>Album</th><th class="col-num">Times sent</th></tr></thead>
+          <tbody id="st-top-albums"></tbody>
+        </table>
+      </div>
+      <p class="stat-foot" id="st-top-albums-off" style="display:none;">
+        Folder packing is off (<code>RAR_ENABLED</code>), so no album can be sent.
+      </p>
+
+      <p class="stat-foot" id="st-foot"></p>
+    </section>
+
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,471 @@
+# =====================================================================
+# DCCore - settings.conf.sample
+# =====================================================================
+# Copy this file to settings.conf and uncomment the lines you want to
+# change. Anything left commented out keeps its default, shown here.
+#
+#     cp settings.conf.sample settings.conf
+#
+# settings.conf is gitignored, so your values never show up as a diff
+# and are never overwritten by an update.
+#
+# GENERATED FILE - do not edit by hand. It is produced from config.py by
+# scripts/gen_settings_sample.py, and a test fails if the two disagree.
+#
+# NOTES
+#   * The [section] headers are for reading convenience only. They are
+#     flattened away when the file is read, so a setting works wherever
+#     you put it - and a setting may not appear twice.
+#   * Yes/no settings accept true/false, yes/no, on/off, 1/0.
+#   * List settings are comma-separated.
+#   * A '%' is an ordinary character here; it needs no escaping.
+#   * If you already have a admin_config.py it still works exactly as
+#     before. This file is applied on top of it, so you can migrate a
+#     few settings at a time, or ignore this file entirely.
+#   * The mIRC colour codes (C_*) are deliberately not listed: they are
+#     raw protocol bytes rather than preferences.
+
+[system and global engine settings]
+#DEBUG_MODE = false
+
+#SCRIPT_VERSION = DCCore v1.10.0
+
+# Names every generated list file ("<LIST_BASE_NAME>-<date>.txt" and its
+# .zip/.rar counterparts). Automatically takes NICKNAME's own value once
+# NICKNAME is set, unless this is given an explicit value of its own first -
+# see the "DERIVED VALUES" section below. Only worth setting here if the
+# list should be named differently from the bot's own nickname.
+#LIST_BASE_NAME = DCCore
+
+# SERVER keeps a real, working default on purpose - "irc.undernet.org" is
+# correct for essentially every operator of an Undernet file server, not one
+# operator's identity to avoid. It is NOT in settings_file.REQUIRED for
+# exactly that reason - see REQUIRED's own comment.
+#SERVER = irc.undernet.org
+
+#PORT = 6667
+
+# NICKNAME, ADMIN_NICK and CHANNEL are None - not a real value - because
+# they ARE in settings_file.REQUIRED: oserve.startup() refuses to boot while
+# any of them is still blank, so there is no shipped value here for a
+# copy-paste install to silently inherit and run under somebody else's
+# identity. See REQUIRED's own comment in settings_file.py for the full
+# reasoning, and RAR_BINARY above for the same "None means unset" convention
+# this already used before REQUIRED existed.
+# REQUIRED - the daemon refuses to start until this is set.
+#NICKNAME = 
+
+#ALT_NICKNAME = DCCore_
+
+# REQUIRED - the daemon refuses to start until this is set.
+#ADMIN_NICK = 
+
+# REQUIRED - the daemon refuses to start until this is set.
+#CHANNEL = 
+
+# Ships BLANK, and that is a deliberate reversal of #171's "#dccore-debug".
+# 
+# That default was fine while this project was two operators who knew each
+# other: a shared debug room is convenient. It stops being fine the moment the
+# repository is public. irc.py joins this channel automatically on connect and
+# streams the daemon's internals into it - bans, pack failures, transfer
+# detail, nicknames - so every adopter of a public DCCore would broadcast their
+# own operation into one room, and read everybody else's.
+# 
+# Blank means "no debug channel", not "misconfigured": irc.py already guards
+# the JOIN with `if debug_chan:` and says so when there is none, and both
+# getattr call sites already fall back to ''. An operator who wants one names
+# their own, which is the only answer that is right for more than one install.
+# 
+# Still not in settings_file.REQUIRED - having no debug channel is a perfectly
+# good state to run in, unlike having no NICKNAME.
+#DEBUG_CHANNEL = 
+
+# The single channel a "search all bots" broadcast (@find) goes into - see
+# webserver.py's POST /api/search/broadcast. Deliberately ONE channel, never
+# all of them: broadcasting into every channel this bot has joined multiplies
+# the disruption to every other operator sharing those channels, for one
+# search. Defaults to the first entry of CHANNEL above; override explicitly
+# here (or in admin_config.py) if that is not the right one.
+# Derived from CHANNEL - but NOT here. See "DERIVED VALUES" at the end of this
+# file: computing it at this point captures the tracked default above and
+# silently ignores an operator's own CHANNEL. None means "derive it below";
+# setting it explicitly, here or in admin_config.py, still wins.
+#BROADCAST_SEARCH_CHANNEL = 
+
+
+[filesystem, paths and text stores]
+# MAINTENANCE SWITCH: when True the bot pauses ALL sharing and searching during !update
+#PAUSE_ON_UPDATE = true
+
+# None, not a real path - a shipped literal path would let a copy-paste
+# install silently inherit somebody else's actual music folder path. Unlike
+# NICKNAME/CHANNEL/ADMIN_NICK, FILE_DIRECTORY is NOT in settings_file.
+# REQUIRED (see its own comment): the daemon boots fine while this is still
+# blank, specifically so the web dashboard's own Settings page can be the
+# place that sets it, rather than needing it typed blind before the
+# dashboard is even reachable. oserve.startup() still refuses to start on a
+# value that IS set but does not exist - only "not chosen yet" is fine.
+#FILE_DIRECTORY = 
+
+# Off refuses every !rar request with a notice; ordinary single-file transfers are unaffected
+#RAR_ENABLED = true
+
+# None = look for rar/rar.exe on PATH (and WinRAR's install dir)
+#RAR_BINARY = 
+
+#TMP_ZIP_DIR = ./data/tmp_zips
+
+#LOCAL_LIST_DIR = ./lists
+
+# How the master list is handed to somebody who types "@<nick>": as the plain
+# text file, packed into a .zip, or packed into a .rar. OmenServe has offered
+# the same three for years and people's clients differ in what they open
+# without complaint, which is the whole reason it is a choice.
+# 
+# All three are always available. This is NOT tied to RAR_ENABLED: that switch
+# governs whether the bot will pack an album folder on request, and packing the
+# list is the operator's own machine doing one small job at build time.
+# 
+# "rar" needs a rar binary (see RAR_BINARY). If none can be found the build
+# falls back to .zip and says so, rather than leaving the bot with no list to
+# serve at all.
+# "txt", "zip" or "rar"
+#LIST_FORMAT = zip
+
+# Where files fetched FROM other bots (dcc_fetch.py) land. Deliberately
+# separate from FILE_DIRECTORY: that directory is the served library, scanned
+# by update_list.py and offered to everyone via @find/!<nick> - fetched files
+# must never be reachable through that path. They are dashboard-download-only
+# (GET /api/fetch/<id>/download in webserver.py).
+#FETCHED_FILES_DIR = ./data/fetched
+
+# Safe, normalised paths into the data/ subdirectory
+#BANS_FILE = ./data/bans.txt
+
+#STATS_FILE = ./data/stats.txt
+
+#HARD_BANS_FILE = ./data/hard_bans.txt
+
+# Other bots seen advertising in our channels, and what each last published
+# about its own list. JSON rather than the column format the files above use:
+# the record has several fields and will grow, and stats.txt's fixed seven
+# columns is exactly the shape that turns "add a field" into a migration.
+#KNOWN_BOTS_FILE = ./data/known_bots.json
+
+# One row per thing this bot has ever sent, {relative path or archive name ->
+# {name, kind, count}}. Feeds the Stats page's "Most downloaded" table. Not
+# bounded on purpose: a bot can only send what it shares, so the row count is
+# capped by the library itself.
+#DOWNLOAD_COUNTS_FILE = ./data/download_counts.json
+
+# Which bots we hold a fetched list for, and where it lives on disk - one
+# small entry per bot ("bot", "fetched_at", "list_path", "entry_count",
+# "source_zip"), not the parsed list itself. Without this, the extracted
+# files under FETCHED_FILES_DIR survived a restart untouched but the File
+# Lists switcher had no memory of them at all, since config.fetched_bot_lists
+# is otherwise populated only by a live fetch completing. Same JSON-file
+# treatment as KNOWN_BOTS_FILE, for the same reason.
+#FETCHED_BOT_LISTS_FILE = ./data/fetched_bot_lists.json
+
+# Every 'complete'/'failed' cross-bot fetch row - the dashboard Downloads
+# table's only record of a finished fetch, and what its Delete button acts
+# on. Without this, config.fetch_queue was in-memory only: a file finished
+# downloading, survived on disk under FETCHED_FILES_DIR untouched, but its
+# row (and therefore its Download/Delete buttons) vanished on the very next
+# restart. Same JSON-file treatment as FETCHED_BOT_LISTS_FILE, for the same
+# reason - in-flight rows (pending/offered/listening/receiving) are
+# deliberately never written here, since none of those can mean anything
+# once the process that was driving them is gone.
+#FETCH_HISTORY_FILE = ./data/fetch_history.json
+
+
+[channel advertising (the advert clock)]
+# Time between each channel advert, in seconds
+#ANNOUNCE_INTERVAL = 300
+
+
+[limits, slots and queue control]
+# Maximum simultaneous live downloads
+#MAX_DCC_SLOTS = 3
+
+# Most files a single user may queue
+#MAX_USER_QUEUE = 100
+
+# Most files across every queue combined
+#MAX_GLOBAL_QUEUE = 1000
+
+# Maximum result lines sent in reply to an @find
+#MAX_SEARCH_RESULTS = 5
+
+# Delay in seconds for the ordinary message queue
+#MSG_DELAY = 5.0
+
+# Pause between each line sent to the debug channel
+#DEBUG_MSG_DELAY = 0.5
+
+# Empty list = console disabled, and every DCC CHAT request is ignored.
+# 
+# Each entry is a HOST pattern. It may be written bare ("operator.users.undernet.org")
+# or in the familiar IRC form ("*!*@operator.users.undernet.org"); either way only the
+# part after the last "@" is used. The nick and ident halves are discarded on
+# purpose - the ident is supplied by the client and anyone can set theirs to
+# "operator", so constraining it grants nothing. Only the host is issued by the server.
+# 
+# On Undernet, log into X and set usermode +x. The server then replaces your host
+# with "<your-account>.users.undernet.org", which nobody else can obtain. That
+# host IS the proof of your services login.
+# 
+# Put the real values in admin_config.py, which is gitignored, NOT here.
+#ADMIN_HOSTMASKS = 
+
+# Generated with:  python adminchat.py
+#ADMIN_PASSWORD_HASH = 
+
+# How the DCC CHAT connection gets made:
+# 
+# "auto"     dial the client, and listen instead if that fails.  (default)
+# "listen"   always listen and offer the connection back.
+# "connect"  only ever dial the client; never listen.
+# 
+# "auto" is right for most setups. Choose "listen" when the client is behind a
+# VPN, a router that does not forward the port, or a firewall that drops rather
+# than rejects - all of which show up as a TIMEOUT on the dial and then cost the
+# full connect timeout on every login before the fallback takes over. The bot's
+# own listener is already proven reachable by every DCC SEND it does.
+#ADMIN_CHAT_MODE = auto
+
+# Whether !ban, !unban, !rehash, !update and !clearqueue still work when typed in
+# a channel or a private message.
+# 
+# Left ON. The console is new, and locking yourself out of every admin command
+# because a hostmask has a typo in it is a bad first experience. Turn it off once
+# the console has proved itself - at which point admin authority rests entirely
+# on the services host plus the password, and no longer on a nick anyone can take
+# while you are offline.
+# 
+# The user commands (!list, !ping, !debugnames, @find, the queue triggers) are
+# not affected by this.
+#ADMIN_CHANNEL_COMMANDS = true
+
+# announce.send_debug() is the daemon's running commentary - transfers, joins,
+# bans, pack failures. Both destinations are on by default.
+# 
+# DEBUG_TO_CHANNEL   the coloured line in DEBUG_CHANNEL, as it has always been
+# DEBUG_TO_CONSOLE   the plain text in an attached DCC admin console
+# 
+# Set DEBUG_TO_CHANNEL = False once the console is doing the job, and the
+# daemon's internals stop being published to a channel other people can sit in.
+# 
+# Neither switch can lose a line: if the channel is off and no console happens to
+# be connected, send_debug falls back to stdout, so the LXC console and the
+# journal always have it. That case - something going wrong while nobody is
+# watching - is the one worth protecting.
+#DEBUG_TO_CHANNEL = true
+
+#DEBUG_TO_CONSOLE = true
+
+# The two side files update_list.py publishes alongside the master list, holding
+# the human-readable total size and the raw byte count that the channel advert and
+# @<nick>-que read back. Named here rather than as a literal in both list.py and
+# update_list.py: that split literal is the same shape as issue #34, where the
+# reader and the writer of speed_record.txt agreed only by coincidence.
+# 
+# The "flac-serv" prefix these carried was one operator's server name, and it
+# was kept because renaming alone would orphan the stats on every existing
+# deployment until the next successful !update - the advert would publish "0B"
+# and @<nick>-que would report no size in the meantime.
+# 
+# So it is not a rename. db.migrate_legacy_side_files() moves the old files to
+# these names at startup, and only when the setting is still at the default
+# below, so an operator who chose their own name is left alone.
+# A DOT and not a dash, which is not cosmetic: find_latest_list() globs
+# LIST_BASE_NAME + "-*.txt", and on a case-insensitive filesystem
+# "dccore-size.txt" matches "DCCore-*.txt" and sorts AFTER the dated list - so
+# the daemon would have picked its own size file as the master list. Caught by
+# tests/test_long_paths.py, which read "15.59KB" where a track should have been.
+#LIST_SIZE_FILE = dccore.size.txt
+
+#LIST_RAWBYTES_FILE = dccore.rawbytes.txt
+
+#DCC_PORT_START = 55000
+
+#DCC_PORT_END = 55010
+
+# Deliberately separate from MAX_DCC_SLOTS above: that governs OUR outbound
+# SENDs to people requesting from us. Conflating the two directions would let
+# outbound leech traffic (us fetching from others) starve our own serving
+# capacity, or vice versa.
+# Max simultaneous in-flight/offered fetches
+#MAX_FETCH_SLOTS = 3
+
+# How long a finished (complete/failed) cross-bot fetch stays in the Downloads
+# table. Age is the primary rule because that table is a recent record of what
+# happened, not an archive; the row cap below is only a backstop for a burst of
+# activity inside the window. Pruning forgets the ROW, never the downloaded
+# file - that stays under FETCHED_FILES_DIR. 0 disables either rule.
+# Days a finished fetch stays in the history
+#FETCH_HISTORY_DAYS = 30
+
+# Hard cap on finished rows, whatever their age
+#FETCH_HISTORY_MAX_ROWS = 500
+
+# Interacts with flood protection: a bot's DCC SEND offers are metered like any
+# other command, so this must stay well below MAX_REQUESTS (per REQUEST_WINDOW)
+# or a bot answering your own fetch requests can trip the flood gate and be muted.
+# 200 MB - reject the offer before we even connect
+#MAX_FETCH_FILE_SIZE = 209715200
+
+# A "list" request_type row (a fetched master-list zip, see list_fetch.py) is a
+# text index, never a real download - a whole 1.21TB/47,420-file library
+# compresses to a few MB. MAX_FETCH_FILE_SIZE's 200MB let a hostile "list" offer
+# claim up to that much, and by the time zipfile.ZipFile() opened it, the whole
+# central directory (one ZipInfo per entry, eagerly, before any guard can refuse
+# anything) was already parsed - hundreds of MB of RAM and several seconds spent
+# on an archive that should have been refused at admission (#162 finding #10).
+# Enforced BEFORE connecting, same as MAX_FETCH_FILE_SIZE/MAX_FETCH_FOLDER_FILE_SIZE.
+# 10 MB - generous over any real master-list zip
+#MAX_FETCH_LIST_FILE_SIZE = 10485760
+
+# Seconds - total wall-clock per transfer (against a slow "drip" that keeps resetting the idle timeout)
+#FETCH_TRANSFER_TIMEOUT = 600
+
+# Seconds an "offered" row waits for a DCC SEND before it's marked failed
+#FETCH_OFFER_TIMEOUT = 60
+
+# A "folder" request_type row (dcc_fetch.py) asks another bot to pack a whole
+# folder/album as .rar via its own "!rar" convention and shares the same
+# MAX_FETCH_SLOTS pool as every other fetch - it gets its own, separate
+# timeout and size cap instead, below.
+# 
+# FETCH_FOLDER_OFFER_TIMEOUT: how long a "folder" row waits for the other
+# bot's DCC SEND before failing - much longer than FETCH_OFFER_TIMEOUT
+# because the other bot has to run its own !rar packing pipeline first.
+# config.fetch_queue is in-memory only (not persisted across a restart), so a
+# folder row waiting this long is lost on restart same as any other
+# offered/listening row - just for longer.
+#FETCH_FOLDER_OFFER_TIMEOUT = 1800
+
+# MAX_FETCH_FOLDER_FILE_SIZE: 2GB - separate, larger cap than
+# MAX_FETCH_FILE_SIZE for a whole packed album/discography archive.
+#MAX_FETCH_FOLDER_FILE_SIZE = 2147483648
+
+# FETCH_FOLDER_TRANSFER_TIMEOUT: a "folder" row's own wall-clock ceiling for
+# _run_transfer(), separate from FETCH_TRANSFER_TIMEOUT. That value is sized for
+# the 200MB MAX_FETCH_FILE_SIZE cap; a folder row's 2GB cap is 10x larger but
+# used to inherit the SAME 600s ceiling, so a 900MB discography at a modest
+# 800KB/s died at t=600s having received ~480MB, threw it all away (no resume),
+# and burned a MAX_FETCH_SLOTS slot for ten minutes doing it - every retry
+# identical (#162 finding #11).
+# 
+# 3600 UNDERSHOT ITS OWN GOAL (#223): the cap grew 10.24x (200MB -> 2GB) but
+# the timeout only 6x (600s -> 3600s), so the IMPLIED throughput floor a peer
+# has to sustain went UP for a folder, not down - 349,525 B/s for a plain
+# file, 596,523 B/s for a folder. A peer exactly fast enough to complete a
+# maximum-size plain file could not complete a maximum-size folder, which is
+# the opposite of "give a large discography more room to be slow". Scaled by
+# the same 10.24x the size cap was: 600 * (2147483648 / MAX_FETCH_FILE_SIZE).
+#FETCH_FOLDER_TRANSFER_TIMEOUT = 6144
+
+# How often a new @find broadcast (POST /api/search/broadcast) is allowed to
+# start. Independent of the UI - courtesy to other bots/operators on a shared
+# public channel, not just a UI detail.
+# Seconds
+#BROADCAST_SEARCH_COOLDOWN = 30
+
+
+[anti-flood and automatic protection]
+# Most commands (search or file) per time window
+#MAX_REQUESTS = 10
+
+# Size of the rolling time window, in seconds
+#REQUEST_WINDOW = 5
+
+# Mute in seconds on the first flood violation
+#MUTE_TIME = 30
+
+# Escalation ban, in seconds, for someone who keeps flooding while already
+# muted. This used to expire at local midnight, which made the punishment
+# depend on the clock rather than the offence: trip it at 00:01 and you were
+# banned for nearly a day, trip it at 23:59 and you were banned for seconds.
+# Same offence, arbitrary sentence. A fixed duration is predictable for the
+# operator and for the person banned. Note it does NOT self-escalate the way
+# midnight accidentally did - repeat offenders are a hard-ban case (!ban).
+# Ban in seconds when someone floods while muted
+#FLOOD_BAN_SECONDS = 3600
+
+# Attempts per queued file before it is dropped (see dcc.release_queue_entry)
+#MAX_SEND_FAILS = 3
+
+# Longest a rar packing run may take, in seconds, before it is abandoned
+#RAR_TIMEOUT = 1800
+
+# Longest a !update / update_list.py run may take, in seconds, before it is abandoned. A full NFS walk legitimately takes minutes, so this is shaped like RAR_TIMEOUT above, not a short fixed number.
+#LIST_UPDATE_TIMEOUT = 1800
+
+# How everything this bot says in a channel or a notice is coloured. One name
+# selects a palette that all eight outbound message paths read - see theme.py
+# for the roles and the presets.
+# 
+# This is not decoration. In a busy channel a dozen bots advertise at once and
+# the palette is how a person tells them apart at a glance, so two DCCore
+# operators who both took the default are indistinguishable. "classic" is the
+# look DCCore has always had, and stays the default so that no existing
+# install silently changes identity.
+# classic, midnight, forest, orchid, plain
+#THEME = classic
+
+# Override individual roles on top of the chosen preset, for an operator who
+# would rather be unique than pick from a list - each is a raw mIRC code
+# string like "\x0306,06", or None (the default) to leave that role at
+# whatever the chosen THEME preset already says.
+# 
+# #170's RFC (issue #170's discussion, its Q1): this used to be one
+# dict, CUSTOM_THEME, which is why it lived here or in admin_config.py rather
+# than settings.conf - settings_file.is_overridable() takes only primitives.
+# Six plain strings are primitives, so this is now settings.conf/dashboard
+# configurable too, the same as every other setting - "one file, one format".
+# The trade-off named out loud in that discussion: a future new theme ROLE
+# still needs a new key here, a generator update and a theme.py change - the
+# old dict form could have accepted an unknown role name for free. That loss
+# is accepted; concrete uniformity now outweighs a hypothetical future role.
+#CUSTOM_THEME_BORDER = 
+
+#CUSTOM_THEME_SEPARATOR = 
+
+#CUSTOM_THEME_TEXTBOX = 
+
+#CUSTOM_THEME_VALUE = 
+
+#CUSTOM_THEME_ALERT = 
+
+#CUSTOM_THEME_ACCENT = 
+
+# OFF by default, same pattern as ADMIN_HOSTMASKS below: a feature that opens
+# a network-facing surface should never be on just because someone pulled and
+# restarted. Opt in from admin_config.py, not here.
+# 
+# Flask is also an OPTIONAL dependency. If it is not installed, webserver.start()
+# logs "[WEBUI] Flask not installed; dashboard disabled." and returns - it
+# never crashes the daemon and CI never installs Flask, so this stays inert
+# there. Install it yourself (`pip install flask`) to actually use the
+# dashboard.
+#WEBUI_ENABLED = false
+
+# LOGIN REQUIRED, shared with the DCC CHAT admin console: every route,
+# including static assets, needs a session started by POSTing the password
+# for ADMIN_PASSWORD_HASH to /login (see webserver.py's module docstring).
+# webserver.start() refuses to run at all while that hash is empty, so there
+# is no window where the dashboard is reachable unauthenticated.
+# 
+# "127.0.0.1" is the tracked default: safe out of the box, reachable only from
+# this machine. Set this to "0.0.0.0" in admin_config.py if you want it
+# reachable from other devices on your LAN (phone, laptop).
+# 
+# DO NOT PORT-FORWARD THIS PORT TO THE INTERNET. A login gate does not stop
+# someone who shares the network segment from reading the password or the
+# session cookie off the wire - there is no TLS here. DO NOT put this host
+# on any network you do not trust.
+#WEBUI_HOST = 127.0.0.1
+
+#WEBUI_PORT = 8420
