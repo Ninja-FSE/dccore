@@ -192,7 +192,33 @@ def new_fetch_row(bot, filename, now=None, request_type="file"):
     actually sends, exactly as it already does for "list" rows.
     """
     now = time.time() if now is None else now
+
+    # THE ::INFO:: SUFFIX COMES OFF HERE. A row copied out of another bot's
+    # list reads "Some Track.mp3  ::INFO:: 79.53MB", and the dashboard sends
+    # what the operator clicked - so the whole line, size and all, was being
+    # stored as the filename and asked for on the wire.
+    #
+    # The serving side has stripped this since #234 (dcc.py, where a request
+    # ARRIVES); the fetching side never learned to, and the failure was
+    # invisible until a peer answered:
+    #
+    #   Requested 'BBCRadio - Under Milk Wood.mp3  ::INFO:: 79.53MB' ...
+    #   Rejected unsolicited DCC SEND ('BBCRadio_-_Under_Milk_Wood.mp3'):
+    #   no matching pending request.
+    #
+    # _normalize_filename_for_match() already handles the space/underscore
+    # swap every DCC client applies - it could never bridge a size that only
+    # one side was carrying. Stripped at row creation rather than at match
+    # time, because this value is also what goes out on the wire: the peer
+    # above coped with the suffix, and a stricter one would not have.
     clean_filename = str(filename).strip()
+    if request_type == "file":
+        # Only for "file" rows. A "folder" row's requested_filename is the
+        # literal "!rar <path>" request text, which has no ::INFO:: and must
+        # survive untouched - new_fetch_row()'s own docstring depends on it.
+        import list as list_mod
+
+        clean_filename = str(list_mod.strip_info_suffix(clean_filename)[0]).strip()
     return {
         "bot": str(bot).strip(),
         "filename": clean_filename,
@@ -295,6 +321,29 @@ def has_outstanding_bot_alone_request(bot):
     queue = _ensure_fetch_queue()
     with _fetch_lock():
         return _has_outstanding_bot_alone_request_locked(queue, bot)
+
+
+def has_any_outstanding_request(bot):
+    """True if ANY row - file, list or folder - is unresolved for `bot`.
+
+    Wider than has_outstanding_bot_alone_request() above, which only looks at
+    "list"/"folder" rows because those are the ones ambiguous at claim time.
+    A caller asking "is it safe to forget this bot entirely" (the List
+    Browser's purge, see webserver.build_purge_offline_fetched_lists_result())
+    cares about every request_type: forgetting a bot mid-download would not
+    misattribute anything the way two bot-alone rows would, but it would
+    still delete the fetched-list entry a "list" reply is about to be filed
+    under, or the extract directory a running "folder" fetch is about to
+    write into.
+    """
+    wanted_bot = str(bot).strip().lower()
+    queue = _ensure_fetch_queue()
+    with _fetch_lock():
+        return any(
+            row.get("state") in _UNRESOLVED_FETCH_STATES
+            and str(row.get("bot", "")).strip().lower() == wanted_bot
+            for row in queue.values()
+        )
 
 
 def enqueue_fetch(bot, filename, request_type="file"):
@@ -594,10 +643,26 @@ def check_fetch_queue():
         # promoting them; there is nowhere safe to write a completed file.
         return
 
+    # The rehash quiesce applies here too. wait_for_transfers_to_finish()
+    # polls config.active_transfers, which is the SEND side only - a fetch has
+    # its own queue and never appears there. So without this check the wait
+    # would report a quiet bot while this dispatcher was still putting fresh
+    # `@bot` and `!bot file` requests into the channel, each of which brings
+    # back an inbound DCC SEND landing squarely in the reload window.
+    #
+    # Read through dcc rather than duplicating the flag name: dcc owns the
+    # pause, and a second reader spelling `config.transfers_paused` by hand is
+    # how a rename turns one of them into a no-op silently.
+    import dcc as _dcc_pause
+    if _dcc_pause.transfers_are_paused():
+        return
+
     queue = _ensure_fetch_queue()
     max_slots = int(getattr(config, "MAX_FETCH_SLOTS", 3))
     offer_timeout = float(getattr(config, "FETCH_OFFER_TIMEOUT", 60))
     folder_offer_timeout = float(getattr(config, "FETCH_FOLDER_OFFER_TIMEOUT", 1800))
+    unadvertised_folder_timeout = float(
+        getattr(config, "FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED", 120))
     now = time.time()
 
     to_dispatch = []
@@ -610,8 +675,9 @@ def check_fetch_queue():
         # plain file/list fetches never have to wait on.
         for row in queue.values():
             if row.get("state") == "offered" and row.get("offered_at") is not None:
-                this_timeout = (folder_offer_timeout
-                                 if row.get("request_type") == "folder" else offer_timeout)
+                this_timeout = _offer_timeout_for(
+                    row, offer_timeout, folder_offer_timeout,
+                    unadvertised_folder_timeout)
                 if (now - row["offered_at"]) > this_timeout:
                     _mark_failed_locked(row, "no response")
 
@@ -658,9 +724,24 @@ def check_fetch_queue():
         return
 
     oserve = sys.modules.get("oserve")
-    channel = (getattr(config, "BROADCAST_SEARCH_CHANNEL", None)
-               or str(getattr(config, "CHANNEL", "")).split(",")[0].strip())
+    # ONE FIXED FALLBACK, still - but no longer the only answer. Reported
+    # live: a bot only in one of several configured channels had its fetch
+    # dispatched into a different one, because every request used to go
+    # into this single channel regardless of where the target bot actually
+    # was - so it never saw the request, and every one of them failed with
+    # "no response". webserver.bot_not_here_error() already checks presence
+    # at enqueue time; this is that same check carried through to where the
+    # PRIVMSG is actually built, per request rather than once for the whole
+    # batch.
+    default_channel = (getattr(config, "BROADCAST_SEARCH_CHANNEL", None)
+                       or str(getattr(config, "CHANNEL", "")).split(",")[0].strip())
     for rid, bot, filename, request_type in to_dispatch:
+        # The bot's own channel wins when we can find one - a stale fallback
+        # is exactly the bug above. Only a bot that left between enqueue and
+        # this dispatch tick (bot_not_here_error() already refused any that
+        # were never seen at all) falls through to the fixed default, which
+        # is no worse than what every request did before this fix.
+        channel = dcc.channel_containing_user(bot) or default_channel
         # Defense-in-depth only, expected to be unreachable: `bot` (and, for
         # a "file" row, `filename`) already passed
         # webserver.reject_if_unsafe_for_irc_line() - which now delegates to
@@ -847,7 +928,57 @@ def parse_dcc_send_offer(ctcp_text):
     except (ipaddress.AddressValueError, ValueError):
         return None
 
+    # ADDRESSES THAT CANNOT BE A PEER AT ALL.
+    #
+    # Until now the only test on this field was that the integer fits in 32
+    # bits, so whoever held the offering nick chose an address this daemon
+    # would connect to. The concrete shape is `DCC SEND x 0 22 1` - ip_long 0
+    # decodes to 0.0.0.0, which connect() treats as localhost, pointing the
+    # fetcher at a port on its own host.
+    #
+    # DELIBERATELY NARROWER THAN dcc.is_offerable_to_strangers(), which is the
+    # same field judged from the other side. That one also refuses loopback
+    # and private ranges, and it is right to: an offer WE advertise carrying
+    # one is an offer no stranger can dial. Refusing them on the way IN would
+    # be wrong, because there the address is the peer's, not ours - two
+    # DCCore bots on the same LAN exchanging lists over 192.168.x.y is an
+    # ordinary setup, and the operator running both is not a stranger to
+    # either. It would also refuse every local transfer this project's own
+    # tests perform over 127.0.0.1.
+    #
+    # So this refuses only what can never name a real peer: the unspecified
+    # address, multicast, and the reserved ranges. Refused at the parse rather
+    # than at the connect, because this return value is what every later stage
+    # acts on.
+    if not _is_a_possible_peer(ip):
+        print(f"[FETCH] Refusing an offer that names {ip}: the unspecified, "
+              f"multicast and reserved ranges cannot be a bot offering a "
+              f"file.")
+        return None
+
     return {"filename": filename, "ip": ip, "port": port, "size": size}
+
+
+def _is_a_possible_peer(ip_text):
+    """Could a bot actually be offering a file from this address?
+
+    Not "is it routable on the public internet" - see the comment at the call
+    site for why that stricter question, which dcc.is_offerable_to_strangers()
+    asks of our OWN address, gives the wrong answer for an address arriving
+    from a peer. Loopback and private ranges are legitimate here: two bots on
+    one LAN, or one machine talking to itself.
+
+    What is left is what can never be a peer at all - 0.0.0.0, which connect()
+    reads as localhost, plus multicast and the reserved ranges.
+    """
+    import ipaddress
+
+    try:
+        address = ipaddress.IPv4Address(str(ip_text).strip())
+    except Exception:
+        return False
+    return not (address.is_unspecified or address.is_multicast
+                or address.is_reserved)
 
 
 def _normalize_filename_for_match(name):
@@ -978,19 +1109,127 @@ def _sanitize_offer_filename(raw_name):
     return name
 
 
+# One path COMPONENT, in bytes. NTFS allows 255 characters per name and ext4
+# 255 bytes, so a byte budget of 255 satisfies both - measured in UTF-8,
+# because a filename of accented characters costs two bytes each and Linux
+# counts those.
+#
+# platform_compat.long_path() does NOT cover this. The `\\?\` prefix lifts the
+# 260-character limit on the TOTAL PATH; the per-component limit is a
+# filesystem rule underneath it and stays exactly where it was. The comment at
+# the open() call in _receive_offer_bytes() said the wrap made the offered
+# name's length safe, and it did not: 255 was still the wall, verified against
+# a real filesystem.
+MAX_NAME_BYTES = 255
+
+
+def _truncate_utf8(text, limit):
+    """`text` cut to at most `limit` UTF-8 bytes, never mid-character.
+
+    errors="ignore" is what drops a trailing partial sequence: slicing encoded
+    bytes can land inside a multi-byte character, and a name is decoded again
+    before it is ever used.
+    """
+    return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+def _fit_name_component(name, limit=MAX_NAME_BYTES):
+    """`name` shortened to fit one path component, keeping its extension.
+
+    The STEM is what shrinks, the way announce.fit_irc_filename() shrinks a
+    stem rather than cutting the end off: the extension is how the operator
+    and their player recognise what the file is, and a name trimmed the other
+    way arrives as "Symphony No 9 in D mino" with no extension at all.
+    """
+    if len(name.encode("utf-8")) <= limit:
+        return name
+    stem, ext = os.path.splitext(name)
+    ext_bytes = len(ext.encode("utf-8"))
+    if ext_bytes >= limit:
+        # A pathological "extension" longer than the whole budget is not an
+        # extension worth preserving.
+        return _truncate_utf8(name, limit)
+    return _truncate_utf8(stem, limit - ext_bytes) + ext
+
+
 def _resolve_destination_path(request_id, raw_filename):
     """Build the on-disk path a completed fetch will be written to, or None
     if it fails the path-containment check. The request id is folded into
     the stored filename so two fetches that happen to share a cleaned
     filename can never collide or overwrite each other.
+
+    The finished component is length-fitted LAST, after the request id is
+    prefixed, because that prefix is part of what has to fit: 12 hex
+    characters plus an underscore, so an offered name of 243 characters was
+    already over the line before this function returned. The offering bot
+    chooses that length, and the failure it caused was an
+    "[Errno 22] Invalid argument" from open() - caught and reported as
+    "transfer error", which names neither the length nor the name.
     """
     dest_dir = os.path.abspath(getattr(config, "FETCHED_FILES_DIR", "./data/fetched"))
     clean_name = _sanitize_offer_filename(raw_filename)
-    stored_name = f"{request_id}_{clean_name}"
+    stored_name = _fit_name_component(f"{request_id}_{clean_name}")
     candidate = os.path.join(dest_dir, stored_name)
     if not dcc.is_safe_path(dest_dir, candidate):
         return None, None
     return dest_dir, stored_name
+
+
+# Exactly what _resolve_destination_path() above prefixes: uuid.uuid4().hex[:12],
+# always hex, always followed by the underscore joining it to the cleaned
+# name. _fit_name_component() only ever shrinks from the END (it shrinks the
+# STEM and keeps the extension - see its own docstring), so this prefix is
+# never itself truncated away; it is always intact at the front of a stored
+# name built by that function.
+_REQUEST_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}_")
+
+
+def _promote_clean_filename(dest_dir, stored_name):
+    """Rename a just-completed fetch from its ID-prefixed staging name to
+    the plain name the peer offered, now that the collision the ID guarded
+    against - two fetches racing for the same name while neither had
+    finished yet - can no longer happen for this one. Returns the name
+    actually on disk afterward (the plain one on success, `stored_name`
+    unchanged otherwise).
+
+    Reported live: an operator's Downloads folder and List Browser fetches
+    both filling up with names like "058c4cc8ee9a_Some Track.mp3" and
+    "ef31cd79d1f5_SomeBot-Default(2026-01-02)-OS.zip" - the ID never meant
+    anything to a human, and for a fetched list it survived even further:
+    downloading the zip and unzipping it on Windows produced a folder named
+    after the ZIP FILE ITSELF (there is no folder recorded inside a plain
+    list zip for Explorer to unpack "into", the way there would be for a
+    folder packed with rar's -ep1 - see dcc.py's own use of that flag), so
+    the id rode all the way onto the operator's own disk.
+
+    Never overwrites an existing file at the plain name - a fetch of the
+    same filename from a different bot, or an operator's own file already
+    there - the same "log and leave both alone" rule note_nick_change()
+    already applies for the identical reason (irc.py). No data is lost
+    either way; the file just keeps its longer name on this one occasion.
+
+    Never raises: a rename that fails for any OS-level reason costs a
+    readable name, not the fetch, which has already succeeded by the time
+    this runs.
+    """
+    match = _REQUEST_ID_PREFIX_RE.match(stored_name)
+    if not match:
+        return stored_name
+    plain_name = stored_name[match.end():]
+    if not plain_name:
+        return stored_name
+
+    old_path = os.path.join(dest_dir, stored_name)
+    new_path = os.path.join(dest_dir, plain_name)
+    if os.path.exists(platform_compat.long_path(new_path)):
+        return stored_name
+    try:
+        os.rename(platform_compat.long_path(old_path), platform_compat.long_path(new_path))
+        return plain_name
+    except OSError as err:
+        print(f"[FETCH] Could not drop the request id from {stored_name!r} "
+              f"after completion ({err}); keeping the longer name.")
+        return stored_name
 
 
 def handle_incoming_offer(irc_sock, from_nick, ctcp_payload):
@@ -1048,10 +1287,24 @@ def handle_incoming_offer(irc_sock, from_nick, ctcp_payload):
         else:
             max_size = int(getattr(config, "MAX_FETCH_FILE_SIZE", 200 * 1024 * 1024))
             cap_name = "MAX_FETCH_FILE_SIZE"
-        if offer["size"] > max_size:
+        # 0 MEANS NO LIMIT. From #302: "Files should never be rejected based
+        # on size." The caps are not deleted, because deleting them would take
+        # the choice away from everyone else - they are switchable off, which
+        # is the same outcome for the operator who wants it and no change for
+        # the operator who does not know they exist.
+        #
+        # Defensible here in a way it would not be on the serving side: a fetch
+        # is SOLICITED. handle_incoming_offer() only accepts an offer matching
+        # a row we created, so the thing that arrives is the thing this
+        # operator asked for, onto their own disk. The cap protects against a
+        # peer answering a request with something enormous, which is worth a
+        # default - not against a stranger pushing files at us, which is
+        # refused earlier and for a different reason.
+        if max_size > 0 and offer["size"] > max_size:
             _mark_failed_locked(row, f"declared size {offer['size']} exceeds {cap_name} ({max_size})")
             print(f"[FETCH] Rejected oversized offer from {from_nick}: "
-                  f"{offer['size']} > {max_size}. Never connected.")
+                  f"{offer['size']} > {max_size}. Never connected. "
+                  f"Set {cap_name} to 0 for no limit.")
             return
 
         dest_dir, stored_name = _resolve_destination_path(request_id, offer["filename"])
@@ -1304,6 +1557,25 @@ def _handle_completed_list_fetch(row, zip_path):
     at top level: keeps this module's own import graph minimal and avoids a
     cycle (list_fetch.py imports dcc_fetch's sibling modules, not the other
     way around).
+
+    THE ZIP IS REMOVED ON SUCCESS. List Browser reads exclusively from
+    list_fetch.py's own extracted copy under FETCHED_FILES_DIR/lists/<bot>/
+    (get_fetched_bot_page() re-parses that file fresh on every view - see
+    its own docstring) - nothing anywhere re-opens the raw zip once
+    process_fetched_list_zip() has returned True, including a re-fetch,
+    which downloads a fresh one rather than touching the old. Reported
+    live: an operator downloaded one of these zips to their own machine and
+    unzipped it, and the request id ended up in the resulting filename too
+    - there is no folder recorded inside a plain list zip for an unzip tool
+    to extract "into" the way there would be for one packed with rar's
+    -ep1 (see dcc.py's own use of that flag), so Explorer named the result
+    after the zip itself. Removing the zip is the fix for that as much as
+    for the disk space: the raw download was never the deliverable, the
+    browsable list is, and it already exists on its own.
+
+    On FAILURE the zip is left exactly where it was - the one piece of
+    diagnostic evidence for why a peer's archive could not be read, and
+    deleting it would trade that for nothing.
     """
     try:
         import list_fetch
@@ -1312,6 +1584,7 @@ def _handle_completed_list_fetch(row, zip_path):
             row["list_processing_error"] = reason or "no recognizable list file found in the zip"
             print(f"[FETCH] {row.get('bot')}'s fetched list zip was received "
                   f"successfully but could not be processed: {row['list_processing_error']}")
+            return
     except Exception as err:
         # Defense-in-depth, expected to be unreachable: list_fetch.py's own
         # entry point already catches everything it knows how to anticipate.
@@ -1320,6 +1593,52 @@ def _handle_completed_list_fetch(row, zip_path):
         # transfer that itself already completed successfully.
         row["list_processing_error"] = f"unexpected error: {err}"
         print(f"[FETCH] Unexpected error processing {row.get('bot')}'s fetched list zip: {err!r}")
+        return
+
+    try:
+        os.remove(platform_compat.long_path(zip_path))
+        # None, not the now-deleted name: webserver.api_fetch_download()
+        # already answers a missing stored_filename with 404 either way, but
+        # leaving the stale name would offer a Download button in the
+        # dashboard for a file that no longer exists - browsing the list
+        # itself is how this fetch is meant to be used from here on.
+        row["stored_filename"] = None
+    except OSError as err:
+        # The list is already safely extracted and browsable either way -
+        # only the now-redundant raw zip failed to go, which costs disk
+        # space, not correctness.
+        print(f"[FETCH] {row.get('bot')}'s list was extracted successfully, "
+              f"but its zip could not be removed afterward ({err}).")
+
+
+def _offer_timeout_for(row, offer_timeout, folder_timeout, unadvertised_timeout):
+    """How long this particular offer is allowed to go unanswered.
+
+    A "folder" row waits far longer than a file, because the other bot has to
+    run its own packing pipeline before it can even start the DCC SEND. That
+    is the right allowance for a bot that IS packing an album - and much too
+    generous for one that never packs anything, where a non-answer is the
+    expected outcome rather than a slow one. The wait is one of
+    MAX_FETCH_SLOTS, so paying it needs a reason.
+
+    See list_fetch.bot_publishes_a_rar_list() for what counts as a sign. Used
+    to decide how long to WAIT, never whether to ask: a bot can pack folders
+    with neither signal, and refusing on this would take away something that
+    works, where waiting less costs nothing when the guess is wrong.
+    """
+    if row.get("request_type") != "folder":
+        return offer_timeout
+    try:
+        import list_fetch
+        if list_fetch.bot_publishes_a_rar_list(row.get("bot", "")):
+            return folder_timeout
+    except Exception:
+        # This runs inside the queue lock on the sweep every tick. A failure
+        # deciding which of two numbers to use is not worth stalling the queue
+        # for; the longer one is the safe way to be wrong, since it only ever
+        # waits, never gives up on something still coming.
+        return folder_timeout
+    return unadvertised_timeout
 
 
 def _fetch_transfer_timeout(request_type):
@@ -1405,9 +1724,11 @@ def _run_transfer(row, offer, dest_dir, stored_name, sock=None):
     failure_reason = None
     handle = None
     try:
-        # _sanitize_offer_filename() does not truncate, so the length of this
-        # name is entirely the offering bot's choice - wrap it like dcc.py
-        # wraps every path it touches.
+        # Two different limits, and long_path() only lifts one of them. The
+        # `\\?\` wrap handles the 260-character TOTAL PATH limit, which is why
+        # dcc.py wraps every path it touches; _resolve_destination_path() has
+        # already fitted the NAME to MAX_NAME_BYTES, which the wrap does not
+        # affect and which the offering bot would otherwise choose.
         handle = open(platform_compat.long_path(dest_path), "wb")
         while bytes_received < total_size:
             if time.time() > wall_deadline:
@@ -1453,7 +1774,6 @@ def _run_transfer(row, offer, dest_dir, stored_name, sock=None):
     if failure_reason is None and bytes_received == total_size:
         row["state"] = "complete"
         row["bytes_received"] = bytes_received
-        print(f"[FETCH] Complete: {stored_name} ({bytes_received} bytes) from {peer_desc}.")
         if row.get("request_type") == "list":
             # The DCC transfer itself succeeded (declared size matched what
             # arrived) - that is what "complete" above means, and is left
@@ -1463,7 +1783,21 @@ def _run_transfer(row, offer, dest_dir, stored_name, sock=None):
             # docstring: zip-slip, zip-bomb, "no recognisable list file
             # inside"), so it is handled by a dedicated module and never
             # allowed to raise back into this transfer's own success path.
+            #
+            # No _promote_clean_filename() call here: on success the raw zip
+            # is about to be removed entirely (see _handle_completed_list_fetch()'s
+            # own comment on why), so renaming it first would be wasted work.
+            print(f"[FETCH] Complete: {stored_name} ({bytes_received} bytes) from {peer_desc}.")
             _handle_completed_list_fetch(row, dest_path)
+        else:
+            # The id in stored_name only ever existed to keep this transfer
+            # from colliding with another one racing for the same cleaned
+            # name - see _resolve_destination_path()'s own docstring. That
+            # risk ends the moment the file is fully written, so the
+            # operator's own copy does not have to go on carrying it.
+            final_name = _promote_clean_filename(dest_dir, stored_name)
+            row["stored_filename"] = final_name
+            print(f"[FETCH] Complete: {final_name} ({bytes_received} bytes) from {peer_desc}.")
         return
 
     if failure_reason is None:

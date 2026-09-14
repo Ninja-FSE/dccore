@@ -83,6 +83,32 @@ def format_speed(bytes_per_sec):
 MIN_RECORD_SECONDS = 1.0
 
 
+def speed_is_measurable(duration):
+    """Whether a transfer of this duration has a rate worth reporting.
+
+    sendall() returns once the bytes are in the KERNEL, not once the peer has
+    them. For a file LARGER than the socket send buffer the two converge - the
+    kernel blocks once the buffer is full, so the send paces itself against the
+    network and the clock measures something real. For a file that fits inside
+    the buffer they do not converge at all: the whole thing is handed over in
+    one go and the clock measures a memory copy.
+
+    From the beta, on a list zip: "Sent ... [138.63MB/s] this seems to high to
+    be true". It was. Raising the default send buffer to 4 MB widened the
+    window of files this applies to from under 1 MB to under 4 MB, which is
+    most list archives and many single tracks.
+
+    MIN_RECORD_SECONDS is the floor the speed RECORD has always applied, for
+    exactly this reason. This is that same judgement, made available to
+    everything that reports a rate rather than only to the thing that stores
+    one - because a number too unreliable to keep is too unreliable to say.
+    """
+    try:
+        return duration is not None and float(duration) >= MIN_RECORD_SECONDS
+    except (TypeError, ValueError):
+        return False
+
+
 def update_speed_record(bytes_per_sec, duration=None):
     """Store `bytes_per_sec` if it beats the saved record. Returns the record
     in force afterwards, whether or not this call changed it.
@@ -106,11 +132,17 @@ def update_speed_record(bytes_per_sec, duration=None):
         return current
     if duration is not None and duration < MIN_RECORD_SECONDS:
         return current
-    if speed <= current:
-        return current
-
-    db.save_speed_record(speed)
-    return speed
+    # The compare and the write happen under ONE lock in db, not here. This
+    # used to read the record, compare, and then save - three steps with two
+    # separate lock acquisitions and the decision in between. MAX_DCC_SLOTS
+    # transfers finish concurrently, so two could both read the old record,
+    # both decide they had beaten it, and the SLOWER one save last: a 5 MB/s
+    # record permanently replaced by a 1.2 MB/s one, with nothing anywhere to
+    # recompute it.
+    #
+    # The cheap rejections above stay here, because they are about whether the
+    # sample is worth offering at all and do not touch the file.
+    return db.raise_speed_record_to(speed)
 
 
 # The shortest window a sample may be measured over, and so also the most often
@@ -130,6 +162,14 @@ MIN_SAMPLE_SECONDS = 1.0
 
 def live_speed(now=None):
     """Aggregate bytes/sec across the transfers currently sending.
+
+    The SUM of what every sending transfer is moving, which is what "live
+    speed" means and what this docstring always said. The implementation
+    disagreed with it: it summed the per-transfer rates and then divided by
+    the number of contributors, so a bot with three slots each moving 2 MB/s
+    advertised 2.0MB/s against 6 MB/s of real outbound traffic - understating
+    itself in a public channel by a factor of the slots in use, worst exactly
+    when it was busiest.
 
     Cached for MIN_SAMPLE_SECONDS: a call inside that window returns the last
     figure rather than taking a second sample that would measure a fraction of
@@ -176,9 +216,18 @@ def live_speed(now=None):
                 total += int(moved / window)
                 contributors += 1
 
-    # Averaged across the transfers that actually contributed, not across every
-    # active slot: one skipped for lack of a window must not drag the mean down.
-    value = int(total / contributors) if contributors else 0
+    # THE SUM, not a mean. "Live speed" is what the bot is moving right now,
+    # so three slots at 2 MB/s each is 6 MB/s - which is what the channel
+    # advert's "Speed:" has always claimed to publish and what the dashboard's
+    # "Speed now" tile means.
+    #
+    # It used to divide by the number of contributing transfers, and the
+    # comment here defended that as protecting the MEAN from a transfer with
+    # no sample window yet. With a sum that concern disappears on its own: a
+    # skipped transfer contributes nothing, which is exactly right, rather
+    # than dragging an average down. `contributors` is kept only to tell "no
+    # transfers moved anything" apart from "they moved zero bytes".
+    value = int(total) if contributors else 0
 
     runtime.live_speed_bps = value
     runtime.live_speed_sampled_at = now

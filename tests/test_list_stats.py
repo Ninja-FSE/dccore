@@ -139,6 +139,81 @@ class ReadingBrokenSideFiles(DCCoreTestCase):
         self.assertEqual((size_str, raw_bytes), ("0B", 0))
 
 
+class AnUnreadableSecondaryListDoesNotCostTheWholeTuple(DCCoreTestCase):
+    """#433: an OSError opening any ONE of all_list_paths() used to collapse
+    the whole return to (0, "Error", "0B", 0) - throwing away a master-list
+    count and date that were perfectly fine, because the read loop sat
+    inside one outer try covering every path at once.
+
+    Reproduced the way the audit's own repro did on Windows (an AV scanner
+    or backup agent holding the VIDEO list open with FileShare.None) without
+    depending on platform-specific file permissions: open() is monkeypatched
+    to raise OSError for exactly the VIDEO list's path and pass every other
+    path through to the real builtin, so this runs identically on every
+    platform the suite's CI covers.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.tree = self.make_tree()
+        config.LOCAL_LIST_DIR = self.tree.lists
+        config.LIST_BASE_NAME = "DCCore"
+        self.master_path = os.path.join(self.tree.lists, "DCCore-2026-08-25.txt")
+        with open(self.master_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("List of 3 Files (10MB) generated on Aug 25th\n")
+            handle.write("header two\n")
+            for i in range(3):
+                handle.write(f"!DCCore track {i}.flac  ::INFO:: 3.0MB\n")
+
+        self.video_path = os.path.join(self.tree.lists, "DCCore-VIDEO-2026-08-25.txt")
+        with open(self.video_path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("List of 2 Files (2GB) generated on Aug 25th\n")
+            handle.write(f"!DCCore Movie.mkv  ::INFO:: 2GB\n")
+            handle.write(f"!DCCore Movie.nfo  ::INFO:: 1KB\n")
+
+    def make_video_list_unreadable(self):
+        import builtins
+        real_open = builtins.open
+        blocked_path = self.video_path
+
+        def guarded_open(path, *args, **kwargs):
+            if os.path.abspath(str(path)) == os.path.abspath(blocked_path):
+                raise OSError(13, "Permission denied", blocked_path)
+            return real_open(path, *args, **kwargs)
+
+        patcher = builtins.open
+        builtins.open = guarded_open
+        self.addCleanup(setattr, builtins, "open", patcher)
+
+    def test_the_master_lists_count_and_date_survive(self):
+        self.make_video_list_unreadable()
+
+        count, date_str, _size, _raw = list_mod.get_file_count_date_size_and_raw_bytes()
+
+        self.assertEqual(count, 3, "the master list's own 3 request lines "
+                                   "must still be counted")
+        self.assertNotEqual(date_str, "Error",
+                            "an unreadable VIDEO list must not cost the "
+                            "master list's date")
+
+    def test_it_is_not_confused_with_no_list_at_all(self):
+        """The two sentinels must stay distinguishable: this is a real,
+        temporary I/O fault, not "nothing has been built yet"."""
+        self.make_video_list_unreadable()
+
+        _count, date_str, _size, _raw = list_mod.get_file_count_date_size_and_raw_bytes()
+
+        self.assertNotEqual(date_str, "No List")
+
+    def test_with_nothing_blocked_the_video_list_is_counted_too(self):
+        """Control: the fix must not simply stop counting the video list."""
+        count, date_str, _size, _raw = list_mod.get_file_count_date_size_and_raw_bytes()
+
+        self.assertEqual(count, 5, "3 from the master list plus 2 from the "
+                                   "video list")
+        self.assertNotEqual(date_str, "Error")
+
+
 class GenerationPublishesStatsWithTheList(DCCoreTestCase):
     """The side files must move with the lists, not ahead of them."""
 

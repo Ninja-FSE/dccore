@@ -64,10 +64,27 @@ class SamplingTheRate(DCCoreTestCase):
         self.assertEqual(stats_mgr.live_speed(now=102.0), 1_000_000,
                          "2MB over 2s should read as 1MB/s")
 
-    def test_the_average_is_over_contributors_not_slots(self):
-        """A transfer skipped for want of a window must not drag the mean
-        toward zero - it has no measurement, which is not the same as a
-        measurement of nothing."""
+    def test_two_transfers_are_added_together(self):
+        """The figure is what the bot is moving RIGHT NOW, so two slots each
+        pushing 1 MB/s is 2 MB/s.
+
+        It used to divide by the number of contributing transfers, so this
+        answered 1 MB/s - understating the bot in its own channel advert by a
+        factor of the slots in use, worst exactly when it was busiest."""
+        first = self.transfer(1_000_000)
+        second = self.transfer(5_000_000)
+        stats_mgr.live_speed(now=100.0)
+
+        first["bytes_sent"] = 2_000_000           # 1 MB over 1s
+        second["bytes_sent"] = 6_000_000          # 1 MB over 1s
+
+        self.assertEqual(stats_mgr.live_speed(now=101.0), 2_000_000)
+
+    def test_a_transfer_with_no_window_yet_adds_nothing(self):
+        """A transfer skipped for want of a window has no measurement, which
+        is not the same as a measurement of nothing. Under a sum that falls
+        out for free - it contributes zero - where the old mean needed a
+        divisor chosen carefully to avoid being dragged down."""
         moving = self.transfer(1_000_000)
         stats_mgr.live_speed(now=100.0)
 
@@ -75,7 +92,7 @@ class SamplingTheRate(DCCoreTestCase):
         moving["bytes_sent"] = 2_000_000          # 1 MB over 1s
 
         self.assertEqual(stats_mgr.live_speed(now=101.0), 1_000_000,
-                         "the newcomer halved the average")
+                         "the newcomer changed a figure it had not measured")
 
     def test_only_forward_movement_counts(self):
         """A counter that went backwards means the row was replaced, not that

@@ -168,6 +168,101 @@ class QueuePayloadTests(DCCoreTestCase):
         self.assertEqual(result["count"], 1)
 
 
+class QueueRowsShowEveryFileAndSendingProgress(DCCoreTestCase):
+    """An operator asked to see the WHOLE queue, not a preview of its head,
+    and a progress bar for whatever is actually sending right now.
+
+    "preview"/"count"/"files" only ever describe what is WAITING - dcc.py
+    never puts the in-flight file into config.dcc_queue (it lives in
+    config.active_transfers instead) - so a sending user's current file and
+    its progress need their own fields, "current_file"/"bytes_sent"/"size",
+    populated from active_transfers rather than folded into the queue ones.
+    """
+
+    def test_the_full_queue_is_in_the_summary_row_not_just_the_first(self):
+        config.dcc_queue = {
+            "alice": [queue_row(user="alice", filename="One.flac"),
+                      queue_row(user="alice", filename="Two.flac"),
+                      queue_row(user="alice", filename="Three.flac")],
+        }
+
+        rows = {row["user"]: row for row in webserver.build_queue_payload()}
+
+        self.assertEqual(rows["alice"]["files"],
+                         ["One.flac", "Two.flac", "Three.flac"])
+        # Unchanged: "preview" still means "the next one", for whatever
+        # already reads only that.
+        self.assertEqual(rows["alice"]["preview"], "One.flac")
+
+    def test_a_sending_user_carries_the_file_in_flight_and_its_progress(self):
+        config.dcc_queue = {}
+        config.active_transfers = [
+            {"user": "bob", "file": "Playing.flac", "bytes_sent": 4096, "size": 8192},
+        ]
+
+        rows = {row["user"]: row for row in webserver.build_queue_payload()}
+
+        self.assertEqual(rows["bob"]["current_file"], "Playing.flac")
+        self.assertEqual(rows["bob"]["bytes_sent"], 4096)
+        self.assertEqual(rows["bob"]["size"], 8192)
+
+    def test_the_queued_files_behind_a_send_are_still_the_full_list(self):
+        """The exact shape from the report: one user both sending AND with
+        several files waiting behind it - every one of them must still be
+        there, not just the head."""
+        config.dcc_queue = {
+            "carol": [queue_row(user="carol", filename="Next.flac"),
+                      queue_row(user="carol", filename="After.flac")],
+        }
+        config.active_transfers = [
+            {"user": "carol", "file": "Playing.flac", "bytes_sent": 100, "size": 200},
+        ]
+
+        rows = {row["user"]: row for row in webserver.build_queue_payload()}
+        row = rows["carol"]
+
+        self.assertEqual(row["status"], "sending")
+        self.assertEqual(row["current_file"], "Playing.flac")
+        self.assertEqual(row["files"], ["Next.flac", "After.flac"])
+        self.assertEqual(row["count"], 2)
+
+    def test_a_size_not_recorded_yet_is_none_not_zero(self):
+        """dcc.start_dcc_send() writes "size" onto the active_transfers row
+        only once it has read the file's real size off disk - a row from the
+        brief window before that has no "size" key at all. None must mean
+        "not known yet", never be confused with a genuinely empty file's
+        honest 0."""
+        config.dcc_queue = {}
+        config.active_transfers = [{"user": "dave", "file": "JustStarted.flac", "bytes_sent": 0}]
+
+        rows = {row["user"]: row for row in webserver.build_queue_payload()}
+
+        self.assertIsNone(rows["dave"]["size"])
+
+    def test_a_non_sending_row_has_no_current_file(self):
+        config.dcc_queue = {"erin": [queue_row(user="erin", filename="Waiting.flac")]}
+        config.active_transfers = []
+
+        rows = {row["user"]: row for row in webserver.build_queue_payload()}
+
+        self.assertIsNone(rows["erin"]["current_file"])
+        self.assertIsNone(rows["erin"]["bytes_sent"])
+        self.assertIsNone(rows["erin"]["size"])
+
+    def test_the_single_user_endpoint_carries_the_same_progress_fields(self):
+        config.dcc_queue = {"frank": [queue_row(user="frank", filename="Next.flac")]}
+        config.active_transfers = [
+            {"user": "frank", "file": "Playing.flac", "bytes_sent": 50, "size": 100},
+        ]
+
+        result = webserver.build_queue_payload(user="frank")
+
+        self.assertEqual(result["current_file"], "Playing.flac")
+        self.assertEqual(result["bytes_sent"], 50)
+        self.assertEqual(result["size"], 100)
+        self.assertEqual(result["files"], ["Next.flac"])
+
+
 def payload_rows(payload):
     """Flat rows out of a folder-grouped file-list payload.
 
@@ -568,7 +663,18 @@ class ListUpdateToolTests(DCCoreTestCase):
             import types
             return types.SimpleNamespace(returncode=0, stdout="List of 1 Files\n", stderr="")
 
-        subprocess.run = fake_run
+        # The seam moved to run_watching_for_a_stall(): the rebuild is
+        # watched rather than timed, and started with Popen.
+        #
+        # RESTORED, unlike the subprocess.run patch this replaces. That one
+        # leaked too, but patching a stdlib module attribute is re-imported
+        # everywhere and got away with it; leaving commands' own function
+        # replaced would silently disable the real rebuild for every test
+        # that ran afterwards.
+        real_runner = commands.run_watching_for_a_stall
+        commands.run_watching_for_a_stall = fake_run
+        self.addCleanup(setattr, commands, "run_watching_for_a_stall",
+                        real_runner)
         self.addCleanup(setattr, subprocess, "run", real_run)
 
     def test_a_clean_run_starts_and_finishes_synchronously_under_the_fake_thread(self):
@@ -640,7 +746,10 @@ class ListUpdateToolTests(DCCoreTestCase):
             import types
             return types.SimpleNamespace(returncode=1, stdout="", stderr="disk full")
 
-        subprocess.run = failing_run
+        real_runner = commands.run_watching_for_a_stall
+        commands.run_watching_for_a_stall = failing_run
+        self.addCleanup(setattr, commands, "run_watching_for_a_stall",
+                        real_runner)
 
         status, _result = webserver.start_list_update()
         self.assertEqual(status, 200, "starting the rebuild itself still succeeds")
@@ -797,7 +906,11 @@ class FetchRoutesTests(DCCoreTestCase):
         self.assertEqual(len(result["errors"]), 2)
         self.assertEqual(len(config.fetch_queue), 1)
 
-    def test_status_payload_is_ordered_oldest_first_and_carries_the_id(self):
+    def test_status_payload_is_ordered_newest_first_and_carries_the_id(self):
+        """It was oldest first. The reason to open this view is almost always
+        the most recent thing that happened, and that meant scrolling past
+        every completed fetch to reach it. Still ordered by time, so it is no
+        less stable between polls - just counted from the other end."""
         rid1 = None
         import dcc_fetch
         rid1 = dcc_fetch.enqueue_fetch("bot1", "First.flac")
@@ -806,8 +919,8 @@ class FetchRoutesTests(DCCoreTestCase):
         config.fetch_queue[rid2]["requested_at"] = 2.0
 
         rows = webserver.build_fetch_status_payload()
-        self.assertEqual([r["id"] for r in rows], [rid1, rid2])
-        self.assertEqual(rows[0]["bot"], "bot1")
+        self.assertEqual([r["id"] for r in rows], [rid2, rid1])
+        self.assertEqual(rows[0]["bot"], "bot2")
 
     def test_status_payload_is_empty_list_when_queue_is_empty(self):
         self.assertEqual(webserver.build_fetch_status_payload(), [])
@@ -1267,11 +1380,16 @@ class ListFetchRoutesTests(DCCoreTestCase):
         self.assertEqual(result["bot"], "GoodBot")
         rows = [r for g in result["folders"] for r in g["entries"]]
         self.assertEqual(rows[0]["title"], "A.flac")
-        # Exactly the row shape build_filelists_payload() uses for our own
-        # list - same five keys, nothing more, nothing less. "folder" joined
-        # them when the views became folder-grouped.
-        self.assertEqual(set(rows[0].keys()),
-                         {"title", "size", "format", "source", "folder"})
+        # Exactly the row shape our own list uses - nothing more, nothing
+        # less. DERIVED from list.entries_to_filelist_rows(), which is the one
+        # place that shape is defined, rather than restated here: this listed
+        # five keys by name and went stale the day a sixth was added, failing
+        # on a change that kept the property it exists to protect.
+        import list as list_mod
+        canonical = list_mod.entries_to_filelist_rows(
+            [{"filename": "A.flac", "size": "1MB", "folder": "F"}], "GoodBot")
+
+        self.assertEqual(set(rows[0].keys()), set(canonical[0].keys()))
         self.assertEqual(result["total"], 1, "one folder in this fixture")
         self.assertEqual(result["total_files"], 1)
         self.assertEqual(result["offset"], 0)
@@ -1456,10 +1574,23 @@ class CrlfInjectionHttpRouteTests(DCCoreTestCase):
         self.assertEqual(len(body["created"]), 1)
         self.assertEqual(config.fetch_queue[body["created"][0]]["request_type"], "list")
 
-    def test_filelists_bots_route_returns_an_empty_list_with_nothing_fetched(self):
+    def test_filelists_bots_route_offers_only_our_own_with_nothing_fetched(self):
+        """This asserted an empty list until our own served lists joined the
+        route. They are never absent - a bot always serves at least one - so
+        "empty" is now the wrong shape for "nothing has been fetched". What
+        the route must still contain is no FOREIGN row."""
         resp = self.client.get("/api/filelists/bots")
+
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.get_json(), [])
+        rows = resp.get_json()
+
+        # OUR OWN LIST IS THERE. Asserted before the filter below, because
+        # "no foreign rows" and "every row is ours" are both vacuously true
+        # of an empty list - which is exactly what this route used to return,
+        # and what a mutation dropping our lists from it produces.
+        self.assertTrue([row for row in rows if row.get("own")],
+                        "the route offers none of our own lists to browse")
+        self.assertEqual([row for row in rows if not row.get("own")], [])
 
     def test_filelists_bot_route_returns_404_for_an_unknown_nick(self):
         resp = self.client.get("/api/filelists/bot/nosuchbot")
@@ -1789,9 +1920,36 @@ class FolderRarButtonTests(unittest.TestCase):
         self.assertNotIn('data-folder="', body)
 
     def test_attach_folder_rar_data_uses_dataset_assignment(self):
+        """The property, not the expression. A folder name is remote input -
+        it is whatever a foreign bot wrote in its own list - and escapeHtml()
+        does not encode a quote, so it must reach the DOM by assignment and
+        never through parsed markup.
+
+        This asserted the exact right-hand side until the cross-list filter
+        made it `group.bot || state.filelistsSource`, and failed on a change
+        that altered nothing it exists to protect."""
         body = self._extract_function("attachFilelistsFolderRarData")
-        self.assertIn(".dataset.bot = state.filelistsSource", body)
-        self.assertIn(".dataset.folder = group.folder", body)
+
+        self.assertIn(".dataset.bot =", body)
+        # The ROW's folder now, not the heading's. The button sits on the row
+        # whose own request line asks for it, and a RAR list's rows are
+        # grouped under whatever heading that list happens to carry - which is
+        # not the folder being requested.
+        self.assertIn(".dataset.folder = (row && row.rar_folder)", body)
+        for unsafe in ("innerHTML", "insertAdjacentHTML", "outerHTML",
+                       'data-bot="', 'data-folder="'):
+            with self.subTest(unsafe=unsafe):
+                self.assertNotIn(unsafe, body)
+
+    def test_the_folder_rar_button_prefers_its_own_group_s_bot(self):
+        """A cross-list filter shows folders from several bots at once, so
+        the selected source is not necessarily the bot a given folder came
+        from. Taking the source would send the right folder to the wrong bot -
+        a request that cannot succeed and reads as the feature being broken."""
+        body = self._extract_function("attachFilelistsFolderRarData")
+
+        self.assertIn("group.bot ||", body,
+                      "the folder request ignores which bot the folder is from")
 
     def test_attach_folder_rar_data_is_called_alongside_the_checkbox_attach(self):
         """Per the brief: wired in right alongside attachFilelistsCheckboxData(),
@@ -1822,9 +1980,29 @@ class FolderRarButtonTests(unittest.TestCase):
     def test_folder_rar_button_only_rendered_for_another_bots_list(self):
         """Same gate folderFilesHtml() already applies to the per-file
         checkbox column - packing a folder as .rar only makes sense against
-        another bot's list, never our own."""
-        body = self._extract_function("folderHeadingHtml")
-        self.assertIn('(state.filelistsSource || "__own__") !== "__own__"', body)
+        another bot's list, never our own.
+
+        It used to be asserted against folderHeadingHtml(), which is where the
+        button was. The button moved to the ROW that carries the request line,
+        because whether a bot will pack a folder is a per-folder question its
+        RAR list answers and a heading could only guess at - so the gate is
+        now literally the same expression the checkbox uses, in the same
+        function, which is what this test always said it should be."""
+        # Sliced from the source rather than taken from _extract_function(),
+        # which stops short of the end of this one - the button sits past
+        # where it cuts, so asserting on what it returns would be asserting
+        # against text that does not contain the subject either way.
+        with open(os.path.join(REPO_ROOT, "web", "app.js"),
+                  encoding="utf-8") as handle:
+            source = handle.read()
+        body = source.split("function folderFilesHtml(", 1)[1]
+        body = body.split("\n    function setFolderExpanded(", 1)[0]
+
+        self.assertIn("var rarCell = (row.rar_folder && fetchable)", body)
+        self.assertIn("var fetchable =", body,
+                      "the gate the button shares with the checkbox is not in "
+                      "this function - the slice above is looking at the "
+                      "wrong text")
 
 
 class FetchDeleteButtonRegressionTests(unittest.TestCase):
@@ -1885,11 +2063,27 @@ class DownloadTabAndFilelistsSwitcherRegressionTests(unittest.TestCase):
         self.assertNotIn("innerHTML +=", body)
         self.assertNotIn("innerHTML +", body)
 
-    def test_filelists_switcher_options_are_built_via_dom_apis(self):
-        body = self._extract_function("renderFilelistsSwitcher")
-        self.assertIn(".textContent = row.bot", body)
-        self.assertNotIn("innerHTML +=", body)
-        self.assertNotIn("innerHTML +", body)
+    def test_the_bot_rows_are_built_via_dom_apis(self):
+        """A nick is whatever that bot called itself in a channel, and it
+        reaches this row through two paths now - a list we hold, and an advert
+        from a bot we hold nothing for. Neither may be parsed as markup.
+
+        The nick must arrive at the DOM only through .textContent or
+        .dataset: both assign, neither parses. Asserting the property rather
+        than one expression, because the expression moved once already."""
+        body = self._extract_function("botRow")
+
+        self.assertNotIn("innerHTML", body)
+        self.assertNotIn("insertAdjacentHTML", body)
+        self.assertNotIn("outerHTML", body)
+
+        # Every place the nick is written down.
+        for sink in [line for line in body.splitlines()
+                     if "row.bot" in line and "//" not in line]:
+            self.assertTrue(
+                ".textContent" in sink or ".dataset." in sink
+                or "isOwnSource(row.bot)" in sink,
+                f"a nick reaches the DOM by some other route: {sink.strip()}")
 
     def test_no_new_attribute_built_via_string_concatenated_innerhtml(self):
         """Bot nicks and filenames from the Download tab / File Lists fetch
@@ -1961,13 +2155,107 @@ class FilelistsPaginationJsRegressionTests(unittest.TestCase):
         self.assertIn('el.filelistsNextBtn.addEventListener("click"', self.source)
 
     def test_switching_bot_source_resets_to_the_first_page(self):
-        start = self.source.index('el.filelistsSourceSelect.addEventListener("change"')
-        body = self.source[start:start + 300]
+        """Offset 40 of the previous bot's list is not a page of this one.
+
+        The handler is brace-matched rather than sliced to a fixed width: it
+        was 1200 characters when this was written and outgrew that the moment
+        the filter's toggling was added, failing on a change that altered
+        nothing it tests."""
+        start = self.source.index('el.filelistsBotList.addEventListener("click"')
+        depth = 0
+        body = None
+        for i in range(self.source.index("{", start), len(self.source)):
+            if self.source[i] == "{":
+                depth += 1
+            elif self.source[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    body = self.source[start:i + 1]
+                    break
+        self.assertIsNotNone(body, "unbalanced braces in the click handler")
+
         self.assertIn("state.filelistsOffset = 0", body)
+        self.assertIn("state.filelistsHistory = []", body)
 
     def test_load_filelists_requests_offset_and_limit_query_params(self):
+        """The "?" moved into the base when ?list= arrived - one of our own
+        lists needs a parameter ahead of the paging, and a foreign bot's does
+        not - so this asserts the paging pair rather than the whole string."""
         body = self._extract_function("loadFilelists")
-        self.assertIn('"?offset=" + offset + "&limit=" + FILELISTS_PAGE_SIZE', body)
+
+        self.assertIn('"offset=" + offset + "&limit=" + FILELISTS_PAGE_SIZE', body)
+
+    def test_one_of_our_own_lists_is_named_in_the_query(self):
+        """A second served list is browsable only if the request says which."""
+        body = self._extract_function("loadFilelists")
+
+        self.assertIn('"?list=" + encodeURIComponent(listParam)', body)
+
+
+class FilelistsFetchableRegressionTests(unittest.TestCase):
+    """A row only gets a checkbox when it is somebody ELSE's file - browsing
+    our own list is filesystem access already, and /api/fetch/enqueue exists
+    to reach another bot.
+
+    That test asked only about the SELECTED SOURCE, which defaults to our own
+    list. The cross-list filter has no single source: its rows come from every
+    list held and every one belongs to another bot - so filtering before
+    picking a bot rendered every result with no checkbox and no way to queue
+    any of it, which is the whole point of finding them.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO_ROOT, "web", "app.js"),
+                  encoding="utf-8") as handle:
+            cls.source = handle.read()
+
+    def test_the_rule_is_written_once(self):
+        """EVERY such decision, derived rather than the first one found.
+
+        There were two - the file row's checkbox and the folder heading's
+        button - and they had the SAME defect, fixed at different times. A
+        test that sliced from the first occurrence checked one and reported on
+        the other, so it failed while pointing at code already fixed.
+
+        There is one now, in rowsAreFetchable(), and both callers ask it. That
+        is the stronger property: two copies of a rule cannot disagree if
+        there is only one."""
+        body = self.source.split("function rowsAreFetchable(", 1)[1]
+        body = body.split("\n    }", 1)[0]
+
+        self.assertIn("state.filelistsFilter", body,
+                      "a cross-list result is only fetchable when a bot "
+                      "happens to be selected")
+        self.assertIn("isOwnSource", body,
+                      "browsing our own list is filesystem access already")
+
+    def test_nothing_decides_it_for_itself(self):
+        """A second copy would be free to drift, which is how the two got out
+        of step before."""
+        decisions = [line.strip() for line in self.source.splitlines()
+                     if "var fetchable =" in line]
+
+        self.assertEqual(decisions, ["var fetchable = rowsAreFetchable();"])
+
+    def test_every_surface_that_offers_a_selection_asks(self):
+        """Guard on the guard: a single unused helper containing the right
+        rule would satisfy both assertions above.
+
+        THREE callers now. The third is the flat-list select-all, which rides
+        on the table header because a list with no folders has no heading to
+        carry it - and a select-all over rows that have no checkboxes would be
+        the same lie the folder heading was fixed for."""
+        self.assertEqual(self.source.count("rowsAreFetchable()"), 4,
+                         "expected the definition plus its three callers - the "
+                         "file rows, the folder heading, and the flat-list "
+                         "select-all in the table header")
+
+    def test_the_flat_list_select_all_is_one_of_them(self):
+        """Named, because a count is satisfied by any third caller."""
+        body = self.source.split("function renderFlatListControls(", 1)[1]
+
+        self.assertIn("rowsAreFetchable()", body.split("\n  }", 1)[0])
 
 
 class OptionalFlaskDependencyTests(unittest.TestCase):
@@ -2194,6 +2482,54 @@ class RejectedListArchiveRenderingTests(DCCoreTestCase):
                          "zip entry would extract outside")
 
 
+class ADownloadButtonNeedsAFileBehindIt(DCCoreTestCase):
+    """dcc_fetch._handle_completed_list_fetch() (issue reported live) now
+    removes a successfully-extracted list's raw zip and clears
+    row["stored_filename"] - the browsable copy is the deliverable, not the
+    zip nothing ever reopens. renderDownloads() used to offer a Download
+    button for any state === "complete" row regardless, which would now be
+    a link that always answers 404. Structural, like every other check on
+    this page - nothing here executes JavaScript."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO_ROOT, "web", "app.js"), "r", encoding="utf-8") as f:
+            cls.app_js = f.read()
+
+    def _render_downloads_source(self):
+        start = self.app_js.index("  function renderDownloads(")
+        end = self.app_js.index(chr(10) + "  function ", start + 10)
+        return self.app_js[start:end]
+
+    def test_a_completed_row_needs_stored_filename_for_the_download_link(self):
+        body = self._render_downloads_source()
+        # The exact condition, not just that the string appears somewhere -
+        # a state === "complete" check with stored_filename tested in some
+        # OTHER branch would pass a looser assertIn without fixing anything.
+        self.assertIn('state === "complete" && row.stored_filename', body)
+
+    def test_a_completed_row_with_no_file_gets_no_download_link(self):
+        """The branch that condition guards must not simply vanish - a
+        completed row with nothing to download still needs SOME action
+        rendered (its Delete button, at least), or the row goes from a dead
+        link to no controls at all."""
+        body = self._render_downloads_source()
+        # Split TWICE: once past the has-a-file branch (which legitimately
+        # contains "/download" - that is the link this test must not catch),
+        # then again to isolate just the no-file branch up to whatever comes
+        # after it.
+        after_has_file_branch = body.split(
+            'state === "complete" && row.stored_filename', 1)[1]
+        no_file_branch = after_has_file_branch.split(
+            'else if (state === "complete")', 1)[1].split(
+            'else if (state === "failed")', 1)[0]
+
+        self.assertNotIn("/download", no_file_branch,
+                         "a completed row with no stored file must not "
+                         "still offer a link to /api/fetch/.../download")
+        self.assertIn("deleteBtn", no_file_branch,
+                      "a completed row with no stored file still needs a "
+                      "way to forget it")
 
 
 class FetchRoutesRefuseWhenTheFeatureIsOff(DCCoreTestCase):

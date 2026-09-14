@@ -330,8 +330,14 @@ class TheFileIsNotTouchedUnlessItIsRight(WriterTestCase):
 
         why = self.refuse({"NICKNAME": "DCCoreWin"})
 
-        self.assertIn("NICKNAME", why)
-        self.assertIn("read back", why)
+        # The refusal now names the INDENTATION rather than the value that
+        # would not read back. parse() rejects a continuation line outright,
+        # so the edited text is refused before the read-back comparison it
+        # used to fail at - an earlier point and a reason an operator can act
+        # on. The guarantee this class exists for is unchanged and is checked
+        # by refuse() itself: the file on disk is byte-for-byte as it was.
+        self.assertIn("would not be readable", why)
+        self.assertIn("indented", why)
 
     def test_a_setting_the_edit_makes_disappear_entirely(self):
         """The other half of the same hazard. An indented setting is not a
@@ -344,8 +350,13 @@ class TheFileIsNotTouchedUnlessItIsRight(WriterTestCase):
 
         why = self.refuse({"MAX_DCC_SLOTS": 9})
 
-        self.assertIn("MAX_DCC_SLOTS", why)
-        self.assertIn("did not survive", why)
+        # Same change of reason as the test above, from the other direction:
+        # the indented COMMENT is legal, and uncommenting it is what produces
+        # an indented SETTING. parse() names that now, where before the value
+        # simply vanished into the line above and the edit was caught by the
+        # setting having disappeared.
+        self.assertIn("would not be readable", why)
+        self.assertIn("indented", why)
 
     def test_the_operators_own_mistake_is_reported_before_the_files(self):
         """Values are checked before the file is even read, so somebody who
@@ -563,6 +574,117 @@ class TheWriteIsAtomic(WriterTestCase):
                      if not line.strip().startswith("#")]
 
         self.assertEqual([line for line in lines if "import db" in line], [])
+
+
+class TheAppendedBlockIsWrittenOnce(WriterTestCase):
+    """What a real settings.conf looked like after a dashboard save.
+
+    The operator typed a debug channel into the Settings page and pressed Save.
+    The setting was written correctly - but the three-line explanation above it
+    was written again too, underneath the copy already in the file, because the
+    append branch only ever asked whether a SETTING was missing and never
+    whether the EXPLANATION was. And the file came back with no trailing
+    newline, because the appended lines went on past the empty string that
+    split("\n") leaves behind for one.
+
+    Neither breaks parse(). Both are wrong in a file an operator opens and
+    reads, and both compound: every save adds another header and another pair
+    of blank lines.
+    """
+
+    def test_a_second_append_does_not_repeat_the_header(self):
+        self.write("NICKNAME = Bot\n")
+
+        self.save({"DEBUG_CHANNEL": "#one"})
+        self.save({"ALT_NICKNAME": "Bot_"})
+
+        self.assertEqual(self.read().count(settings_file._ADDED_HEADER[0]), 1)
+
+    def test_the_header_is_written_when_there_is_none(self):
+        """Control. The explanation exists to be read the first time."""
+        self.write("NICKNAME = Bot\n")
+
+        self.save({"DEBUG_CHANNEL": "#one"})
+
+        self.assertEqual(self.read().count(settings_file._ADDED_HEADER[0]), 1)
+        for line in settings_file._ADDED_HEADER:
+            self.assertIn(line, self.read())
+
+    def test_a_file_that_already_has_the_header_gains_no_second_one(self):
+        """The reported file, reduced: it already carried the block, from an
+        earlier save, and the next save added another."""
+        self.write("NICKNAME = Bot\n"
+                   "\n"
+                   + "\n".join(settings_file._ADDED_HEADER) + "\n"
+                   "DEBUG_CHANNEL = #one\n")
+
+        self.save({"ALT_NICKNAME": "Bot_"})
+
+        self.assertEqual(self.read().count(settings_file._ADDED_HEADER[0]), 1)
+
+    def test_the_file_ends_with_a_newline_after_an_append(self):
+        self.write("NICKNAME = Bot\n")
+
+        self.save({"DEBUG_CHANNEL": "#one"})
+
+        self.assertTrue(self.read().endswith("\n"),
+                        "the appended setting left the file ending mid-line")
+
+    def test_a_file_that_arrived_without_a_trailing_newline_gets_one(self):
+        """Exactly the state the reported install was in - itself the result of
+        an earlier append by this same function."""
+        self.write("NICKNAME = Bot")
+
+        self.save({"DEBUG_CHANNEL": "#one"})
+
+        self.assertTrue(self.read().endswith("\n"))
+
+    def test_blank_lines_do_not_accumulate(self):
+        """One blank line separates the appended block from what came before,
+        however many saves have run. The old form added one to the empty string
+        split() had already left, so a file that ended with a newline - which is
+        to say every file this function has ever written - grew a pair per
+        save."""
+        self.write("NICKNAME = Bot\n")
+
+        for value in ("#one", "#two", "#three"):
+            self.save({"DEBUG_CHANNEL": value})
+            self.save({"ALT_NICKNAME": "Bot" + str(len(value))})
+
+        self.assertNotIn("\n\n\n", self.read(),
+                         "blank lines are still accumulating on every save")
+
+    def test_repeated_saves_stay_readable(self):
+        """The property underneath all of the above. parse() refuses a file
+        that sets a key twice, and refuses it ENTIRELY - so a writer that
+        degraded the file a little on each save would eventually take every
+        setting down at once, at the next restart, with nothing connecting the
+        two events."""
+        self.write("NICKNAME = Bot\n")
+
+        for index in range(6):
+            self.save({"DEBUG_CHANNEL": "#chan%d" % index})
+            self.save({"ALT_NICKNAME": "Bot%d" % index})
+
+        entries = settings_file.parse(self.read())
+
+        self.assertEqual(entries["NICKNAME"], "Bot")
+        self.assertEqual(entries["DEBUG_CHANNEL"], "#chan5")
+        self.assertEqual(entries["ALT_NICKNAME"], "Bot5")
+
+    def test_a_crlf_file_keeps_crlf(self):
+        """The trailing newline added must be the file's own ending, not "\n"
+        stamped onto a file somebody last edited in Notepad."""
+        self.write("NICKNAME = Bot\r\n")
+
+        self.save({"DEBUG_CHANNEL": "#one"})
+
+        text = self.read()
+
+        self.assertTrue(text.endswith("\r\n"))
+        self.assertEqual(text.count("\n"), text.count("\r\n"),
+                         "an appended line was written with a bare LF into a "
+                         "CRLF file")
 
 
 if __name__ == "__main__":

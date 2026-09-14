@@ -110,6 +110,9 @@ class TheSendRefusesRatherThanOfferingLoopback(DCCoreTestCase):
     def send(self, address):
         self.set_config(MY_IP_OR_DOCK=address)
         sock = RecordingSocket()
+        # #430: start_dcc_send() dispatches through the LIVE socket
+        # sys.modules['oserve'] reports, not the parameter alone.
+        self.oserve.irc_connection = sock
         dcc.start_dcc_send(sock, "dave", self.track, "Song.flac", "#chan",
                            {"file": "Song.flac", "path": self.track})
         return sock.text()
@@ -158,6 +161,7 @@ class TheSendRefusesRatherThanOfferingLoopback(DCCoreTestCase):
         io.open(empty, "w").close()
         self.set_config(MY_IP_OR_DOCK=ROUTABLE)
         sock = RecordingSocket()
+        self.oserve.irc_connection = sock
 
         dcc.start_dcc_send(sock, "dave", empty, "Empty.flac", "#chan",
                            {"file": "Empty.flac", "path": empty})

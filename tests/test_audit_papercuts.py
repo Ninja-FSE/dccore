@@ -110,7 +110,18 @@ class TheUpdateCounterReadsTheSameFileAsEverythingElse(DCCoreTestCase):
     """count_from_master_list() excluded "-RAR-" but not the delivered "-FULL-"
     copy, unlike list.find_latest_list() which excludes both. "-FULL-" sorts
     after a plain date suffix, so the !update counter could read a different
-    file from the one @find and the advert read."""
+    file from the one @find and the advert read.
+
+    THE INVARIANT CHANGED SHAPE when film moved into a list of its own. "The
+    same file" was right while there was one; the advert now counts across
+    both, so holding it would make !update announce a smaller number than the
+    advert for the same library. What #234 was really protecting is that the
+    two give the same ANSWER, and that is what these now assert - satisfied by
+    construction, since the counter calls the advert's own function rather
+    than keeping a second copy of the filtering in step by hand.
+
+    The three cases #234 encoded are all still here: they live in
+    find_latest_list(), which both sides go through."""
 
     def setUp(self):
         super().setUp()
@@ -120,9 +131,14 @@ class TheUpdateCounterReadsTheSameFileAsEverythingElse(DCCoreTestCase):
                         LIST_BASE_NAME="Bot", NICKNAME="Bot")
 
     def write(self, name, count):
+        """A list with real REQUEST ROWS. Both the counter and the advert
+        count rows, so a header-only fixture would be a file no generator
+        produces and would test the wrong thing."""
         with io.open(os.path.join(self.tree.lists, name), "w",
                      encoding="utf-8") as handle:
             handle.write(f"List of {count} Files\n")
+            for i in range(count):
+                handle.write(f"!Bot Track {i}.flac  ::INFO:: 4.00MB\n")
 
     def test_the_delivered_full_copy_is_not_counted(self):
         self.write("Bot-2026-01-01.txt", 10)
@@ -141,6 +157,10 @@ class TheUpdateCounterReadsTheSameFileAsEverythingElse(DCCoreTestCase):
 
         self.assertEqual(os.path.basename(index), "Bot-2026-01-01.txt")
         self.assertEqual(commands.count_from_master_list(), 42)
+        # And the same answer as the advert, which is the invariant that
+        # survives film having a list of its own.
+        self.assertEqual(commands.count_from_master_list(),
+                         list_mod.get_file_count_date_size_and_raw_bytes()[0])
 
     def test_the_rar_list_is_still_excluded(self):
         """Control for the filter that was already right."""

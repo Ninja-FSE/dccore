@@ -56,7 +56,14 @@ def thread_calls():
     for name in sorted(os.listdir(REPO_ROOT)):
         if not name.endswith(".py"):
             continue
-        with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+        path = os.path.join(REPO_ROOT, name)
+        if not os.path.exists(path):
+            # Gone between listdir() and here. The control test below writes
+            # a tmp*.py into this very directory and removes it again, so two
+            # suite runs against one checkout make each other fail with a
+            # FileNotFoundError naming a file neither of them ships.
+            continue
+        with io.open(path, encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -114,6 +121,29 @@ class EveryStartedThreadIsADaemon(unittest.TestCase):
                 if name == os.path.basename(path)]
 
         self.assertEqual(mine, [(2, False), (3, False), (4, True)])
+
+    def test_a_file_that_vanishes_mid_scan_is_skipped(self):
+        """The control test above writes a tmp*.py into REPO_ROOT - the very
+        directory this scan walks - and removes it again on cleanup. So two
+        suite runs against one checkout used to fail each other with a
+        FileNotFoundError naming a file neither of them ships, which reads as
+        a real defect and is not one.
+
+        A name that is gone by the time we open it cannot be a source file
+        anyone ships, so skipping it loses nothing.
+        """
+        real_listdir = os.listdir
+
+        def with_a_ghost(path):
+            return sorted(real_listdir(path) + ["tmp-not-there.py"])
+
+        os.listdir = with_a_ghost
+        self.addCleanup(setattr, os, "listdir", real_listdir)
+
+        names = {name for name, _line, _ok in thread_calls()}
+
+        self.assertNotIn("tmp-not-there.py", names)
+        self.assertIn("irc.py", names, "the scan stopped at the ghost")
 
     def test_the_two_command_handlers_are_covered_by_this(self):
         """Named because they are the ones that were wrong, and because a
@@ -182,6 +212,12 @@ class TheListenerIsClosedWhenNoPortIsFree(DCCoreTestCase):
     def send(self):
         import dcc
         sock = RecordingSocket()
+        # #430: start_dcc_send() now dispatches through whatever socket
+        # sys.modules['oserve'].irc_connection reports as live, not the
+        # parameter alone - this has to be that same socket, or the call
+        # bails out as "no live connection" before it can ever refuse a
+        # port.
+        self.oserve.irc_connection = sock
         dcc.start_dcc_send(sock, "dave", self.track, "Song.flac", "#chan",
                            {"file": "Song.flac", "path": self.track})
         return sock.text()

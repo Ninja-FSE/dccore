@@ -29,6 +29,10 @@ FETCHED_BOT_LISTS_FILE = getattr(config, "FETCHED_BOT_LISTS_FILE",
                                  os.path.join("data", "fetched_bot_lists.json"))
 FETCH_HISTORY_FILE = getattr(config, "FETCH_HISTORY_FILE",
                               os.path.join("data", "fetch_history.json"))
+NOTICES_FILE = getattr(config, "NOTICES_FILE",
+                       os.path.join("data", "notices.json"))
+PRIVATE_MESSAGES_FILE = getattr(config, "PRIVATE_MESSAGES_FILE",
+                                os.path.join("data", "private_messages.json"))
 
 
 def _atomic_write(path, text):
@@ -67,65 +71,6 @@ def _atomic_write(path, text):
 # =================================================================----
 # SECTION 1: BANS.TXT (banned users)
 # =================================================================----
-
-# What the two list side files were called before they were named after the
-# program rather than after one operator's server. Only these exact names are
-# migrated: anything else is a name somebody chose.
-LEGACY_SIDE_FILES = {
-    "dccore.size.txt": "flac-serv-size.txt",
-    "dccore.rawbytes.txt": "flac-serv-rawbytes.txt",
-}
-
-
-def migrate_legacy_side_files(log=print):
-    """Carry the old flac-serv-* side files across to their new names.
-
-    Renaming the settings alone would have orphaned these on every existing
-    deployment: update_list.py would start writing the new names, list.py would
-    start reading them, and until the next SUCCESSFUL !update neither exists -
-    so the advert publishes "0B" and @<nick>-que reports no size. On a bot whose
-    list is rebuilt weekly that is a week of wrong numbers in public, for a
-    cosmetic change.
-
-    Deliberately narrow, because a migration that guesses is worse than none:
-
-      * only when the setting still holds the new default. An operator who
-        chose their own filename gets left alone - their file is not "the old
-        one", it is theirs.
-      * only when the new file does not already exist. A rebuild that has
-        already happened wins over anything left on disk.
-      * os.replace, so an interrupted run leaves one intact file rather than
-        two halves; and a failure is logged and swallowed, because a daemon
-        that will not start over a cosmetic rename is a worse outcome than the
-        rename not happening.
-
-    Returns the list of (old, new) basenames actually moved, for the tests and
-    for the startup log.
-    """
-    directory = getattr(config, "LOCAL_LIST_DIR", "./lists")
-    moved = []
-    for new_default, legacy_name in LEGACY_SIDE_FILES.items():
-        setting = "LIST_SIZE_FILE" if "size" in new_default else "LIST_RAWBYTES_FILE"
-        configured = str(getattr(config, setting, new_default))
-        if configured != new_default:
-            continue
-
-        new_path = os.path.join(directory, configured)
-        legacy_path = os.path.join(directory, legacy_name)
-        if os.path.exists(new_path) or not os.path.exists(legacy_path):
-            continue
-        try:
-            platform_compat.replace_with_retry(legacy_path, new_path)
-            moved.append((legacy_name, configured))
-        except OSError as err:
-            log(f"[MIGRATE] Could not rename {legacy_name} to {configured}: {err}. "
-                f"The figure it holds will be republished by the next list update.")
-
-    if moved:
-        for legacy_name, configured in moved:
-            log(f"[MIGRATE] Renamed {legacy_name} to {configured}.")
-    return moved
-
 
 def load_bans_from_file():
     """Load the active bans from bans.txt into memory."""
@@ -518,6 +463,47 @@ def save_speed_record(new_record):
         print(f"[DB ERROR] Could not save the speed record: {e}")
 
 
+def _read_speed_record_unlocked():
+    """The saved record, or 0. Caller must hold _disk_lock."""
+    if not os.path.exists(SPEED_RECORD_FILE):
+        return 0
+    try:
+        with open(SPEED_RECORD_FILE, "r") as handle:
+            return int(handle.read().strip())
+    except Exception:
+        return 0
+
+
+def raise_speed_record_to(candidate):
+    """Store `candidate` only if it beats the record. Returns the record after.
+
+    ONE lock acquisition around read-compare-write, for the same reason
+    record_download() and update_stats_on_complete() hold one across their
+    whole load-increment-save: MAX_DCC_SLOTS transfers finish concurrently.
+
+    Read and write used to be two separate acquisitions, with the comparison
+    in the caller between them. Two transfers finishing together both read the
+    old record, both decided they had beaten it, and whichever saved second
+    won - so a 5 MB/s record was permanently replaced by a 1.2 MB/s one, and
+    nothing ever recomputes it. Losing a record is not corruption, but it is
+    the one number in the advert an operator cannot get back.
+    """
+    try:
+        speed = int(candidate)
+    except (TypeError, ValueError):
+        return get_speed_record()
+    with _disk_lock:
+        current = _read_speed_record_unlocked()
+        if speed <= current:
+            return current
+        try:
+            _atomic_write(SPEED_RECORD_FILE, str(speed))
+        except Exception as err:
+            print(f"[DB ERROR] Could not save the speed record: {err}")
+            return current
+        return speed
+
+
 DOWNLOAD_COUNTS_FILE = getattr(config, "DOWNLOAD_COUNTS_FILE",
                                os.path.join("data", "download_counts.json"))
 
@@ -547,6 +533,153 @@ def load_download_counts():
         return _load_download_counts_unlocked()
 
 
+def migrate_download_counts_to_labels():
+    """Carry existing counters onto the labelled key, once - and never at the
+    cost of the daemon starting.
+
+    The wrapper is not decoration. This runs from oserve.startup(), and
+    load_download_counts() two functions up states the posture every other
+    reader of this file keeps: "a file that will not parse costs an empty
+    'most downloaded' table, not a refusal to start. These counters describe
+    history and nothing else reads them, so losing them is a cosmetic failure
+    - which is exactly why it must not be a loud one."
+
+    A migration that raises is a louder failure than the thing it was
+    migrating. Found by audit: one non-dict value under a key a legacy row
+    migrated onto raised AttributeError and the bot would not boot.
+    """
+    try:
+        marker = _counter_migration_marker()
+        if os.path.exists(marker):
+            return 0
+        moved = _migrate_download_counts_to_labels()
+        _write_counter_migration_marker(marker)
+        return moved
+    except Exception as err:                              # noqa: BLE001
+        print(f"[DB ERROR] Could not migrate the download counters: {err}. "
+              f"They are left exactly as they were, and the daemon carries on.")
+        return 0
+
+
+def _counter_migration_marker():
+    """Where "this migration has already run" is recorded.
+
+    Beside the counters it describes, so a restored backup of the data
+    directory carries its own answer with it.
+    """
+    return os.path.join(os.path.dirname(os.path.abspath(DOWNLOAD_COUNTS_FILE)),
+                        ".download_counts_labelled")
+
+
+def _write_counter_migration_marker(marker):
+    try:
+        os.makedirs(os.path.dirname(marker), exist_ok=True)
+        with io.open(marker, "w", encoding="utf-8") as handle:
+            handle.write("Written by db.migrate_download_counts_to_labels().\n"
+                         "Its presence means the download counters already "
+                         "carry their folder label.\nDelete it only if you "
+                         "want that one-time migration attempted again.\n")
+    except OSError as err:
+        # Not fatal: the migration itself is idempotent enough to survive a
+        # second run, and refusing to start over a marker would be the very
+        # thing this whole function exists not to do.
+        print(f"[DB] Could not record that the counter migration ran ({err}); "
+              f"it will be attempted again on the next start.")
+
+
+def _migrate_download_counts_to_labels():
+    """The migration itself.
+
+    Returns how many rows moved, for the caller's log and for the tests.
+
+    Every install that has counters today is a single-folder one: multi-folder
+    was unreachable until the dashboard could write the folder list. So the
+    old bare key "Artist/Album/track.flac" is unambiguously a file in the
+    FIRST configured folder, and gains that folder's label.
+
+    Without this the change is a silent reset: every row an operator has
+    accumulated stays under a key nothing will ever increment again, and the
+    "most downloaded" table starts from nothing while still showing the old
+    entries. #164 settled the principle for exactly this shape of change -
+    one break at the moment the operator upgrades beats a quiet second one
+    weeks later - and a migration means there is no break at all.
+
+    IDEMPOTENT BY INSPECTION, with one honest gap. A key whose first component
+    is already a configured label is left alone, so a second run does nothing.
+    The gap: a library whose own top-level subfolder happens to share the
+    library's label - D:\\Flac containing a folder also called "Flac" - has
+    legacy keys that already start with "Flac", and those are skipped and stay
+    unlabelled. That splits one folder's counters between two keys. Rare, and
+    cosmetic when it happens, which is why it is documented rather than
+    solved with a schema marker in a file whose every other key is a real row.
+    """
+    import library
+
+    folders = library.folders()
+    if not folders:
+        return 0
+    labels = {str(entry.name).lower() for entry in folders}
+    primary = folders[0].name
+
+    with _disk_lock:
+        counts = _load_download_counts_unlocked()
+        moves = {}
+        for key, row in counts.items():
+            if not isinstance(row, dict) or row.get("kind") != "file":
+                continue
+            # An ABSOLUTE key is not a relative path missing its label - it
+            # is a file that was under no configured folder when it was
+            # counted. os.path.join(label, absolute) returns the absolute path
+            # unchanged, so "migrating" it rewrote the file and logged a
+            # migration on every single boot while changing nothing.
+            if os.path.isabs(str(key)):
+                continue
+
+            head = str(key).replace("\\", "/").split("/", 1)[0]
+            if head.lower() in labels:
+                continue
+            moves[key] = os.path.join(primary, key)
+
+        if not moves:
+            return 0
+
+        for old_key, new_key in moves.items():
+            row = counts.pop(old_key)
+            existing = counts.get(new_key)
+            if isinstance(existing, dict):
+                # Both spellings present: add rather than let one win, because
+                # either way round would discard real downloads.
+                try:
+                    existing["count"] = (int(existing.get("count", 0))
+                                         + int(row.get("count", 0)))
+                except (TypeError, ValueError):
+                    existing["count"] = row.get("count", 0)
+            else:
+                # Either nothing was there, or what was there is not a row
+                # anything in this file wrote - a hand-edit, or a half-restored
+                # backup. `row` came through the isinstance check above and is
+                # real data; that is not. Keep the real one.
+                #
+                # This used to be `if new_key in counts:` followed by
+                # counts[new_key].get(...), which is an AttributeError the
+                # moment the existing value is a string. That ran at STARTUP,
+                # so the whole daemon refused to boot over one bad line in a
+                # file whose own loader is written to shrug off corruption.
+                counts[new_key] = row
+
+        try:
+            _atomic_write(DOWNLOAD_COUNTS_FILE,
+                          json.dumps(counts, indent=1, sort_keys=True,
+                                     ensure_ascii=False))
+        except Exception as err:
+            print(f"[DB ERROR] Could not save the migrated download counts: {err}")
+            return 0
+
+    print(f"[MIGRATE] Moved {len(moves)} download counter(s) onto the "
+          f"{primary!r} folder label.")
+    return len(moves)
+
+
 def record_download(key, name, kind):
     """Count one completed send against `key`, and save.
 
@@ -567,6 +700,12 @@ def record_download(key, name, kind):
     Not bounded, and it does not need to be: a bot can only send what it
     shares, so the row count is capped by the size of the library itself.
     """
+    # A FALSY KEY MEANS "DO NOT COUNT THIS", and it is deliberate as well as
+    # defensive. dcc.download_count_identity() answers None for the master
+    # list, which is sent to everybody who types the nickname and is how a
+    # person finds out what the downloads are rather than being one - see its
+    # own note. Returning here keeps that decision in the one place that
+    # already decides what a send counts as.
     if not key:
         return
     with _disk_lock:
@@ -587,6 +726,70 @@ def record_download(key, name, kind):
         except Exception as err:
             print(f"[DB ERROR] Could not save the download counts: {err}")
         return row["count"]
+
+
+def prune_list_artifact_download_counts():
+    """Drop rows the master list left in the counters before it stopped being
+    counted. Returns how many went.
+
+    Needed because the fix alone is invisible to anybody who already has them:
+    the list has been counted since these tables existed, its name carries the
+    build date so there is a row per rebuild, and they sit at the top of
+    "Most downloaded" where they crowd out the files the table is for.
+
+    Two rules, because neither catches everything on its own:
+
+      * the NAME is a list artifact - "<base>-<date>.zip|.rar",
+        "<base>-FULL-<date>.txt" - which finds them wherever they were keyed.
+      * the KEY is an absolute path inside LOCAL_LIST_DIR, which finds them
+        even after the operator has renamed the bot, since the name rule is
+        anchored on the CURRENT LIST_BASE_NAME and an old row would no longer
+        match it. That directory holds the further lists' subdirectories too,
+        so one check covers every list a bot serves.
+
+    Nothing served can legitimately be keyed that way: a library folder is
+    keyed by its label and the path beneath it, never absolutely - which is
+    the whole point of library_count_key().
+
+    Same posture as migrate_download_counts_to_labels() next door, and for the
+    same reason: this runs from oserve.startup(), and these counters describe
+    history that nothing else reads. Losing them is cosmetic; refusing to boot
+    over them is not. So it never raises.
+    """
+    try:
+        # Both imported here, not at module scope: dcc imports db, so a
+        # top-level `import dcc` would close the cycle, and list_mod is only
+        # wanted for this one sweep.
+        import dcc
+        import list as list_mod
+
+        lists_root = os.path.abspath(
+            getattr(config, "LOCAL_LIST_DIR", "./lists") or "./lists")
+
+        with _disk_lock:
+            counts = _load_download_counts_unlocked()
+            doomed = []
+            for key, row in counts.items():
+                name = row.get("name") if isinstance(row, dict) else None
+                if list_mod.is_list_artifact_name(name or key):
+                    doomed.append(key)
+                    continue
+                if os.path.isabs(str(key)) and dcc.is_safe_path(lists_root, str(key)):
+                    doomed.append(key)
+            if not doomed:
+                return 0
+            for key in doomed:
+                del counts[key]
+            _atomic_write(DOWNLOAD_COUNTS_FILE,
+                          json.dumps(counts, indent=1, sort_keys=True,
+                                     ensure_ascii=False))
+        print(f"[DB] Removed {len(doomed)} master-list row(s) from the "
+              f"download counters; the list is not a download.")
+        return len(doomed)
+    except Exception as err:
+        print(f"[DB] Could not tidy the download counters ({err}); "
+              f"the master list may still appear under Most downloaded.")
+        return 0
 
 
 def top_downloads(limit=10, kind=None):
@@ -640,7 +843,14 @@ def load_known_bots():
     try:
         with io.open(KNOWN_BOTS_FILE, "r", encoding="utf-8") as handle:
             loaded = json.load(handle)
-        return loaded if isinstance(loaded, dict) else {}
+        if not isinstance(loaded, dict):
+            return {}
+        # Every reader treats an entry as a mapping - irc.py copies it with
+        # dict(), webserver reads fields off it - so one malformed entry in a
+        # hand-edited file would raise in all of them rather than costing the
+        # "empty sidebar" this docstring promises. Adverts rebuild it.
+        return {key: value for key, value in loaded.items()
+                if isinstance(value, dict)}
     except Exception as err:
         print(f"[DB ERROR] Could not read the bot registry, starting empty: {err}")
         return {}
@@ -672,7 +882,15 @@ def load_fetched_bot_lists():
     try:
         with io.open(FETCHED_BOT_LISTS_FILE, "r", encoding="utf-8") as handle:
             loaded = json.load(handle)
-        return loaded if isinstance(loaded, dict) else {}
+        if not isinstance(loaded, dict):
+            return {}
+        # Per ENTRY, not just the whole file - the same filter, and the same
+        # reasoning, as load_known_bots() forty lines above. Every reader
+        # treats a row as a mapping, so one malformed value in a hand-edited
+        # or half-restored file raises in all of them instead of costing the
+        # empty registry this docstring promises.
+        return {key: value for key, value in loaded.items()
+                if isinstance(value, dict)}
     except Exception as err:
         print(f"[DB ERROR] Could not read the fetched-lists registry, starting empty: {err}")
         return {}
@@ -705,10 +923,141 @@ def load_fetch_history():
     try:
         with io.open(FETCH_HISTORY_FILE, "r", encoding="utf-8") as handle:
             loaded = json.load(handle)
-        return loaded if isinstance(loaded, dict) else {}
+        if not isinstance(loaded, dict):
+            return {}
+        # Per ENTRY, not just the whole file - the same filter, and the same
+        # reasoning, as load_known_bots() forty lines above. Every reader
+        # treats a row as a mapping, so one malformed value in a hand-edited
+        # or half-restored file raises in all of them instead of costing the
+        # empty history this docstring promises.
+        #
+        # Worse here than in the registry: oserve.py loads this straight into
+        # config.fetch_queue, and check_fetch_queue() walks that dict with
+        # row.get("state") every two seconds. One string value therefore did
+        # not degrade the view - it raised AttributeError on every tick and
+        # killed the cross-bot fetch dispatcher for the life of the process.
+        return {key: value for key, value in loaded.items()
+                if isinstance(value, dict)}
     except Exception as err:
         print(f"[DB ERROR] Could not read the fetch history, starting empty: {err}")
         return {}
+
+
+def load_notices():
+    """(list of notices, state dict) from disk, or ([], {"seen_id": 0}).
+
+    Persisted at all because the events worth a badge are exactly the ones
+    that happen while nobody is looking. A kick at three in the morning that
+    is gone by nine is a badge that never did its job.
+
+    Same posture as every other store here: a file that will not parse costs
+    an empty panel until the next event, not a refusal to start. And the
+    entries are filtered individually - one hand-edited row must not take the
+    other hundred and ninety-nine with it.
+    """
+    if not os.path.exists(NOTICES_FILE):
+        return [], {"seen_id": 0}
+    try:
+        with io.open(NOTICES_FILE, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            return [], {"seen_id": 0}
+        # THE ID HAS TO BE A NUMBER, not merely present (#451). seen_id two
+        # lines below is already coerced with a guarded int(); a row's id was
+        # not, so a hand-edited "id": "first" survived the loader and raised
+        # wherever ids are compared - unread_notices(), the mark-read marker -
+        # taking the whole panel out rather than the one bad row.
+        rows = []
+        for row in (loaded.get("notices") or []):
+            if not isinstance(row, dict) or "id" not in row:
+                continue
+            try:
+                row["id"] = int(row["id"])
+            except (TypeError, ValueError):
+                continue
+            rows.append(row)
+        state = loaded.get("state")
+        if not isinstance(state, dict):
+            state = {}
+        seen = state.get("seen_id", 0)
+        try:
+            seen = int(seen)
+        except (TypeError, ValueError):
+            seen = 0
+        return rows, {"seen_id": seen}
+    except Exception as err:
+        print(f"[DB ERROR] Could not read the notices, starting empty: {err}")
+        return [], {"seen_id": 0}
+
+
+def load_private_messages():
+    """(rows, state) of unanswered private messages, or ([], {"seen_id": 0}).
+
+    Same posture as the notices beside it: a file that will not parse costs an
+    empty panel until the next message, never a refusal to start, and rows are
+    filtered individually so one hand-edited entry does not take the rest.
+    """
+    if not os.path.exists(PRIVATE_MESSAGES_FILE):
+        return [], {"seen_id": 0}
+    try:
+        with io.open(PRIVATE_MESSAGES_FILE, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if not isinstance(loaded, dict):
+            return [], {"seen_id": 0}
+        rows = [row for row in (loaded.get("messages") or [])
+                if isinstance(row, dict) and "id" in row]
+        state = loaded.get("state")
+        if not isinstance(state, dict):
+            state = {}
+        try:
+            seen = int(state.get("seen_id", 0))
+        except (TypeError, ValueError):
+            seen = 0
+        # Rebuilt entry by entry, same as the rows above: one unparseable
+        # timestamp in a hand-edited file must not cost the whole record of
+        # who has already been told, which would make the bot repeat itself
+        # to everybody at once.
+        declined = {}
+        for name, when in (state.get("declined") or {}).items():
+            try:
+                declined[str(name).lower()] = float(when)
+            except (TypeError, ValueError):
+                continue
+        return rows, {"seen_id": seen, "declined": declined}
+    except Exception as err:
+        print(f"[DB ERROR] Could not read the private messages, starting "
+              f"empty: {err}")
+        return [], {"seen_id": 0}
+
+
+def save_private_messages(rows, state):
+    """Both together and atomically, for the reason save_notices() gives: a
+    seen marker higher than any surviving row silently swallows everything in
+    between."""
+    try:
+        with _disk_lock:
+            _atomic_write(PRIVATE_MESSAGES_FILE, json.dumps(
+                {"messages": list(rows), "state": dict(state)},
+                indent=1, sort_keys=True, ensure_ascii=False))
+    except Exception as err:
+        print(f"[DB ERROR] Could not save the private messages: {err}")
+
+
+def save_notices(rows, state):
+    """Write the notices and the read marker together, atomically.
+
+    ONE FILE, because they are one fact. Written apart, a crash between the
+    two writes could leave a seen_id higher than any surviving notice - which
+    silently swallows everything that arrived in between, and the operator is
+    never told what they were never told about.
+    """
+    try:
+        with _disk_lock:
+            _atomic_write(NOTICES_FILE, json.dumps(
+                {"notices": list(rows), "state": dict(state)},
+                indent=1, sort_keys=True, ensure_ascii=False))
+    except Exception as err:
+        print(f"[DB ERROR] Could not save the notices: {err}")
 
 
 def save_fetch_history(rows):
@@ -735,16 +1084,31 @@ def save_dcc_queue():
     import json
 
     try:
-        # Drop users whose queue is now empty.
-        for user_key in list(config.dcc_queue.keys()):
-            if not config.dcc_queue[user_key]:
-                del config.dcc_queue[user_key]
+        # ONE COPY, THEN WALK THE COPY (#452). Both loops below used to walk
+        # config.dcc_queue live while holding only _disk_lock - which guards
+        # the FILE, not the dict. Every writer mutates it under queue_lock,
+        # so a key added or removed mid-walk raised "dictionary changed size
+        # during iteration" and the whole save was abandoned: the queue stayed
+        # only in RAM until the next successful save, and a restart in between
+        # lost it.
+        #
+        # queue_lock cannot be taken here - five of the six callers in dcc.py
+        # are already inside `with queue_lock:` and it is a plain
+        # threading.Lock, so locking would deadlock the request path. dict()
+        # copies the mapping in one step under the GIL, which is what #432
+        # settled on for get_total_queued_count() for the same reason: a
+        # concurrent change can leave this snapshot one entry stale, never
+        # raise.
+        live = dict(config.dcc_queue)
+
+        # Drop users whose queue is now empty. Deleting from the real dict is
+        # the point, but the KEYS come from the copy.
+        for user_key, files in live.items():
+            if not files:
+                config.dcc_queue.pop(user_key, None)
 
         with _disk_lock:
-            # Serialise from a snapshot: another thread mutating config.dcc_queue during
-            # json.dump would otherwise raise "dictionary changed size during iteration"
-            # and abort the save.
-            snapshot = {k: list(v) for k, v in config.dcc_queue.items()}
+            snapshot = {k: list(v) for k, v in live.items() if v}
             _atomic_write(DCC_QUEUE_FILE, json.dumps(snapshot, indent=4))
 
         print("[DB-QUEUE] Queue structure saved and sanitised successfully.")
@@ -773,8 +1137,29 @@ def load_dcc_queue():
         if not isinstance(loaded, dict):
             raise ValueError(f"expected a JSON object, got {type(loaded).__name__}")
         config.dcc_queue.clear()
-        config.dcc_queue.update(loaded)
-        total = sum(len(v) for v in loaded.values() if isinstance(v, list))
+        # ROW BY ROW, like every loader beside it (#450). The top level was
+        # checked and nothing below it: a value that is not a list, or a row
+        # that is not a dict, went straight into config.dcc_queue and failed
+        # later - on a dispatch thread, far from the file that caused it, with
+        # nothing naming the file.
+        #
+        # A queue file is hand-editable by design (the docs say so), so one
+        # bad entry has to cost that entry and not the whole queue.
+        clean = {}
+        dropped = 0
+        for user_key, files in loaded.items():
+            if not isinstance(files, list):
+                dropped += 1
+                continue
+            rows = [row for row in files if isinstance(row, dict)]
+            dropped += len(files) - len(rows)
+            if rows:
+                clean[str(user_key)] = rows
+        if dropped:
+            print(f"[DB-QUEUE] Dropped {dropped} unusable entr(ies) from "
+                  f"{DCC_QUEUE_FILE}; the rest of the queue was kept.")
+        config.dcc_queue.update(clean)
+        total = sum(len(v) for v in clean.values())
         print(f"[DB] Loaded {total} saved queue slot(s) for {len(loaded)} user(s) from disk.")
     except Exception as e:
         config.dcc_queue.clear()

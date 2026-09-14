@@ -44,7 +44,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-import adminchat  # noqa: E402
+import adminchat
+import announce  # noqa: E402
 import defaults as config  # noqa: E402
 import webserver  # noqa: E402
 
@@ -60,6 +61,8 @@ READ_ONLY_ROUTES = [
     ("/api/search/broadcast/status", "build_broadcast_status_payload"),
     ("/api/tools/update-list/status", "build_update_list_status_payload"),
     ("/api/tools/verify-list", "build_verify_list_payload"),
+    ("/api/console/log", "build_console_log_payload"),
+    ("/api/notices", "build_notices_payload"),
 ]
 
 
@@ -75,7 +78,13 @@ class DashboardRouteCase(DCCoreTestCase):
         self.set_config(
             ADMIN_PASSWORD_HASH=adminchat.make_password_hash(PASSWORD, iterations=1000),
             LOCAL_LIST_DIR=self.tree.lists, FILE_DIRECTORY=self.tree.music,
-            LIST_BASE_NAME="DCCoreTest", NICKNAME="DCCoreTest")
+            LIST_BASE_NAME="DCCoreTest", NICKNAME="DCCoreTest",
+            # The Console ships OFF (WEBUI_CONSOLE_ENABLED) - it puts the admin
+            # command set behind one factor instead of two, so it is opted into
+            # rather than granted by turning the dashboard on. Enabled here
+            # because these tests are about the routes' wiring; the gate itself
+            # is TheConsoleGate below.
+            WEBUI_CONSOLE_ENABLED=True)
         self.app = webserver.create_app()
         self.client = self.app.test_client()
         webserver._web_bad_ips.clear()
@@ -145,6 +154,53 @@ class TheSearchRoute(DashboardRouteCase):
 
     def test_it_refuses_an_unauthenticated_caller(self):
         resp = self.client.get("/api/search?q=x")
+
+        self.assertEqual(resp.status_code, 401)
+
+
+class TheConsoleCommandRoute(DashboardRouteCase):
+    """/api/console/command is the one mutating route in this file with no
+    query string to pass through - the body is JSON, not ?q=. See
+    tests/test_web_console.py for build_console_command_result() itself
+    (command dispatch, 'quit', unrecognised names); this is only the wiring:
+    does the route reach that builder with what the caller actually sent."""
+
+    def test_it_passes_the_command_through(self):
+        self.log_in()
+
+        resp = self.client.post("/api/console/command", json={"command": "uptime"})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json(),
+                         webserver.build_console_command_result("uptime")[1])
+
+    def test_a_missing_body_is_treated_as_an_empty_command(self):
+        """Not a 500. json_object() is what every other mutating route in
+        this file already falls back to for a malformed or absent body."""
+        self.log_in()
+
+        resp = self.client.post("/api/console/command")
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("error", resp.get_json())
+
+    def test_the_command_actually_reaches_the_builder(self):
+        """Control for the pass-through test above: if the route ignored the
+        body entirely, that test would still pass, because it compares
+        against a builder call that used the same hardcoded string."""
+        self.log_in()
+        recorded = []
+        real = webserver.build_console_command_result
+        webserver.build_console_command_result = (
+            lambda command, remote_addr=None: recorded.append(command) or real(command))
+        self.addCleanup(setattr, webserver, "build_console_command_result", real)
+
+        self.client.post("/api/console/command", json={"command": "status"})
+
+        self.assertEqual(recorded, ["status"])
+
+    def test_it_refuses_an_unauthenticated_caller(self):
+        resp = self.client.post("/api/console/command", json={"command": "uptime"})
 
         self.assertEqual(resp.status_code, 401)
 
@@ -289,6 +345,314 @@ class TheQueueViewIgnoresAMalformedTransfer(DashboardRouteCase):
         self.assertEqual([r["user"] for r in rows], ["dave"])
         self.assertEqual(rows[0]["status"], "sending")
         self.assertEqual(rows[0]["preview"], "Song.flac")
+
+
+class ThePurgeRoute(DashboardRouteCase):
+    """The wiring only - what a purge actually removes is in
+    tests/test_purging_a_fetched_list.py."""
+
+    def test_the_source_reaches_the_builder(self):
+        self.log_in()
+
+        resp = self.client.post("/api/filelists/NoSuchBot/purge")
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.get_json(),
+                         webserver.build_fetched_list_purge_result(
+                             "NoSuchBot")[1])
+
+    def test_a_source_with_a_slash_in_it_reaches_the_route_at_all(self):
+        """A bot's other lists are named "<nick>/<marker>". A plain <source>
+        converter stops at the slash, so those rows - the ones most likely to
+        be purged, since they are the duplicates - would have 404'd on the
+        ROUTE rather than reaching the builder. <path:source> is what makes
+        them addressable."""
+        self.log_in()
+
+        resp = self.client.post("/api/filelists/NoSuchBot/films/purge")
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("NoSuchBot", resp.get_json().get("error", ""))
+
+    def test_a_get_does_not_purge(self):
+        """POST-only: it deletes files, and a GET that mutates gets fired by
+        anything that prefetches links.
+
+        Asserted on the STORE rather than on a status code. Whether the
+        framework answers 405 or 404 for a wrong method is its business and
+        has changed between versions; what must be true is that nothing was
+        deleted.
+        """
+        self.log_in()
+        config.fetched_bot_lists["somebot"] = {"bot": "SomeBot",
+                                               "entry_count": 1, "lists": {}}
+
+        self.client.get("/api/filelists/SomeBot/purge")
+
+        self.assertIn("somebot", config.fetched_bot_lists)
+
+
+class TheNoticesReadRoute(DashboardRouteCase):
+    """/api/notices/read, the wiring only. What the builder decides - which
+    notices are acknowledged, what the badge says afterwards - is in
+    tests/test_tell_me_what_i_missed.py.
+
+    POST rather than GET because it CHANGES what the operator has
+    acknowledged, and a GET that mutates gets fired by anything that prefetches
+    links.
+    """
+
+    def test_it_answers_with_the_payload_the_builder_produces(self):
+        self.log_in()
+        announce.record_notice("Kicked from #example.", "warning")
+
+        resp = self.client.post("/api/notices/read")
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["unread"], 0)
+        self.assertEqual(len(resp.get_json()["notices"]), 1)
+
+    def test_it_actually_marks_them_read(self):
+        """Control for the test above: a route that answered with a fresh
+        payload without marking anything would satisfy an equality check
+        against a builder call made after it."""
+        self.log_in()
+        announce.record_notice("Kicked from #example.", "warning")
+
+        self.client.post("/api/notices/read")
+
+        self.assertEqual(announce.unread_notices(), (0, ""))
+
+    def test_a_get_does_not_mark_them_read(self):
+        """The read route is POST-only, and the listing route beside it must
+        not quietly acknowledge things merely by being looked at - the panel
+        polls it every couple of seconds whether anybody is on that page."""
+        self.log_in()
+        announce.record_notice("Kicked from #example.", "warning")
+
+        self.client.get("/api/notices")
+
+        self.assertEqual(announce.unread_notices(), (1, "warning"))
+
+
+class TheConsoleGate(DashboardRouteCase):
+    """WEBUI_CONSOLE_ENABLED, and why it exists.
+
+    The two ways to reach the admin command set are not equally protected: the
+    DCC CHAT console needs the operator's services host AND the password, the
+    dashboard needs the password alone, over HTTP with no TLS. So the Console
+    page puts ban/unban/clearqueue/rehash/update behind the weaker door.
+
+    That is a fine trade for an operator who wants it. Without this switch it
+    would not have been a trade at all - anyone who had turned the dashboard on
+    for Search and Queue would have gained a remote admin console on upgrade,
+    no setting changed, nothing recording that their exposure had widened.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.set_config(WEBUI_CONSOLE_ENABLED=False)
+        self.app = webserver.create_app()
+        self.client = self.app.test_client()
+
+    def test_the_log_route_is_not_there_when_the_console_is_off(self):
+        self.log_in()
+
+        self.assertEqual(self.client.get("/api/console/log").status_code, 404)
+
+    def test_the_command_route_is_not_there_when_the_console_is_off(self):
+        """Checked separately from the log route on purpose. They are the whole
+        attack surface of this feature, and a gate applied to one and forgotten
+        on the other is a silent hole - which is exactly the shape of mistake
+        that would leave the mutating route open while the harmless one was
+        shut."""
+        self.log_in()
+
+        resp = self.client.post("/api/console/command", json={"command": "uptime"})
+
+        self.assertEqual(resp.status_code, 404)
+
+    def test_it_is_404_rather_than_403(self):
+        """403 would confirm the routes exist and are merely switched off,
+        which tells anyone probing that this build has an admin console worth
+        coming back for."""
+        self.log_in()
+        resp = self.client.get("/api/console/log")
+
+        self.assertEqual(resp.status_code, 404)
+        self.assertNotEqual(resp.status_code, 403)
+
+    def test_still_closed_to_someone_who_never_logged_in(self):
+        """Control on the pair above: the gate must not have replaced the login
+        with itself. An unauthenticated request is turned away whether the
+        console is on or off."""
+        self.assertIn(self.client.get("/api/console/log").status_code, (302, 401, 404))
+
+    def test_the_rest_of_the_dashboard_is_unaffected(self):
+        """Control. A gate that took the whole dashboard down with it would
+        satisfy every assertion above."""
+        self.log_in()
+
+        self.assertEqual(self.client.get("/api/stats").status_code, 200)
+        self.assertEqual(self.client.get("/api/queue").status_code, 200)
+
+
+class WhatNeedsARestartToTakeEffect(DashboardRouteCase):
+    """#302: "when a user changes ports or other core configurations that
+    affect irc.py and dcc.py, the changes do not take effect immediately."
+
+    The notice already existed - the save returns `restart_required` and the
+    page shows it. SERVER and PORT were simply not in the set, so the two
+    settings the issue actually names were saved in silence.
+    """
+
+    def test_the_server_and_port_are_named(self):
+        self.assertIn("SERVER", webserver.SETTINGS_RESTART_ONLY)
+        self.assertIn("PORT", webserver.SETTINGS_RESTART_ONLY)
+
+    def test_settings_a_rehash_really_does_apply_are_not(self):
+        """Listing those would train an operator to ignore the notice. The DCC
+        port range is read per send, so a rehash applies it to the very next
+        transfer; the channel list is JOIN/PARTed by the rehash itself."""
+        for name in ("DCC_PORT_START", "DCC_PORT_END", "CHANNEL",
+                     "FILE_DIRECTORY", "MAX_DCC_SLOTS"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, webserver.SETTINGS_RESTART_ONLY)
+
+    def test_there_is_one_answer_to_the_question(self):
+        """A second set was written and deleted during this change. Two
+        answers to "does this need a restart" is how they drift."""
+        self.assertFalse(hasattr(webserver, "SETTINGS_NEEDING_RESTART"))
+
+    def test_a_save_that_changes_the_server_says_so(self):
+        self.log_in()
+
+        resp = self.client.post("/api/settings", json={"SERVER": "irc.example.org"})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("SERVER", resp.get_json().get("restart_required", []))
+
+    def test_a_save_that_changes_something_live_does_not(self):
+        """The notice is only worth anything if it stays rare."""
+        self.log_in()
+
+        resp = self.client.post("/api/settings", json={"MAX_DCC_SLOTS": "4"})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json().get("restart_required", []), [])
+
+
+class WhenTheConsoleIsOnByDefault(DCCoreTestCase):
+    """Asked for as "on by default on windows machines". Keyed on EXPOSURE
+    instead, which gives the same answer on a normal Windows desktop and does
+    not create the case the setting exists to prevent.
+
+    The Console puts ban, unban, clearqueue, rehash and update behind the
+    dashboard password alone - one factor, over plain HTTP. That is a real
+    widening when the dashboard is on the LAN, and no widening at all when it
+    is on loopback, where whoever can reach it already has the served files
+    and admin_config.py.
+    """
+
+    def test_loopback_means_on(self):
+        self.set_config(WEBUI_HOST="127.0.0.1", WEBUI_CONSOLE_ENABLED=None)
+
+        self.assertTrue(webserver.console_is_enabled())
+
+    def test_localhost_counts_as_loopback(self):
+        self.set_config(WEBUI_HOST="localhost", WEBUI_CONSOLE_ENABLED=None)
+
+        self.assertTrue(webserver.console_is_enabled())
+
+    def test_a_lan_address_means_off(self):
+        """The paragraph in defaults.py applies in full here: turning the
+        dashboard on for Search and Queue must not grant remote admin as a
+        side effect."""
+        for host in ("0.0.0.0", "192.168.1.20", "10.0.0.5"):
+            with self.subTest(host=host):
+                self.set_config(WEBUI_HOST=host, WEBUI_CONSOLE_ENABLED=None)
+                self.assertFalse(webserver.console_is_enabled())
+
+    def test_a_host_it_cannot_read_is_treated_as_exposed(self):
+        """A host this cannot parse is a host it cannot vouch for, and the
+        safe answer to "is this exposed" is yes."""
+        self.set_config(WEBUI_HOST="some-hostname.local",
+                        WEBUI_CONSOLE_ENABLED=None)
+
+        self.assertFalse(webserver.console_is_enabled())
+
+    def test_an_explicit_choice_always_wins(self):
+        """Nobody who has already made this choice has it made again for them
+        on upgrade - which is the whole objection to changing a default."""
+        self.set_config(WEBUI_HOST="127.0.0.1", WEBUI_CONSOLE_ENABLED=False)
+        self.assertFalse(webserver.console_is_enabled())
+
+        self.set_config(WEBUI_HOST="0.0.0.0", WEBUI_CONSOLE_ENABLED=True)
+        self.assertTrue(webserver.console_is_enabled())
+
+    def test_the_routes_ask_the_same_question(self):
+        """Reading the setting directly in the route would keep the old flat
+        default alive on the only paths that actually gate the feature."""
+        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+            code = handle.read()
+        gate = code.split("def _console_is_available():", 1)[1][:400]
+
+        self.assertIn("console_is_enabled()", gate)
+        self.assertNotIn('getattr(config, "WEBUI_CONSOLE_ENABLED"', gate)
+
+
+class OpeningTheDashboardOnStartup(DCCoreTestCase):
+    """"when it is enabled i think the website should auto open on the default
+    browser when you start up the program"."""
+
+    def test_it_opens_for_a_loopback_dashboard(self):
+        self.set_config(WEBUI_HOST="127.0.0.1", WEBUI_OPEN_BROWSER=True)
+        opened = []
+
+        self.assertTrue(webserver._open_in_browser("127.0.0.1", 8420,
+                                                   opener=opened.append))
+        self.assertEqual(opened, ["http://127.0.0.1:8420/"])
+
+    def test_it_does_not_open_on_a_lan_bound_dashboard(self):
+        """Not about security - about what the machine probably is. A
+        dashboard on the LAN is as likely to be a headless box as a desktop,
+        and a daemon spawning a browser there is doing something nobody asked
+        for and nobody will see."""
+        self.set_config(WEBUI_HOST="0.0.0.0", WEBUI_OPEN_BROWSER=True)
+        opened = []
+
+        self.assertFalse(webserver._open_in_browser("0.0.0.0", 8420,
+                                                    opener=opened.append))
+        self.assertEqual(opened, [])
+
+    def test_it_can_be_turned_off(self):
+        self.set_config(WEBUI_HOST="127.0.0.1", WEBUI_OPEN_BROWSER=False)
+        opened = []
+
+        self.assertFalse(webserver._open_in_browser("127.0.0.1", 8420,
+                                                    opener=opened.append))
+        self.assertEqual(opened, [])
+
+    def test_a_machine_with_no_browser_still_starts_the_bot(self):
+        """A missing browser, no display, or a wayward BROWSER variable is not
+        a reason to stop the daemon - the address was printed a line above."""
+        self.set_config(WEBUI_HOST="127.0.0.1", WEBUI_OPEN_BROWSER=True)
+        said = []
+
+        def explode(_url):
+            raise RuntimeError("no display")
+
+        result = webserver._open_in_browser("127.0.0.1", 8420, opener=explode,
+                                            log=said.append)
+
+        self.assertFalse(result)
+        self.assertIn("still running at", chr(10).join(said))
+
+    def test_startup_calls_it(self):
+        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+            code = handle.read()
+
+        self.assertIn("_open_in_browser(host, port)", code)
 
 
 if __name__ == "__main__":

@@ -103,13 +103,26 @@ def handle_help_request(s, user, target):
         f"To search every bot at once, type: {bold}{red}@find <words>{reset}")
 
     for line in lines:
-        oserve.queue_message(user, f"NOTICE {user} :{line}\r\n", is_vip=True)
+        # #426: NOT is_vip=True. The VIP lane is strict-priority with no
+        # aging - a channel advert waiting behind it is the reason it
+        # exists, but being ahead of the advert does not require being
+        # ahead of every OTHER user's own reply. A single user typing
+        # -help repeatedly, well inside the ordinary flood limits, used to
+        # be able to fill the 200-line VIP cap and starve config.send_queue
+        # completely - @find results, "Preparing full list" and queue
+        # position notices for everyone else stopped reaching anyone.
+        oserve.queue_message(user, f"NOTICE {user} :{line}\r\n")
 
     print(f"[HELP] Sent the usage notice to {user} (asked in {target}).")
 
 
 def handle_queue_check(s, user, target):
-    """Count one user's queued files and answer them through the VIP queue."""
+    """Count one user's queued files and answer them.
+
+    #426: NOT the VIP lane, despite what this docstring used to claim - see
+    handle_help_request()'s own comment for why a per-user reply does not
+    belong in the lane channel adverts exist for.
+    """
     user_key = user.lower()
     oserve = sys.modules.get('oserve')
     import list
@@ -120,9 +133,20 @@ def handle_queue_check(s, user, target):
     if hasattr(config, 'dcc_queue') and user_key in config.dcc_queue:
         file_count = len(config.dcc_queue[user_key])
         
-    # 2. Live statistics, for the fuller empty-queue notice
-    file_count_total, list_date, total_size, raw_bytes = list.get_file_count_date_size_and_raw_bytes()
-    formatted_total_files = f"{file_count_total:,}"
+    # 2. Live statistics - read ONLY where they are used (#457).
+    #
+    # These feed the fuller notice shown when somebody has nothing queued,
+    # and nothing in the other branch touches them. They were fetched for
+    # every -que regardless, and get_file_count_date_size_and_raw_bytes()
+    # reads every published list file end to end - so the person who DOES
+    # have files queued paid a full read of the library index for four
+    # values that were then thrown away, on a command they are likely to
+    # repeat while they wait.
+    formatted_total_files = ""
+    list_date = ""
+    if file_count <= 0:
+        file_count_total, list_date, total_size, raw_bytes = list.get_file_count_date_size_and_raw_bytes()
+        formatted_total_files = f"{file_count_total:,}"
     
     active_dl = oserve.active_downloads if oserve else 0
     free_slots = max(0, config.MAX_DCC_SLOTS - active_dl)
@@ -154,7 +178,7 @@ def handle_queue_check(s, user, target):
 
         
     if oserve:
-        oserve.queue_message(user, msg, is_vip=True)
+        oserve.queue_message(user, msg)
     print(f"[COMMANDS] {user} checked their queue status ({file_count} files).")
 
 def handle_queue_remove(s, user, target):
@@ -245,18 +269,37 @@ def handle_admin_clear_queue(user, target_chan, msg_text, authorised=False):
         print(f"[ADMIN CLEARQUEUE] {user} tried to clear {target_nick}, but no queue or frozen entry was found.")
 
 def handle_ping_request(irc_sock, user, target_chan):
-    """Start the timer and send a unique latency PING to the IRC server."""
+    """Start the timer and send a unique latency PING to the IRC server.
+
+    #425: this used to write straight to the socket, the last responder in
+    the dispatch chain that never touched the shared outbound clock #406
+    installed - any nick can trigger it, and several clone connections doing
+    so aggregate into unthrottled traffic the server sees as one burst.
+
+    NOT routed through oserve.queue_message() the way the CTCP VERSION reply
+    and the "!debugnames" RAM-CHECK notice were (see
+    tests/test_a_shared_outbound_pace.py's TheThirdUnpacedWriterIsFixedToo):
+    this command measures its own round-trip latency, and queueing the PING
+    behind the VIP lane would fold however long it waited there into the
+    number the command exists to report. A direct wait_for_slot() still puts
+    the send on the one shared clock without touching the measurement's
+    honesty - the timer starts only once the wait is over and the byte is
+    about to go out, not before.
+    """
     import time
     import defaults as config
-    
+    import runtime
+
+    runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)
+
     # Keep the measurement in shared memory so the pong handler can read it later
     config.ping_start_time = time.time()
     config.ping_triggered_by = user
     config.ping_channel_source = target_chan
-    
+
     # Send the probe straight to the server's raw socket
     try:
-        irc_sock.send(b"PING :OSERVE_LATENCY_CHECK\r\n")
+        irc_sock.sendall(b"PING :OSERVE_LATENCY_CHECK\r\n")
         print(f"[PING COMMAND] Latency measurement started by {user} in {target_chan}.")
     except Exception as e:
         print(f"[PING ERROR] Could not send the PING packet: {e}")
@@ -315,6 +358,9 @@ PRESERVE_RUNTIME = (
     'whois_status',
     'user_requests',      # flood history, so a flooder gets a clean slate
     'failed_transfers',   # per-file retry counters
+    'kicked_channels',    # losing this restarts the rejoin count at zero on every
+                          # rehash, so a channel that has refused us three times
+                          # gets tried three more for each setting the operator saves
     'fetch_queue',        # the cross-bot fetch pool. Losing it is the same failure the
                           # active_transfers comment above describes, in the other slot
                           # pool: count_active_fetches() counts rows here, so an empty
@@ -330,6 +376,31 @@ PRESERVE_RUNTIME = (
                           # at the pace those bots advertise - five minutes or more per
                           # entry, in advert order - so a rehash would empty the
                           # dashboard's bot list and refill it a stranger at a time.
+    'dcc_send_offers',    # DCC SEND offers waiting for a receiver to connect, and the
+                          # byte each one has agreed to resume from. Losing this does
+                          # not merely forget an offer: the sending thread reads the
+                          # agreed offset AFTER accept() returns, so an emptied dict
+                          # gives it zero, and it sends the file from the start to a
+                          # receiver that has already been told to append from the
+                          # middle. That is a silently corrupted download rather than
+                          # a failed one - the transfer "succeeds" at both ends.
+    'notices',            # what the operator has not read yet. A rehash is not an
+                          # acknowledgement, and losing these would clear the badge
+                          # without anybody having looked at what it was for
+    'notice_state',       # and the "how much of it have I seen" marker beside them
+    'recent_departures',  # #376's alt-nick reconnect window - a PART/QUIT seen
+                          # moments before a rehash would otherwise be forgotten,
+                          # so the alt-nick's join right after loses the merge it
+                          # would have earned
+    'nick_aliases',       # the merges already inferred. Losing this un-merges
+                          # every bot the List Browser had already combined,
+                          # for no reason connected to the setting that changed
+    'private_messages',   # somebody spoke to the bot and it said nothing back. A
+                          # rehash is not a reply, and losing these would drop the
+                          # only record that anybody tried
+    'private_message_state',
+    'private_message_decline_sends',  # and the burst window, so a rehash is not
+                                      # a way to get the bot talking again
 )
 
 
@@ -438,6 +509,222 @@ CORE_MODULES = ('admin_config', 'defaults', 'list', 'dcc', 'announce',
                 'security', 'db', 'stats_mgr')
 
 
+def _channels_to_sync(config):
+    """Every channel the bot should be in: CHANNEL, plus the debug channel.
+
+    Lowercased, because the JOIN/PART comparison this feeds is by name and IRC
+    channel names are case-insensitive.
+
+    DELEGATED TO irc.py (#510), which is where the connect path asks the same
+    question. This used to be a second, hand-written answer to "where does
+    this bot belong" - and the file three modules away already carries a
+    comment about exactly that hazard, for exactly this setting (#193): a
+    second source of truth that disagrees with the first, in the one place it
+    decides whether to PART a channel.
+
+    Imported here rather than at module scope because irc.py imports commands
+    (lazily, inside its own handlers) and this file is reloaded by !rehash.
+
+    `config` is now unused and kept deliberately. The rehash calls this twice,
+    before and after the reload, passing the config module both times - and it
+    is the SAME module object either way, reloaded in place, which is what
+    makes reading it through irc.py equivalent. Dropping the parameter would
+    make the two call sites look like they are asking different questions.
+    """
+    import irc
+    return [name.lower() for name in irc.channels_we_should_be_in()]
+
+
+# One IRC line is 512 bytes including the trailing CRLF, so 510 for the
+# command itself - the same number on_connect.MAX_COMMAND_BYTES uses, for the
+# same reason.
+MAX_SYNC_LINE_BYTES = 510
+
+
+def comma_batched(verb, channels, tail=""):
+    """`verb` lines carrying as many channels each as an IRC line will hold.
+
+    JOIN, PART and NAMES all take a comma-separated channel list. The connect
+    path has always used that (irc.py joins every channel with ONE JOIN); the
+    rehash sync never did, and sent one line per channel per verb (#440).
+
+    A single channel whose line is already over the limit goes out alone and
+    over-length rather than being dropped: RFC 2812 caps a channel name at 50
+    characters so it cannot happen with anything a server would accept, and
+    sending it is the only answer that leaves the operator something to see.
+    """
+    lines = []
+    batch = []
+
+    def rendered(names):
+        return f"{verb} {','.join(names)}{tail}"
+
+    for chan in channels:
+        if batch and len(rendered(batch + [chan]).encode("utf-8")) > MAX_SYNC_LINE_BYTES:
+            lines.append(rendered(batch) + "\r\n")
+            batch = []
+        batch.append(chan)
+    if batch:
+        lines.append(rendered(batch) + "\r\n")
+    return lines
+
+
+def sync_channels(oserve_mod, old_chans, new_chans, log=print,
+                  previous_debug_channel=None):
+    """JOIN what is new, PART what is gone, NAMES the lot - through the pacer.
+
+    Returns the lines queued, which is what the caller reports.
+
+    LIFTED OUT OF _handle_rehash_request() so it can be driven. While it was
+    inline, reaching it meant reloading every module in the daemon, so the only
+    thing a test could do was read the source - and "the word JOIN appears in
+    commands.py" passes with the loop behind `if False:`. Same reason
+    irc.resolve_dcc_address() is a function of its own.
+
+    THE PACER, AND WHY THIS WAS THE ONE PATH WITHOUT IT (#440)
+
+    These three loops wrote JOIN/PART/NAMES straight to the socket with no
+    pacer slot and no gap between them, so the burst scaled with the channel
+    count: 15 channels meant 15 back-to-back lines, and replacing the channel
+    list outright meant JOIN + PART + NAMES for every channel in one go. It
+    was the only outbound path in the daemon that both scaled with the channel
+    count and ignored runtime.outbound_pacer.
+
+    Not remotely reachable - a rehash is refused from anyone who is not an
+    admin, and the dashboard is authenticated - so this is an operator burst
+    rather than a vector. But the dashboard fires a rehash on EVERY settings
+    save, including a theme change, and 15 short lines is a burst an operator
+    did not ask for and cannot see.
+
+    Two things fix it together. The lines are comma-batched, the way the
+    connect path already batches its JOIN, which turns the realistic case into
+    two lines and the full-swap case into three. And they go through
+    oserve.queue_message() like every other line the bot says, so they take a
+    pacer slot instead of racing whatever else is being sent. A NAMES refresh
+    is latency-insensitive; the DCC negotiation lines that deliberately bypass
+    the queue are not.
+    """
+    import defaults as config
+    import announce
+    import runtime
+
+    debug_chan = str(getattr(config, 'DEBUG_CHANNEL', '') or '').lower()
+    previous_debug = str(previous_debug_channel or '').strip().lower()
+
+    joining = [chan for chan in new_chans if chan not in old_chans]
+
+    # The debug channel is never parted by a sync. config.py declares
+    # DEBUG_CHANNEL as "" (blank) since #193, so a literal channel name here
+    # was a second source of truth that disagreed with the first - and the one
+    # place it would have been consulted is the one place it decides whether to
+    # PART a channel.
+    protected = {debug_chan} - {""}
+
+    # AND THE VALUE THE RELOAD MAY HAVE JUST LOST (#511).
+    #
+    # debug_chan is read AFTER the reload, so the guard above worked whenever
+    # DEBUG_CHANNEL survived and did nothing in the one case it exists for:
+    # the reload handing back a blank. Then the channel is in old_chans, absent
+    # from new_chans, and `chan != ""` is true - so the bot PARTed the one
+    # channel whose whole purpose is telling the operator what it is doing.
+    #
+    # A blank is ambiguous and the two readings want opposite things. The
+    # operator may have cleared the setting on purpose; or settings.conf was
+    # briefly unreadable, admin_config.py failed to import, or the reload
+    # caught a value mid-flight - the window tests/test_audit_high_findings.py
+    # already documents. The dashboard fires a rehash on EVERY settings save,
+    # so the second is not rare.
+    #
+    # Staying is the recoverable answer. An operator who meant to clear it
+    # loses nothing they can see - a blank DEBUG_CHANNEL already stops
+    # send_debug() writing there - and the bot leaves on the next reconnect.
+    # An operator who did not mean it keeps the channel they are reading.
+    #
+    # NOT the same shape as the REQUIRED-setting restore in
+    # reload_modules_in_order(), and deliberately not: that one puts the value
+    # BACK, which is only safe because a blank NICKNAME/CHANNEL/ADMIN_NICK is
+    # never legitimate. A blank DEBUG_CHANNEL is perfectly legitimate, so this
+    # changes nothing about the setting - only about whether a PART is sent on
+    # the strength of it.
+    if previous_debug and not debug_chan:
+        protected.add(previous_debug)
+        log(f"[REHASH SYNC] DEBUG_CHANNEL came back blank from the reload. "
+            f"Staying in {previous_debug} rather than parting it - if you did "
+            f"mean to clear it, the bot leaves on the next reconnect.")
+
+    # A DELIBERATE CHANGE still parts. DEBUG_CHANNEL going from one channel to
+    # a different one is an edit nobody makes by accident, so the old one is
+    # not protected and the new one is joined - which is the behaviour this has
+    # always had, and the half a blanket "never part the debug channel" rule
+    # would have quietly broken.
+    parting = [chan for chan in old_chans
+               if chan not in new_chans and chan not in protected]
+
+    # The membership map moves with the decision, not with the send. These
+    # lines are now queued rather than written, so waiting for them to go out
+    # would leave dcc.py reading a stale channel_users for as long as the
+    # queue takes to drain - and it treats that map as proof a user is present.
+    for chan in joining:
+        with runtime.channel_users_lock():
+            if chan.lower() not in config.channel_users:
+                config.channel_users[chan.lower()] = set()
+    for chan in parting:
+        with runtime.channel_users_lock():
+            if chan.lower() in config.channel_users:
+                del config.channel_users[chan.lower()]
+
+    lines = (comma_batched("JOIN", joining)
+             + comma_batched("PART", parting, tail=" :Removed from DCCore")
+             + comma_batched("NAMES", new_chans))
+
+    for line in lines:
+        oserve_mod.queue_message("channel_sync", line)
+
+    # ONE debug line per verb, not one per channel. send_debug() goes to a
+    # CHANNEL through the VIP lane, so a line per channel was a second burst
+    # sitting behind the first - paced, but still 15 lines of the operator's
+    # debug channel saying the same thing 15 times.
+    if joining:
+        announce.send_debug(f"Joining {', '.join(joining)} due to new "
+                            f"configuration layout!", category="JOIN")
+    if parting:
+        announce.send_debug(f"Parting {', '.join(parting)} due to new "
+                            f"configuration layout!", category="PART")
+    if not joining and not parting:
+        log("[REHASH SYNC] No channel changes - refreshing the name lists only.")
+
+    return lines
+
+
+def _restore_advert_worker_token(live_worker_id):
+    """Put the advert worker's generation token back after a reload.
+
+    Returns True if this call restored it.
+
+    announce.current_worker_id is how a running advert worker knows it is
+    still the current one: it compares its own id against the module's and
+    retires if something newer has taken over. importlib.reload() re-executes
+    announce's body, which resets that to 0 - so between the reload and this
+    call, a worker waking on its five-second cycle reads 0, concludes it has
+    been replaced, and stops. Nothing starts another, and the channels go
+    quiet until the next reconnect.
+
+    ONLY IF NOTHING NEWER CLAIMED IT. A reconnect completing inside the reload
+    window starts a fresh worker and stamps a higher id; restoring blindly
+    would retire that one instead and cause the very silence this is
+    preventing.
+    """
+    import announce as _ann
+
+    if not live_worker_id or getattr(_ann, "current_worker_id", 0):
+        return False
+    _ann.current_worker_id = live_worker_id
+    print("[REHASH RAM] Advert worker kept alive across the reload.")
+    print("[REHASH NOTE] announce_worker's own code is NOT re-entered by a rehash; "
+          "restart the daemon to pick up changes to the advert loop itself.")
+    return True
+
+
 def reload_modules_in_order(modules=CORE_MODULES, reload_self=True):
     """Reload the daemon's modules in place and return the names reloaded.
 
@@ -461,46 +748,139 @@ def reload_modules_in_order(modules=CORE_MODULES, reload_self=True):
     out of that scope. `sys` really is module-level; `importlib` was not.
     """
     import importlib
+    import settings_file
 
-    reloaded = []
-    for mod_name in modules:
-        if mod_name in sys.modules:
-            importlib.reload(sys.modules[mod_name])
-            reloaded.append(mod_name)
+    # What the operator's configuration actually resolved to BEFORE the reload.
+    # Two separate jobs below: the lock stops other threads seeing this window,
+    # and this snapshot is the backstop for when the window does not close
+    # cleanly.
+    live = sys.modules.get('defaults')
+    before = ({name: getattr(live, name, None) for name in settings_file.REQUIRED}
+              if live is not None else {})
 
-    # Last, and separately: reloading this module rebinds the very names the
-    # caller is executing out of. The running frame keeps its old code object,
-    # which is what makes this safe here and would not be if it ran first.
-    if reload_self and 'commands' in sys.modules:
-        importlib.reload(sys.modules['commands'])
-        reloaded.append('commands')
+    # Everything from here to the end of the reload is one window as far as any
+    # other thread is concerned - see runtime.config_reload_lock's own comment
+    # for what is observable inside it and how it was found.
+    with runtime.config_reload_lock:
+        reloaded = []
+        for mod_name in modules:
+            if mod_name in sys.modules:
+                importlib.reload(sys.modules[mod_name])
+                reloaded.append(mod_name)
+
+        # The lock hides the window; it cannot help if the window never closes.
+        # settings_file.apply_to() is deliberately forgiving - an unreadable
+        # settings.conf is logged and the built-in defaults are kept, which is
+        # right at STARTUP (oserve.startup()'s REQUIRED gate then refuses to
+        # boot and the operator is told why) and wrong here, because a rehash
+        # has no such gate: the daemon is already running and would simply
+        # carry on with no nickname, no channels and no admin. A file that was
+        # readable a moment ago and is not now - antivirus holding it open,
+        # a network share blinking, an editor mid-save - would silently
+        # de-configure a live bot.
+        #
+        # settings_file.REQUIRED ONLY, and only a value that WAS set and came
+        # back blank. That narrowness is what stops this becoming a ratchet
+        # that prevents a rehash from unsetting anything: every other setting
+        # reverts to its shipped default normally, which is what a rehash is
+        # for. A blank REQUIRED setting is the one state that is never
+        # legitimate - save() refuses to write one (SettingsWriteError) and
+        # oserve.startup() refuses to boot with one - so restoring it can
+        # never overwrite something an operator actually asked for.
+        for name, value in before.items():
+            if value and not getattr(live, name, None):
+                setattr(live, name, value)
+                print(f"[REHASH CONFIG] {name} came back blank from the reload, so the "
+                      f"value that was already running was kept. Check that settings.conf "
+                      f"is readable - the next restart will use whatever it says.")
+
+        # Last, and separately: reloading this module rebinds the very names the
+        # caller is executing out of. The running frame keeps its old code object,
+        # which is what makes this safe here and would not be if it ran first.
+        if reload_self and 'commands' in sys.modules:
+            importlib.reload(sys.modules['commands'])
+            reloaded.append('commands')
     return reloaded
 
 
 def handle_rehash_request(user, target_chan, authorised=False):
-    """Reload the modules live, in memory, without reading anything back from disk."""
-    import importlib
-    import sys
-    import defaults as config
-    import announce
-    import copy
-    
+    """Reload the modules live, in memory - one rehash at a time.
+
+    THE SERIALISATION IS THE POINT OF THIS WRAPPER. The body below reloads
+    the modules and then compares the channel list it reads AFTERWARDS
+    against the one it read before, to decide what to JOIN and what to
+    PART. Two rehashes overlapping is not merely wasteful: the second
+    one's reload puts config.CHANNEL back to its literal None for about a
+    millisecond (see runtime.config_reload_lock), and a first rehash that
+    reads its "new" channel list inside that window sees NO CHANNELS - so
+    every channel the bot is in falls into the PART branch.
+
+    Measured by audit: the bot PARTed every channel including the debug
+    channel, sent no JOIN and no NAMES, emptied channel_users, and logged
+    "[REHASH SYNC] Channel sync completed successfully." dcc.py treats
+    channel_users as proof a user is present, so every queue then froze.
+    Nothing raised. Reproduced with nothing patched in 4 of 60 runs.
+
+    Reachable without trying: irc.py spawns an unguarded thread per
+    "!rehash", adminchat.py does the same from the console, and
+    webserver.py fires one on EVERY Settings save and every password
+    change - two separate endpoints.
+
+    WAITS, rather than dropping the second one. A second rehash is often
+    the one that matters: a dashboard save writes settings.conf and THEN
+    triggers it, and the rehash already running may have read the file
+    before that write landed. Dropping it would silently lose the
+    operator's change; waiting applies it.
+    """
     if not authorised and not is_admin(user):
         print(f"[REHASH SECURITY] Ignored a rehash attempt from an unauthorised user: {user}")
         return
 
+    if not runtime.rehash_lock.acquire(blocking=False):
+        print("[REHASH] Another rehash is still running - waiting for it "
+              "to finish before starting this one.")
+        runtime.rehash_lock.acquire()
+    try:
+        return _handle_rehash_request(user, target_chan)
+    finally:
+        runtime.rehash_lock.release()
+
+
+def _handle_rehash_request(user, target_chan):
+    """The rehash itself. Only ever called with runtime.rehash_lock held."""
+    import importlib
+    import sys
+    import defaults as config
+    import announce
+
     # =====================================================================
     # 1. Back EVERY piece of live state up into local variables
     # =====================================================================
-    # A. The channel user lists (from NAMES)
-    ram_backup_users = {}
-    backed_up_users = False
-    with runtime.channel_users_lock():
-        if hasattr(config, 'channel_users') and isinstance(config.channel_users, dict):
-            ram_backup_users = copy.deepcopy(config.channel_users)
-            backed_up_users = True
-    if backed_up_users:
-        print(f"[REHASH RAM] Backed up the user lists for {len(ram_backup_users)} channel(s).")
+    # channel_users is NOT snapshotted here (#429), for the identical reason
+    # dcc_queue is not (see that removed snapshot's own comment below): it is
+    # a runtime.py-bound container, so importlib.reload() below never empties
+    # or replaces it - the object irc.py sees after reload_modules_in_order()
+    # is the SAME one it saw before, with every JOIN/PART/QUIT the read
+    # thread applied during the reload window already on it.
+    #
+    # A snapshot-and-restore used to run here anyway, capturing channel_users
+    # before the reload and overwriting it with that snapshot afterwards -
+    # deep-copied, so the restore could not even see writes made to the live
+    # dict while the copy was held. dcc.wait_for_transfers_to_finish() blocks
+    # this function for up to REHASH_TRANSFER_WAIT (120s) before the restore
+    # runs, which is a two-minute window for the read thread to apply real
+    # JOINs and PARTs that the restore then silently discarded. A JOIN lost
+    # this way heals itself at the next NAMES resync; a PART or QUIT does
+    # not, because the resync can only ADD names back (irc.py's 353 handler
+    # does config.channel_users[chan].update(names), never a removal) - so a
+    # user who left during the window came back to life as far as this bot
+    # was concerned, for the rest of the connection. dcc.user_is_present_in_
+    # ram() then thaws their frozen queue and the presence gate admits
+    # dispatch to a nick that is not on the network, burning a DCC slot on
+    # every attempt until MAX_SEND_FAILS deletes the row - destroying the
+    # departed user's queue instead of the freezer preserving it, which is
+    # the entire reason the freezer exists. Reachable on every dashboard
+    # Settings save and every password change, not just a manual !rehash.
 
     # B. The active DCC slots
     ram_backup_slots = 0
@@ -531,8 +911,25 @@ def handle_rehash_request(user, target_chan, authorised=False):
     # rar_queue and download_queue, probed in the same removed loop, were never
     # real container names anywhere in this codebase.
 
-    # Keep the old channel list, for the JOIN/PART comparison
-    old_chans = [c.strip().lower() for c in config.CHANNEL.split(",") if c.strip()]
+    # Keep the old channel list, for the JOIN/PART comparison.
+    #
+    # The debug channel belongs in BOTH sides of that comparison, and used to be
+    # in neither. irc.py joins it once, at connect, right after the main
+    # channels; the sync below built its list from CHANNEL alone and mentioned
+    # DEBUG_CHANNEL only to avoid PARTing it. So an operator who set a debug
+    # channel on the dashboard was told "Rehash started", watched the setting
+    # save correctly, and the bot never joined - nothing to see in any log,
+    # because nothing failed. Reported from a real install.
+    #
+    # Symmetry is what keeps it quiet: present on both sides when it has not
+    # changed, so an unchanged debug channel is not re-JOINed with a "due to new
+    # configuration layout!" line on every single rehash.
+    old_chans = _channels_to_sync(config)
+    # Captured HERE, beside old_chans and for the same reason (#511): both are
+    # what the operator's configuration actually said before the reload, and
+    # the sync needs them together to tell "you cleared this" from "the reload
+    # did not bring it back".
+    old_debug_chan = str(getattr(config, 'DEBUG_CHANNEL', '') or '').strip()
 
     # Pause the advert for the moment
     announce.is_ready = False
@@ -568,9 +965,37 @@ def handle_rehash_request(user, target_chan, authorised=False):
         live_debug_sinks = list(announce._debug_sinks)
 
     try:
+        # 1b. QUIESCE FIRST (#310). A reload swaps the modules a
+        # running transfer is executing inside, so the safe order is: stop
+        # starting new sends, let the ones in flight finish, reload, then
+        # start again. Without it a rehash lands in the middle of somebody's
+        # download.
+        #
+        # Bounded, and it carries on if the bound is reached - see
+        # wait_for_transfers_to_finish(). A bot that cannot be reconfigured
+        # while one stuck peer holds a socket is worse than one that
+        # occasionally interrupts a transfer, and the log says which happened.
+        import dcc as _dcc_quiesce
+        _dcc_quiesce.wait_for_transfers_to_finish()
+
         # 2. REHASH: reload every core module live, in memory. The ORDER matters
         # and is documented on reload_modules_in_order() itself.
         reload_modules_in_order()
+
+        # THE ADVERT TOKEN GOES BACK FIRST, not seventy lines further down
+        # where it used to. importlib.reload(announce) re-executes that
+        # module's body, which resets current_worker_id to 0, and the live
+        # advert worker wakes every five seconds to compare its own id against
+        # it. A wake landing anywhere in the window between the reload and the
+        # restore saw 0, concluded that something newer had replaced it, and
+        # retired - leaving no advert worker at all and the channels silent
+        # until the next reconnect.
+        #
+        # The "only if nothing newer claimed it" rule below is unchanged and
+        # still needed: a reconnect completing inside this window starts a
+        # fresh worker and stamps a higher id, and restoring blindly would
+        # retire that one instead.
+        _restore_advert_worker_token(live_worker_id)
 
         print(f"[REHASH SUCCESS] Every Python module was reloaded in memory by {user}.")
 
@@ -635,7 +1060,7 @@ def handle_rehash_request(user, target_chan, authorised=False):
                 _live_sock_for_nick = getattr(_oserve_for_nick, 'irc_connection', None) if _oserve_for_nick else None
                 if _live_sock_for_nick:
                     try:
-                        _live_sock_for_nick.send(_nick_line.encode())
+                        _live_sock_for_nick.sendall(_nick_line.encode("utf-8", errors="ignore"))
                         print(f"[REHASH NICK] Sent a live NICK change to {_cfg.NICKNAME!r}.")
                     except Exception as _nick_err:
                         print(f"[REHASH NICK ERROR] Could not send the live nick change: {_nick_err}")
@@ -644,14 +1069,10 @@ def handle_rehash_request(user, target_chan, authorised=False):
                           "will take effect on the next reconnect instead.")
 
         import announce as _ann
-        # Only reinstate the token if nothing newer claimed it. A reconnect completing inside
-        # the reload window starts a fresh advert worker and stamps a higher id; restoring
-        # blindly would retire that new worker and leave the channels silent.
-        if live_worker_id and not getattr(_ann, 'current_worker_id', 0):
-            _ann.current_worker_id = live_worker_id
-            print("[REHASH RAM] Advert worker kept alive across the reload.")
-            print("[REHASH NOTE] announce_worker's own code is NOT re-entered by a rehash; "
-                  "restart the daemon to pick up changes to the advert loop itself.")
+        # The token itself went back immediately after the reload - see
+        # _restore_advert_worker_token() and the comment at that call - because
+        # the worker wakes every five seconds and a wake inside this stretch
+        # used to find it zeroed and retire.
 
         # Reinstate every console session's debug sink - see reattach_debug_sinks()'s
         # docstring for why this is not optional.
@@ -667,16 +1088,11 @@ def handle_rehash_request(user, target_chan, authorised=False):
          # =====================================================================
         # 3. RESTORE: write every value back into the newly loaded modules
         # =====================================================================
-        # Restore the users
-        # In place: rebinding would detach config.channel_users from the
-        # object runtime.py holds, and ram_backup_users is a deep COPY, so
-        # the two would diverge from here on (see runtime.py's docstring).
-        with runtime.channel_users_lock():
-            config.channel_users.clear()
-            if ram_backup_users:
-                config.channel_users.update(ram_backup_users)
-            restored_count = len(config.channel_users)
-        print(f"[REHASH RAM] Restored {restored_count} channel list(s) into the new modules.")
+        # No channel_users restore here - see the removed snapshot's comment
+        # above (#429). It is runtime.py-bound and was never actually touched
+        # by the reload, so there is nothing to put back, and the restore
+        # that used to run here was purely destructive: it discarded every
+        # JOIN/PART/QUIT applied during the up-to-120s transfer-wait window.
 
         # Restore the slots
         for mod_name in ['dcc', 'defaults', 'oserve']:
@@ -716,36 +1132,28 @@ def handle_rehash_request(user, target_chan, authorised=False):
         irc_sock = getattr(oserve, 'irc_connection', None)
         
         if irc_sock:
-            new_chans = [c.strip().lower() for c in config.CHANNEL.split(",") if c.strip()]
-            
-            for chan in new_chans:
-                if chan not in old_chans:
-                    irc_sock.send(f"JOIN {chan}\r\n".encode())
-                    announce.send_debug(f"Joining channel {chan} due to new configuration layout!", category="JOIN")
-                    with runtime.channel_users_lock():
-                        if chan.lower() not in config.channel_users:
-                            config.channel_users[chan.lower()] = set()
-            
-            for chan in old_chans:
-                if chan not in new_chans:
-                    # Not a channel name. config.py declares DEBUG_CHANNEL as
-                    # "" (blank) since #193, so a literal "#example-debug" here was a second
-                    # source of truth that disagreed with the first - and the
-                    # one place it would have been consulted is the one place it
-                    # decides whether to PART a channel.
-                    debug_chan = str(getattr(config, 'DEBUG_CHANNEL', '') or '').lower()
-                    if chan != debug_chan:
-                        irc_sock.send(f"PART {chan} :Removed from DDCore\r\n".encode())
-                        announce.send_debug(f"Parting channel {chan} due to new configuration layout!", category="PART")
-                        with runtime.channel_users_lock():
-                            if chan.lower() in config.channel_users:
-                                del config.channel_users[chan.lower()]
-            
-            print("[REHASH SYNC] Sending a background NAMES to keep the lists fresh...")
-            for chan in new_chans:
-                irc_sock.send(f"NAMES {chan}\r\n".encode())
-                
-            print(f"[REHASH SYNC] Channel sync completed successfully.")
+            # THE SYNC IS TAIL WORK, AND MUST NOT REPORT THE RELOAD AS FAILED.
+            #
+            # Everything this handler exists to do has already happened by
+            # here: the modules are reloaded and the live state is merged
+            # back. The channel sync is bookkeeping on top - so anything it
+            # raises used to reach the handler at the bottom, which prints
+            # "[REHASH CRITICAL ERROR] The files could not be reloaded live"
+            # and tells the operator their rehash failed when it succeeded.
+            # Same reasoning as update_list.py's point of no return (#442):
+            # once the thing is done, the error path has to stop claiming it
+            # is not.
+            try:
+                queued = sync_channels(oserve, old_chans, _channels_to_sync(config),
+                                       previous_debug_channel=old_debug_chan)
+                print(f"[REHASH SYNC] Channel sync queued as {len(queued)} paced "
+                      f"line(s); they go out at MSG_DELAY like everything else "
+                      f"the bot says.")
+            except Exception as sync_err:
+                print(f"[REHASH SYNC ERROR] The reload itself completed; the "
+                      f"channel sync did not: {sync_err}. The channels the bot "
+                      f"is in are unchanged until the next rehash or "
+                      f"reconnect.")
         else:
             print("[REHASH WARNING] Could not sync the channels: no raw socket was available.")
         # ---------------------------------------------------------------------
@@ -762,6 +1170,13 @@ def handle_rehash_request(user, target_chan, authorised=False):
         oserve_mod = sys.modules.get('oserve')
         live_socket = getattr(oserve_mod, 'irc_connection', None) if oserve_mod else None
         
+        # Sends are allowed again BEFORE the queue is woken - waking it while
+        # still paused would have every dispatch refused by the gate the wait
+        # put up, and the wake is the thing that restarts the queue the
+        # operator asked for.
+        import dcc as _dcc_resume
+        _dcc_resume.resume_transfers()
+
         if live_socket:
             import dcc
             import threading
@@ -777,6 +1192,14 @@ def handle_rehash_request(user, target_chan, authorised=False):
     except Exception as e:
         import announce
         announce.is_ready = True
+        # THE PAUSE MUST NOT OUTLIVE THE REHASH. If the reload raised anywhere
+        # after the quiesce, the bot would sit refusing every send for ever,
+        # with the only clue a notice telling users to try again in a moment.
+        try:
+            import dcc as _dcc_unpause
+            _dcc_unpause.resume_transfers()
+        except Exception:
+            pass
         print(f"[REHASH CRITICAL ERROR] The files could not be reloaded live: {e}")
         announce.send_debug(f"Rehash FAILED (Notices Resumed for safety): {e}", category="INFO")
 
@@ -884,6 +1307,16 @@ def handle_hard_unban_request(user, target_chan, msg_text, authorised=False):
     else:
         announce.send_debug(f"Pattern {pattern} was not found in hard_bans.txt.", category="INFO")
 
+# The banners update_list.py's __main__ prints AFTER everything else, and the
+# reason the "last line" rule below stopped working. They say whether the run
+# failed, which the exit code already said, and never why.
+_GENERIC_RESULT_LINES = ("--- ERROR: could not generate the list. ---",
+                         "--- The list was updated successfully. ---")
+
+# The tags update_list.py puts on a real explanation.
+_ERROR_TAGS = ("[LIST-GEN ERROR]", "[CRITICAL]", "[LIST ERROR]", "[UPDATE ERROR]")
+
+
 def subprocess_failure_message(stderr, stdout):
     """The best available explanation for a failed subprocess run.
 
@@ -893,79 +1326,202 @@ def subprocess_failure_message(stderr, stdout):
 
     #162 finding #4: update_list.py's own error handling prints via plain
     print() - stdout, not stderr - so a script-level failure (a directory
-    walk that raised, a write that failed) left stderr empty, and the
-    admin saw "Unknown script error" with no filename and no reason at
-    all. Falls back to stdout, and takes its LAST line - where
-    update_list.py's own "[LIST-GEN ERROR] ..." summary lands - mirroring
-    how update_list.py's own _write_rar_artifact() already reports a
-    subprocess failure.
+    walk that raised, a write that failed) left stderr empty, and the admin
+    saw "Unknown script error" with no filename and no reason at all. Hence
+    the fall back to stdout.
+
+    TAKING THE LAST LINE STOPPED WORKING, and reported the one line that
+    never explains anything. That rule was written when update_list.py's own
+    "[LIST-GEN ERROR] ..." summary really was last. Its __main__ now prints
+    a generic banner after it:
+
+        [LIST-GEN ERROR] 'Music' failed: <the actual reason>
+        [LIST-GEN ERROR] These lists were not rebuilt and are still serving...
+        --- ERROR: could not generate the list. ---      <- always last
+
+    so the dashboard reliably showed "--- ERROR: could not generate the
+    list. ---" while the reason sat in the output above it, captured and
+    discarded. Reported from a live install, where it replaced an earlier
+    failure that at least said which encoding gave up.
+
+    THE FIRST TAGGED LINE, not the last: later ones are consequences of the
+    first. "These lists were not rebuilt" is true and follows from whatever
+    broke the first one, and only the first names it.
     """
     output = (stderr or stdout or "").strip()
-    lines = output.splitlines()
-    return lines[-1] if lines else "Unknown script error"
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return "Unknown script error"
+
+    for line in lines:
+        if any(tag in line for tag in _ERROR_TAGS):
+            return line
+
+    # Nothing tagged - a traceback, or a failure from somewhere that does not
+    # use the tags. The last line is still the best guess, minus the banner
+    # that would otherwise always win.
+    useful = [line for line in lines if line not in _GENERIC_RESULT_LINES]
+    return useful[-1] if useful else lines[-1]
 
 
 # Reads ONLY line 1 of the real master list, so it costs almost nothing
 def count_from_master_list():
-    """The file count on line 1 of the newest master list, or 0.
+    """How many files this bot is currently offering, across every list.
 
     Lifted out of handle_list_update_request() so it can be called directly.
     It was a closure over nothing - it reads config and the disk - and being
     one meant the only way to reach it was to run a real !update, subprocess
-    and all. A glob-escaping fix to this very function could not be proved
-    by any test until it moved out here.
+    and all. A glob-escaping fix to this very function could not be proved by
+    any test until it moved out here.
 
-    The three imports are local because they were local in the enclosing
-    function, and the closure was reading them out of ITS scope - lifting the
-    body out without them raised NameError('os') on the first call, caught by
-    the broad except below and reported as a count of 0. Which is to say the
-    extraction reproduced the exact bug it was made to prove was fixed.
+    ONE FINDER, not a second copy of one. This used to glob the lists
+    directory and filter for itself, and every time list.py learned to exclude
+    another name this did not. #234 was that story with the delivered "-FULL-"
+    copy. The film list was it again, and worse: "<base>-VIDEO-<date>.txt"
+    sorts after a plain date ("V" > "2"), so this picked the film list, whose
+    header reads "List of N Films & Series" and does not match the "List of N
+    Files" pattern it was looking for. Every !update reported "0 files, added
+    0" while the advert published the real total.
+
+    Worse than a wrong number. The #230 shrink guard in the caller fires on
+    `added_files < 0`, and 0 - 0 is never negative - so the one warning that
+    catches a partial mount failure publishing a truncated index could never
+    fire again. update_list.py's decision to let a missing folder cost only
+    its own contents is safe BECAUSE that warning exists; breaking it removed
+    the net underneath a deliberate choice, silently.
+
+    Counting rows across every list rather than reading the master list's own
+    header is the other half: with film in a list of its own, the header
+    reports the music half alone, and !update would announce a smaller number
+    than the advert publishes for the same library.
     """
-    import glob
-    import os
-    import re
+    import list as _list_mod
 
     try:
-        # Find every text file in the directory matching the bot's name
-        # LIST_BASE_NAME, not NICKNAME: irc.py rebinds NICKNAME on a 433 fallback, and
-        # update_list.py names the files with LIST_BASE_NAME. Keyed off the live nick this
-        # counted 0 both before and after a rebuild, so !update reported "0 files, added 0"
-        # while the advert reported the real total. Matches list.find_latest_list().
-        # glob.escape both halves: "[" and "]" are a character class to glob, and
-        # both are ordinary in the two values interpolated here. Bot[GR] is a
-        # standard IRC nick, and LIST_BASE_NAME follows NICKNAME by default; a
-        # music share under D:\Lists[FLAC]\ is the same bug from the other side.
-        # Unescaped, the pattern matched nothing and never errored: @find answered
-        # "No MasterList found" and the advert published "0 Files" forever.
-        pattern = os.path.join(glob.escape(config.LOCAL_LIST_DIR),
-                               f"{glob.escape(config.LIST_BASE_NAME)}-*.txt")
-        all_txt_files = sorted(glob.glob(pattern))
-        
-        # Both markers, matching list.find_latest_list(). Excluding only
-        # "-RAR-" left the DELIVERED "-FULL-" copy in the running, and it sorts
-        # after any plain date suffix - so this counted a different file from the
-        # one @find and the advert read. It agreed only because that copy happens
-        # to carry the same header (#234).
-        import list as _list_mod
-        true_master_lists = [f for f in all_txt_files
-                             if "-RAR-" not in f
-                             and _list_mod.FULL_LIST_MARKER not in f]
-        
-        if true_master_lists:
-            list_path = true_master_lists[-1]  # The very newest master list
-            if os.path.exists(list_path):
-                with open(list_path, "r", encoding="utf-8", errors="ignore") as f:
-                    first_line = f.readline().strip()
-                    
-                    # Look for the "List of X Files" pattern
-                    match = re.search(r"List of\s+([\d,.]+)\s+Files", first_line, re.IGNORECASE)
-                    if match:
-                        raw_num = match.group(1).replace(",", "").replace(".", "")
-                        if raw_num.isdigit():
-                            return int(raw_num)
+        return _list_mod.get_file_count_date_size_and_raw_bytes()[0]
     except Exception as e:
-        print(f"[LIST READ ERROR] Could not read line 1: {e}")
-    return 0
+        print(f"[LIST READ ERROR] Could not count the list: {e}")
+        return 0
+
+
+class ListUpdateStalled(Exception):
+    """The child stopped reporting for longer than the stall window.
+
+    Its own exception rather than subprocess.TimeoutExpired, because the two
+    now mean different things and the operator is told different things: this
+    one says the rebuild went silent, which points at the library; the other
+    that it ran past an absolute cap the operator set deliberately.
+    """
+
+    def __init__(self, silent_for):
+        self.silent_for = silent_for
+        super().__init__(f"no progress for {int(silent_for)}s")
+
+
+def last_progress_at():
+    """When the running rebuild last reported, or None if we cannot tell.
+
+    None is "cannot tell", never "a long time ago". A rebuild that cannot
+    write its progress file - a full disk, a read-only data/ - is not evidence
+    of a rebuild that is stuck, and killing one for it would turn a cosmetic
+    failure into the loss of an eight-hour run.
+    """
+    import json
+    import platform_compat
+
+    path = getattr(config, "LIST_PROGRESS_FILE", None)
+    if not path:
+        return None
+    try:
+        with open(platform_compat.long_path(path), encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        return float(loaded["at"])
+    except Exception:
+        return None
+
+
+def run_watching_for_a_stall(argv, ceiling=0, stall=900, tick=5.0):
+    """Run the list builder, killing it only when it stops making progress.
+
+    Returns the same CompletedProcess shape subprocess.run() did, so the
+    caller's success path is unchanged.
+
+    THREE RULES:
+
+      * The child reports to LIST_PROGRESS_FILE roughly twice a second while
+        scanning. While that timestamp is advancing the rebuild is working -
+        for as many hours as it needs - and nothing here interferes.
+      * If it has not advanced for `stall` seconds, the rebuild is wedged and
+        is killed. Fifteen minutes by default: more generous than the old flat
+        thirty-minute cap for a long run, and quicker than it for a genuinely
+        hung one.
+      * `ceiling` is an absolute cap for an operator who wants one anyway.
+        0, the default, means none.
+
+    A rebuild that has never written a progress file is never killed for
+    stalling. That is the case where working and stuck cannot be told apart,
+    and the honest answer is to let the ceiling decide - which is what an
+    operator who set one asked for, and no limit at all otherwise.
+    """
+    import subprocess
+    # Imported here like every other use in this module - commands.py has no
+    # module-level `time`, and this function is called from a nested one that
+    # imports its own.
+    import time
+
+    begun = time.time()
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True,
+                               encoding="utf-8", errors="replace")
+    while True:
+        try:
+            # communicate() is the only safe way to wait while draining the
+            # pipes: a child that fills its stderr buffer blocks forever
+            # otherwise, and this one prints a line per folder. Calling it
+            # again after TimeoutExpired is the documented way to keep
+            # waiting - it resumes rather than restarting.
+            out, err = process.communicate(timeout=tick)
+            return subprocess.CompletedProcess(argv, process.returncode,
+                                               out, err)
+        except subprocess.TimeoutExpired:
+            pass
+
+        now = time.time()
+        if ceiling and (now - begun) >= ceiling:
+            process.kill()
+            process.communicate()
+            raise subprocess.TimeoutExpired(argv, ceiling)
+
+        reported_at = last_progress_at()
+        if reported_at is None:
+            # Cannot tell. Never kill for it.
+            continue
+        silent_for = now - reported_at
+        if silent_for >= stall:
+            process.kill()
+            process.communicate()
+            raise ListUpdateStalled(silent_for)
+
+
+def describe_duration(seconds):
+    """A rebuild's runtime, for a person rather than for arithmetic.
+
+    Whole seconds under a minute, "2m 04s" above it, "1h 12m" above an hour -
+    a rebuild of a large library on a mapped drive runs into the hours, and
+    "4331s" is a number nobody converts in their head.
+
+    The smaller unit is zero-padded so consecutive rebuilds line up when they
+    are read one under the other in a log.
+    """
+    try:
+        total = max(0, int(float(seconds)))
+    except (TypeError, ValueError):
+        return "an unknown time"
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m {total % 60:02d}s"
+    return f"{total // 3600}h {(total % 3600) // 60:02d}m"
 
 
 def handle_list_update_request(user, target_chan, authorised=False):
@@ -990,14 +1546,29 @@ def handle_list_update_request(user, target_chan, authorised=False):
     # subprocesses all writing the same .new temp paths. config.update_inprogress is
     # set unconditionally a few lines down and cleared only in async_list_updater's
     # finally, regardless of PAUSE_ON_UPDATE, so it is the right flag to gate on here.
-    if getattr(config, 'update_inprogress', False) is True:
-        announce.send_debug(f"List update request from {user} denied: An update is already running.", category="INFO")
-        return
+    # CHECKED AND SET AS ONE STEP (#444). This used to read the flag here and
+    # set it 178 lines below, with the PAUSE_ON_UPDATE wait for a running
+    # search in between - so two !update requests arriving in that window both
+    # passed the guard and both started a rebuild, two subprocesses writing
+    # the same .new temp paths.
+    #
+    # Every path that returns after this point must put the flag back, or the
+    # bot refuses every future update until it restarts. There is exactly one
+    # such path today - the search-already-running denial below - and it does.
+    with runtime.list_update_gate:
+        if getattr(config, 'update_inprogress', False) is True:
+            announce.send_debug(f"List update request from {user} denied: An update is already running.", category="INFO")
+            return
+        config.update_inprogress = True
 
     # The global maintenance lock is only taken if the switch is True in config
     if getattr(config, 'PAUSE_ON_UPDATE', True) is True:
         if getattr(config, 'search_inprogress', False) is True:
             announce.send_debug(f"List update request from {user} denied: Another system scan is already running.", category="INFO")
+            # The flag was raised by the gate above and this request is not
+            # going to use it. Leaving it set would deny every later update
+            # for the life of the process.
+            config.update_inprogress = False
             return
         config.search_inprogress = True
         print(f"[MAINTENANCE START] {user} ran !update. Searching and sharing are now PAUSED.")
@@ -1010,6 +1581,16 @@ def handle_list_update_request(user, target_chan, authorised=False):
     old_count = count_from_master_list()
     announce.send_debug(f"List update triggered by {user} from {target_chan}. Indexing the music directory, bot paused...", category="INFO")
     def async_list_updater():
+        # HOW LONG THE WHOLE THING TOOK, from here rather than from the
+        # subprocess's own progress file. That file reports the scan; this
+        # measures what the operator actually waited for, which also covers
+        # spawning python, the NFS sync pause after the child exits, and the
+        # re-count afterwards. On a slow mount those are not rounding.
+        #
+        # Recorded on EVERY exit below - success, failure, timeout and the
+        # unexpected - because a duration left over from the last run is worse
+        # than none: it would be attached to a rebuild it did not measure.
+        started = time.time()
         try:
             base_path = os.path.dirname(os.path.abspath(__file__))
             script_path = os.path.join(base_path, "update_list.py")
@@ -1023,16 +1604,36 @@ def handle_list_update_request(user, target_chan, authorised=False):
                 # `running` flipped false, whether the rebuild worked or not.
                 config.last_list_update_ok = False
                 config.last_list_update_error = "update_list.py not found"
+                config.last_list_update_seconds = int(time.time() - started)
                 return
                 
-            # 2. Threaded run, bounded by LIST_UPDATE_TIMEOUT (default 1800s, shaped
-            # like dcc.py's RAR_TIMEOUT) rather than waiting forever. A full NFS walk
-            # legitimately takes minutes, so this is generous rather than tight - the
-            # point is only that a hung mount cannot wedge config.search_inprogress /
-            # config.update_inprogress permanently. subprocess.run() kills the child
-            # itself when the timeout fires.
-            list_update_timeout = getattr(config, 'LIST_UPDATE_TIMEOUT', 1800)
-            process = subprocess.run([sys.executable, script_path], capture_output=True, text=True, timeout=list_update_timeout)
+            # 2. Threaded run. A hung mount must not wedge
+            # config.search_inprogress / config.update_inprogress permanently -
+            # but a rebuild that is still working is NOT hung, and a wall clock
+            # cannot tell the two apart. This was a flat 1800s, which is a bet
+            # that no library takes longer than half an hour to walk; an 80 TB
+            # library on a mapped drive takes hours, and lost the whole run at
+            # the thirty-minute mark every single time.
+            #
+            # So the child is watched rather than timed: it reports what it is
+            # doing to LIST_PROGRESS_FILE about twice a second, and going
+            # silent is the thing that means something. See
+            # run_watching_for_a_stall() for the rules.
+            list_update_timeout = getattr(config, 'LIST_UPDATE_TIMEOUT', 0)
+            # utf-8 with errors="replace", NOT the locale code page.
+            # text=True alone decodes the child with whatever the console
+            # uses - cp1253 on a Greek install - and one byte outside it
+            # kills subprocess's own reader thread with UnicodeDecodeError.
+            # The run then reports "Unknown script error" because the
+            # output that would have explained it is what could not be
+            # read. The child guards its own writes now (see
+            # update_list.py); this guards our reading of them, so a
+            # future child that does not still cannot take the daemon's
+            # report away with it.
+            process = run_watching_for_a_stall(
+                [sys.executable, script_path],
+                ceiling=list_update_timeout,
+                stall=getattr(config, 'LIST_UPDATE_STALL_SECONDS', 900))
             
             if process.returncode == 0:
                 # ---------------------------------------------------------------------
@@ -1074,7 +1675,9 @@ def handle_list_update_request(user, target_chan, authorised=False):
                 else:
                     # 4. Confirm, through the VIP express lane
                     announce.send_debug(
-                        f"List update successfully completed! MasterList now contains {config.C_BOLD}{new_count:,}{config.C_RESET} files. "
+                        f"List update successfully completed in "
+                        f"{describe_duration(time.time() - started)}! MasterList "
+                        f"now contains {new_count:,} files. "
                         f"Added {added_files:,} new file(s) since last index.",
                         category="INFO"
                     )
@@ -1083,24 +1686,50 @@ def handle_list_update_request(user, target_chan, authorised=False):
                 # of the rebuild process #224 is about.
                 config.last_list_update_ok = True
                 config.last_list_update_error = None
+                config.last_list_update_seconds = int(time.time() - started)
 
             else:
                 error_msg = subprocess_failure_message(process.stderr, process.stdout)
-                announce.send_debug(f"External update_list.py failed (Exit Code {process.returncode}): {error_msg}", category="INFO")
+                # A rebuild that failed is still failed tomorrow: the list
+                # being served is the last good one and nothing retries on its
+                # own, so this is the operator's to act on.
+                announce.send_debug(
+                    f"External update_list.py failed (Exit Code "
+                    f"{process.returncode}): {error_msg}",
+                    category="INFO", notice="error")
                 config.last_list_update_ok = False
                 config.last_list_update_error = error_msg
+                config.last_list_update_seconds = int(time.time() - started)
 
+        except ListUpdateStalled as stall_err:
+            # Distinct from the timeout below on purpose: this one means the
+            # rebuild went QUIET, which points at the library - a mount that
+            # went away mid-walk - rather than at a limit the operator set.
+            announce.send_debug(
+                f"List update ABANDONED: nothing reported for "
+                f"{describe_duration(stall_err.silent_for)}. The library it "
+                f"was reading may have gone away; the previous list is still "
+                f"being served.",
+                category="INFO", notice="error")
+            config.last_list_update_ok = False
+            config.last_list_update_error = (
+                f"stalled - nothing reported for "
+                f"{describe_duration(stall_err.silent_for)}")
+            config.last_list_update_seconds = int(time.time() - started)
         except subprocess.TimeoutExpired:
             announce.send_debug(
-                f"List update FAILED: Script execution timed out after {list_update_timeout} seconds.",
-                category="INFO")
+                f"List update FAILED: Script execution timed out after "
+                f"{list_update_timeout} seconds.",
+                category="INFO", notice="error")
             config.last_list_update_ok = False
             config.last_list_update_error = f"timed out after {list_update_timeout}s"
+            config.last_list_update_seconds = int(time.time() - started)
         except Exception as e:
             print(f"[UPDATE ERROR] The list update could not be run: {e}")
             announce.send_debug(f"List update FAILED critical error: {e}", category="INFO")
             config.last_list_update_ok = False
             config.last_list_update_error = str(e)
+            config.last_list_update_seconds = int(time.time() - started)
         finally:
             # Release the global pause lock again
             config.search_inprogress = False
@@ -1109,8 +1738,10 @@ def handle_list_update_request(user, target_chan, authorised=False):
             config.update_inprogress = False
             print("[MAINTENANCE END] Sharing and searching have been restarted automatically.")
 
-    # Raise the maintenance flag, so the whole daemon knows an update is starting
-    config.update_inprogress = True
+    # The maintenance flag was raised by the gate at the top of this function,
+    # as one step with the check that guards it (#444). It is deliberately not
+    # re-raised here: a second assignment would read as though something in
+    # between might have cleared it.
 
     # Start the background thread
     threading.Thread(target=async_list_updater, daemon=True).start()
@@ -1211,7 +1842,13 @@ def handle_stats_request(s, user, target):
     # when there is nothing to read, which reads as a date in the sentence it
     # was going into. A bot that has not built its list yet is the state every
     # fresh install is in, and the first thing somebody would ask about.
-    if shared_count or list_date != "No List":
+    #
+    # #433: "Error" is the other sentinel the same function can answer with -
+    # an OSError reading any list file collapses its whole return to
+    # (0, "Error", "0B", 0), and "Error" != "No List" let it straight through
+    # here too: "Sharing 0 files (0B), list built Error." answered a direct
+    # question with exactly the fault, not with "not built yet".
+    if shared_count or list_date not in ("No List", "Error"):
         shared_line = (f"Sharing {figure(f'{shared_count:,}')} files "
                        f"({figure(shared_size)}), list built {figure(list_date, red)}.")
     else:
@@ -1230,7 +1867,9 @@ def handle_stats_request(s, user, target):
     ]
 
     for line in lines:
-        oserve.queue_message(user, f"NOTICE {user} :{line}\r\n", is_vip=True)
+        # #426: see handle_help_request()'s own comment - a per-user reply
+        # does not belong in the lane channel adverts exist for.
+        oserve.queue_message(user, f"NOTICE {user} :{line}\r\n")
 
     print(f"[STATS] Sent the stats notice to {user} (asked in {target}).")
 
@@ -1301,6 +1940,8 @@ def handle_top_request(s, user, target):
             f"send. Get my list with {bold}{red}@{config.NICKNAME}{reset}.")
 
     for line in lines:
-        oserve.queue_message(user, f"NOTICE {user} :{line}\r\n", is_vip=True)
+        # #426: see handle_help_request()'s own comment - a per-user reply
+        # does not belong in the lane channel adverts exist for.
+        oserve.queue_message(user, f"NOTICE {user} :{line}\r\n")
 
     print(f"[TOP] Sent the most-requested notice to {user} (asked in {target}).")

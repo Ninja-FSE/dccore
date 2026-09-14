@@ -21,8 +21,13 @@ advertise an installation path nobody maintains. `pip install .` failing with
 "no pyproject.toml or setup.py" is the accurate answer.
 """
 
+import io
 import os
+import sys
 import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from exported_tree import internal_changelog_or_skip  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -77,6 +82,20 @@ class TheDocsPointAtTheRightFile(unittest.TestCase):
         """Control: a rename that removed the instruction entirely would pass
         the test above."""
         self.assertIn("configure.py", self.read("docs/INSTALL.md"))
+
+    def test_the_changelog_is_left_alone(self):
+        """docs/UPDATES.md records what happened at the time. The entries that
+        mention setup.py are describing a file that was called that when they
+        were written, and rewriting history to match a later rename is how a
+        changelog stops being evidence.
+
+        Skipped in an extracted public tree, where that changelog is
+        export-ignored and legitimately absent - but only when .gitattributes
+        actually says so. See tests/exported_tree.py."""
+        changelog = internal_changelog_or_skip(self)
+
+        with io.open(changelog, encoding="utf-8", errors="replace") as handle:
+            self.assertIn("setup.py", handle.read())
 
 
 if __name__ == "__main__":

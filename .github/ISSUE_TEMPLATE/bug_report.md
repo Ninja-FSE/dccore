@@ -12,7 +12,8 @@ library, crash or hang the daemon from IRC, anything like that), please
 don't file it here — see [docs/SECURITY.md](../../docs/SECURITY.md) for how
 to report it privately instead.
 
-**Version or commit:** (from `!version`, or the release tag / commit you're
+**Version or commit:** (the `version` command in the admin console, which
+reports the build and the platform, or the release tag / commit you're
 running)
 
 **OS:** Linux or Windows, and how you're running it (systemd, a plain

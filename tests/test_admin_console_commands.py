@@ -420,5 +420,82 @@ class ChannelCommandsCanBeRetired(unittest.TestCase):
                 self.assertIn(handler, block)
 
 
+class BanAndUnbanAreDispatchedCaseInsensitively(unittest.TestCase):
+    """#437: !rehash, !update and !clearqueue were already matched on
+    msg_lower beside them - !ban and !unban were left on the raw, case-
+    sensitive `msg`, so "!Ban ..." or "!BAN ..." failed the admin gate
+    entirely. Admin commands are deliberately excluded from
+    is_bot_command's metering, so a mistyped ban was not just refused -
+    nothing ran, nothing was written to hard_bans.txt, and nothing was
+    logged either. In channel it looked identical to an applied ban.
+
+    Evaluated out of the real source with ChannelCommandsCanBeRetired's own
+    _gate_condition()/_evaluate() helpers, the same way that class already
+    proves the gate is not merely present but actually short-circuits
+    correctly - a source grep cannot tell "matches any case" apart from
+    "matches lowercase only".
+    """
+
+    def setUp(self):
+        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+            self.source = handle.read()
+        self.original = config.ADMIN_CHANNEL_COMMANDS
+        self.addCleanup(lambda: setattr(config, "ADMIN_CHANNEL_COMMANDS", self.original))
+        config.ADMIN_CHANNEL_COMMANDS = True
+
+    gate_condition = staticmethod(ChannelCommandsCanBeRetired._gate_condition)
+    evaluate = staticmethod(ChannelCommandsCanBeRetired._evaluate)
+
+    def _dispatch_condition(self, prefix):
+        """The real `elif msg_lower.startswith('!ban ')`-shaped inner
+        branch, read out of irc.py the same way _gate_condition() reads the
+        outer one - proving the INNER dispatch is case-insensitive too, not
+        only the gate that guards it. A gate fixed alone but an inner
+        `elif msg.startswith(...)` left behind would pass the gate and then
+        dispatch to nothing.
+        """
+        lines = self.source.split("\n")
+        needle = f"elif msg_lower.startswith(\"{prefix}\")"
+        line = next(l for l in lines if l.strip().startswith(needle))
+        return line.strip()[len("elif "):-1]
+
+    def test_the_gate_accepts_every_casing(self):
+        condition = self.gate_condition()
+
+        for command in ("!ban *!*@x", "!Ban *!*@x", "!BAN *!*@x", "!bAn *!*@x",
+                        "!unban *!*@x", "!Unban *!*@x", "!UNBAN *!*@x"):
+            with self.subTest(command=command):
+                self.assertTrue(self.evaluate(condition, command),
+                               f"{command} failed the admin gate")
+
+    def test_the_inner_dispatch_accepts_every_casing_too(self):
+        for prefix, casings in (
+            ("!ban ", ("!ban x", "!Ban x", "!BAN x", "!bAn x")),
+            ("!unban ", ("!unban x", "!Unban x", "!UNBAN x", "!unBAN x")),
+        ):
+            condition = self._dispatch_condition(prefix)
+            for command in casings:
+                with self.subTest(prefix=prefix, command=command):
+                    self.assertTrue(self.evaluate(condition, command),
+                                   f"{command!r} did not match the inner "
+                                   f"{prefix!r} dispatch branch")
+
+    def test_ban_and_unban_never_both_match_the_same_line(self):
+        """A dispatch bug that made both patterns too permissive would
+        route a !ban through handle_hard_unban_request or vice versa."""
+        ban_condition = self._dispatch_condition("!ban ")
+        unban_condition = self._dispatch_condition("!unban ")
+
+        for command in ("!ban x", "!Ban x", "!BAN x"):
+            with self.subTest(command=command):
+                self.assertTrue(self.evaluate(ban_condition, command))
+                self.assertFalse(self.evaluate(unban_condition, command))
+
+        for command in ("!unban x", "!Unban x", "!UNBAN x"):
+            with self.subTest(command=command):
+                self.assertTrue(self.evaluate(unban_condition, command))
+                self.assertFalse(self.evaluate(ban_condition, command))
+
+
 if __name__ == "__main__":
     unittest.main()

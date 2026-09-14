@@ -74,10 +74,17 @@ settings.conf, and nothing here can silently revert an already-correct
 answer to a blank one.
 """
 
+import io
 import os
 import re
 import subprocess
 import sys
+
+import platform_compat
+
+# See update_list.py's own note: this is an entry point of its own,
+# so it needs the guard oserve.py installs for the daemon.
+platform_compat.install_console_encoding_guard()
 
 REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 if REPO_ROOT not in sys.path:
@@ -200,11 +207,11 @@ def collect_answers():
     print()
     print("Web dashboard (optional) - search / queue / file lists, over a")
     print("small Flask app in a browser. Off by default; needs Flask")
-    print("installed (`pip install flask`), but never stops the daemon from")
-    print("starting if it is not.")
+    print("installed, but never stops the daemon from starting if it is not.")
     enable_webui = input("Enable it? [y/N]: ").strip().lower() in ("y", "yes")
     changes["WEBUI_ENABLED"] = enable_webui
     if enable_webui:
+        offer_to_install_web_requirements()
         lan = input("  Reachable from other devices on your LAN (phone, "
                     "laptop), not just this machine? [y/N]: ").strip().lower() in ("y", "yes")
         changes["WEBUI_HOST"] = "0.0.0.0" if lan else "127.0.0.1"
@@ -214,6 +221,78 @@ def collect_answers():
             print("  and never port-forward this port to the internet.")
 
     return changes, password_hash
+
+
+def offer_to_install_web_requirements():
+    """Install Flask for the web dashboard just enabled, or say how to.
+
+    Answers the half of #69 that shipping WEBUI_ENABLED's own yes/no prompt
+    never did: saying yes here used to just print `pip install flask` and
+    leave it at that, so an operator who answered "yes" still had a
+    dashboard that would not start on the very first run until they read
+    the log, found the ImportError, and typed the command themselves.
+
+    Checked with the same try/import webserver.py itself uses (HAVE_FLASK),
+    not a subprocess or importlib.util.find_spec probe - Flask is either
+    importable in THIS interpreter or it is not, and that is the exact
+    question this function needs answered.
+
+    Nothing here is fatal. A failed or declined install still lets setup
+    finish and the daemon still starts - a dashboard that cannot import
+    Flask logs it and stays off, exactly as it does today; this only
+    changes whether an operator has to go looking for the fix themselves.
+
+    pip itself is checked the same way, separately, before asking anything:
+    `python -m pip` does `import pip` internally, so a missing pip module
+    fails identically whether asked here first or discovered by running the
+    subprocess - checking first means the operator is not asked "Install it
+    now?" for something already known to fail, and is told the actual
+    problem (no pip, not "the install failed") with somewhere to go for it.
+    """
+    try:
+        import flask  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    print("  Flask is not installed yet, so the dashboard will not start "
+          "until it is.")
+
+    try:
+        import pip  # noqa: F401
+    except ImportError:
+        if platform_compat.IS_WINDOWS:
+            print("  pip is not installed for this Python, so it cannot be "
+                  "installed automatically. This usually means Python was "
+                  "installed without ticking the pip/py launcher boxes - see "
+                  "docs/WINDOWS.md (\"Before you start\") for how to fix that.")
+        else:
+            print("  pip is not installed for this Python, so it cannot be "
+                  "installed automatically. On many Linux distributions pip "
+                  "is a separate package from Python itself (for example "
+                  "python3-pip on Debian/Ubuntu) - see docs/INSTALL.md for "
+                  "the exact command to install the dashboard's dependencies "
+                  "once you have it.")
+        print("  Skipped. The dashboard will log that Flask is missing and "
+              "stay off until you install it.")
+        return
+
+    install = input("  Install it now (pip install -r requirements-web.txt)? "
+                    "[Y/n]: ").strip().lower() in ("", "y", "yes")
+    if not install:
+        print("  Skipped. Run 'pip install -r requirements-web.txt' "
+              "yourself before starting the daemon, or the dashboard will "
+              "log that Flask is missing and stay off.")
+        return
+
+    print("  Installing...")
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "install", "-r",
+         os.path.join(REPO_ROOT, "requirements-web.txt")])
+    if result.returncode != 0:
+        print("  Install failed - see the output above. Run "
+              "'pip install -r requirements-web.txt' yourself once the "
+              "problem is fixed; the dashboard stays off until then.")
 
 
 def write_settings_conf(changes, path=None):
@@ -277,9 +356,154 @@ def write_admin_config_password(password_hash, path=None, sample_path=None):
 
     text = build_admin_config_text(existing_text, password_hash)
 
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(text)
+    # ATOMIC, because open(path, "w") truncates BEFORE it writes. A full disk,
+    # a killed process or a power cut at that moment left a half-written
+    # admin_config.py - and a half-written Python file is a SyntaxError, which
+    # defaults.py's `except ImportError` around `from admin_config import *`
+    # does not catch. That makes the daemon unbootable, and configure.py
+    # cannot repair it either, because configure.py imports defaults itself.
+    # settings_file._atomic_write() already does this correctly for the other
+    # config file; there is no reason for this one to be the exception.
+    settings_file._atomic_write(path, text)
     print(f"[SETUP] Wrote ADMIN_PASSWORD_HASH to {os.path.basename(path)}.")
+
+    shadow = settings_conf_shadows_password()
+    if shadow:
+        # WHICH FILE WINS IS NOT THE ONE THIS FUNCTION WRITES. defaults.py
+        # applies admin_config.py first and settings.conf second, so a hash in
+        # settings.conf overrides the one just written - and the dashboard's
+        # own "change password" control writes to settings.conf. So on any
+        # install whose password was ever changed from the dashboard, running
+        # configure.py to rotate the credential silently did nothing, and the
+        # operator kept using a password they believed they had replaced.
+        #
+        # settings_file.shadowed_by_admin_config() warns about exactly this
+        # collision from the other direction. This is the missing half.
+        print(f"[SETUP] WARNING: {os.path.basename(shadow)} also sets "
+              f"ADMIN_PASSWORD_HASH, and it is applied AFTER "
+              f"{os.path.basename(path)} - so the password you just set will "
+              f"NOT take effect.")
+        print(f"[SETUP] Remove the ADMIN_PASSWORD_HASH line from "
+              f"{os.path.basename(shadow)}, or change the password from the "
+              f"dashboard instead, which writes to that file.")
+    return shadow
+
+
+def settings_conf_shadows_password():
+    """The settings.conf path if it sets ADMIN_PASSWORD_HASH, else None.
+
+    Parsed rather than pattern-matched: settings_file.parse() is what the
+    daemon itself uses to decide what that file sets, so this cannot disagree
+    with the thing it is predicting.
+    """
+    try:
+        path = settings_file.settings_path()
+        if not os.path.exists(path):
+            return None
+        with io.open(path, encoding="utf-8") as handle:
+            parsed = settings_file.parse(handle.read())
+    except Exception:
+        # A settings.conf that cannot be read is not a reason to refuse to set
+        # a password; the daemon reports that fault on its own at startup.
+        return None
+    values = parsed[0] if isinstance(parsed, tuple) else parsed
+    try:
+        names = set(values)
+    except TypeError:
+        return None
+    return path if "ADMIN_PASSWORD_HASH" in names else None
+
+
+def read_vars_ini(path):
+    """The text of a vars.ini, or (None, reason). No parsing here.
+
+    mIRC writes that file in whatever the machine's ANSI code page is, and a
+    nickname with an accent in it is enough to make it invalid UTF-8 - so this
+    reads with errors="replace" rather than failing. A mangled character in a
+    variable NAME simply stops that line matching a field, which is the same
+    outcome as the variable being absent; the numbers this reads are ASCII
+    digits either way.
+    """
+    try:
+        with io.open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read(), None
+    except OSError as err:
+        return None, str(err)
+
+
+def offer_to_import_omenserve_stats(ask=input, log=print):
+    """Bring an OmenServe operator's totals across, during setup.
+
+    THE POINT IS WHEN, not what. The Stats page has imported these since #69,
+    and somebody migrating is looking at THIS script - not at a dashboard they
+    have not enabled yet, on a feature they have no reason to know exists. The
+    roadmap called it "an OmenServe migration path offered on first run", and
+    this is that: the same parse, the same validation, the same write.
+
+    Nothing here re-implements the import. `omenserve_import` reads the file
+    and webserver's preview/apply do the rest - a second copy of "which
+    variables, what is a sane number, what actually landed" is precisely how
+    two answers to one question drift apart.
+
+    Returns True if figures were written, False otherwise. Never raises: a
+    setup script that dies on a mistyped path has cost the operator the whole
+    run.
+    """
+    # Imported here, not at module scope. This is one optional branch of a
+    # setup script, and webserver pulls in its own dependencies - the same
+    # reason webserver itself imports `list` inside its handlers.
+    import webserver
+
+    log("")
+    log("Coming from OmenServe? Your files-sent and bytes-sent totals and your")
+    log("speed record are in mIRC's scripts/vars.ini, written by whichever")
+    log("add-ons you ran. They can be brought across now, or later from the")
+    log("dashboard's Stats page - this is the same import either way.")
+    if str(ask("Import them now? [y/N]: ")).strip().lower() not in ("y", "yes"):
+        return False
+
+    # Quotes stripped because dragging a file onto a terminal on both Windows
+    # and Linux hands you a quoted path, and an operator who does that is
+    # doing the sensible thing.
+    path = str(ask("  Full path to vars.ini: ")).strip().strip('"').strip("'")
+    if not path:
+        log("  Nothing entered - skipped.")
+        return False
+
+    text, problem = read_vars_ini(path)
+    if text is None:
+        log(f"  Could not read it: {problem}")
+        log("  Skipped. The Stats page can do this later.")
+        return False
+
+    try:
+        preview = webserver.build_stats_import_preview(text)
+    except Exception as err:                      # pragma: no cover - defensive
+        log(f"  Could not read the figures out of it: {err}")
+        return False
+
+    for row in preview.get("rows", []):
+        mark = "will import" if row.get("imported") else "not imported"
+        log(f"    {row.get('label', row.get('variable'))}: "
+            f"{row.get('value')}  ({mark})")
+    for note in preview.get("notes", []):
+        log(f"  {note}")
+
+    values = preview.get("values") or {}
+    if not values:
+        log("  Nothing in that file could be imported. Skipped.")
+        return False
+
+    if str(ask("  Write these figures? [y/N]: ")).strip().lower() not in ("y", "yes"):
+        log("  Left alone.")
+        return False
+
+    status, result = webserver.apply_stats_import(values)
+    if status != 200:
+        log(f"  {result.get('error', 'The import failed.')}")
+        return False
+    log(f"  Imported: {', '.join(result.get('imported', []))}.")
+    return True
 
 
 def offer_to_generate_master_list(file_directory_set):
@@ -328,6 +552,7 @@ def main():
     write_settings_conf(changes)
     write_admin_config_password(password_hash)
     offer_to_generate_master_list("FILE_DIRECTORY" in changes)
+    offer_to_import_omenserve_stats()
 
     print()
     print("=" * 68)

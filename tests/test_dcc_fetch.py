@@ -12,6 +12,8 @@ tests/test_adminchat.py's real-socket pattern rather than mocking everything.
 Deliberately stdlib-only, like the rest of the suite.
 """
 
+import contextlib
+import io
 import ipaddress
 import os
 import socket
@@ -19,6 +21,7 @@ import sys
 import threading
 import time
 import unittest
+import zipfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -117,16 +120,21 @@ class OfferParsingTests(unittest.TestCase):
 
 class PassiveOfferParsingTests(unittest.TestCase):
     """port 0 plus a trailing token is the standard passive/reverse DCC
-    marker - another bot on the network (ValOgg) answered a cross-bot fetch
-    request with exactly this shape during live testing, and the old code
+    marker - a peer bot answered a cross-bot fetch request with exactly this
+    shape during live testing, and the old code
     rejected it as "Unusable" because it checked `port <= 0`. It must now
     parse as a distinct, valid result - see parse_dcc_send_offer()'s
     docstring and adminchat.parse_offer()'s identical convention for
     passive DCC CHAT."""
 
     def test_the_reported_offer_parses(self):
-        """Reproduction of a real passive offer's shape - the claimed IP is a
-        TEST-NET-3 address (RFC 5737), not the real one originally logged."""
+        """A real passive offer's SHAPE, with invented contents.
+
+        This used to say that only the address had been replaced, which
+        certifies everything beside it as genuine - and a sentence doing that
+        is what kept real names alive through three earlier scrub passes. The
+        claimed IP is a TEST-NET-3 address (RFC 5737); the filename is an
+        example."""
         offer = dcc_fetch.parse_dcc_send_offer(
             "DCC SEND [Metallica]_-_72_Seasons_-_01-72_Seasons.mp3 "
             "3405803818 0 3359600 11124")
@@ -703,6 +711,96 @@ class DispatcherStateMachineTests(DCCoreTestCase):
         self.assertEqual(config.fetch_queue[rid]["state"], "listening")
 
 
+class ARequestGoesToTheBotsOwnChannel(DCCoreTestCase):
+    """Reported live: a bot only in the second of several configured
+    channels had its fetch dispatched into the first one instead, and every
+    request to it failed with "no response" - unsurprising, since the bot
+    never saw a request that never reached its channel. check_fetch_queue()
+    used to send every dispatched request into one fixed channel
+    (BROADCAST_SEARCH_CHANNEL, or else the first entry of config.CHANNEL)
+    no matter where the target bot actually was.
+
+    webserver.bot_not_here_error() already refuses to even enqueue a fetch
+    for a bot in none of our channels - these tests are about the bot BEING
+    somewhere, just not the one fixed channel dispatch used to assume.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.set_config(CHANNEL="#one,#two,#three")
+
+    def _dispatch(self, bot, filename="Song.flac", request_type="file"):
+        rid = dcc_fetch.enqueue_fetch(bot, filename, request_type=request_type)
+        dcc_fetch.check_fetch_queue()
+        self.assertEqual(len(self.oserve.queued), 1)
+        _user, message, _is_vip = self.oserve.queued[0]
+        return message
+
+    def test_the_request_goes_into_the_channel_the_bot_is_actually_in(self):
+        config.channel_users["#two"] = {"somebot"}
+
+        message = self._dispatch("SomeBot")
+
+        self.assertIn("PRIVMSG #two :", message)
+        self.assertNotIn("#one", message)
+
+    def test_a_list_request_goes_to_the_right_channel_too(self):
+        config.channel_users["#two"] = {"somebot"}
+
+        message = self._dispatch("SomeBot", request_type="list")
+
+        self.assertIn("PRIVMSG #two :@SomeBot", message)
+
+    def test_a_folder_request_goes_to_the_right_channel_too(self):
+        config.channel_users["#two"] = {"somebot"}
+
+        message = self._dispatch("SomeBot", "!rar Artist/Album", request_type="folder")
+
+        self.assertIn("PRIVMSG #two :!SomeBot", message)
+
+    def test_a_bot_nowhere_we_know_of_falls_back_to_the_first_channel(self):
+        """Presence changed between enqueue and this dispatch tick - the
+        request must still go somewhere rather than vanish silently, even
+        though it is no better off than before this fix."""
+        message = self._dispatch("ghostbot")
+
+        self.assertIn("PRIVMSG #one :", message)
+
+    def test_a_bot_present_in_more_than_one_channel_picks_the_configured_order(self):
+        config.channel_users["#two"] = {"multibot"}
+        config.channel_users["#three"] = {"multibot"}
+
+        message = self._dispatch("multibot")
+
+        self.assertIn("PRIVMSG #two :", message,
+                      "#two comes before #three in config.CHANNEL")
+
+    def test_the_match_is_case_insensitive_but_the_channel_keeps_its_own_case(self):
+        config.channel_users["#two"] = {"somebot"}
+
+        message = self._dispatch("SOMEBOT")
+
+        self.assertIn("PRIVMSG #two :", message)
+
+    def test_broadcast_search_channel_is_only_the_last_resort_now(self):
+        """BROADCAST_SEARCH_CHANNEL used to be dispatch's one and only
+        default - now the bot's own channel wins over it too, and it is
+        purely a fallback for a bot presence cannot place anywhere."""
+        self.set_config(BROADCAST_SEARCH_CHANNEL="#three")
+        config.channel_users["#two"] = {"somebot"}
+
+        message = self._dispatch("SomeBot")
+
+        self.assertIn("PRIVMSG #two :", message)
+
+    def test_broadcast_search_channel_still_answers_for_an_unplaceable_bot(self):
+        self.set_config(BROADCAST_SEARCH_CHANNEL="#three")
+
+        message = self._dispatch("ghostbot")
+
+        self.assertIn("PRIVMSG #three :", message)
+
+
 class LoopbackTransferTests(DCCoreTestCase):
     """Real sockets, like tests/test_adminchat.py's loopback pattern - not
     everything mocked, so the actual recv/write/size-accounting loop runs."""
@@ -831,6 +929,220 @@ class LoopbackTransferTests(DCCoreTestCase):
         self.assertIn("connect error", row["reason"])
 
 
+class PromoteCleanFilenameTests(DCCoreTestCase):
+    """dcc_fetch._promote_clean_filename() in isolation.
+
+    Reported live: an operator's fetched files and fetched list zips both
+    carrying a name like "058c4cc8ee9a_Some Track.mp3" forever - the request
+    id in _resolve_destination_path()'s stored name exists only to keep two
+    in-flight fetches from colliding on the same cleaned filename, and that
+    risk is over the moment one of them finishes.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="dccore-promote-test-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+
+    def _touch(self, name, content=b"data"):
+        with open(os.path.join(self.tmp, name), "wb") as f:
+            f.write(content)
+
+    def test_the_id_prefix_is_dropped(self):
+        self._touch("abcdef012345_Track.flac", b"payload")
+
+        result = dcc_fetch._promote_clean_filename(self.tmp, "abcdef012345_Track.flac")
+
+        self.assertEqual(result, "Track.flac")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "Track.flac")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "abcdef012345_Track.flac")))
+
+    def test_a_name_already_taken_keeps_the_longer_one(self):
+        """Never overwrites - the same rule note_nick_change() applies for the
+        identical reason (irc.py): no data lost, the file just keeps its
+        longer name on this one occasion rather than clobbering whatever
+        else is already using the plain name."""
+        self._touch("abcdef012345_Track.flac", b"new")
+        self._touch("Track.flac", b"already here")
+
+        result = dcc_fetch._promote_clean_filename(self.tmp, "abcdef012345_Track.flac")
+
+        self.assertEqual(result, "abcdef012345_Track.flac")
+        with open(os.path.join(self.tmp, "Track.flac"), "rb") as f:
+            self.assertEqual(f.read(), b"already here")
+        with open(os.path.join(self.tmp, "abcdef012345_Track.flac"), "rb") as f:
+            self.assertEqual(f.read(), b"new")
+
+    def test_a_name_with_no_id_prefix_is_left_alone(self):
+        """Defense-in-depth: nothing calls this on a name that was never
+        built by _resolve_destination_path(), but it must not mangle one
+        that reaches it anyway."""
+        self._touch("Track.flac")
+
+        result = dcc_fetch._promote_clean_filename(self.tmp, "Track.flac")
+
+        self.assertEqual(result, "Track.flac")
+
+    def test_a_rename_failure_falls_back_to_the_original_name(self):
+        self._touch("abcdef012345_Track.flac")
+        real_rename = os.rename
+
+        def _boom(*a, **k):
+            raise OSError("permission denied")
+
+        dcc_fetch.os.rename = _boom
+        self.addCleanup(setattr, dcc_fetch.os, "rename", real_rename)
+
+        result = dcc_fetch._promote_clean_filename(self.tmp, "abcdef012345_Track.flac")
+
+        self.assertEqual(result, "abcdef012345_Track.flac")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "abcdef012345_Track.flac")))
+
+
+class ACompletedFetchDropsItsTemporaryId(DCCoreTestCase):
+    """End to end, through the real transfer loop - PromoteCleanFilenameTests
+    above covers the helper in isolation; this covers it actually being
+    called from _run_transfer() for "file" and "folder" rows."""
+
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="dccore-fetch-id-test-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        config.FETCHED_FILES_DIR = self.tmp
+
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(1)
+        self.port = self.listener.getsockname()[1]
+        self.addCleanup(self.listener.close)
+
+    def _serve_and_fetch(self, bot, filename, payload, request_type="file"):
+        rid = dcc_fetch.enqueue_fetch(bot, filename, request_type=request_type)
+        config.fetch_queue[rid]["state"] = "offered"
+        config.fetch_queue[rid]["offered_at"] = time.time()
+
+        def serve():
+            self.listener.settimeout(5.0)
+            conn, _ = self.listener.accept()
+            conn.settimeout(5.0)
+            conn.sendall(payload)
+            conn.close()
+
+        server_thread = threading.Thread(target=serve, daemon=True)
+        server_thread.start()
+        offer_line = f"DCC SEND {filename} {ip_long('127.0.0.1')} {self.port} {len(payload)}"
+        dcc_fetch.handle_incoming_offer(None, bot, offer_line)
+        server_thread.join(timeout=5.0)
+        return rid
+
+    def test_a_completed_file_fetch_has_no_id_in_its_stored_name(self):
+        payload = b"FLAC" + (b"\x01\x02\x03\x04" * 1024)
+        rid = self._serve_and_fetch("peerbot", "Song.flac", payload)
+
+        row = config.fetch_queue[rid]
+        self.assertEqual(row["state"], "complete")
+        self.assertEqual(row["stored_filename"], "Song.flac")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp, "Song.flac")))
+
+    def test_a_completed_folder_fetch_has_no_id_in_its_stored_name_either(self):
+        payload = b"RAR" + (b"\x05" * 200)
+        rid = self._serve_and_fetch("peerbot", "Album.rar", payload, request_type="folder")
+
+        row = config.fetch_queue[rid]
+        self.assertEqual(row["state"], "complete")
+        self.assertEqual(row["stored_filename"], "Album.rar")
+
+    def test_two_fetches_racing_for_the_same_name_do_not_collide(self):
+        """The reason the id exists at all - two overlapping fetches for a
+        name that will collide once both are done. Served sequentially here
+        (this test does not need real concurrency to prove the outcome:
+        whichever finishes second must not silently destroy the first)."""
+        first_payload = b"first-file-data"
+        second_payload = b"second-file-data-longer"
+
+        first_rid = self._serve_and_fetch("botone", "Track.flac", first_payload)
+        second_rid = self._serve_and_fetch("bottwo", "Track.flac", second_payload)
+
+        first_name = config.fetch_queue[first_rid]["stored_filename"]
+        second_name = config.fetch_queue[second_rid]["stored_filename"]
+        self.assertNotEqual(first_name, second_name)
+
+        with open(os.path.join(self.tmp, first_name), "rb") as f:
+            self.assertEqual(f.read(), first_payload)
+        with open(os.path.join(self.tmp, second_name), "rb") as f:
+            self.assertEqual(f.read(), second_payload)
+
+
+class ACompletedListFetchRemovesItsZip(DCCoreTestCase):
+    """dcc_fetch._handle_completed_list_fetch(): the raw zip is dead weight
+    once list_fetch.py has safely extracted it - nothing ever reopens it
+    afterward, including a re-fetch, which downloads a fresh one. Reported
+    live: downloading one of these to an operator's own machine and
+    unzipping it there put the request id into the resulting filename too,
+    since a plain list zip has no folder recorded inside it for an unzip
+    tool to extract "into" the way a folder packed with rar's -ep1 does."""
+
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="dccore-listzip-test-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        config.FETCHED_FILES_DIR = self.tmp
+
+    def _write_real_list_zip(self, bot, path):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                f"{bot}-2026-09-12.txt",
+                "List of 1 Files generated on Sep 12th\n"
+                "To request a file, copy/paste to the channel... !x FILENAME\n\n\n"
+                + "=" * 53 + "\n"
+                "Folder\\Path\\\n"
+                f"!{bot} Track.flac  ::INFO:: 1.0MB\n")
+        with open(path, "wb") as fh:
+            fh.write(buf.getvalue())
+
+    def test_the_zip_is_removed_on_success(self):
+        zip_path = os.path.join(self.tmp, "abcdef012345_GoodBot-2026-09-12.zip")
+        self._write_real_list_zip("goodbot", zip_path)
+        row = {"bot": "goodbot"}
+
+        dcc_fetch._handle_completed_list_fetch(row, zip_path)
+
+        self.assertFalse(os.path.exists(zip_path))
+        self.assertIsNone(row["stored_filename"])
+        self.assertNotIn("list_processing_error", row)
+
+    def test_the_list_is_actually_browsable_afterward(self):
+        """Not just "the zip is gone" - the point of removing it is that the
+        extracted copy already stands on its own."""
+        zip_path = os.path.join(self.tmp, "abcdef012345_GoodBot-2026-09-12.zip")
+        self._write_real_list_zip("goodbot", zip_path)
+        row = {"bot": "goodbot"}
+
+        dcc_fetch._handle_completed_list_fetch(row, zip_path)
+
+        self.assertIn("goodbot", dict(getattr(config, "fetched_bot_lists", {}) or {}))
+
+    def test_a_failed_extraction_keeps_the_zip(self):
+        """The one piece of diagnostic evidence for why a peer's archive
+        could not be read - removing it would trade that for nothing."""
+        zip_path = os.path.join(self.tmp, "abcdef012345_BadBot.zip")
+        with open(zip_path, "wb") as f:
+            f.write(b"not a zip file at all")
+        row = {"bot": "badbot", "stored_filename": "abcdef012345_BadBot.zip"}
+
+        dcc_fetch._handle_completed_list_fetch(row, zip_path)
+
+        self.assertTrue(os.path.exists(zip_path))
+        self.assertIn("list_processing_error", row)
+        self.assertEqual(row["stored_filename"], "abcdef012345_BadBot.zip",
+                         "a failed extraction must not touch stored_filename - "
+                         "the zip is still exactly where that name points")
+
+
 class FetchListenerPortOrderingTests(DCCoreTestCase):
     """BUG regression: _open_fetch_listener() used to scan DOWNWARD from
     DCC_PORT_END - the exact same direction and first-probed port as
@@ -840,39 +1152,70 @@ class FetchListenerPortOrderingTests(DCCoreTestCase):
     first-probed port as either adminchat's downward-from-end scan or
     dcc.py's own outbound SEND (upward-from-start, verified separately in
     dcc.py's own tests) - reducing first-probe collisions with both.
+
+    WHY THESE DO NOT BIND REAL SOCKETS
+
+    They used to. That made them assert which port came back while quietly
+    depending on 55000-55010 being free on the machine, which is not something
+    a test can assume: `_open_fetch_listener()` falls through to the next port
+    whenever one is taken, so a listener still open from an earlier test - or
+    a TIME_WAIT left by one - silently changes the answer. Both failed that
+    way during a full-suite run, one as `55004 != 55005` and the other as
+    `55000 == 55000`, on a branch that touched none of this.
+
+    Proven environmental rather than a regression: on a clean checkout, simply
+    holding port 55005 reproduces the first failure exactly.
+
+    What these tests are actually about is the PROBE ORDER, and that needs no
+    network at all. Faking bind makes them deterministic, lets them state
+    which ports are occupied instead of hoping, and covers the fallback
+    behaviour that could not be reached before. Real binding is still
+    exercised end to end by PassiveOfferEndToEndTests below.
     """
+
+    def probe(self, occupied=()):
+        """Run _open_fetch_listener() against a fake socket layer.
+
+        Returns (attempted_ports, port). `occupied` names the ports whose bind
+        should fail, the way a port held by another process behaves.
+        """
+        attempted = []
+        taken = set(occupied)
+        real_socket_cls = socket.socket
+
+        class FakeListenerSocket:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def setsockopt(self, *args, **kwargs):
+                # platform_compat.prepare_listener() sets one address-reuse
+                # option and nothing else.
+                return None
+
+            def bind(self, addr):
+                attempted.append(addr[1])
+                if addr[1] in taken:
+                    raise OSError(98, "Address already in use")
+
+            def listen(self, *args, **kwargs):
+                return None
+
+            def close(self):
+                return None
+
+        socket.socket = FakeListenerSocket
+        try:
+            _listener, port = dcc_fetch._open_fetch_listener()
+        finally:
+            socket.socket = real_socket_cls
+        return attempted, port
 
     def test_first_probed_port_is_the_midpoint_of_the_range(self):
         self.set_config(DCC_PORT_START=55000, DCC_PORT_END=55010)
-        attempted_ports = []
-        real_socket_cls = socket.socket
 
-        class RecordingSocket:
-            def __init__(self, *args, **kwargs):
-                self._real = real_socket_cls(*args, **kwargs)
+        attempted, port = self.probe()
 
-            def bind(self, addr):
-                attempted_ports.append(addr[1])
-                return self._real.bind(addr)
-
-            def listen(self, *args, **kwargs):
-                return self._real.listen(*args, **kwargs)
-
-            def close(self):
-                return self._real.close()
-
-            def __getattr__(self, name):
-                return getattr(self._real, name)
-
-        socket.socket = RecordingSocket
-        try:
-            listener, port = dcc_fetch._open_fetch_listener()
-        finally:
-            socket.socket = real_socket_cls
-
-        self.assertIsNotNone(listener)
-        self.addCleanup(listener.close)
-        self.assertEqual(attempted_ports[0], 55005, "midpoint of 55000-55010")
+        self.assertEqual(attempted[0], 55005, "midpoint of 55000-55010")
         self.assertEqual(port, 55005)
 
     def test_never_shares_a_first_probed_port_with_adminchat_or_dcc_py(self):
@@ -880,10 +1223,53 @@ class FetchListenerPortOrderingTests(DCCoreTestCase):
         dcc.py's own outbound SEND scans upward from DCC_PORT_START (first
         probe: START). The fetch listener's first probe must be neither."""
         self.set_config(DCC_PORT_START=55000, DCC_PORT_END=55010)
-        listener, port = dcc_fetch._open_fetch_listener()
-        self.addCleanup(listener.close)
-        self.assertNotEqual(port, config.DCC_PORT_START)
-        self.assertNotEqual(port, config.DCC_PORT_END)
+
+        attempted, _port = self.probe()
+
+        self.assertNotEqual(attempted[0], config.DCC_PORT_START)
+        self.assertNotEqual(attempted[0], config.DCC_PORT_END)
+
+    def test_it_scans_upward_from_the_midpoint_then_wraps_downward(self):
+        """The full order, which the real-socket version could only assert the
+        first element of. Upward from the midpoint to the end, then downward
+        from just below the midpoint to the start."""
+        self.set_config(DCC_PORT_START=55000, DCC_PORT_END=55010)
+
+        attempted, _port = self.probe(occupied=range(55000, 55011))
+
+        self.assertEqual(attempted,
+                         [55005, 55006, 55007, 55008, 55009, 55010,
+                          55004, 55003, 55002, 55001, 55000])
+
+    def test_a_busy_midpoint_falls_through_to_the_next_port(self):
+        """Reachable only now that occupancy can be stated. This is exactly
+        what the machine was doing to these tests when they bound for real."""
+        self.set_config(DCC_PORT_START=55000, DCC_PORT_END=55010)
+
+        attempted, port = self.probe(occupied=[55005])
+
+        self.assertEqual(attempted[:2], [55005, 55006])
+        self.assertEqual(port, 55006)
+
+    def test_a_full_range_returns_no_listener_rather_than_raising(self):
+        """The caller checks for None. Raising instead would take down the
+        fetch path on a busy box rather than declining one offer."""
+        self.set_config(DCC_PORT_START=55000, DCC_PORT_END=55010)
+
+        attempted, port = self.probe(occupied=range(55000, 55011))
+
+        self.assertIsNone(port)
+        self.assertEqual(len(attempted), 11, "every port must be tried once")
+
+    def test_a_single_port_range_still_works(self):
+        """Boundary: start == end makes the midpoint both ends at once, and
+        the downward half of the scan empty."""
+        self.set_config(DCC_PORT_START=55000, DCC_PORT_END=55000)
+
+        attempted, port = self.probe()
+
+        self.assertEqual(attempted, [55000])
+        self.assertEqual(port, 55000)
 
 
 class PassiveOfferEndToEndTests(DCCoreTestCase):
@@ -927,8 +1313,14 @@ class PassiveOfferEndToEndTests(DCCoreTestCase):
         return payload.rstrip("\x01\r\n").split()
 
     def test_the_reported_offer_end_to_end(self):
-        """The exact ValOgg shape from a real capture, all the way through a
-        real accepted connection and a byte-for-byte written file."""
+        """The exact shape from a real capture, all the way through a real
+        accepted connection and a byte-for-byte written file.
+
+        The SHAPE is real; the nick that used to be named here was not, and
+        saying otherwise is what kept three real names alive through three
+        scrub passes - see tests/test_advert_listener.py's own note. A
+        sentence asserting a name is genuine is the thing that stops the next
+        reader replacing it."""
         payload = b"MP3" + (b"\x05\x06\x07\x08" * 2048)
         rid = self._enqueue_and_offer("valogg", "72_Seasons.mp3")
         offer_line = (f"DCC SEND 72_Seasons.mp3 {ip_long('198.51.100.9')} "
@@ -1705,6 +2097,11 @@ class EnqueueTimeBotAloneCollisionTests(DCCoreTestCase):
         self.assertIsNotNone(folder_rid)
         self.assertEqual(len(config.fetch_queue), 2)
 
+    def test_bot_name_comparison_is_case_and_whitespace_insensitive_for_files_too(self):
+        dcc_fetch.enqueue_fetch(" GoodBot ", "Track.flac", request_type="file")
+
+        self.assertEqual(len(config.fetch_queue), 1)
+
     def test_a_new_bot_alone_request_succeeds_once_the_first_has_completed(self):
         list_rid = dcc_fetch.enqueue_fetch("goodbot", "", request_type="list")
         config.fetch_queue[list_rid]["state"] = "complete"
@@ -1757,6 +2154,56 @@ class EnqueueTimeBotAloneCollisionTests(DCCoreTestCase):
 
         self.assertIsNotNone(list_rid)
         self.assertEqual(len(config.fetch_queue), 2)
+
+
+class HasAnyOutstandingRequestTests(DCCoreTestCase):
+    """dcc_fetch.has_any_outstanding_request(), issue #385's purge feature.
+
+    Wider than has_outstanding_bot_alone_request() above: that one only
+    watches "list"/"folder" rows because those are the ambiguous ones at
+    claim time. This one is for a caller that wants to know "is it safe to
+    forget this bot entirely right now", and a plain "file" row in flight is
+    just as unsafe to forget as a bot-alone one - deleting the fetched-list
+    entry or extract directory a reply is about to be matched against would
+    still break something, even though the claim-time ambiguity itself does
+    not apply to "file" rows.
+    """
+
+    def test_false_with_an_empty_queue(self):
+        self.assertFalse(dcc_fetch.has_any_outstanding_request("goodbot"))
+
+    def test_true_for_a_plain_file_request(self):
+        rid = dcc_fetch.enqueue_fetch("goodbot", "Track.flac", request_type="file")
+        self.assertIsNotNone(rid)
+        self.assertTrue(dcc_fetch.has_any_outstanding_request("goodbot"))
+
+    def test_true_for_a_list_request(self):
+        rid = dcc_fetch.enqueue_fetch("goodbot", "", request_type="list")
+        self.assertIsNotNone(rid)
+        self.assertTrue(dcc_fetch.has_any_outstanding_request("goodbot"))
+
+    def test_true_for_a_folder_request(self):
+        rid = dcc_fetch.enqueue_fetch("goodbot", "!rar Artist/Album", request_type="folder")
+        self.assertIsNotNone(rid)
+        self.assertTrue(dcc_fetch.has_any_outstanding_request("goodbot"))
+
+    def test_false_once_the_row_reaches_a_terminal_state(self):
+        rid = dcc_fetch.enqueue_fetch("goodbot", "Track.flac", request_type="file")
+        with dcc_fetch._fetch_lock():
+            config.fetch_queue[rid]["state"] = "complete"
+
+        self.assertFalse(dcc_fetch.has_any_outstanding_request("goodbot"))
+
+    def test_a_request_for_a_different_bot_is_unaffected(self):
+        dcc_fetch.enqueue_fetch("goodbot", "Track.flac", request_type="file")
+
+        self.assertFalse(dcc_fetch.has_any_outstanding_request("otherbot"))
+
+    def test_bot_name_comparison_is_case_and_whitespace_insensitive(self):
+        dcc_fetch.enqueue_fetch(" GoodBot ", "Track.flac", request_type="file")
+
+        self.assertTrue(dcc_fetch.has_any_outstanding_request("goodbot"))
+        self.assertTrue(dcc_fetch.has_any_outstanding_request(" GOODBOT "))
 
 
 class RefusalNoticeFastFailTests(DCCoreTestCase):
@@ -2222,7 +2669,7 @@ class ListFetchEndToEndTests(DCCoreTestCase):
         import list_fetch
         # Paged by folder now: flatten the groups back to rows, which is all
         # this test ever cared about.
-        folders, _n, _files, error = list_fetch.get_fetched_bot_page(entry, 0, 10**9)
+        folders, _n, _files, _row_capped, error = list_fetch.get_fetched_bot_page(entry, 0, 10**9)
         self.assertIsNone(error)
         titles = [e["title"] for g in folders for e in g["entries"]]
         self.assertIn("Track One.flac", titles)
@@ -2261,7 +2708,7 @@ class ListFetchEndToEndTests(DCCoreTestCase):
         entry = config.fetched_bot_lists["otherbot"]
         # Paged by folder now: flatten the groups back to rows, which is all
         # this test ever cared about.
-        folders, _n, _files, error = list_fetch.get_fetched_bot_page(entry, 0, 10**9)
+        folders, _n, _files, _row_capped, error = list_fetch.get_fetched_bot_page(entry, 0, 10**9)
         self.assertIsNone(error)
         titles = [e["title"] for g in folders for e in g["entries"]]
         self.assertNotIn("Stale.flac", titles)
@@ -2345,6 +2792,293 @@ class LongOfferedFilenames(LoopbackTransferTests):
 
         self.assertEqual(row["state"], "complete")
         self.assertEqual(row["bytes_received"], len(payload))
+
+
+class TurningTheSizeCapsOff(DCCoreTestCase):
+    """#302: "Files should never be rejected based on size."
+
+    The caps are not deleted - deleting them takes the choice from every
+    operator who does not know they exist. They are switchable off, which is
+    the same outcome for the one who wants it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.bot = "SizeBot"
+        self.set_config(fetch_queue={})
+
+    def offer(self, size, request_type="file"):
+        """The payload is the raw CTCP text, and the row must already be
+        'offered' - admission control only accepts an offer answering a
+        request we made a moment ago."""
+        import dcc_fetch
+        request_id = dcc_fetch.enqueue_fetch(self.bot, "Huge.rar")
+        row = config.fetch_queue[request_id]
+        row["request_type"] = request_type
+        row["state"] = "offered"
+        row["offered_at"] = time.time()
+        dcc_fetch.handle_incoming_offer(
+            None, self.bot, f"DCC SEND Huge.rar 2130706433 55000 {size}")
+        return config.fetch_queue[request_id]
+
+    def test_an_offer_over_the_cap_is_still_refused_by_default(self):
+        self.set_config(MAX_FETCH_FILE_SIZE=1000)
+
+        row = self.offer(5000)
+
+        self.assertEqual(row["state"], "failed")
+        self.assertIn("exceeds", row.get("reason", ""))
+
+    def test_zero_means_no_limit(self):
+        """The row still fails - it goes on to connect to a peer that is not
+        there - but not FOR ITS SIZE, which is the whole of what the cap
+        decides. Asserting "not failed" would be asserting that a fixture
+        socket connects."""
+        self.set_config(MAX_FETCH_FILE_SIZE=0)
+
+        row = self.offer(5 * 1024 * 1024 * 1024)
+
+        self.assertNotIn("exceeds", row.get("reason", ""))
+        self.assertNotIn("MAX_FETCH_FILE_SIZE", row.get("reason", ""))
+
+    def test_the_refusal_says_how_to_switch_it_off(self):
+        """The operator who hit this had no way to tell from the message that
+        it was theirs to change."""
+        self.set_config(MAX_FETCH_FILE_SIZE=1000)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            self.offer(5000)
+
+        self.assertIn("0 for no limit", buffer.getvalue())
+
+    def test_the_list_cap_clears_a_real_list_archive(self):
+        """10MB was 'generous over any real master-list zip' on the same
+        evidence that put the text ceiling at 20MB: one 4MB list. Real lists
+        run to 31MB of text, and a zip of one is several MB - close enough to
+        the old cap that the next library along lands on it."""
+        self.assertGreaterEqual(config.MAX_FETCH_LIST_FILE_SIZE, 32 * 1024 * 1024)
+
+
+class AskingForARowCopiedOutOfAnotherBotsList(DCCoreTestCase):
+    """The shape an operator's own log showed, with the peer renamed:
+
+        [FETCH] Requested 'BBCRadio - Under Milk Wood - Richard Burton.mp3
+                ::INFO:: 79.53MB' from PeerServeDCC (request f96ba6b77dff).
+        [FETCH] Rejected unsolicited DCC SEND from PeerServeDCC
+                ('BBCRadio_-_Under_Milk_Wood_-_Richard_Burton.mp3'):
+                no matching pending request.
+
+    The bot asked for a file and then refused the answer to its own question.
+    """
+
+    LINE = "BBCRadio - Under Milk Wood - Richard Burton.mp3  ::INFO:: 79.53MB"
+    SENT_BACK = "BBCRadio_-_Under_Milk_Wood_-_Richard_Burton.mp3"
+
+    def test_the_size_suffix_is_not_part_of_the_filename(self):
+        """The dashboard sends what the operator clicked, which is the whole
+        list row. The serving side has stripped this since #234; the fetching
+        side never learned to."""
+        row = dcc_fetch.new_fetch_row("PeerServeDCC", self.LINE)
+
+        self.assertEqual(row["filename"],
+                         "BBCRadio - Under Milk Wood - Richard Burton.mp3")
+        self.assertNotIn("::INFO::", row["requested_filename"])
+
+    def test_the_answer_to_our_own_request_is_now_claimed(self):
+        """The end-to-end shape of the bug: ask with the suffix, be answered
+        without it and with underscores for spaces, and match."""
+        self.set_config(fetch_queue={})
+        request_id = dcc_fetch.enqueue_fetch("PeerServeDCC", self.LINE)
+        config.fetch_queue[request_id]["state"] = "offered"
+
+        claimed_id, row = dcc_fetch._claim_matching_offer_locked(
+            config.fetch_queue, "PeerServeDCC", self.SENT_BACK)
+
+        self.assertEqual(claimed_id, request_id)
+        self.assertEqual(row["state"], "receiving")
+
+    def test_the_normaliser_alone_could_never_have_bridged_it(self):
+        """Worth pinning, because the docstring says the match is
+        "underscore/space-normalised" and it is - that was never the gap. A
+        size only one side carries is not whitespace."""
+        with_suffix = dcc_fetch._normalize_filename_for_match(self.LINE)
+        without = dcc_fetch._normalize_filename_for_match(self.SENT_BACK)
+
+        self.assertNotEqual(with_suffix, without)
+
+    def test_a_folder_rows_request_text_survives_untouched(self):
+        """Only "file" rows are stripped. A folder row's requested_filename is
+        the literal "!rar <path>" request text, which new_fetch_row()'s own
+        docstring depends on being preserved.
+
+        The path is built from a heading in ANOTHER bot's list, so it is not
+        ours to predict - a folder actually named "::INFO::" is odd but it is
+        theirs to name, and stripping it would turn a request they could have
+        answered into one they cannot. That is what makes this restriction
+        load-bearing rather than decorative: without the case, "file" and
+        "everything" are the same code."""
+        for text in ("!rar D:/MEDIA/Artist/Album/",
+                     "!rar D:/MEDIA/Artist/::INFO:: Sessions/"):
+            with self.subTest(text=text):
+                row = dcc_fetch.new_fetch_row("B", text, request_type="folder")
+
+                self.assertEqual(row["requested_filename"], text)
+
+    def test_an_ordinary_filename_is_unchanged(self):
+        row = dcc_fetch.new_fetch_row("B", "Just A Track.flac")
+
+        self.assertEqual(row["filename"], "Just A Track.flac")
+
+
+class AWholeAlbumSelectedAtOnce(DCCoreTestCase):
+    """From an operator report: "i download a bot's list, added 10+ into the
+    queue on the webdashboard. it didnt queue them, it spit out every line
+    at 1 go. should be queued and sent 3 at the time to the channel."
+
+    That is the contract, and it was only half covered. The SLOT CAP had a
+    test - two promoted, two left pending. What did not was the thing an
+    operator actually sees: that a hundred-row selection reaches the channel a
+    few lines at a time, and that each COMPLETION is what releases the next.
+    A regression in either would have been silent.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.set_config(fetch_queue={}, MAX_FETCH_SLOTS=3,
+                        fetch_feature_disabled=False, CHANNEL="#chan")
+
+    def lines_sent(self):
+        return [msg for _user, msg, _vip in self.oserve.queued]
+
+    def queue_up(self, count, bot="ListBot"):
+        return [dcc_fetch.enqueue_fetch(bot, f"Track {i:02d}.flac")
+                for i in range(count)]
+
+    def complete_everything_in_flight(self):
+        done = 0
+        for row in config.fetch_queue.values():
+            if row.get("state") == "offered":
+                row["state"] = "complete"
+                done += 1
+        return done
+
+    def test_selecting_ten_does_not_put_ten_lines_in_the_channel(self):
+        """The whole point of a queue. Every line at once is both a wall of
+        text in a public channel and a good way to meet Excess Flood."""
+        self.queue_up(10)
+
+        dcc_fetch.check_fetch_queue()
+
+        self.assertEqual(len(self.lines_sent()), 3)
+
+    def test_the_rest_are_waiting_not_lost(self):
+        ids = self.queue_up(10)
+
+        dcc_fetch.check_fetch_queue()
+
+        states = [config.fetch_queue[rid]["state"] for rid in ids]
+        self.assertEqual(states.count("offered"), 3)
+        self.assertEqual(states.count("pending"), 7)
+
+    def test_nothing_more_goes_out_while_the_first_three_are_in_flight(self):
+        """The tick runs every two seconds. If a dispatched row did not count
+        against the slots, a ten-row queue would empty into the channel in
+        under ten seconds - which is what "spit out every line at 1 go" looks
+        like from the outside."""
+        self.queue_up(10)
+
+        for _tick in range(5):
+            dcc_fetch.check_fetch_queue()
+
+        self.assertEqual(len(self.lines_sent()), 3)
+
+    def test_each_completion_releases_exactly_one_more(self):
+        """"as each file download gets completed program requests the next
+        from queue"."""
+        self.queue_up(10)
+        dcc_fetch.check_fetch_queue()
+
+        for row in config.fetch_queue.values():
+            if row.get("state") == "offered":
+                row["state"] = "complete"
+                break
+        dcc_fetch.check_fetch_queue()
+
+        self.assertEqual(len(self.lines_sent()), 4)
+
+    def test_a_long_queue_drains_a_batch_at_a_time(self):
+        """"Queue could be hundreds of lines." Driven the way it really runs -
+        dispatch, complete, dispatch - rather than by setting states and
+        hoping."""
+        self.queue_up(9)
+
+        rounds = 0
+        while rounds < 10:
+            dcc_fetch.check_fetch_queue()
+            self.assertLessEqual(
+                len(self.lines_sent()), (rounds + 1) * 3,
+                "more lines reached the channel than slots allow")
+            if not self.complete_everything_in_flight():
+                break
+            rounds += 1
+
+        self.assertEqual(len(self.lines_sent()), 9)
+        self.assertEqual(rounds, 3, "nine files should take three batches")
+
+    def test_lowering_the_slot_limit_mid_flight_does_not_flush_the_queue(self):
+        """An operator can edit Max fetch slots on the settings page while
+        transfers are running, which is the one way `active` can come out
+        HIGHER than the limit. Without the free_slots <= 0 guard, the negative
+        count reaches pending_ids[:free_slots] as a from-the-end slice and
+        dispatches every pending row but the last few - a hundred-row queue
+        emptying into the channel the moment somebody saved a setting.
+
+        A rehash disturbing a live queue has been reported once already, so
+        this path is not hypothetical. Holding still until the extra
+        transfers finish is the correct response: the ones in flight are
+        already paid for, and the new limit governs from the next promotion
+        on.
+        """
+        self.queue_up(10)
+        dcc_fetch.check_fetch_queue()
+        self.assertEqual(len(self.lines_sent()), 3)
+
+        self.set_config(MAX_FETCH_SLOTS=1)
+        for _tick in range(3):
+            dcc_fetch.check_fetch_queue()
+
+        self.assertEqual(len(self.lines_sent()), 3,
+                         "lowering the limit released the rest of the queue")
+
+    def test_the_lowered_limit_governs_once_the_backlog_clears(self):
+        """The guard holds, it does not wedge."""
+        self.queue_up(10)
+        dcc_fetch.check_fetch_queue()
+        self.set_config(MAX_FETCH_SLOTS=1)
+        self.complete_everything_in_flight()
+
+        dcc_fetch.check_fetch_queue()
+
+        self.assertEqual(len(self.lines_sent()), 4)
+
+    def test_the_slot_count_is_what_paces_it(self):
+        """Raising the limit raises the batch - so an operator who wants more
+        in flight has a setting, and one who does not is not surprised."""
+        self.set_config(MAX_FETCH_SLOTS=5)
+        self.queue_up(10)
+
+        dcc_fetch.check_fetch_queue()
+
+        self.assertEqual(len(self.lines_sent()), 5)
+
+    def test_enqueueing_sends_nothing_by_itself(self):
+        """The dashboard creates rows; the dispatcher owns pacing. If enqueue
+        ever dispatched, selecting a hundred files would send a hundred lines
+        before the dispatcher got a say - which is exactly the reported
+        symptom."""
+        self.queue_up(10)
+
+        self.assertEqual(self.lines_sent(), [])
 
 
 if __name__ == "__main__":

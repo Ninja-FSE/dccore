@@ -79,17 +79,17 @@ class TwoTracksWithTheSameName(CountsCase):
     popular when two different tracks are."""
 
     def test_they_are_counted_apart(self):
-        db.record_download("Dolch/Nacht/01 - Intro.flac", "01 - Intro.flac", "file")
-        db.record_download("EchO/Devoid/01 - Intro.flac", "01 - Intro.flac", "file")
-        db.record_download("EchO/Devoid/01 - Intro.flac", "01 - Intro.flac", "file")
+        db.record_download("Norvale/Dusk/01 - Intro.flac", "01 - Intro.flac", "file")
+        db.record_download("Calder/Hollow/01 - Intro.flac", "01 - Intro.flac", "file")
+        db.record_download("Calder/Hollow/01 - Intro.flac", "01 - Intro.flac", "file")
 
         counts = self.counts()
-        self.assertEqual(counts["Dolch/Nacht/01 - Intro.flac"]["count"], 1)
-        self.assertEqual(counts["EchO/Devoid/01 - Intro.flac"]["count"], 2)
+        self.assertEqual(counts["Norvale/Dusk/01 - Intro.flac"]["count"], 1)
+        self.assertEqual(counts["Calder/Hollow/01 - Intro.flac"]["count"], 2)
 
     def test_but_a_person_still_reads_the_filename(self):
         """Keyed by path, displayed by basename - the table is for humans."""
-        db.record_download("EchO/Devoid/01 - Intro.flac", "01 - Intro.flac", "file")
+        db.record_download("Calder/Hollow/01 - Intro.flac", "01 - Intro.flac", "file")
 
         self.assertEqual(db.top_downloads()[0]["name"], "01 - Intro.flac")
 
@@ -350,7 +350,7 @@ class WhatEachSendIsCountedAs(DCCoreTestCase):
         a "01 - Intro.flac" (#110), so a basename key would credit one track
         with the other's downloads."""
         first = dcc.download_count_identity(
-            os.path.join(config.FILE_DIRECTORY, "Dolch", "Nacht", "01 - Intro.flac"),
+            os.path.join(config.FILE_DIRECTORY, "Norvale", "Dusk", "01 - Intro.flac"),
             "01 - Intro.flac")
         second = dcc.download_count_identity(
             os.path.join(config.FILE_DIRECTORY, "EchO", "Devoid", "01 - Intro.flac"),
@@ -361,13 +361,23 @@ class WhatEachSendIsCountedAs(DCCoreTestCase):
 
     def test_the_key_is_relative_to_the_library(self):
         """So moving the library, or reading the file on another machine, does
-        not orphan every count that came before."""
+        not orphan every count that came before.
+
+        The key now begins with the served folder's LABEL rather than nothing
+        - see tests/test_download_counts_per_folder.py for why - so this used
+        to assert `"MUSIC" not in key` as a proxy for "no absolute path in
+        here" and that proxy stopped meaning what it said the moment the
+        library's own folder name became the label. Asserting the intent
+        directly instead: the key must not carry the library's LOCATION,
+        whatever that location happens to be called.
+        """
         key, _name, _kind = dcc.download_count_identity(
-            os.path.join(config.FILE_DIRECTORY, "Dolch", "Nacht", "01 - Intro.flac"),
+            os.path.join(config.FILE_DIRECTORY, "Norvale", "Dusk", "01 - Intro.flac"),
             "01 - Intro.flac")
 
-        self.assertNotIn("MUSIC", key)
-        self.assertIn("Dolch", key)
+        self.assertNotIn(config.FILE_DIRECTORY, key)
+        self.assertFalse(os.path.isabs(key))
+        self.assertIn("Norvale", key)
 
     def test_an_archive_from_the_temp_directory_is_an_album(self):
         key, name, kind = dcc.download_count_identity(
@@ -395,6 +405,222 @@ class WhatEachSendIsCountedAs(DCCoreTestCase):
 
         self.assertTrue(key)
         self.assertEqual(kind, "file")
+
+
+class TheListIsNotADownload(DCCoreTestCase):
+    """The master list is how somebody finds out what the downloads ARE.
+
+    It is sent to everyone who ever types the nickname, so counting it makes
+    it the most-requested item on every bot forever, in a table whose whole
+    job is to say which of the FILES people want. And because its name carries
+    the build date, it is not even one wrong row: every rebuild starts a new
+    key, so the table fills with dated copies of the same list and pushes real
+    files out of the top ten.
+
+    Reported from the live bot.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.lists = os.path.join(self.make_tree().root, "lists")
+        os.makedirs(self.lists, exist_ok=True)
+        self.set_config(LIST_BASE_NAME="DCCoreTest",
+                        LOCAL_LIST_DIR=self.lists,
+                        FILE_DIRECTORY=os.path.join("D:", os.sep, "MUSIC"),
+                        TMP_ZIP_DIR=os.path.join("D:", os.sep, "tmp_zips"))
+
+    def artifact(self, name):
+        return os.path.join(self.lists, name), name
+
+    def test_the_zip_is_not_counted(self):
+        key, _name, kind = dcc.download_count_identity(
+            *self.artifact("DCCoreTest-2026-09-11.zip"))
+
+        self.assertIsNone(key, "the master list was given a counter key")
+        self.assertEqual(kind, "list")
+
+    def test_the_rar_is_not_counted(self):
+        key, _name, _kind = dcc.download_count_identity(
+            *self.artifact("DCCoreTest-2026-09-11.rar"))
+
+        self.assertIsNone(key)
+
+    def test_the_plain_text_one_is_not_counted(self):
+        """Named differently from the other two - "<base>-FULL-<date>.txt" -
+        so a rule written against the dash-date shape alone misses it."""
+        key, _name, _kind = dcc.download_count_identity(
+            *self.artifact("DCCoreTest-FULL-2026-09-11.txt"))
+
+        self.assertIsNone(key)
+
+    def test_record_download_ignores_it(self):
+        """The end of the path, not just the decision. A falsy key has always
+        returned early there; this is what now depends on it."""
+        db.record_download(*dcc.download_count_identity(
+            *self.artifact("DCCoreTest-2026-09-11.zip")))
+
+        self.assertEqual(db.top_downloads(), [])
+
+    def test_an_ordinary_file_is_still_counted(self):
+        """The control. A rule that stopped counting everything would satisfy
+        every assertion above."""
+        key, _name, kind = dcc.download_count_identity(
+            os.path.join(config.FILE_DIRECTORY, "Artist", "Album", "01.flac"),
+            "01.flac")
+
+        self.assertIsNotNone(key)
+        self.assertEqual(kind, "file")
+
+    def test_an_album_is_still_counted(self):
+        key, _name, kind = dcc.download_count_identity(
+            os.path.join(config.TMP_ZIP_DIR, "Artist - Album.rar"),
+            "Artist - Album.rar")
+
+        self.assertIsNotNone(key)
+        self.assertEqual(kind, "album")
+
+    def test_a_packed_folder_named_like_a_list_is_still_an_album(self):
+        """Checked after the album branch on purpose. An album is identified
+        by WHERE it is - TMP_ZIP_DIR, which dcc.py wrote - and that is
+        unambiguous, so a folder that happens to pack as
+        "<base name>-<date>.rar" must not fall through to the list branch and
+        stop being counted."""
+        key, _name, kind = dcc.download_count_identity(
+            os.path.join(config.TMP_ZIP_DIR, "DCCoreTest-2026-09-11.rar"),
+            "DCCoreTest-2026-09-11.rar")
+
+        self.assertIsNotNone(key)
+        self.assertEqual(kind, "album")
+
+
+class TidyingUpWhatWasAlreadyCounted(DCCoreTestCase):
+    """The fix is invisible to anybody who already has these rows - and they
+    are the people who reported it. The list has been counted since these
+    tables existed, and its dated name means one row per rebuild."""
+
+    def setUp(self):
+        super().setUp()
+        self.lists = os.path.join(self.make_tree().root, "lists")
+        os.makedirs(self.lists, exist_ok=True)
+        self.set_config(LIST_BASE_NAME="DCCoreTest", LOCAL_LIST_DIR=self.lists)
+
+    def write(self, counts):
+        with io.open(db.DOWNLOAD_COUNTS_FILE, "w", encoding="utf-8") as handle:
+            json.dump(counts, handle)
+
+    def test_the_list_rows_go(self):
+        self.write({
+            os.path.join(self.lists, "DCCoreTest-2026-08-01.zip"):
+                {"name": "DCCoreTest-2026-08-01.zip", "kind": "file", "count": 91},
+            "Flac/Artist/Album/01.flac":
+                {"name": "01.flac", "kind": "file", "count": 7},
+        })
+
+        removed = db.prune_list_artifact_download_counts()
+
+        self.assertEqual(removed, 1)
+        self.assertEqual([row["name"] for row in db.top_downloads()], ["01.flac"])
+
+    def test_every_rebuilds_row_goes_not_just_the_newest(self):
+        """The dated name is the reason there is more than one."""
+        self.write({
+            os.path.join(self.lists, "DCCoreTest-2026-07-01.zip"):
+                {"name": "DCCoreTest-2026-07-01.zip", "kind": "file", "count": 5},
+            os.path.join(self.lists, "DCCoreTest-2026-08-01.zip"):
+                {"name": "DCCoreTest-2026-08-01.zip", "kind": "file", "count": 91},
+            os.path.join(self.lists, "DCCoreTest-FULL-2026-09-01.txt"):
+                {"name": "DCCoreTest-FULL-2026-09-01.txt", "kind": "file", "count": 2},
+        })
+
+        self.assertEqual(db.prune_list_artifact_download_counts(), 3)
+        self.assertEqual(db.top_downloads(), [])
+
+    def test_a_row_left_by_a_bot_that_has_since_been_renamed(self):
+        """The name rule is anchored on the CURRENT LIST_BASE_NAME, so a row
+        written under the old nickname no longer matches it. The key still
+        points inside LOCAL_LIST_DIR, which is what catches it - and nothing
+        served can legitimately be keyed that way, because a library file is
+        keyed by its label and the path beneath it, never absolutely."""
+        self.write({
+            os.path.join(self.lists, "OldNick-2026-08-01.zip"):
+                {"name": "OldNick-2026-08-01.zip", "kind": "file", "count": 40},
+            "Flac/Artist/Album/01.flac":
+                {"name": "01.flac", "kind": "file", "count": 7},
+        })
+
+        self.assertEqual(db.prune_list_artifact_download_counts(), 1)
+        self.assertEqual([row["name"] for row in db.top_downloads()], ["01.flac"])
+
+    def test_a_row_left_behind_after_the_lists_directory_moved(self):
+        """The other rule, and the mutation that first showed it was never
+        being exercised on its own: every other fixture here is keyed inside
+        the CURRENT LOCAL_LIST_DIR, so the path check caught them all and
+        deleting the name check changed nothing.
+
+        An operator who repoints LOCAL_LIST_DIR keeps the old rows, keyed
+        under a directory this daemon no longer knows about. The name is all
+        that is left to recognise them by."""
+        self.write({
+            os.path.join("D:", os.sep, "old_lists", "DCCoreTest-2026-08-01.zip"):
+                {"name": "DCCoreTest-2026-08-01.zip", "kind": "file", "count": 55},
+            "Flac/Artist/Album/01.flac":
+                {"name": "01.flac", "kind": "file", "count": 7},
+        })
+
+        self.assertEqual(db.prune_list_artifact_download_counts(), 1)
+        self.assertEqual([row["name"] for row in db.top_downloads()], ["01.flac"])
+
+    def test_a_further_list_in_its_own_subdirectory_goes_too(self):
+        """Non-primary lists write under a subdirectory of LOCAL_LIST_DIR, so
+        one check covers every list a bot serves."""
+        self.write({
+            os.path.join(self.lists, "films", "DCCoreTest-2026-08-01.zip"):
+                {"name": "DCCoreTest-2026-08-01.zip", "kind": "file", "count": 12},
+        })
+
+        self.assertEqual(db.prune_list_artifact_download_counts(), 1)
+
+    def test_real_files_and_albums_are_left_alone(self):
+        """The control, and the one that matters most: this deletes an
+        operator's history, so it must take only what it came for."""
+        self.write({
+            "Flac/Artist/Album/01.flac":
+                {"name": "01.flac", "kind": "file", "count": 7},
+            "Artist - Album.rar":
+                {"name": "Artist - Album", "kind": "album", "count": 3},
+        })
+
+        self.assertEqual(db.prune_list_artifact_download_counts(), 0)
+        self.assertEqual(
+            sorted(row["name"] for row in db.top_downloads(kind=None)),
+            ["01.flac", "Artist - Album"])
+
+    def test_nothing_to_do_does_not_rewrite_the_file(self):
+        """It runs on every boot, so the ordinary case has to be a no-op
+        rather than a rewrite on each start."""
+        self.write({"Flac/Artist/01.flac":
+                    {"name": "01.flac", "kind": "file", "count": 7}})
+        before = os.path.getmtime(db.DOWNLOAD_COUNTS_FILE)
+
+        self.assertEqual(db.prune_list_artifact_download_counts(), 0)
+
+        self.assertEqual(os.path.getmtime(db.DOWNLOAD_COUNTS_FILE), before)
+
+    def test_a_file_that_will_not_parse_costs_nothing(self):
+        """Same posture as every other reader of this file: these counters
+        describe history nothing else reads, so losing them is cosmetic - and
+        refusing to boot over them would not be."""
+        with io.open(db.DOWNLOAD_COUNTS_FILE, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+
+        self.assertEqual(db.prune_list_artifact_download_counts(), 0)
+
+    def test_it_runs_at_startup(self):
+        """Beside the migration that already tidies this same file."""
+        with io.open(os.path.join(REPO_ROOT, "oserve.py"), encoding="utf-8") as f:
+            source = f.read()
+
+        self.assertIn("db.prune_list_artifact_download_counts()", source)
 
 
 if __name__ == "__main__":

@@ -223,18 +223,74 @@ class MissingRarBinaryTests(unittest.TestCase):
                          "for every user until restart")
         self.assertNotIn("dave", getattr(self.config, "user_processing_lock", set()))
 
-    def test_missing_rar_charges_the_row_rather_than_looping(self):
+    def queued_row(self):
         row = {"file": "Album.rar", "path": self.tree.album, "channel": "#c",
                "user_raw": "dave", "is_unpacked_rar_folder": True, "is_temporary_zip": True}
         self.config.dcc_queue = {"dave": [row]}
         self.config.channel_users = {"#c": {"dave"}}
         self.config.bot_joined_channel = True
+        return row
+
+    def test_missing_rar_charges_the_row_rather_than_looping(self):
+        """The failure is charged, and charged within the budget.
+
+        NOT "charged exactly once", which is what this asserted until it
+        failed on ubuntu/3.12 with `3 != 1` - first failure in twenty-five CI
+        runs, green on a re-run of the same commit, and not reproducible in
+        thirty isolated runs or a full local suite.
+
+        The exact number was never a contract. A failure reaches
+        release_queue_entry() by more than one path, and they do not all
+        charge the same amount: start_dcc_send()'s missing-file branch
+        deliberately charges, sleeps three seconds and calls
+        check_queue_and_send() again, so one request there walks the row to
+        the budget on its own. Its comment says so outright - "charging the
+        budget is what stops it being re-selected every three seconds
+        forever". Which path a given failure takes depends on how far the pack
+        got, which is timing, which is why a loaded runner sees a different
+        number from a laptop.
+
+        So the assertion is the thing the test is named for and the thing
+        every path guarantees: the failure lands on the retry budget, and the
+        budget is a ceiling. The exact count was an artifact of one path being
+        the usual one.
+        """
+        row = self.queued_row()
+        budget = getattr(self.config, "MAX_SEND_FAILS", 3)
 
         self.dcc.check_queue_and_send(self.sock, "dave")
         wait_until(lambda: row.get("send_fails") is not None)
+        charged = row.get("send_fails")
 
-        self.assertEqual(row.get("send_fails"), 1,
-                         "the failure must be charged to the retry budget, not retried forever")
+        self.assertIsNotNone(charged,
+                             "the failure was not charged at all, so nothing "
+                             "stops this row being re-selected forever")
+        self.assertGreaterEqual(charged, 1)
+        self.assertLessEqual(charged, budget,
+                             "charged past its own budget, which is the loop "
+                             "this test is named for")
+
+    def test_the_budget_is_a_ceiling_and_the_row_is_then_dropped(self):
+        """The half nothing asserted. Charging is only a bound if the charges
+        stop and the row leaves - otherwise it is re-selected forever at the
+        cost of a queue slot, which is the same failure wearing a counter.
+
+        Driven by calling the sender again rather than by waiting out the
+        retry timer, so it takes milliseconds instead of forty-five seconds
+        and does not assert on the clock."""
+        row = self.queued_row()
+        budget = getattr(self.config, "MAX_SEND_FAILS", 3)
+
+        for _attempt in range(budget + 2):
+            self.dcc.check_queue_and_send(self.sock, "dave")
+            wait_until(lambda: not self.config.rar_inprogress)
+            if not self.config.dcc_queue.get("dave"):
+                break
+
+        self.assertLessEqual(row.get("send_fails") or 0, budget,
+                             "the charge count kept climbing past the budget")
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [],
+                         "a row that used up its budget must leave the queue")
 
 
 class DescribeTests(unittest.TestCase):
@@ -326,6 +382,11 @@ class WiringTests(unittest.TestCase):
         config.MY_IP_OR_DOCK = "8.8.8.8"
 
         sock = RecordingSocket()
+        # #430: start_dcc_send() dispatches through the LIVE socket
+        # sys.modules['oserve'] reports, not the parameter alone - this
+        # test does not use DCCoreTestCase, so oserve is stubbed directly.
+        from tests.support import install_fake_oserve
+        install_fake_oserve(irc_connection=sock)
         dcc.start_dcc_send(sock, "dave", track, "Song.flac", "#chan",
                            {"file": "Song.flac", "path": track})
 

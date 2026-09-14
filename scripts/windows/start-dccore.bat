@@ -36,12 +36,32 @@ if not defined PY (
 )
 
 rem --- check-only mode ---------------------------------------------------
-if /i "%~1"=="check" (
-    %PY% scripts\windows\check-setup.py
-    echo.
-    pause
-    exit /b %errorlevel%
-)
+rem  NOT written as `if ... ( ... exit /b %errorlevel% )`. cmd.exe expands
+rem  %errorlevel% when it PARSES the parenthesised block, before anything
+rem  inside it has run, so the value used is whatever it was beforehand -
+rem  0 - whatever check-setup.py actually returned. Verified on Windows 11:
+rem  the block form exits 0 where this form exits the real code.
+rem
+rem  It matters because `start-dccore.bat check` is the documented Windows
+rem  pre-flight in README.md, docs/INSTALL.md and docs/WINDOWS.md. It would
+rem  print "FAIL ..." and "1 problem(s) - fix these before starting", then
+rem  exit 0 - so a wrapper, a scheduled task or a CI step gating on the
+rem  exit code treated a broken config as verified.
+rem
+rem  The Linux twin was always right (`"$PY" ... ; exit $?`, outside any
+rem  block), so the two launchers had drifted on the one thing this shim
+rem  layer exists to keep identical.
+if /i "%~1"=="check" goto :run_check
+goto :after_check
+
+:run_check
+%PY% scripts\windows\check-setup.py
+set "CHECK_RC=%errorlevel%"
+echo.
+pause
+exit /b %CHECK_RC%
+
+:after_check
 
 rem --- refuse to start without a local config ---------------------------
 rem  settings.conf is fully first-class (see scripts/setup_check.py's own

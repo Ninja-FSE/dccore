@@ -153,7 +153,10 @@ def theme_name():
     return DEFAULT_THEME
 
 
-def palette():
+ROLES = ("border", "separator", "textbox", "value", "alert", "accent")
+
+
+def palette(settings=None):
     """The six roles for the configured theme, as a dict.
 
     config.CUSTOM_THEME_<ROLE> overrides one role on top of the chosen
@@ -162,25 +165,58 @@ def palette():
     into six plain strings (see config.py's own comment on that change) - a
     role left at its default of None keeps the preset's own value, exactly
     as an absent key in the old dict did.
+
+    `settings` answers "what WOULD this look like" without changing anything.
+    It is a plain {"THEME": ..., "CUSTOM_THEME_ACCENT": ...} mapping, read in
+    place of config for exactly the keys it holds, so the dashboard can render
+    a preview of values the operator has typed and not yet saved. A live
+    daemon is serving a channel while they are choosing colours; the preview
+    must not reach the config every other thread is reading.
     """
-    roles = dict(THEMES[theme_name()])
+    if settings is None:
+        settings = {}
+
+    def setting(name, fallback=None):
+        if name in settings:
+            return settings[name]
+        return getattr(config, name, fallback)
+
+    wanted = str(setting("THEME", "") or "").strip().lower()
+    roles = dict(THEMES[wanted if wanted in THEMES else theme_name()])
     for role in roles:
-        override = getattr(config, f"CUSTOM_THEME_{role.upper()}", None)
+        override = setting(f"CUSTOM_THEME_{role.upper()}")
         if isinstance(override, str) and override:
-            roles[role] = override
+            # #436: settings_file.py's own writer refuses a newline or a
+            # null byte in a CUSTOM_THEME_* value now, but this reads
+            # whatever config actually holds - a hand-edited settings.conf
+            # or admin_config.py answers to neither that check nor to
+            # coerce(), and this function is the single place every one of
+            # the eight outbound templates gets its colours from. Stripped,
+            # not refused: a preview has nobody to report an error to, and
+            # the raw preset underneath is always a safe fallback.
+            override = override.replace("\r", "").replace("\n", "").replace("\x00", "")
+            if override:
+                roles[role] = override
     return roles
 
 
-def blocks():
+def blocks(settings=None):
     """The eight message paths' palette, in the order they bind it.
 
     Returns (border, separator, textbox, reset, bold, value, alert, accent).
+
+    `bold` is still returned and is no longer used by any template. Asked for
+    directly: "theme shouldn't have bold in any location of the message ...
+    That's for everywhere bot advertisement answers to find requests etc. No
+    bolds." It stays in the tuple because it is a protocol constant that
+    remains true, and because removing it would renumber an unpacking that
+    eight call sites share for the sake of a name nobody reads.
 
     A tuple rather than the dict because every call site unpacks it into the
     local names its templates already use - which is what makes this a change
     of where the values come from and not a change to a single line of
     outbound text.
     """
-    roles = palette()
+    roles = palette(settings)
     return (roles["border"], roles["separator"], roles["textbox"],
             RESET, BOLD, roles["value"], roles["alert"], roles["accent"])

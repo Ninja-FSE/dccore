@@ -38,14 +38,31 @@ class KeepingTheBestSpeed(DCCoreTestCase):
         self.stored = 0
         self._real_get = db.get_speed_record
         self._real_save = db.save_speed_record
+        self._real_raise = db.raise_speed_record_to
         db.get_speed_record = lambda: self.stored
         db.save_speed_record = self._record
+        # The compare-and-set moved INTO db so the read and the write happen
+        # under one lock - see db.raise_speed_record_to(). The stub keeps the
+        # same in-memory semantics, so every assertion below still describes
+        # what stats_mgr.update_speed_record() decides.
+        db.raise_speed_record_to = self._raise_to
         self.addCleanup(setattr, db, "get_speed_record", self._real_get)
         self.addCleanup(setattr, db, "save_speed_record", self._real_save)
+        self.addCleanup(setattr, db, "raise_speed_record_to", self._real_raise)
 
     def _record(self, value):
         self.saved.append(value)
         self.stored = value
+
+    def _raise_to(self, candidate):
+        try:
+            speed = int(candidate)
+        except (TypeError, ValueError):
+            return self.stored
+        if speed <= self.stored:
+            return self.stored
+        self._record(speed)
+        return speed
 
     def test_a_faster_transfer_becomes_the_record(self):
         self.stored = 1000
@@ -211,6 +228,62 @@ class EveryPersistedValueHasAWriterInTheDaemon(unittest.TestCase):
                                 f"scan has probably stopped recognising them")
         self.assertIn("save_speed_record", writers,
                       "the writer this test was written for is not being seen")
+
+
+class TheClockStopsWhenTheBytesDo(DCCoreTestCase):
+    """"i feel it slower than mirc omenserve even with 64kb" - and the
+    transfer was never slow. The NUMBER was.
+
+    The duration was measured at the very end of start_dcc_send(), after two
+    deliberate pauses: 1.5 seconds for the receiver to close its file calmly,
+    and another half-second before the statistics write. Two seconds of
+    settling, counted as transfer time, against files that mostly take less
+    than that.
+
+    A loopback benchmark of the send loop itself reaches ~950 MB/s at 64 KB on
+    this machine, so the loop was never the limit either.
+    """
+
+    def test_the_settling_pause_is_not_counted(self):
+        """Read out of the source: driving a real transfer needs a peer on a
+        socket. Asserted as an ORDER, because a timestamp taken in the right
+        place and then not used would pass a check for either half alone."""
+        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+            code = handle.read()
+
+        stamped = code.index("transfer_finished_at = time.time()")
+        first_pause = code.index("time.sleep(1.5)", stamped)
+        used = code.index("_ended = (transfer_finished_at", stamped)
+
+        self.assertLess(stamped, first_pause,
+                        "the clock is stopped after the settling pause")
+        self.assertLess(first_pause, used,
+                        "fixture invariant: the pause should sit between the "
+                        "stamp and its use, or this proves nothing")
+
+    def test_the_duration_no_longer_reads_the_wall_clock_at_the_end(self):
+        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+            code = handle.read()
+
+        self.assertNotIn(
+            "acute_duration = time.time() - (start_time", code,
+            "the duration is measured at the end of the function again, so "
+            "every pause between the last byte and here is counted as "
+            "transfer time")
+
+    def test_what_the_old_arithmetic_did_to_a_real_file(self):
+        """Not a test of the code - a test of the claim, so the size of the
+        error is written down somewhere it cannot quietly stop being true.
+        A 10 MB file at 46 MB/s takes 0.22s; two seconds of settling made it
+        report a tenth of its real rate."""
+        megabytes, real_rate, settling = 10.0, 46.0, 2.0
+        honest_seconds = megabytes / real_rate
+
+        reported = megabytes / (honest_seconds + settling)
+
+        self.assertLess(reported, real_rate / 9,
+                        "the settling pause no longer dominates a small "
+                        "file, so this note is out of date")
 
 
 if __name__ == "__main__":

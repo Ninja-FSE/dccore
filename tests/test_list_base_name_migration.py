@@ -17,7 +17,7 @@ successful !update, which on a weekly rebuild schedule is up to a week of a
 bot that looks healthy and answers every request with "not found".
 
 So the derivation comes with a migration, deliberately narrow the same way
-db.migrate_legacy_side_files() is: it only fires when LIST_BASE_NAME no
+the removed side-file migration was: it only fires when LIST_BASE_NAME no
 longer equals what defaults.py ships, only a file whose new name does not
 already exist is moved, and it moves rather than copies.
 """

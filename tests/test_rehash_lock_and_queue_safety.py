@@ -206,6 +206,85 @@ class ARehashNoLongerTouchesDccQueueDirectly(DCCoreTestCase):
         self.assertIs(config.dcc_queue, runtime.dcc_queue)
 
 
+class ARehashNoLongerTouchesChannelUsersDirectly(DCCoreTestCase):
+    """#429. The identical mistake as #216 above, for channel_users instead
+    of dcc_queue: a snapshot taken before the reload, restored with a
+    destructive `.clear()` + `.update()` afterwards, even though the
+    container is runtime.py-bound and the reload never actually touches it.
+
+    Worse here than for the queue, because the restore ran after
+    dcc.wait_for_transfers_to_finish() - up to REHASH_TRANSFER_WAIT (120s) -
+    had already given the IRC read thread a wide window to apply real
+    JOIN/PART/QUIT traffic that the stale snapshot then silently overwrote.
+    A lost JOIN heals at the next NAMES resync; a lost PART/QUIT does not,
+    because 353 can only ADD names back - so a user who left during the
+    window came back to life for the rest of the connection, as far as
+    dcc.user_is_present_in_ram() is concerned.
+
+    Same stubbing technique as ARehashNoLongerTouchesDccQueueDirectly, for
+    the same two reasons: no real reload mid-suite, and the interception
+    point is exactly where a concurrent channel_users change needs to land
+    to simulate the race.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.set_config(NICKNAME="TestBot", CHANNEL="#chan", ADMIN_NICK="operator")
+
+        import oserve
+        real_conn = getattr(oserve, "irc_connection", None)
+        oserve.irc_connection = _RecordingSocket()
+        self.addCleanup(setattr, oserve, "irc_connection", real_conn)
+
+    def _stub_reload_with(self, during_reload):
+        real = commands.reload_modules_in_order
+
+        def stub(*args, **kwargs):
+            during_reload()
+            return []
+
+        commands.reload_modules_in_order = stub
+        self.addCleanup(setattr, commands, "reload_modules_in_order", real)
+
+    def test_a_departure_during_the_reload_window_is_not_resurrected(self):
+        """The concrete failure #429 reports: a user who quits or parts while
+        the rehash is blocked in the transfer wait comes back to life the
+        moment the stale snapshot is restored over their real departure."""
+        config.channel_users["#chan"] = {"alice", "bob"}
+        self._stub_reload_with(
+            lambda: config.channel_users["#chan"].discard("bob"))
+
+        commands.handle_rehash_request("operator", "#chan", authorised=True)
+
+        self.assertNotIn("bob", config.channel_users.get("#chan", set()),
+                         "a user who left during the reload window was "
+                         "resurrected by the stale snapshot restore")
+
+    def test_a_join_during_the_reload_window_is_not_wiped(self):
+        """The other direction: someone who joined during the window must
+        not be erased by a restore taken before they arrived."""
+        config.channel_users["#chan"] = {"alice"}
+        self._stub_reload_with(
+            lambda: config.channel_users["#chan"].add("eve"))
+
+        commands.handle_rehash_request("operator", "#chan", authorised=True)
+
+        self.assertIn("eve", config.channel_users.get("#chan", set()),
+                      "handle_rehash_request erased a JOIN that arrived "
+                      "during the reload window")
+
+    def test_channel_users_is_the_exact_same_object_afterwards(self):
+        """The property the fix rests on: nothing in handle_rehash_request
+        rebinds config.channel_users away from runtime's object."""
+        self._stub_reload_with(lambda: None)
+        before = config.channel_users
+
+        commands.handle_rehash_request("operator", "#chan", authorised=True)
+
+        self.assertIs(config.channel_users, before)
+        self.assertIs(config.channel_users, runtime.channel_users)
+
+
 class _RecordingSocket:
     def send(self, data):
         pass

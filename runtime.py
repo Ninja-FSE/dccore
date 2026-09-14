@@ -55,6 +55,7 @@ a rehash is unchanged.
 """
 
 import threading
+import time
 
 # Per-user bookkeeping -------------------------------------------------------
 failed_transfers = {}    # Failed-transfer counter, per user
@@ -115,6 +116,75 @@ debug_drain_guard  = threading.Lock()  # announce.py's single-drain-worker start
 debug_sinks_lock   = threading.Lock()  # announce.py's admin-console debug sink list
 disk_lock          = threading.Lock()  # db.py's serialised on-disk writes
 
+# The reload window, which is not only about rebinding.
+#
+# importlib.reload(defaults) re-executes defaults.py from the top, and that
+# file is a list of literal assignments (NICKNAME = None, CHANNEL = None, ...)
+# with `settings_file.apply_to(globals())` only at the very END. So for the
+# whole of a reload every setting an operator configured is transiently back
+# to its shipped default - not corrupted, just not applied yet.
+#
+# Measured on a real install's file: a reader looping on config.NICKNAME
+# during !rehash saw it blank for 52% of the reload. That is not a narrow
+# race to reason away; it is half the window.
+#
+# Found from the dashboard. An operator saved DEBUG_CHANNEL, the browser
+# re-fetched /api/settings the instant the response said "Rehash started",
+# and the Settings page came back with Nickname, Admin nick(s) and Channels
+# EMPTY. Nothing was lost - settings.conf was intact the whole time and a
+# refresh showed the real values - but the page an operator uses to check
+# their configuration told them their configuration was gone.
+#
+# Only the three REQUIRED settings looked wrong, which is why it took a real
+# install to notice: every other setting on that page has a shipped default
+# that happens to match what most operators run (SERVER, WEBUI_HOST), so it
+# renders identically whether or not settings.conf has been applied yet.
+#
+# RLock, not Lock: the rehash thread holds this across the reload and calls
+# announce.send_debug() inside it, which fans out to the web console sink -
+# webserver code, on the same thread, reaching for the same lock.
+#
+# Here rather than in commands.py for this module's founding reason: a lock
+# allocated in a module that !rehash reloads is a NEW lock every rehash, and
+# this one is held BY the rehash.
+config_reload_lock = threading.RLock()
+
+# Only one rehash at a time.
+#
+# handle_rehash_request() reloads modules AND then compares the channel list it
+# reads afterwards against the one it read before, to work out what to JOIN and
+# what to PART. Two of them overlapping is not merely wasteful: the second
+# one's reload puts config.CHANNEL back to its literal None for the ~1ms window
+# described on config_reload_lock above, and if the FIRST one reads its "new"
+# channel list inside that window it sees no channels at all - so every channel
+# the bot is in falls into the PART branch. Measured by audit: the bot PARTed
+# every channel including the debug channel, sent no JOIN and no NAMES, emptied
+# channel_users, and logged "[REHASH SYNC] Channel sync completed successfully."
+# dcc.py treats channel_users as proof a user is present, so every queue then
+# freezes. Reproduced with nothing patched in 4 of 60 overlapping runs.
+#
+# Overlapping rehashes are easy to reach: irc.py spawns an unguarded thread per
+# "!rehash", adminchat.py does the same from the console, and webserver.py
+# fires one on EVERY Settings save and every password change.
+#
+# SERIALISED, not skipped. A second rehash is often the one that matters - a
+# dashboard save writes settings.conf and then triggers it, and the rehash
+# already running may have read the file before that write. Dropping it would
+# lose the operator's change; waiting applies it.
+#
+# Here rather than in commands.py because commands.py is one of the modules a
+# rehash reloads, so a lock allocated there would be a new lock every time -
+# the founding reason this module exists.
+rehash_lock = threading.Lock()
+
+
+# The cross-list search index's connection cache -----------------------------
+# list_index.py keeps one sqlite3 connection open and reuses it; this guards
+# that cache, not the database (sqlite3 serialises writers itself). Here for
+# the reason every other lock in this file is: !rehash re-executes the module
+# that would otherwise construct it, and a fresh Lock() on every reload lets
+# two callers both believe they hold it.
+list_index_lock = threading.Lock()
 
 # Other bots advertising in our channels ------------------------------------
 # nick.lower() -> {"nick", "channel", "files", "list_date", "list_size",
@@ -125,12 +195,212 @@ disk_lock          = threading.Lock()  # db.py's serialised on-disk writes
 known_bots = {}
 known_bots_flushed_at = 0.0
 
+# Offers waiting for the receiver to connect ---------------------------------
+# Keyed by (nick_lower, port) -> {"filename", "size", "position"}, one entry
+# per DCC SEND handshake that has gone out and not yet been picked up.
+#
+# It exists so a DCC RESUME can find the offer it belongs to. The RESUME
+# arrives on the IRC read loop, in a different thread from the one blocked in
+# accept(), so the two need somewhere to meet. Keyed by PORT and not by
+# filename: the port is ours, unique, and unambiguous, while the offered name
+# has already been through a space-to-underscore pass and may have been
+# shortened to fit the IRC line.
+#
+# Here rather than in dcc.py for this module's usual reason: a !rehash
+# re-executes that module's body and would drop every offer in flight.
+# CHANNELS WE HAVE BEEN THROWN OUT OF, and how many times a rejoin has been
+# refused since. Keyed by lowercase channel name.
+#
+#     {"#chan": {"refusals": 0, "kicked_at": 1788904212.0, "by": "someop"}}
+#
+# Live state, so it belongs here rather than in a module body: a !rehash
+# re-executes those, and forgetting we were kicked would restart the retry
+# count from zero every time the operator saved a setting - which is a rejoin
+# loop with extra steps.
+#
+# A channel is removed from this map the moment a join succeeds, so its
+# presence means "not in it, and still trying" and nothing else.
+# THINGS THE OPERATOR SHOULD BE TOLD ABOUT, newest last. Not a log - the
+# Console is the log, and it carries everything. This is the short list of
+# events that mean the bot's ability to do its job changed, and that somebody
+# may need to act on:
+#
+#     {"id": 7, "at": 1788904212.0, "severity": "error",
+#      "text": "Cannot rejoin #chan - gave up after 3 attempts."}
+#
+# `notice_state["seen_id"]` is the highest id the operator has acknowledged,
+# which is what the unread count is measured against. It lives INSIDE a dict
+# rather than beside it as a plain int because only mutable objects can be
+# bound onto config by reference - a scalar there would be a copy, and the
+# dashboard marking notices read would update a number the daemon never sees.
+notices = []
+notice_state = {"seen_id": 0}
+notices_lock = threading.Lock()
+
+# SOMEBODY SPOKE TO THE BOT AND IT SAID NOTHING BACK, newest last.
+#
+# A private message that is not a recognised command is dropped in the read
+# loop - no reply, and until now no record either. That silence is deliberate
+# and mostly right: a bot that answers every stray message is a bot that can
+# be made to flood itself off the network. But there is a real gap between
+# "do not reply to strangers" and "the operator never finds out anyone spoke
+# to it", and somebody messaging a file server is usually somebody who wants
+# something from it and does not know the syntax.
+#
+#     {"id": 4, "at": 1788904212.0, "nick": "SomeUser",
+#      "text": "can you send me the new album"}
+#
+# Kept apart from `notices` on purpose. A notice is something that went WRONG
+# and has two severities; a message is neither wrong nor right, and giving it
+# a severity would mean inventing a third one that nobody can tell apart at a
+# glance - which the notice design says explicitly it will not do.
+private_messages = []
+
+# Also carries {"declined": {nick.lower(): when}} when PRIVATE_MESSAGES_ENABLED
+# is off - who has already been told where to go instead.
+#
+# Kept HERE, in the state dict that is already persisted, rather than in a
+# sixth state file: a restart that forgot this would tell everybody again,
+# and "the bot repeats itself every time the operator restarts it" is most of
+# what this record exists to prevent. It is pruned on write rather than left
+# to grow, because an entry older than the interval can never stop a reply
+# again and keeping it is keeping a fact that has stopped meaning anything.
+private_message_state = {"seen_id": 0}
+
+# When the last few declines went out, newest last, for the across-everyone
+# ceiling. RAM only and deliberately so: this one is about a burst happening
+# RIGHT NOW, and a bot that has just restarted is not in the middle of one.
+private_message_decline_sends = []
+
+# One lock for all three. They are written together by
+# announce.decline_private_message() and read together by the Messages
+# payload, so a second lock would buy nothing but an ordering question.
+private_messages_lock = threading.Lock()
+
+kicked_channels = {}
+kicked_channels_lock = threading.Lock()
+
+dcc_send_offers = {}
+dcc_send_offers_lock = threading.Lock()
+
+# Alt-nick reconnects (#376) --------------------------------------------------
+# Two small, RAM-only registries that together let the List Browser sidebar
+# merge a peer bot's two nicks (its usual one, and the alt it fell back to
+# after a 433 at connect) into one row, instead of showing what looks like two
+# unrelated bots.
+#
+# recent_departures: nick.lower() -> {"channel", "at"}. Written ONLY by
+# irc.py's PART/QUIT handlers, and only for a nick they actually saw removed
+# from config.channel_users - never for a nick that merely stopped appearing,
+# which absence alone cannot tell apart from "was never in a channel we
+# share". Read, briefly, by irc.py's JOIN handler (note_possible_reconnect())
+# to decide whether a newly-joining nick is the same connection coming back.
+# Self-pruning on a short TTL of its own (ALT_NICK_RECONNECT_WINDOW_SECONDS in
+# irc.py) - the inference is only trustworthy for seconds, not minutes.
+recent_departures = {}
+recent_departures_lock = threading.Lock()
+
+# nick_aliases: alias_nick.lower() -> primary_nick, REAL case, written only when
+# note_possible_reconnect() decides a join matches the shape above. DISPLAY
+# ONLY - resolve_display_nick() below is the one reader, and
+# webserver.build_fetched_bot_list_summaries() is its one caller. Nothing
+# here ever reaches config.channel_users, fetched_bot_lists, known_bots or a
+# download counter: a wrong guess mis-groups one sidebar row and nothing else,
+# which is the whole reason this is allowed to be a heuristic rather than
+# something requiring proof.
+#
+# ONLY GROWS, and deliberately: an alias is one tiny dict entry, the event
+# that creates one is rare, and the alternative - expiring it - would mean a
+# genuine reconnect eventually un-merging itself for no reason connected to
+# anything having changed. Not a memory concern at any realistic uptime.
+# What DOES stop a stale alias being trusted forever is webserver.py's own
+# `_display_nick()`, which checks CURRENT presence at display time rather
+# than relying on this dict's age - see that function's docstring.
+#
+# SINGLE-HOP ONLY: resolving "SomeBot__" after two collisions in a row lands
+# on "SomeBot_" (whichever nick it actually replaced), not on "SomeBot" -
+# resolve_display_nick() does one dict lookup, not a walk to a fixed point.
+# A bot that collides twice in a row therefore still splits into two sidebar
+# identities instead of merging into one - strictly better than today's
+# three, but not the full transitive merge the name of this feature might
+# suggest.
+nick_aliases = {}
+nick_aliases_lock = threading.Lock()
+
+
+def resolve_display_nick(nick):
+    """The nick a List Browser row should be grouped and labelled under.
+
+    `nick` itself, unless irc.py's note_possible_reconnect() has aliased it to
+    a nick it just replaced - see nick_aliases's own comment above for what
+    that is and, as importantly, is not allowed to affect. Pure lookup, no
+    lock ordering concerns with anything else: this is the only place
+    nick_aliases is read.
+    """
+    key = str(nick or "").strip().lower()
+    if not key:
+        return nick
+    with nick_aliases_lock:
+        primary = nick_aliases.get(key)
+    return primary if primary else nick
+
+# Held across the !update re-entrancy check AND the flag it sets (#444).
+#
+# handle_list_update_request() read config.update_inprogress and did not set
+# it until 178 lines later, with a PAUSE_ON_UPDATE wait for any running search
+# in between - so two requests arriving in that window both passed the guard
+# and both started a rebuild, two subprocesses writing the same .new temp
+# paths. The check and the set have to be one step.
+list_update_gate = threading.Lock()
+
 # Live transfer rate ---------------------------------------------------------
 # Sampled by stats_mgr.live_speed(); kept here rather than in that module so a
 # !rehash cannot reset it, and so readers that must not import the daemon can
 # still see it. webserver.py reads these two directly for the dashboard.
-live_speed_bps = 0        # bytes/sec across every sending transfer
+live_speed_bps = 0        # bytes/sec across every sending transfer, summed
 live_speed_sampled_at = 0.0
+
+
+# Outbound pacing ------------------------------------------------------------
+#
+# There used to be two: queue_mgr.py's queue_worker slept MSG_DELAY after
+# every send, and announce.py's debug drain slept DEBUG_MSG_DELAY after every
+# send, on its own thread, deaf to the first. The server only ever sees the
+# sum of the two - a bot with fourteen channels can burst enough debug lines
+# on reconnect to add up past what Undernet allows, while every setting an
+# operator can see looks polite in isolation. Two numbers that multiply into
+# a third that appears nowhere is not something an operator can reason about.
+#
+# One clock now, shared by every lane. Each sender still asks for its own
+# interval - queue_mgr.py asks for MSG_DELAY, announce.py's debug drain asks
+# for whichever of MSG_DELAY and DEBUG_MSG_DELAY is larger, so debug can be
+# throttled slower than ordinary traffic if an operator wants that, but never
+# faster - and every reservation, from either lane, holds the SAME clock for
+# that long before anyone else's next send. The combined rate can never
+# exceed one interval's worth of traffic, however the two lanes interleave.
+class OutboundPacer:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def wait_for_slot(self, min_interval):
+        """Block until the shared clock has a slot free, then take it.
+
+        Loops rather than computing the wait once and sleeping outside the
+        lock, because a second thread could otherwise wake at the same
+        moment, both see the slot as free, and both reserve it.
+        """
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                if now >= self._next_allowed:
+                    self._next_allowed = now + min_interval
+                    return
+                remaining = self._next_allowed - now
+            time.sleep(remaining)
+
+
+outbound_pacer = OutboundPacer()
 
 
 def channel_users_lock():

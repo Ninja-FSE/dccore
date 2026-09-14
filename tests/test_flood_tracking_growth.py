@@ -31,6 +31,8 @@ if REPO_ROOT not in sys.path:
 
 import defaults as config  # noqa: E402
 import security  # noqa: E402
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
 
@@ -42,12 +44,121 @@ class FloodCase(DCCoreTestCase):
         self.set_config(MAX_REQUESTS=10, REQUEST_WINDOW=5, MUTE_TIME=30)
         config.user_requests.clear()
         config.muted_until.clear()
+        config.banned_users.clear()
         self.addCleanup(config.user_requests.clear)
         self.addCleanup(config.muted_until.clear)
+        self.addCleanup(config.banned_users.clear)
+        # The sweep writes bans.txt when something expires. Redirected, for
+        # the reason DCCoreTestCase already redirects the fetch history: a
+        # test must never write into the operator's own data directory.
+        import db
+        self._bans_dir = tempfile.mkdtemp(prefix="dccore-bans-")
+        self.set_config(BANS_FILE=os.path.join(self._bans_dir, "bans.txt"))
+        self.addCleanup(shutil.rmtree, self._bans_dir, ignore_errors=True)
         # Module state, so it survives between tests and would make whichever
         # ran second see a throttled sweep.
         security._last_flood_sweep = 0.0
         self.addCleanup(setattr, security, "_last_flood_sweep", 0.0)
+
+
+class TheThirdStructure(FloodCase):
+    """banned_users, which the sweep did not cover.
+
+    It was expired lazily and only on the next request FROM THAT SAME NICK -
+    and a banned nick not coming back is the NORMAL case, because the ban is
+    what made them leave. So a timed ban on somebody who never returns sat in
+    memory and in bans.txt for ever, and the file grew one permanent row per
+    flooder.
+    """
+
+    def read_bans_file(self):
+        path = getattr(config, "BANS_FILE")
+        if not os.path.exists(path):
+            return ""
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_an_expired_ban_is_dropped(self):
+        now = time.time()
+        config.banned_users["gone"] = now - 1
+
+        security._prune_flood_tracking(now)
+
+        self.assertNotIn("gone", config.banned_users)
+
+    def test_a_live_ban_survives(self):
+        """The sweep must never release somebody still serving one."""
+        now = time.time()
+        config.banned_users["still-banned"] = now + 3600
+
+        security._prune_flood_tracking(now)
+
+        self.assertIn("still-banned", config.banned_users)
+
+    def test_the_boundary_belongs_to_the_expired_side(self):
+        """Same test the per-request check applies: it denies while
+        `time.time() < expire_ts`, so at exactly the expiry it is over."""
+        now = time.time()
+        config.banned_users["exactly-now"] = now
+
+        security._prune_flood_tracking(now)
+
+        self.assertNotIn("exactly-now", config.banned_users)
+
+    def test_a_row_that_cannot_be_read_is_swept(self):
+        """Same coercion the lazy path applies - it would have deleted this
+        too. A row nothing can parse is not a ban anyone is serving, and
+        keeping it would be keeping the leak for the corrupt case only."""
+        now = time.time()
+        config.banned_users["corrupt"] = "not a timestamp"
+
+        security._prune_flood_tracking(now)
+
+        self.assertNotIn("corrupt", config.banned_users)
+
+    def test_it_counts_towards_what_the_sweep_reports(self):
+        now = time.time()
+        config.banned_users["gone"] = now - 1
+
+        self.assertEqual(security._prune_flood_tracking(now), 1)
+
+    def test_the_file_is_rewritten_so_the_ban_does_not_come_back(self):
+        """Unlike the other two structures, this one is persisted. Clearing
+        memory alone would let every swept ban return at the next restart -
+        and the file would go on growing regardless."""
+        import db
+        now = time.time()
+        config.banned_users["gone"] = now - 1
+        config.banned_users["still-banned"] = now + 3600
+        db.save_bans_to_file()
+        self.assertIn("gone", self.read_bans_file())
+
+        security._prune_flood_tracking(now)
+
+        written = self.read_bans_file()
+        self.assertNotIn("gone", written)
+        self.assertIn("still-banned", written)
+
+    def test_nothing_is_written_when_nothing_expired(self):
+        """A sweep runs every 60 seconds for the life of the daemon. Writing
+        the ban file each time would be a disk write a minute, for ever, to
+        record no change at all."""
+        now = time.time()
+        config.banned_users["still-banned"] = now + 3600
+
+        security._prune_flood_tracking(now)
+
+        self.assertEqual(self.read_bans_file(), "",
+                         "the sweep rewrote the ban file having changed nothing")
+
+    def test_thousands_of_expired_bans_leave_nothing_behind(self):
+        now = time.time()
+        for i in range(5000):
+            config.banned_users[f"flooder{i}"] = now - 1
+
+        security._prune_flood_tracking(now)
+
+        self.assertEqual(config.banned_users, {})
 
 
 class TheSweepForgetsWhatCannotMatterAnyMore(FloodCase):

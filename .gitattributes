@@ -38,3 +38,31 @@
 *.png   binary
 *.jpg   binary
 *.ico   binary
+
+# =====================================================================
+# WHAT DOES NOT LEAVE THIS REPOSITORY
+# =====================================================================
+# `git archive` is how the public tree is extracted, and export-ignore is
+# the only thing that makes "internal only" mean anything to it. Without a
+# rule here, a file is internal by intention and public in fact.
+#
+# docs/PUBLIC-REPO-WORKFLOW.md documents the dccore-dev / dccore split
+# itself: it names this repository directly, by handle, and references
+# internal issue and PR numbers that resolve to nothing outside it. It
+# exists to be read by the two of us, not shipped - and it does not exist
+# in this repository at all, so this rule matches nothing here. It stays
+# anyway: tests/exported_tree.py uses its absence, explained by this exact
+# line, as the signal that this is the public repository rather than
+# dccore-dev - docs/UPDATES.md's own presence cannot serve that purpose,
+# since extraction renames a different, legitimate file onto that same
+# path for this repository.
+docs/PUBLIC-REPO-WORKFLOW.md    export-ignore
+
+# The denylist, NOT the guard. tests/test_no_personal_identifiers_ship.py
+# still ships and still runs every structural check it has; only the list
+# of hashes stops travelling with it. See that file's own docstring: the
+# hashes are a truncated unsalted SHA-256 of a single lowercased word,
+# recoverable from a wordlist, and each one is labelled with what it is -
+# so shipping them publishes exactly what they exist to hide. Two of this
+# operator's channels were recovered from the shipped list by hand.
+tests/forbidden_identifiers.py    export-ignore

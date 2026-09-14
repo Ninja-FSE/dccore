@@ -56,6 +56,10 @@ class DispatchAdmissionTests(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
+        # Whatever was already running - the suite's own machinery, and any
+        # thread an earlier test has not finished with. settle() waits for
+        # what THIS test starts, measured against this.
+        self._baseline_threads = set(threading.enumerate())
         self.sock = RecordingSocket()
         self.debug = silence_debug(announce)
         no_disk_writes(db)
@@ -92,6 +96,12 @@ class DispatchAdmissionTests(DCCoreTestCase):
         self.addCleanup(setattr, sys, "stdout", sys.stdout)
         sys.stdout = io.StringIO()
 
+        # LAST registered, so LIFO runs it FIRST - while the notice and
+        # dispatch hooks above are still installed. A test must not hand its
+        # own unfinished threads to the next one, whether or not it happened
+        # to call settle() itself.
+        self.addCleanup(self.settle)
+
     # -- helpers ------------------------------------------------------------
 
     def in_channel(self, *users, **kwargs):
@@ -104,11 +114,37 @@ class DispatchAdmissionTests(DCCoreTestCase):
         return {"user": user, "file": file_name, "bytes_sent": 0,
                 "next_file_obj": file_name}
 
-    def settle(self, seconds=0.15):
-        """Let any real dispatch threads finish before asserting 'exactly once'."""
+    def settle(self, seconds=10.0):
+        """Wait for this test's dispatch threads to finish.
+
+        This used to sleep a flat 0.15s and hope. It held for a long time and
+        then did not: CI caught ["erin", "dave"] where only "erin" should have
+        been notified, on one runner out of six.
+
+        Nothing about that test involved "dave" - an EARLIER test in this class
+        queued him, and its dispatch thread outlived the 0.15s. The notice hook
+        is a module attribute resolved at CALL time, so a thread that starts
+        under one test and finishes under the next writes into the next test's
+        list. A fixed sleep cannot rule that out; it can only make it rare
+        enough to look fixed, which is worse.
+
+        So this waits for the actual condition - no thread alive that was not
+        already running when the test began - and only falls back to a
+        deadline. Bounded, so a thread that never finishes fails an assertion
+        rather than hanging the suite.
+        """
         deadline = time.time() + seconds
         while time.time() < deadline:
+            if not self._threads_started_here():
+                return
             time.sleep(0.01)
+
+    def _threads_started_here(self):
+        """Live threads that were not already running when this test began."""
+        current = threading.current_thread()
+        return [t for t in threading.enumerate()
+                if t is not current and t.is_alive()
+                and t not in self._baseline_threads]
 
     def run_concurrently(self, targets):
         """Run check_queue_and_send for each completed_user, started together."""
@@ -257,6 +293,42 @@ class DispatchAdmissionTests(DCCoreTestCase):
         self.assertIn("bob", config.user_processing_lock)
         self.assertNotIn("alice", config.user_processing_lock,
                          "the folder-pack row must not be claimed by the promotion scan")
+
+    def test_settle_waits_for_a_thread_rather_than_the_clock(self):
+        """The harness fix, pinned.
+
+        A flat sleep passes this only by being longer than whatever it is
+        racing - the property that failed on one CI runner and made a test
+        about "erin" report "dave" as well. Asserting the WAIT means the next
+        person to shorten it finds out here rather than one run in six.
+        """
+        finished = []
+
+        def slow_worker():
+            time.sleep(0.4)
+            finished.append(True)
+
+        worker = threading.Thread(target=slow_worker, daemon=True)
+        started = time.time()
+        worker.start()
+
+        self.settle()
+
+        self.assertEqual(finished, [True],
+                         "settle() returned while a thread it should have "
+                         "waited for was still running")
+        self.assertGreaterEqual(time.time() - started, 0.4)
+
+    def test_settle_is_bounded_when_a_thread_never_finishes(self):
+        """A thread that hangs must fail an assertion, not the whole suite."""
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        threading.Thread(target=stop.wait, daemon=True).start()
+
+        started = time.time()
+        self.settle(seconds=0.2)
+
+        self.assertLess(time.time() - started, 5.0)
 
     def test_legacy_string_row_is_skipped_without_raising(self):
         """Pre-dict queue rows survive in dcc_queue.txt and must not crash the scan.

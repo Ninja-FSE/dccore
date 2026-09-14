@@ -29,6 +29,7 @@ import copy
 import importlib
 import io
 import os
+import subprocess
 import sys
 import unittest
 
@@ -78,6 +79,14 @@ class ContainersSurviveAReload(DCCoreTestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             importlib.reload(config)
 
+    def _remove_probes(self):
+        for name in CONTAINERS:
+            container = getattr(runtime, name)
+            if isinstance(container, dict):
+                container.pop("probe", None)
+            elif "probe" in container:
+                container.remove("probe")
+
     def test_a_queued_user_is_still_queued_after_a_reload(self):
         config.dcc_queue["someuser"] = ["Track.flac"]
         config.active_transfers.append({"user": "someuser"})
@@ -102,6 +111,12 @@ class ContainersSurviveAReload(DCCoreTestCase):
                 container["probe"] = 1
             else:
                 container.append("probe")
+        # These containers are shared, module-level and survive the reload on
+        # purpose - that is the property under test - so nothing else takes
+        # the probe back out. Leaving it in put {"probe": 1} in the bot
+        # registry for the rest of the run, which cost nothing until
+        # something read that registry and then cost a 500.
+        self.addCleanup(self._remove_probes)
 
         self._reload_config()
 
@@ -111,6 +126,53 @@ class ContainersSurviveAReload(DCCoreTestCase):
                 self.assertIs(after, getattr(runtime, name),
                               "the reload left config detached from runtime")
                 self.assertTrue(after, f"the reload emptied {name}")
+
+    def test_the_probe_does_not_outlive_the_test(self):
+        """These containers are shared and survive a reload on purpose, so
+        nothing else takes the probe out. It sat in the bot registry for the
+        rest of the run and cost three unrelated tests in webserver, one of
+        them a 500, the moment a view started reading that registry."""
+        self.test_every_container_survives_and_stays_attached()
+        self.doCleanups()
+
+        for name in CONTAINERS:
+            container = getattr(runtime, name)
+            with self.subTest(container=name):
+                self.assertNotIn("probe", container)
+
+    def test_no_test_reads_the_operators_own_bot_registry(self):
+        """oserve.start() loads the registry at boot, so every test that boots
+        the daemon was reading `data/known_bots.json` from this working tree -
+        whatever bots this machine's own bot has actually met.
+
+        The file is gitignored, so it exists here and not on CI, and the suite
+        therefore behaved differently in the two places. It is how a route
+        that reads the registry came to fail on one machine only, with a nick
+        no test had ever heard of in the assertion diff.
+        """
+        import db
+
+        self.assertNotEqual(
+            os.path.abspath(db.KNOWN_BOTS_FILE),
+            os.path.abspath(os.path.join(REPO_ROOT, "data", "known_bots.json")),
+            "a test is reading the operator's real bot registry")
+
+    def test_every_container_is_reset_between_tests(self):
+        """Derived, like the test above, and for the same reason it exists.
+
+        A container runtime.py exposes is shared, module-level and outlives
+        every test that writes to it, so one left out of the harness's reset
+        list is a test-order dependency waiting for the day some other module
+        reads it. known_bots was that one: harmless while only irc.py read it,
+        three failures the day a dashboard view did - passing alone, failing
+        in the full run, which is the most expensive way to find anything.
+        """
+        from tests.support import RUNTIME_CONTAINERS
+
+        for name in CONTAINERS:
+            with self.subTest(container=name):
+                self.assertIn(name, RUNTIME_CONTAINERS,
+                              f"runtime.{name} is never reset between tests")
 
     def test_scalars_are_still_reset_by_a_reload(self):
         """Not a regression - a deliberate boundary, asserted so it stays one.
@@ -229,7 +291,15 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
         # none of which are ast.Dict/ast.List literals any more, so the scan
         # below no longer even considers them and there is nothing left to
         # allow-list here.
-        allowed = {"ADMIN_HOSTMASKS"}
+        # LIST_IGNORED_EXTENSIONS joins it on the same grounds, and the
+        # distinction is worth stating because the shape is identical: it is a
+        # list literal in config.py that a rehash rebinds. That is CORRECT for
+        # a setting. The rule exists for runtime STATE - a queue, a transfer
+        # list - where rebinding loses work in progress. Re-reading which file
+        # types to skip is the whole reason an operator runs !rehash after
+        # editing it.
+        allowed = {"ADMIN_HOSTMASKS", "LIST_IGNORED_EXTENSIONS",
+                   "LIST_VIDEO_EXTENSIONS", "RAR_EXTENSIONS"}
 
         with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
@@ -282,6 +352,67 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
             "runtime.py is in the reload list, so a rehash re-executes it and "
             "empties every container - exactly the bug moving them there was "
             "meant to remove")
+
+
+class EveryContainerIsBoundInACleanInterpreter(unittest.TestCase):
+    """The one gap the tests above cannot see, because DCCoreTestCase's own
+    setUp() closes it before any of them run.
+
+    `kicked_channels` was added to runtime.py and to PRESERVE_RUNTIME
+    (#380/dccore#382), but the line binding it onto defaults.py - the one
+    every other container in that same block has - was never written.
+    `config.kicked_channels` did not exist, and the live bot crashed on its
+    first PRIVMSG: "module 'defaults' has no attribute 'kicked_channels'".
+
+    Every test in this file still passed. tests/support.py's reset_config()
+    runs before each one and does exactly what the missing line should have:
+    `setattr(config, name, getattr(runtime, name))` - a deliberate safety net
+    for test isolation, and here an accidental one for a real production gap.
+    ConfigAndRuntimeShareTheSameObjects above checks object identity, but by
+    the time it runs the harness has already repaired what defaults.py failed
+    to do itself.
+
+    A clean interpreter is the only place this question means anything - see
+    tests/test_import_graph.py's own reasoning for the same shape of check.
+    """
+
+    def bindings(self):
+        code = (
+            "import json\n"
+            "import defaults, runtime\n"
+            "containers = [n for n, v in vars(runtime).items()\n"
+            "              if isinstance(v, (dict, list)) and not n.startswith('_')]\n"
+            "result = {n: (hasattr(defaults, n)\n"
+            "              and getattr(defaults, n) is getattr(runtime, n))\n"
+            "          for n in containers}\n"
+            "print(json.dumps(result))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                "importing defaults/runtime in a clean interpreter failed:\n"
+                + result.stderr.strip()[-2000:])
+        import json as _json
+        return _json.loads(result.stdout)
+
+    def test_the_scan_finds_containers_to_check(self):
+        """Fixture invariant - an empty result would pass every assertion
+        below vacuously."""
+        self.assertTrue(self.bindings())
+
+    def test_every_runtime_container_is_bound_by_defaults_py_itself(self):
+        bound = self.bindings()
+        missing = sorted(name for name, ok in bound.items() if not ok)
+
+        self.assertEqual(
+            missing, [],
+            "these runtime.py containers have no working "
+            "`name = runtime.name` binding in defaults.py, so the real "
+            "daemon crashes on first use even though every test using "
+            "tests/support.py's reset_config() passes: " + ", ".join(missing))
 
 
 if __name__ == "__main__":

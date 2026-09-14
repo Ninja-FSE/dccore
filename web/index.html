@@ -35,27 +35,35 @@
       <span class="brand-name" id="brand-name">DCCore</span>
     </div>
 
+    <!-- Ordered by how often a view is used, not by how central its
+         information feels (#133). The daily work is at the top; Stats is a
+         glance, and Settings and Console are admin surfaces reached
+         occasionally. Queue is gone as a tab - it lives in Stats now. -->
     <nav class="nav">
       <button class="nav-item is-active" data-view="search">
         <span class="nav-icon">&#9906;</span> Search
       </button>
-      <button class="nav-item" data-view="queue">
-        <span class="nav-icon">&#8801;</span> Queue
-      </button>
       <button class="nav-item" data-view="download">
-        <span class="nav-icon">&#8595;</span> Download
+        <span class="nav-icon">&#8595;</span> Downloads
       </button>
       <button class="nav-item" data-view="filelists">
-        <span class="nav-icon">&#9776;</span> File Lists
+        <span class="nav-icon">&#9776;</span> List Browser
       </button>
       <button class="nav-item" data-view="tools">
         <span class="nav-icon">&#9881;</span> Tools
       </button>
+      <button class="nav-item" data-view="stats">
+        <span class="nav-icon">&#9673;</span> Stats
+      </button>
+      <button class="nav-item" data-view="messages">
+        <span class="nav-icon">&#9993;</span> Messages
+        <span class="nav-count" id="messages-nav-count" hidden></span>
+      </button>
       <button class="nav-item" data-view="settings">
         <span class="nav-icon">&#9998;</span> Settings
       </button>
-      <button class="nav-item" data-view="stats">
-        <span class="nav-icon">&#9673;</span> Stats
+      <button class="nav-item" data-view="console">
+        <span class="nav-icon">&#10095;</span> Console
       </button>
     </nav>
 
@@ -74,6 +82,11 @@
       <div class="status-row">
         <span class="status-label">Queued</span>
         <span class="status-value" id="status-queued">&mdash;</span>
+      </div>
+      <!-- Nothing at all when there is nothing unread, so it means something
+           when it appears. See renderNoticeBadge() for what decides that. -->
+      <div class="status-row status-notices" id="status-notices" hidden>
+        <button type="button" class="notice-badge" id="notice-badge"></button>
       </div>
     </div>
 
@@ -151,38 +164,6 @@
       </div>
     </section>
 
-    <section class="view" id="view-queue">
-      <div class="stat-row">
-        <div class="stat-card">
-          <div class="stat-value" id="stat-slots">&mdash;</div>
-          <div class="stat-label">Active slots</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-files">&mdash;</div>
-          <div class="stat-label">Files queued</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-value" id="stat-users">&mdash;</div>
-          <div class="stat-label">Users waiting</div>
-        </div>
-      </div>
-
-      <div class="table-wrap">
-        <table class="data-table" id="queue-table">
-          <thead>
-            <tr>
-              <th>User</th>
-              <th>Next file</th>
-              <th>Count</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="queue-body">
-            <tr class="empty-row"><td colspan="4">Loading&hellip;</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
 
     <section class="view" id="view-download">
       <div class="table-wrap bulk-fetch-wrap">
@@ -226,48 +207,174 @@
     </section>
 
     <section class="view" id="view-filelists">
-      <div class="filelists-toolbar">
-        <form id="filelists-fetch-form" class="filelists-fetch-form">
-          <input type="text" id="filelists-fetch-input" class="search-input"
-                 placeholder="Fetch a bot's list&hellip; (nick)" autocomplete="off">
-          <button type="submit" class="btn btn-accent">Fetch</button>
-        </form>
-        <div class="filelists-switcher">
-          <label for="filelists-source-select">Showing</label>
-          <select id="filelists-source-select">
-            <option value="__own__">Our own list</option>
-          </select>
+      <!-- TWO COLUMNS: which list, and what is in it.
+           These were stacked, so the sources took the full width to show a
+           column of nicks and pushed the files below the fold - on a wide
+           screen the table began some 600px down and then had to scroll
+           inside what was left. Side by side, the sources are as wide as they
+           need to be and the table gets the height. -->
+      <div class="filelists-layout">
+        <div class="filelists-sources">
+          <div class="filelists-toolbar">
+            <form id="filelists-fetch-form" class="filelists-fetch-form">
+              <input type="text" id="filelists-fetch-input" class="search-input"
+                     placeholder="Fetch a bot's list&hellip; (nick)" autocomplete="off">
+              <button type="submit" class="btn btn-accent">Fetch</button>
+            </form>
+          </div>
+          <p class="broadcast-status" id="filelists-fetch-status"></p>
+
+          <!-- One term against every list held at once (#133). Live as you type:
+               the search index makes both the results and the "which bots have
+               nothing" answer a couple of milliseconds even across four million
+               rows, which is what this bar needs to exist at all. -->
+          <div class="filelists-filter">
+            <input type="search" id="filelists-filter-input" class="search-input"
+                   placeholder="Filter every list you hold&hellip;"
+                   autocomplete="off" aria-describedby="filelists-filter-status">
+            <button type="button" class="btn btn-small" id="filelists-filter-clear"
+                    hidden>Clear</button>
+          </div>
+          <p class="filelists-filter-status" id="filelists-filter-status" hidden></p>
+          <div class="filelists-filter-actions" id="filelists-filter-actions" hidden>
+            <button type="button" class="btn btn-small"
+                    id="filelists-filter-all">Show all lists</button>
+            <button type="button" class="btn btn-small"
+                    id="filelists-filter-none">Show none</button>
+            <!-- The way back to a row the filter has taken off the screen.
+                 Hiding without saying so would make the sidebar answer a
+                 different question every keystroke with no way to check it. -->
+            <button type="button" class="btn btn-small"
+                    id="filelists-filter-reveal" hidden></button>
+          </div>
+
+          <!-- One row per source, with a dot for whether the copy we hold is
+               still what that bot advertises (#133). Scrolls, because a busy
+               channel has thirty-odd advertisers and every one of them is a row
+               here whether we hold their list or not. -->
+          <div class="bot-list" id="filelists-bot-list"
+               aria-label="Whose list to show"></div>
+          <!-- Two legends, because there are two signals: the dot says
+               whether that bot is HERE, and the name's colour says what we
+               hold from them. One dot carrying both was what hid presence
+               entirely. -->
+          <p class="bot-legend">
+            <span><span class="led is-online"></span> here now</span>
+            <span><span class="led is-offline"></span> not in a channel</span>
+            <span><span class="led is-presence-unknown"></span> still joining</span>
+          </p>
+          <p class="bot-legend">
+            <span><span class="legend-name is-current">name</span> list current</span>
+            <span><span class="legend-name is-changed">name</span> theirs changed</span>
+            <span><span class="legend-name is-not-held">name</span> not downloaded</span>
+            <span><span class="legend-name is-unknown">name</span> cannot tell</span>
+          </p>
+
+          <!-- Forgets every held list whose dot is red (#385): a fetch stays
+               forever otherwise, even for a bot that will never come back.
+               Never touches a bot that is here now, or the grey "still
+               joining" dot - only a confirmed "not in a channel" counts. -->
+          <button type="button" class="btn btn-small" id="filelists-purge-offline-btn"
+                  title="Forget every held list whose bot is not in a channel with you right now (the red dot above). A bot that is here, or one we have not finished checking, is left alone.">
+            Purge offline bots' lists
+          </button>
+          <p class="broadcast-status" id="filelists-purge-status" hidden></p>
+        </div>
+
+        <div class="filelists-files">
+          <!-- One tab per list the SELECTED bot publishes (#399). Hidden
+               whenever that bot has only one - which is every own list, and
+               most fetched ones - so this never appears as an empty bar.
+               renderFilelistsTabs() decides what goes in it and when it
+               shows; the sidebar itself carries one row per bot, not one per
+               list, so a bot's RAR or VIDEO list no longer needs a second
+               row of its own to be reachable. -->
+          <div class="filelists-list-tabs" id="filelists-list-tabs" hidden
+               aria-label="Which of this bot's lists to show"></div>
+
+          <!-- Searches the ONE list currently open, server-side against its
+               full contents rather than only the page on screen - the
+               sidebar's own "Filter every list you hold" box (#133) answers
+               a different question: it spans every list held at once and
+               replaces this whole view while a term is typed there. Reuses
+               find_matching_entries() - the same match rule @find and the
+               Search tab already use - rather than a second search engine,
+               so a phrase means the same thing everywhere it is typed. -->
+          <div class="filelists-list-search">
+            <input type="search" id="filelists-list-search-input" class="search-input"
+                   placeholder="Search this list…" autocomplete="off">
+          </div>
+
+          <p class="filelists-freshness" id="filelists-freshness" hidden></p>
+          <div class="folder-controls">
+            <button type="button" class="btn btn-small" id="filelists-expand-all">Expand all</button>
+            <button type="button" class="btn btn-small" id="filelists-collapse-all">Collapse all</button>
+            <button type="button" class="btn btn-accent btn-small" id="filelists-download-selected-btn" disabled title="Tick the files you want. Shift-click a second box to take everything between it and the last one you touched.">Download selected</button>
+            <!-- Shown only for a list fetched from another bot: your own is
+                 the library itself, and a bot you have only seen advertising
+                 has nothing to remove. renderFilelistsPurge() decides.
+                 Removes every list the bot has, not just the one open here -
+                 wording says so since the sidebar stopped showing a row per
+                 list (#399). -->
+            <button type="button" class="btn btn-small btn-danger" id="filelists-purge-btn" hidden
+                    title="Remove everything downloaded from this bot: every list, its files and its search index rows.">Purge this bot's lists</button>
+          </div>
+
+          <div class="table-wrap">
+            <table class="data-table" id="filelists-table">
+              <thead>
+                <tr>
+                  <!-- Empty except in a list with no folders, where the
+                       select-all that normally rides on a folder heading has
+                       nowhere else to be. See renderFlatListControls(). -->
+                  <th class="col-check" id="filelists-head-check"></th>
+                  <th>Title</th>
+                  <th>Size</th>
+                  <th>Format</th>
+                  <th>Source</th>
+                </tr>
+              </thead>
+              <tbody id="filelists-body">
+                <tr class="empty-row"><td colspan="5">Loading&hellip;</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="filelists-pager">
+            <button type="button" class="btn btn-small" id="filelists-prev-btn">Prev</button>
+            <span class="filelists-pager-info" id="filelists-page-info"></span>
+            <button type="button" class="btn btn-small" id="filelists-next-btn">Next</button>
+          </div>
         </div>
       </div>
-      <p class="broadcast-status" id="filelists-fetch-status"></p>
+    </section>
 
-      <div class="folder-controls">
-        <button type="button" class="btn btn-small" id="filelists-expand-all">Expand all</button>
-        <button type="button" class="btn btn-small" id="filelists-collapse-all">Collapse all</button>
-        <button type="button" class="btn btn-accent btn-small" id="filelists-download-selected-btn" disabled>Download selected</button>
+    <section class="view" id="view-messages">
+      <h1>Messages</h1>
+      <!-- SAYING THE BOT DOES NOT REPLY, right at the top and before the
+           list. Everything here looks like a conversation and is not one:
+           there is no reply box, and there never will be, because a bot that
+           answers unrecognised messages is one that can be made to flood
+           itself off the network. Somebody would otherwise type an answer
+           into the first field they found. -->
+      <p class="view-subtitle">People who messaged the bot privately and got
+        no answer, because what they sent was not a command. <strong>The bot
+        never replies to these</strong> - if you want to answer, message them
+        yourself from your own client.</p>
+      <div class="messages-actions">
+        <button type="button" class="btn btn-small" id="messages-mark-read">Mark all read</button>
       </div>
+      <div class="message-list" id="message-list"></div>
+    </section>
 
-      <div class="table-wrap">
-        <table class="data-table" id="filelists-table">
-          <thead>
-            <tr>
-              <th class="col-check"></th>
-              <th>Title</th>
-              <th>Size</th>
-              <th>Format</th>
-              <th>Source</th>
-            </tr>
-          </thead>
-          <tbody id="filelists-body">
-            <tr class="empty-row"><td colspan="5">Loading&hellip;</td></tr>
-          </tbody>
-        </table>
+    <section class="view" id="view-notices">
+      <h1>What happened</h1>
+      <p class="view-subtitle">Kicks, bans and rebuilds that need looking at.
+        The Console has everything; this has only what somebody should act
+        on.</p>
+      <div class="notice-actions">
+        <button type="button" class="btn btn-small" id="notices-mark-read">Mark all read</button>
       </div>
-      <div class="filelists-pager">
-        <button type="button" class="btn btn-small" id="filelists-prev-btn">Prev</button>
-        <span class="filelists-pager-info" id="filelists-page-info"></span>
-        <button type="button" class="btn btn-small" id="filelists-next-btn">Next</button>
-      </div>
+      <div class="notice-list" id="notice-list"></div>
     </section>
 
     <section class="view" id="view-tools">
@@ -284,6 +391,9 @@
           it automatically.
         </p>
         <p class="tool-status" id="update-list-status"></p>
+          <div class="progress-bar" id="update-list-bar" style="display:none;">
+            <div class="progress-bar-fill" id="update-list-bar-fill"></div>
+          </div>
       </div>
       <div class="tool-card">
         <div class="tool-head">
@@ -346,26 +456,146 @@
       </div>
 
 
-      <div class="stat-group-label">Most downloaded &mdash; files</div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>File</th><th class="col-num">Times sent</th></tr></thead>
-          <tbody id="st-top-files"></tbody>
-        </table>
-      </div>
+      <!-- SIDE BY SIDE: two "most downloaded" tables that used to stack full
+           width, one under the other, for no reason beyond being written
+           that way - neither needs the whole row, and stacked they pushed
+           whatever came after them a screen's height down. The long names
+           that would otherwise force one wide are truncated instead (see
+           .stat-top-name), which is what keeps both columns the width they
+           are here rather than each fighting to be as wide as its longest
+           row. -->
+      <div class="stat-top-grid">
+        <div>
+          <div class="stat-group-label">Most downloaded &mdash; files</div>
+          <div class="table-wrap">
+            <table class="stat-top-table">
+              <thead><tr><th>File</th><th class="col-num">Times sent</th></tr></thead>
+              <tbody id="st-top-files"></tbody>
+            </table>
+          </div>
+        </div>
 
-      <div class="stat-group-label" id="st-top-albums-label">Most downloaded &mdash; album folders</div>
-      <div class="table-wrap" id="st-top-albums-wrap">
-        <table>
-          <thead><tr><th>Album</th><th class="col-num">Times sent</th></tr></thead>
-          <tbody id="st-top-albums"></tbody>
-        </table>
+        <div>
+          <div class="stat-group-label" id="st-top-albums-label">Most downloaded &mdash; album folders</div>
+          <div class="table-wrap" id="st-top-albums-wrap">
+            <table class="stat-top-table">
+              <thead><tr><th>Album</th><th class="col-num">Times sent</th></tr></thead>
+              <tbody id="st-top-albums"></tbody>
+            </table>
+          </div>
+          <p class="stat-foot" id="st-top-albums-off" style="display:none;">
+            Folder packing is off (<code>RAR_ENABLED</code>), so no album can be sent.
+          </p>
+        </div>
       </div>
-      <p class="stat-foot" id="st-top-albums-off" style="display:none;">
-        Folder packing is off (<code>RAR_ENABLED</code>), so no album can be sent.
-      </p>
 
       <p class="stat-foot" id="st-foot"></p>
+
+      <!-- Queue, folded in from its own tab (#133): "everything the bot
+           knows about itself, with the queue table keeping its place in
+           the lower half of the view". The ids are unchanged, so
+           renderQueueStats()/renderQueueTable() go on finding them. -->
+      <div class="stat-group-label">Queue</div>
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="stat-value" id="stat-slots">&mdash;</div>
+          <div class="stat-label">Active slots</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-files">&mdash;</div>
+          <div class="stat-label">Files queued</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-value" id="stat-users">&mdash;</div>
+          <div class="stat-label">Users waiting</div>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="queue-table">
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Next file</th>
+              <th>Count</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="queue-body">
+            <tr class="empty-row"><td colspan="4">Loading&hellip;</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Bringing an OmenServe operator's history across (#69). The numbers
+           live in mIRC's own scripts/vars.ini, written by whichever add-ons
+           they run - so this reads what is there and skips what is not.
+
+           The file is read IN THE PAGE and only the recognised lines are
+           sent, so an operator's other ~268 variables - their nicks,
+           channels, paths and passwords - never cross the network. -->
+      <div class="stat-group-label">Coming from OmenServe</div>
+      <div class="import-panel">
+        <p class="import-intro">
+          Bring your totals across from OmenServe. Your counters live in
+          mIRC's <code>scripts/vars.ini</code> &mdash; choose it below and you
+          will see exactly what would change before anything is written.
+          Only the counter lines are sent; the rest of the file stays on your
+          machine.
+        </p>
+        <div class="import-actions">
+          <label class="btn btn-small" for="import-file">Choose vars.ini&hellip;</label>
+          <input type="file" id="import-file" accept=".ini,.txt,text/plain" hidden>
+          <button type="button" class="btn btn-small" id="import-paste-toggle">Paste it instead</button>
+        </div>
+        <textarea id="import-paste" class="import-paste" rows="6" hidden
+                  placeholder="Paste the contents of vars.ini here&hellip;"></textarea>
+        <div class="import-paste-actions" id="import-paste-actions" hidden>
+          <button type="button" class="btn btn-small" id="import-paste-read">Read it</button>
+        </div>
+
+        <p class="import-status" id="import-status" hidden></p>
+
+        <div class="table-wrap" id="import-preview-wrap" hidden>
+          <table class="data-table">
+            <thead>
+              <tr><th>Figure</th><th class="col-num">Now</th><th class="col-num">After import</th></tr>
+            </thead>
+            <tbody id="import-preview"></tbody>
+          </table>
+        </div>
+        <p class="import-warning" id="import-warning" hidden></p>
+        <div class="import-confirm" id="import-confirm" hidden>
+          <button type="button" class="btn btn-accent btn-small" id="import-apply">Import these figures</button>
+          <button type="button" class="btn btn-small" id="import-cancel">Cancel</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-console">
+      <div class="tool-card console-card">
+        <p class="tool-what">
+          The same commands and the same live log as the DCC CHAT admin
+          console (<code>/dcc chat &lt;botnick&gt;</code>), for an operator
+          who would rather not keep a second IRC client open, or run without
+          a debug channel at all. Type <code>help</code> for the full command
+          list.
+        </p>
+        <div class="console-log" id="console-log"></div>
+        <form class="console-input-row" id="console-form">
+          <span class="console-prompt">&gt;</span>
+          <input type="text" class="console-input" id="console-input"
+                autocomplete="off" spellcheck="false"
+                placeholder="status, queue, help ...">
+          <button type="submit" class="btn btn-accent" id="console-run-btn">Run</button>
+        </form>
+        <p class="console-note">
+          <code>ban</code>, <code>unban</code>, <code>clearqueue</code>,
+          <code>rehash</code> and <code>update</code> reply immediately with
+          just an acknowledgement &mdash; their result appears a moment
+          later in the log above, the same as it would in a DCC CHAT window.
+        </p>
+      </div>
     </section>
 
   </div>

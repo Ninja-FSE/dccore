@@ -39,7 +39,7 @@ with open(IRC_SOURCE_PATH, "r", encoding="utf-8") as _handle:
 # each. The live-nick fragment keeps its closing quote attached so it does NOT
 # match the "-que"/"-remove" variants further down the chain.
 ALIAS_FRAGMENT = 'startswith(f"!{alias} ")'
-LIVE_NICK_FRAGMENT = 'msg_lower == f"@{config.NICKNAME.lower()}"'
+LIVE_NICK_FRAGMENT = 'is_list_request(msg, msg_lower)'
 
 
 def _elif_conditions(fragment=None):
@@ -110,6 +110,12 @@ def _evaluate(source, msg, target_chan=None):
         "msg": msg,
         "msg_lower": msg.lower(),
         "bot_aliases": irc.get_bot_aliases(),
+        # Pulled from irc.py itself, exactly as bot_aliases above is. The
+        # lifted expression is evaluated with THIS namespace as its globals,
+        # so a module-level name it calls has to be bound here - and binding
+        # the real function rather than a copy of its logic is what stops the
+        # two drifting apart.
+        "is_list_request": irc.is_list_request,
         "config": config,
         "target_chan": target_chan if target_chan is not None else config.NICKNAME,
     }
@@ -200,7 +206,7 @@ class TriggerExpressionTests(DCCoreTestCase):
         these fragments no longer appear, this module must fail loudly rather
         than silently testing nothing."""
         self.assertIn("bot_aliases", ALIAS_CONDITION)
-        self.assertIn("config.NICKNAME", LIVE_NICK_CONDITION)
+        self.assertIn("is_list_request", LIVE_NICK_CONDITION)
         self.assertIn("bot_aliases", FLOOD_GATE_SOURCE)
         # The alias dispatch sits in the chain, below the list-request branch.
         self.assertGreater(ALIAS_LINE, LIVE_NICK_LINE)
@@ -225,15 +231,48 @@ class TriggerExpressionTests(DCCoreTestCase):
                                  msg.lower().startswith("!dccore "))
 
     def test_main_nick_list_request_matches(self):
-        """Defect guard: "@<nick>" is the master-list request and stays an exact
-        match, so "@DCCore-que" is not swallowed by it."""
+        """"@<nick>", and "@<nick> " followed by anything.
+
+        This asserted an EXACT match, and the reason given was that
+        "@DCCore-que" must not be swallowed by it. That reason is still met -
+        by the SPACE, which none of the names this must stay distinct from
+        contains - and the exactness itself turned out to be a defect: AutoQ's
+        own "Get Listfile" menu item sends "@<nick>  ::AutoQ::" with the tag
+        colour-coded, so this bot was silent for every user of it. Every case
+        the old test pinned is still here; "@DCCore please" moved sides, and
+        is the case that was broken.
+        """
         reset_config(NICKNAME="DCCore", ORIGINAL_NICK="DCCore")
-        self.assertTrue(_evaluate(LIVE_NICK_CONDITION, "@DCCore"))
-        self.assertTrue(_evaluate(LIVE_NICK_CONDITION, "@dccore"))
-        for msg in ("@DCCore-que", "@DCCore-remove", "@DCCore please",
-                    "@DCCoreX", "DCCore"):
+        for msg in ("@DCCore", "@dccore", "@DCCore please",
+                    # What AutoQ.mrc actually sends, control codes and all.
+                    "@DCCore  ::4,0Auto12,0Q1,0::"):
+            with self.subTest(msg=msg):
+                self.assertTrue(_evaluate(LIVE_NICK_CONDITION, msg))
+        for msg in ("@DCCore-que", "@DCCore-remove", "@DCCore-help",
+                    "@DCCore-stats", "@DCCore-top",
+                    # A DIFFERENT bot whose nick merely starts with ours. It
+                    # must never have its list request answered by us, and
+                    # that is what the space requirement buys.
+                    "@DCCoreX", "@DCCoreX please", "@DCCore_away files",
+                    "DCCore"):
             with self.subTest(msg=msg):
                 self.assertFalse(_evaluate(LIVE_NICK_CONDITION, msg))
+
+    def test_a_bot_actually_named_find_still_searches(self):
+        """@find and @locator are the only triggers whose first word could
+        also be a nickname. For a bot named "find", a search must keep meaning
+        a search rather than becoming a request for its whole list."""
+        reset_config(NICKNAME="find", ORIGINAL_NICK="find")
+
+        self.assertFalse(_evaluate(LIVE_NICK_CONDITION, "@find Blue Monday"))
+        self.assertTrue(_evaluate(LIVE_NICK_CONDITION, "@find"))
+        # And the AutoQ tag goes the same way, which is the honest cost of the
+        # ambiguity rather than an oversight: for THIS bot alone, "Get
+        # Listfile" searches for "::AutoQ::" instead of sending the list.
+        # Preferring the search preserves what the dispatcher does today; the
+        # alternative silently changes the meaning of every @find in a channel
+        # where somebody happens to be running a bot called "find".
+        self.assertFalse(_evaluate(LIVE_NICK_CONDITION, "@find  ::AutoQ::"))
 
     # --- during a 433 fallback ---------------------------------------------
 
@@ -309,7 +348,12 @@ class FloodGateCoverageTests(DCCoreTestCase):
         for nickname, original in (("DCCore", "DCCore"), ("DCCore_", "DCCore")):
             reset_config(NICKNAME=nickname, ORIGINAL_NICK=original)
             for msg in ("@" + nickname, "@find metallica", "@locator metallica",
-                        "!" + nickname + " Song.flac", "!DCCore Song.flac"):
+                        "!" + nickname + " Song.flac", "!DCCore Song.flac",
+                        # A list request carrying AutoQ's tag is dispatched,
+                        # so it must be metered. The two widened together or
+                        # the tag becomes an unmetered command path - exactly
+                        # the defect this class exists for.
+                        "@" + nickname + "  ::AutoQ::"):
                 with self.subTest(nick=nickname, msg=msg):
                     self.assertTrue(self._gate(msg))
 
@@ -319,7 +363,9 @@ class FloodGateCoverageTests(DCCoreTestCase):
         corpus = ["!DCCore Song.flac", "!DCCore_ Song.flac", "!dccore x",
                   "!DCCore !rar Artist/Album", "!DCCoreX Song.flac",
                   "!DCCore2 Song.flac", "@DCCore", "@DCCore_", "@DCCore2",
-                  "@find x", "@locator x", "hello world", "!ping"]
+                  "@find x", "@locator x", "hello world", "!ping",
+                  "@DCCore  ::AutoQ::", "@DCCore_  ::AutoQ::",
+                  "@DCCore please", "@DCCore2  ::AutoQ::"]
         for nickname, original, previous in (("DCCore", "DCCore", None),
                                              ("DCCore_", "DCCore", None),
                                              ("DCCore2", "DCCore2", "DCCore")):
@@ -503,6 +549,28 @@ class BroadcastSearchCaptureTests(DCCoreTestCase):
                 self.assertEqual(entry["filename"], expected_filename)
                 self.assertNotIn("::INFO::", entry["filename"])
 
+    def test_a_dash_separated_size_with_no_marker_word_is_stripped_too(self):
+        """Reported live: SDFind v3.91 by SDSailor (the bot 'SomeBot' runs)
+        does not use "::INFO::" at all - its master list writes
+        "!<nick> <filename> ---- <size>", two or more hyphens between
+        spaces, no marker word. strip_info_suffix() only recognised the
+        marker, so the whole trailing " ---- 18.8Mb" stayed attached to
+        what the dashboard then requested - and the real DCC SEND that came
+        back (bearing only the bare filename) never matched it, rejected as
+        unsolicited exactly like the marker-spacing bug above. Drawn from
+        the bot's real, currently-held list file."""
+        raw_reply = (
+            "!SomeBot A101. Donna Summer - I Feel Love (Original 12'' "
+            "Version).mp3 ---- 18.8Mb")
+
+        irc._capture_broadcast_search_reply("OtherBot", "DCCore", raw_reply)
+
+        entry = config.broadcast_search_results[0]
+        self.assertEqual(entry["bot"], "SomeBot")
+        self.assertEqual(
+            entry["filename"],
+            "A101. Donna Summer - I Feel Love (Original 12'' Version).mp3")
+
     def test_no_token_means_no_bot_filename_fields(self):
         irc._capture_broadcast_search_reply("OtherBot", "DCCore", "Found 3 matches, use my list command")
         entry = config.broadcast_search_results[0]
@@ -524,6 +592,63 @@ class BroadcastSearchCaptureTests(DCCoreTestCase):
         irc._capture_broadcast_search_reply(config.NICKNAME, config.NICKNAME, "@find sandman")
         self.assertEqual(len(config.broadcast_search_results), len(before) + 1)
 
+
+class StripInfoSuffixDirectly(unittest.TestCase):
+    """list.strip_info_suffix() in isolation - BroadcastSearchCaptureTests
+    above exercises it through a real caller; this pins down the function's
+    own contract, including the "::INFO::" marker taking priority over the
+    dash-separated form when a line somehow carried both."""
+
+    def strip(self, rest):
+        import list as list_mod
+        return list_mod.strip_info_suffix(rest)
+
+    def test_the_dash_form_needs_at_least_two_hyphens(self):
+        """A single hyphen is an ordinary word separator in a real title -
+        "Song - Remix.mp3" must not lose "Remix.mp3" to this."""
+        filename, size = self.strip("Song - Remix.mp3")
+
+        self.assertEqual(filename, "Song - Remix.mp3")
+        self.assertEqual(size, "")
+
+    def test_the_dash_form_needs_a_size_shaped_tail(self):
+        """Two-or-more hyphens alone are not enough - a title that happens to
+        contain a run of dashes but no trailing size must be left whole."""
+        filename, size = self.strip("Track ---- Extended Mix.mp3")
+
+        self.assertEqual(filename, "Track ---- Extended Mix.mp3")
+        self.assertEqual(size, "")
+
+    def test_a_size_with_no_decimal_point_is_still_recognised(self):
+        filename, size = self.strip("A104. Cerrone - Supernature.mp3 ---- 25Mb")
+
+        self.assertEqual(filename, "A104. Cerrone - Supernature.mp3")
+        self.assertEqual(size, "25Mb")
+
+    def test_other_units_are_recognised_too(self):
+        for unit in ("KB", "kb", "GB", "Gb", "TB", "B"):
+            with self.subTest(unit=unit):
+                filename, size = self.strip(f"Track.flac ---- 1.5{unit}")
+                self.assertEqual(filename, "Track.flac")
+                self.assertEqual(size, f"1.5{unit}")
+
+    def test_the_info_marker_wins_when_a_line_somehow_carries_both(self):
+        """Defense-in-depth over a hypothetical, not a reported shape - the
+        far more specific and far more common marker is tried first and
+        takes the whole rest of the line, exactly as it always has."""
+        filename, size = self.strip("Track.mp3 ---- 5MB ::INFO:: 5.00MB OmenServe")
+
+        self.assertEqual(filename, "Track.mp3 ---- 5MB")
+        self.assertEqual(size, "5.00MB OmenServe")
+
+    def test_only_the_trailing_dash_group_is_treated_as_the_separator(self):
+        """A title with an earlier, unrelated run of hyphens must not be cut
+        at the first one - only the LAST "----<size>" shape, anchored to the
+        end of the line, is the separator."""
+        filename, size = self.strip("Artist ---- Working Title.mp3 ---- 12MB")
+
+        self.assertEqual(filename, "Artist ---- Working Title.mp3")
+        self.assertEqual(size, "12MB")
 
 
 class BroadcastRepliesFromRealBots(DCCoreTestCase):
@@ -572,15 +697,15 @@ class BroadcastRepliesFromRealBots(DCCoreTestCase):
         ("[rigserv]", "![rigserv] Testament (1990) Souls Of Black.rar  ::INFO:: "
                      "89.92MB : OmenServe v2.71 :",
          "Testament (1990) Souls Of Black.rar"),
-        ("kurtb66", "!kurtb66 14 - Testament - Souls Of Black.mp3  ::INFO:: "
+        ("somereq66", "!somereq66 14 - Testament - Souls Of Black.mp3  ::INFO:: "
                     "4.8MB OmenServe v2.71",
          "14 - Testament - Souls Of Black.mp3"),
     ]
 
     CHATTER = [
         "Thank You !!! I have now received 1 file(s) 702 Kb from you, for a "
-        "total of 24,024 file(s) 104 GbB leeched since 31st December 2008 "
-        "KeepTrack 6.2 by ^OmeN^",
+        "total of 11,111 file(s) 222 GbB leeched since 1st January 2020 "
+        "KeepTrack 6.2",
         "Matches for *Testament*Souls* Copy and Paste in Channel to Request a "
         "File (Slot:0/) (Que:0/16) in Use",
     ]
@@ -662,7 +787,7 @@ class SearchHeaderStats(DCCoreTestCase):
     def test_an_omenserve_header(self):
         stats = irc.parse_search_header(
             "Search Result 4 Matches For Testament Souls Copy And Paste "
-            "!kurtb66 FILENAME To The Channel To Request. (10/10) Free Slots, "
+            "!somereq66 FILENAME To The Channel To Request. (10/10) Free Slots, "
             "0 Queued OmenServe v2.71")
 
         self.assertEqual(stats["family"], "omenserve")
@@ -686,17 +811,17 @@ class SearchHeaderStats(DCCoreTestCase):
                 self.assertEqual(stats["server"], "OmeNServE v2.60")
 
     def test_a_bot_that_found_more_than_it_sent(self):
-        """Beezer answers with a list size and a truncation notice instead of
+        """CrateBot answers with a list size and a truncation notice instead of
         slot counts. The gap between 'matches' and what arrives is the whole
         reason to show it - otherwise five looks like all there is."""
         stats = irc.parse_search_header(
             "Search Result  12 Matches For Testament Souls   Get My List Of "
-            "94,952 Files By Typing @Beezer In The Channel Or Refine Your "
+            "41,238 Files By Typing @CrateBot In The Channel Or Refine Your "
             "Search. Sending first 5 Results   OmeNServE v2.60")
 
         self.assertEqual(stats["matches"], 12)
         self.assertEqual(stats["sending"], 5)
-        self.assertEqual(stats["list_size"], 94952)
+        self.assertEqual(stats["list_size"], 41238)
         self.assertNotIn("slots_free", stats, "this header reports no slots - "
                                               "absent must not become zero")
 
@@ -729,13 +854,13 @@ class SearchHeaderStats(DCCoreTestCase):
         """SPQR matches carry no ::INFO:: tag at all - a bare token and a
         filename."""
         self.assertIsNone(irc.parse_search_header(
-            "!BigRig Testament - Souls of Black.mp3"))
+            "!LoadBot Testament - Souls of Black.mp3"))
 
     def test_unrelated_chatter_is_not_a_header(self):
         self.assertIsNone(irc.parse_search_header(
             "Thank You !!! I have now received 1 file(s) 702 Kb from you, for "
-            "a total of 24,024 file(s) 104 GbB leeched since 31st December "
-            "2008 KeepTrack 6.2 by ^OmeN^"))
+            "a total of 11,111 file(s) 222 GbB leeched since 1st January "
+            "2020 KeepTrack 6.2"))
         self.assertIsNone(irc.parse_search_header(""))
         self.assertIsNone(irc.parse_search_header("just some words"))
 
@@ -748,19 +873,77 @@ class SearchHeaderStats(DCCoreTestCase):
         config.broadcast_search_results = []
 
         irc._capture_broadcast_search_reply(
-            "kurtb66", "DCCore",
-            "Search Result 4 Matches For X Copy And Paste !kurtb66 FILENAME "
+            "somereq66", "DCCore",
+            "Search Result 4 Matches For X Copy And Paste !somereq66 FILENAME "
             "To The Channel To Request. (10/10) Free Slots, 0 Queued "
             "OmenServe v2.71")
         irc._capture_broadcast_search_reply(
-            "kurtb66", "DCCore",
-            "!kurtb66 14 - Testament - Souls Of Black.mp3  ::INFO:: 4.8MB")
+            "somereq66", "DCCore",
+            "!somereq66 14 - Testament - Souls Of Black.mp3  ::INFO:: 4.8MB")
 
         header, result = config.broadcast_search_results
         self.assertIn("header", header)
         self.assertNotIn("filename", header)
         self.assertEqual(result["filename"], "14 - Testament - Souls Of Black.mp3")
         self.assertNotIn("header", result)
+
+
+class TheHelperItselfIsTheRule(DCCoreTestCase):
+    """is_list_request() is called from two places - the flood gate and the
+    dispatch - so its own answer is what both of them mean."""
+
+    def setUp(self):
+        super().setUp()
+        reset_config(NICKNAME="DCCore", ORIGINAL_NICK="DCCore")
+
+    def ask(self, msg):
+        return irc.is_list_request(msg, msg.lower())
+
+    def test_what_autoq_actually_sends_is_answered(self):
+        """Read off AutoQ.mrc's "Get Listfile" menu item:
+
+            msg $chan $+(@,$snick($chan,%i))  ::^C4,0Auto^C12,0^BQ^B^C1,0::
+
+        Two spaces and a colour-coded tag. OmenServe answers it; comparing for
+        equality did not, so this bot was silent for every user of that menu
+        item - no reply, no error, nothing in the log.
+        """
+        payload = "@DCCore  ::4,0Auto12,0Q1,0::"
+
+        self.assertTrue(self.ask(payload))
+
+    def test_the_plain_request_still_works(self):
+        for msg in ("@DCCore", "@dccore", "@DCCORE"):
+            with self.subTest(msg=msg):
+                self.assertTrue(self.ask(msg))
+
+    def test_a_longer_nick_is_not_us(self):
+        """The space is what buys this. Answering "@DCCore2" would send OUR
+        list to somebody asking a different bot for theirs."""
+        for msg in ("@DCCore2", "@DCCore2 please", "@DCCore_away",
+                    "@DCCore_away files", "@DCCoreX  ::AutoQ::"):
+            with self.subTest(msg=msg):
+                self.assertFalse(self.ask(msg))
+
+    def test_this_bots_own_suffix_commands_are_not_swallowed(self):
+        """Each has its own branch below this one in the chain, and none of
+        them contains a space - which is why widening to a suffix is safe."""
+        for msg in ("@DCCore-que", "@DCCore-remove", "@DCCore-help",
+                    "@DCCore-stats", "@DCCore-top"):
+            with self.subTest(msg=msg):
+                self.assertFalse(self.ask(msg))
+
+    def test_a_bare_nick_is_not_a_request(self):
+        self.assertFalse(self.ask("DCCore"))
+        self.assertFalse(self.ask("hello @DCCore please"))
+
+    def test_no_nickname_configured_answers_nothing(self):
+        """A blank NICKNAME would make the prefix "@ ", which every line
+        beginning with "@ " would then match."""
+        reset_config(NICKNAME="", ORIGINAL_NICK="")
+
+        self.assertFalse(self.ask("@ anything"))
+        self.assertFalse(self.ask("@"))
 
 
 if __name__ == "__main__":

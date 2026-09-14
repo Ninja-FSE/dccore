@@ -374,6 +374,22 @@ class WhichFilesCountAsTheList(ListFormatCase):
     def test_a_track_is_not(self):
         self.assertFalse(list_mod.is_list_artifact_name("Metallica/Black Album/01 - Enter Sandman.flac"))
 
+    def test_a_library_file_that_starts_with_the_base_name_is_not_the_list(self):
+        """The prefix half of the same rule, and the likelier half of the two.
+
+        LIST_BASE_NAME is derived from the bot's nickname, so it is an
+        ordinary word - and a shared archive beginning with that word and
+        ending in .rar or .zip was routed to the lists directory, found
+        missing there, and refused for ever, while the file sat in the
+        library being advertised. What separates a real artifact from one is
+        the date the builder writes into the name.
+        """
+        for name in ("DCCoreTest-Collection.rar", "DCCoreTest-Live 1999.zip",
+                     "DCCoreTest-Sessions-vol2.rar",
+                     "DCCoreTest" + list_mod.FULL_LIST_MARKER + "mix.txt"):
+            with self.subTest(name=name):
+                self.assertFalse(list_mod.is_list_artifact_name(name))
+
 
 class AValueThatIsNotOneOfTheThree(ListFormatCase):
 

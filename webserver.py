@@ -60,6 +60,7 @@ only on the next daemon restart, but MAX_DCC_SLOTS, the queue, etc. are always
 current) are visible without needing a reload of this module.
 """
 
+import collections
 import os
 import sys
 import threading
@@ -68,9 +69,11 @@ import time
 import adminchat
 import defaults as config
 import platform_compat
+import runtime
 
 try:
-    from flask import Flask, jsonify, redirect, request, send_from_directory, session
+    from flask import (Flask, jsonify, redirect, request, send_file,
+                       send_from_directory, session)
     HAVE_FLASK = True
 except ImportError:
     HAVE_FLASK = False
@@ -181,6 +184,28 @@ IRC_LINE_FIELD_MAX_LEN = 300
 # is the only unbounded input - which is the one this is for.
 FETCH_ENQUEUE_MAX_ITEMS = 500
 
+# A ceiling on the served-folder list, for the same reason every other list
+# this module accepts has one: a POST body is not a promise. Far above any
+# real library - an operator with more than this has a drive letter problem,
+# not a folder list - and low enough that the O(n^2) pairwise nesting check in
+# library.problems() cannot be turned into a way to occupy the process.
+MAX_SERVED_FOLDERS = 64
+
+# And one path. library.problems() embeds each offending path verbatim in up
+# to two messages per entry, so without this a 400 response is roughly twice
+# the request that caused it. Every other web input in this module is bounded
+# (IRC_LINE_FIELD_MAX_LEN, FETCH_ENQUEUE_MAX_ITEMS, FOLDER_BROWSE_MAX_ENTRIES);
+# this one was not. Far longer than any real path - Windows stops at 32767
+# even through the \\?\ prefix - so it bounds the absurd without touching the
+# possible.
+MAX_FOLDER_PATH_LEN = 4096
+
+# One directory listing. A music library's top level can hold thousands of
+# artist folders, and every one of them would be rendered into a panel nobody
+# can scroll usefully - so the listing is capped and SAYS it was capped, which
+# is the part that stops an operator concluding a folder is missing.
+FOLDER_BROWSE_MAX_ENTRIES = 500
+
 
 def reject_if_unsafe_for_irc_line(value, field_name, max_len=IRC_LINE_FIELD_MAX_LEN):
     """Return an error string if `value` is not safe to interpolate into an
@@ -264,6 +289,171 @@ def count_rar_album_folders():
             return sum(1 for line in handle if line.startswith("!"))
     except OSError:
         return None
+
+
+# The ceilings the import refuses beyond. A stray digit from a hand-edited
+# text file is far likelier than a genuine value up here, and importing one
+# silently is worse than refusing it - the operator can retype a number, but
+# they cannot tell that a total is wrong once it looks plausible.
+#
+# 2^63 is where a 64-bit counter stops meaning anything; a byte total past a
+# petabyte and a speed record past 10 GB/s are both past any real DCC link by
+# orders of magnitude, and both are what a mis-parsed field looks like.
+MAX_IMPORT_FILES = 2 ** 63 - 1
+MAX_IMPORT_BYTES = 1 << 50           # 1 PiB
+MAX_IMPORT_SPEED = 10 * 1000 ** 3    # 10 GB/s
+
+_IMPORT_LIMITS = {
+    "total_files": (MAX_IMPORT_FILES, "files sent"),
+    "total_bytes": (MAX_IMPORT_BYTES, "bytes sent"),
+    "speed_record": (MAX_IMPORT_SPEED, "speed record"),
+}
+
+
+def current_importable_stats():
+    """What the three importable figures are right now.
+
+    Read through the same accessors the Stats page uses, so the "before" column
+    of the preview cannot disagree with the page the operator is looking at.
+    """
+    import db
+
+    row = db.load_advanced_stats() or [0] * 7
+    try:
+        total_files = int(row[0])
+    except (IndexError, TypeError, ValueError):
+        total_files = 0
+    try:
+        total_bytes = int(row[1])
+    except (IndexError, TypeError, ValueError):
+        total_bytes = 0
+    try:
+        record = int(db.get_speed_record() or 0)
+    except (TypeError, ValueError):
+        record = 0
+    return {"total_files": total_files, "total_bytes": total_bytes,
+            "speed_record": record}
+
+
+def validate_import_values(raw):
+    """(clean, errors) for the three figures an import may carry.
+
+    Every field optional - an operator missing an add-on imports what they
+    have - but a field that IS present must be a whole number in range.
+    Checked HERE and not only in the page: the page is convenience, this is
+    the boundary, and everything arriving is from a text file somebody may
+    have hand-edited.
+    """
+    clean = {}
+    errors = []
+    for name, (ceiling, label) in _IMPORT_LIMITS.items():
+        if name not in (raw or {}):
+            continue
+        value = raw[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            errors.append(f"{label}: expected a whole number.")
+            continue
+        try:
+            # str() first so "45902" works and 45902.0 does not silently
+            # truncate a fraction somebody meant to be there.
+            number = int(str(value).strip())
+        except (TypeError, ValueError):
+            errors.append(f"{label}: {value!r} is not a whole number.")
+            continue
+        if number < 0:
+            errors.append(f"{label}: cannot be negative.")
+            continue
+        if number > ceiling:
+            errors.append(f"{label}: {number:,} is beyond anything real "
+                          f"(the limit is {ceiling:,}). A stray digit in a "
+                          f"hand-edited file looks exactly like this.")
+            continue
+        clean[name] = number
+    return clean, errors
+
+
+def build_stats_import_preview(text):
+    """POST /api/stats/import/preview: what a vars.ini would do, changing nothing.
+
+    Separate from the write for the reason the issue gives: on a fresh install
+    nobody reads the sentence about overwriting, and on a used one it is the
+    only thing that matters. The page shows before and after side by side and
+    the operator confirms.
+    """
+    import omenserve_import
+
+    found = omenserve_import.read_install(text)
+    clean, errors = validate_import_values(found.get("values") or {})
+    return {
+        "rows": found.get("rows", []),
+        "notes": list(found.get("notes", [])) + errors,
+        "current": current_importable_stats(),
+        "values": clean,
+        # OVERWRITTEN, NOT COMBINED, and said where the page can put it in
+        # front of the operator rather than buried in prose they will not read
+        # on a fresh install and cannot miss on a used one.
+        "replaces": {name: value for name, value in clean.items()
+                     if current_importable_stats().get(name)},
+    }
+
+
+def apply_stats_import(raw):
+    """(http_status, payload) for POST /api/stats/import.
+
+    Writes through db.save_advanced_stats() and db.save_speed_record(), which
+    already take the disk lock and write atomically - a caller, not a second
+    implementation of either.
+
+    Returns the before and after, so the page reports what actually happened
+    rather than what it asked for.
+    """
+    import db
+
+    clean, errors = validate_import_values(raw)
+    if errors:
+        return 400, {"error": errors[0], "errors": errors}
+    if not clean:
+        return 400, {"error": "Nothing to import - no recognised figure was "
+                              "supplied."}
+
+    before = current_importable_stats()
+
+    if "total_files" in clean or "total_bytes" in clean:
+        # The 7-column row read-modify-written as a whole: the day columns and
+        # the date belong to the daemon's own rotation and are not this
+        # feature's to touch. Importing a lifetime total must not reset what
+        # the bot did today.
+        row = list(db.load_advanced_stats() or [0] * 7)
+        while len(row) < 7:
+            row.append(0)
+        if "total_files" in clean:
+            row[0] = clean["total_files"]
+        if "total_bytes" in clean:
+            row[1] = clean["total_bytes"]
+        db.save_advanced_stats(row)
+
+    if "speed_record" in clean:
+        db.save_speed_record(clean["speed_record"])
+
+    # WHAT ACTUALLY LANDED, compared against what was asked for. Both writers
+    # swallow their own errors and return None - correct for them, since a
+    # failed stats write must not take the daemon down - which meant this
+    # returned 200 and "imported: [...]" for figures that never reached the
+    # disk. The operator would have been told their history came across and
+    # found half of it, with nothing to say which half.
+    after = current_importable_stats()
+    landed = [name for name in sorted(clean) if after.get(name) == clean[name]]
+    missing = [name for name in sorted(clean) if name not in landed]
+    if missing:
+        return 500, {
+            "error": "Some figures could not be written: "
+                     + ", ".join(missing)
+                     + ". Check the daemon log and the data directory.",
+            "before": before, "after": after, "imported": landed,
+            "failed": missing,
+        }
+
+    return 200, {"before": before, "after": after, "imported": landed}
 
 
 def build_stats_payload():
@@ -389,9 +579,20 @@ def build_queue_payload(user=None):
     """The Queue view's data.
 
     With no `user`, one summary row per queued user (their status, a preview
-    of the next file, and how many are waiting) - what the Queue table shows.
-    With `user`, the full file list queued for that one user instead - what a
-    click-through or `?user=<nick>` on /api/queue returns.
+    of the next file, how many are waiting, the FULL list of what is waiting,
+    and - for whoever is sending - the file in flight and its progress) -
+    what the Queue table shows. With `user`, the full file list queued for
+    that one user instead - what a click-through or `?user=<nick>` on
+    /api/queue returns.
+
+    "preview"/"count"/"files" describe the QUEUE only - what is waiting
+    behind whatever is currently sending, if anything, never included in it.
+    dcc.py never puts the in-flight file into config.dcc_queue; it lives in
+    config.active_transfers instead, which is why a sending user's progress
+    needs its own fields rather than being folded into the queue ones -
+    an operator asked to see the whole queue, not just its head, and a
+    progress bar for the transfer actually running, not for whatever is
+    queued behind it.
 
     No lock is taken, matching adminchat.py's _cmd_queue/_cmd_status idiom: a
     shallow dict()/list() copy of the live containers, read without a lock,
@@ -402,6 +603,23 @@ def build_queue_payload(user=None):
     frozen = dict(getattr(config, "frozen_queues", {}))
     active = list(getattr(config, "active_transfers", []))
     sending_users = {str(tx.get("user", "")).lower() for tx in active}
+
+    active_by_user = {}
+    for tx in active:
+        active_by_user.setdefault(str(tx.get("user", "")).lower(), tx)
+
+    def _progress_fields(user_key):
+        # None, not 0, when there is nothing sending or the size is not
+        # known yet (dcc.start_dcc_send() writes "size" onto the row the
+        # moment it has read the file's real size off disk - a fresh
+        # dispatch's row does not have it for the brief window before that).
+        # The dashboard tells "no bar to draw" apart from "0% so far" by
+        # this, not by a size of 0, which a genuinely empty file would also
+        # report honestly.
+        tx = active_by_user.get(user_key)
+        if tx is None:
+            return None, None, None
+        return tx.get("file"), tx.get("bytes_sent"), tx.get("size")
 
     if user:
         user_key = str(user).strip().lower()
@@ -415,7 +633,9 @@ def build_queue_payload(user=None):
         else:
             status = "empty"
         files = [e.get("file", "?") if isinstance(e, dict) else str(e) for e in entries]
-        return {"user": user_key, "status": status, "count": len(entries), "files": files}
+        current_file, bytes_sent, size = _progress_fields(user_key)
+        return {"user": user_key, "status": status, "count": len(entries), "files": files,
+                "current_file": current_file, "bytes_sent": bytes_sent, "size": size}
 
     # #220: a user sent with a free slot and nothing already queued never
     # enters dcc_queue at all - dcc.py's admission check appends straight to
@@ -425,10 +645,6 @@ def build_queue_payload(user=None):
     # transfer correctly - the two disagreeing about the same page. The
     # single-user branch above already got this right by checking
     # sending_users regardless of whether entries exist; this does the same.
-    active_by_user = {}
-    for tx in active:
-        active_by_user.setdefault(str(tx.get("user", "")).lower(), tx)
-
     rows = []
     for user_key in dict.fromkeys(list(queue.keys()) + list(sending_users)):
         # sending_users comes from active_transfers, whose rows are built by
@@ -441,6 +657,7 @@ def build_queue_payload(user=None):
             continue
         entries = queue.get(user_key, [])
         status = "sending" if user_key in sending_users else ("frozen" if user_key in frozen else "queued")
+        files = [e.get("file", "?") if isinstance(e, dict) else str(e) for e in entries]
         first = entries[0] if entries else None
         if first is not None:
             preview = first.get("file", "?") if isinstance(first, dict) else str(first)
@@ -448,8 +665,33 @@ def build_queue_payload(user=None):
             preview = active_by_user[user_key].get("file", "?")
         else:
             preview = ""
-        rows.append({"user": user_key, "preview": preview, "count": len(entries), "status": status})
+        current_file, bytes_sent, size = _progress_fields(user_key)
+        rows.append({"user": user_key, "preview": preview, "count": len(entries), "status": status,
+                     "files": files, "current_file": current_file,
+                     "bytes_sent": bytes_sent, "size": size})
     return rows
+
+
+def split_list_search_words(query):
+    """A raw query string into the pre-split, lower-cased word list
+    list.find_matching_entries() takes - the same splitting rule
+    execute_search() has always used for @find, so a phrase means the same
+    thing here, on the Search tab, and in the List Browser's per-list search
+    (#399's follow-up) rather than three separate ideas of "contains".
+
+    An empty result (no words survived, or the query was empty/blank) is
+    NOT the same as "no filter" to every caller - find_matching_entries()
+    treats an empty list as "match everything", which build_filelists_payload()
+    and build_fetched_bot_list_payload() want but build_search_payload()
+    historically did not (a term that stripped to nothing returned no
+    results, not the whole list) - so each caller decides what to do with an
+    empty return rather than this function guessing for all of them.
+    """
+    import re
+
+    raw_clean = str(query or "")
+    clean_term = re.sub(r'[-*_.]', ' ', raw_clean)
+    return [w.strip().lower() for w in clean_term.split() if w.strip()]
 
 
 def build_search_payload(query):
@@ -461,11 +703,8 @@ def build_search_payload(query):
     and its own JSON shape instead of IRC formatting.
     """
     import list as list_mod
-    import re
 
-    raw_clean = str(query or "")
-    clean_term = re.sub(r'[-*_.]', ' ', raw_clean)
-    search_words = [w.strip().lower() for w in clean_term.split() if w.strip()]
+    search_words = split_list_search_words(query)
     if not search_words:
         return []
 
@@ -488,8 +727,20 @@ def build_search_payload(query):
     ]
 
 
-def build_filelists_payload(offset=0, limit=None):
-    """The File Lists view's data: a page of THIS bot's own master list.
+def build_filelists_payload(offset=0, limit=None, name=None, q=""):
+    """The File Lists view's data: a page of one of THIS bot's own lists.
+
+    `name` picks which. None means the primary, which is what every list
+    function already resolves it to and what this route meant before lists
+    had names - so an unqualified request is unchanged.
+
+    `q`, when given, narrows the list to rows matching every word in it -
+    #399's follow-up, the List Browser's own per-list search, asked for
+    because a fetched bot's archive can run to tens of thousands of rows and
+    paging through them by hand to find one file is not a real option.
+    split_list_search_words("") is [], and find_matching_entries() already
+    treats an empty word list as "match everything" - the same rule that
+    makes an unfiltered page unchanged, so this needs no branch of its own.
 
     v1 scope is deliberately THIS BOT ONLY - it serves DCCore's own master
     list, decomposed into rows, with "source" hardcoded to config.NICKNAME.
@@ -515,10 +766,11 @@ def build_filelists_payload(offset=0, limit=None):
     if limit is None:
         limit = FILELISTS_DEFAULT_PAGE_SIZE
 
-    entries, _total = list_mod.find_matching_entries([], limit=None)
+    search_words = split_list_search_words(q)
+    entries, _total = list_mod.find_matching_entries(search_words, limit=None, name=name)
     rows = list_mod.entries_to_filelist_rows(entries, getattr(config, "NICKNAME", "?"))
     groups = list_mod.group_rows_by_folder(rows)
-    page, total_folders, total_rows = list_mod.page_folder_groups(
+    page, total_folders, total_rows, row_capped = list_mod.page_folder_groups(
         groups, offset, limit, max_rows=list_mod.FILELISTS_MAX_PAGE_ROWS)
     return {
         "folders": page,
@@ -530,6 +782,10 @@ def build_filelists_payload(offset=0, limit=None):
         # so the frontend advances by this rather than by `limit` - otherwise
         # a truncated page would silently skip the folders it did not receive.
         "returned": len(page),
+        # #477: distinguishes "this page is short because the safety valve
+        # cut it" from "this page is short because it is the last one" - a
+        # page of one huge folder otherwise reads as the pager being broken.
+        "row_capped": row_capped,
     }
 
 
@@ -574,6 +830,43 @@ BOT_ALONE_FETCH_CONFLICT_ERROR = (
 )
 
 
+def bot_not_here_error(bot):
+    """Why we will not ask this bot, or None if we will.
+
+    FROM THE BETA. A list was requested from a nick that was not on the
+    network - the server answered the operator's own WHOIS with "No such
+    nick" - and the fetch sat in the queue holding a slot until it timed out,
+    then reported "no response". Which was true, and useless: nobody was there
+    to respond, and that was knowable before a line went out.
+
+    The daemon already knows. config.channel_users is synced from 353/JOIN/
+    PART for every channel it is in, and dcc.py has read it as proof of
+    presence before dispatching a send since long before this. A request is a
+    PRIVMSG into a channel: a nick that is not in one of ours cannot see it,
+    so this is not a guess about whether they would answer - it is the
+    observation that they were not asked.
+
+    Returns None when we have no channel membership at all, rather than
+    refusing everything: that is a bot which has not finished joining, and
+    "wait" is a better answer than "nobody exists".
+    """
+    import dcc
+
+    nick = str(bot or "").strip()
+    if not nick:
+        return None
+    with runtime.channel_users_lock():
+        known = any(users for users in
+                    (getattr(config, "channel_users", {}) or {}).values())
+    if not known:
+        return None
+    if dcc.user_is_present_in_ram(nick):
+        return None
+    return (f"{nick} is not in any channel this bot is in, so a request "
+            f"would go nowhere. They may have signed off - the dot beside "
+            f"their name says which.")
+
+
 def build_list_fetch_enqueue_result(bot_raw):
     """POST /api/filelists/fetch's pure logic: validate the bot nick and
     enqueue a request_type="list" row.
@@ -616,6 +909,10 @@ def build_list_fetch_enqueue_result(bot_raw):
     bot = bot_raw.strip()
     if not bot:
         return 400, {"error": "'bot' is required."}
+
+    absent = bot_not_here_error(bot)
+    if absent:
+        return 409, {"error": absent}
 
     if dcc_fetch.has_outstanding_bot_alone_request(bot):
         return 409, {"error": BOT_ALONE_FETCH_CONFLICT_ERROR}
@@ -671,6 +968,10 @@ def build_folder_rar_fetch_enqueue_result(bot_raw, folder_raw):
     if not bot or not folder:
         return 400, {"error": "Both 'bot' and 'folder' are required."}
 
+    absent = bot_not_here_error(bot)
+    if absent:
+        return 409, {"error": absent}
+
     if dcc_fetch.has_outstanding_bot_alone_request(bot):
         return 409, {"error": BOT_ALONE_FETCH_CONFLICT_ERROR}
 
@@ -682,11 +983,369 @@ def build_folder_rar_fetch_enqueue_result(bot_raw, folder_raw):
     return 200, {"created": [request_id]}
 
 
-def build_fetched_bot_list_summaries():
-    """GET /api/filelists/bots payload: one row per bot with a fetched list
-    currently available, for the File Lists view's switcher control.
+def fetch_marks_by_bot():
+    """{bot: {filename: "requested"|"received"}}, both keys lower-cased.
 
-    "count" reads the "entry_count" field process_fetched_list_zip() computes
+    What #133 calls "mark what you already requested", and it wants two states
+    rather than one:
+
+      requested  the row is still in flight - dcc_fetch groups exactly these
+                 as _UNRESOLVED_FETCH_STATES (pending, offered, listening,
+                 receiving), and reusing that tuple is what stops this drifting
+                 the day a state is added there.
+      received   complete.
+      nothing    FAILED, on purpose. A failed fetch is not a thing you have,
+                 and marking it would discourage the one useful action left,
+                 which is to ask again.
+
+    Only file requests are marked. A "list" or "folder" row is a request for
+    the whole list or a packed archive, not for any row shown in the table, so
+    marking a filename from one would claim something that never happened.
+    """
+    import dcc_fetch
+
+    # Under the SAME LOCK the writers use, exactly as
+    # build_fetch_status_payload() does: enqueue_fetch() inserts rows from the
+    # transfer thread while this runs on Flask's, and iterating a dict being
+    # inserted into raises "dictionary changed size during iteration" - which
+    # here is a 500 on the List Browser at the precise moment somebody starts
+    # a fetch, which is the moment they are most likely to be looking at it.
+    with dcc_fetch._fetch_lock():
+        queued = [dict(row) for row in (getattr(config, "fetch_queue", {}) or {}).values()
+                  if isinstance(row, dict)]
+
+    marks = {}
+    for row in queued:
+        if not isinstance(row, dict):
+            continue
+        if row.get("request_type") != "file":
+            continue
+        bot = str(row.get("bot") or "").strip().lower()
+        filename = str(row.get("requested_filename") or "").strip().lower()
+        if not bot or not filename:
+            continue
+        state = row.get("state")
+        if state in dcc_fetch._UNRESOLVED_FETCH_STATES:
+            mark = "requested"
+        elif state == "complete":
+            mark = "received"
+        else:
+            continue
+        # "received" wins over "requested" for the same file: asking twice and
+        # having it once is a thing you HAVE, and that is the more useful of
+        # the two answers to show.
+        if marks.setdefault(bot, {}).get(filename) != "received":
+            marks[bot][filename] = mark
+    return marks
+
+
+def mark_rows_with_fetch_state(rows, marks, bot=None):
+    """Stamp each row with what we have already asked that bot for.
+
+    `bot` when every row belongs to one list (a fetched bot's page); left out
+    when they do not (the cross-list filter), where each row's own "source"
+    says which bot it came from.
+
+    Rows with no mark get one anyway, as "". The frontend then has one field to
+    read rather than having to know whether its absence means "not requested"
+    or "this payload does not carry marks".
+    """
+    for row in rows:
+        owner = str(bot if bot is not None else row.get("source", "")).strip().lower()
+        name = str(row.get("title") or "").strip().lower()
+        row["mark"] = marks.get(owner, {}).get(name, "")
+    return rows
+
+
+def build_crosslist_search_payload(term, limit=None):
+    """GET /api/filelists/search: one term against every list we hold.
+
+    Returns the SAME shape as GET /api/filelists - {"folders": [...]} of
+    {"folder", "count", "entries"} - plus "matched"/"empty" for the sidebar.
+    Deliberately the same: the browser's folder rendering, its checkboxes and
+    its "Download selected" all work on that shape already, and the row's
+    "source" field is the bot, so selecting across several lists at once needs
+    no new plumbing. A second row shape here would have been a second renderer
+    and a second selection path to keep in step.
+
+    GROUPED BY BOT AND FOLDER, not by folder alone. list.group_rows_by_folder()
+    keys on the folder string, which is right for one list and wrong across
+    several: two bots can easily both have "D:\\MUSIC\\Metallica\\", and
+    merging those would put one bot's files under another's heading and point
+    the folder's !rar button at whichever bot happened to be first.
+
+    "matched" and "empty" are asked separately rather than derived from the
+    rows, because the page is capped: a bot whose matches all fall past the cap
+    would look empty when it is not. See list_index.bots_with_a_match() for why
+    the second question is cheap enough to ask on every keystroke.
+
+    Scoped to the lists actually held, never to whatever is in the index. The
+    two can drift - a list file removed by hand, a reset store - and a row for
+    a list we no longer have offers a file that cannot be requested.
+    """
+    import list as list_mod
+    import list_index
+
+    import list_fetch
+
+    # PHRASES, not loose words - see list_index.filter_segments(). What the
+    # operator typed is one phrase unless they separated it with "*", and the
+    # page needs the same pieces to highlight what matched, so they are
+    # parsed once here and returned in the payload rather than parsed again
+    # in JavaScript.
+    terms = list_index.filter_segments(term)
+
+    # EVERY LIST, not every bot. A bot's archive can hold several - its loose
+    # files and its packed albums, or music and film - and each is indexed
+    # under its own name, "<nick>" for the main one and "<nick>/<marker>" for
+    # the rest. Asking about the NICK alone had two consequences, both
+    # reported from a beta looking at a bot with two lists:
+    #
+    #   * the other lists were never searched, so a match inside one could
+    #     not be found by the filter at all; and
+    #   * they came back in neither `matched` nor `empty`, and the sidebar
+    #     only dims what it was TOLD is empty - so a list with no matches was
+    #     left bright, reading as the one list that had them.
+    #
+    # These keys are exactly the ones build_fetched_bot_list_summaries()
+    # gives its rows, which is what makes the dimming line up.
+    held = {}
+    for key, entry in (dict(getattr(config, "fetched_bot_lists", {}) or {})
+                       ).items():
+        name = str(entry.get("bot") or key).strip()
+        if not name:
+            continue
+        stored = entry.get("lists")
+        markers = (list(stored) if isinstance(stored, dict) and stored
+                   else [""])
+        for marker in markers:
+            source = list_fetch.index_key(name, marker)
+            held[source.lower()] = source
+
+    empty_payload = {
+        "term": str(term or ""),
+        "terms": terms,
+        "folders": [],
+        "total": 0,
+        "total_files": 0,
+        "returned": 0,
+        "truncated": False,
+        "matched": [],
+        "empty": sorted(held),
+    }
+    if not terms or not held:
+        return empty_payload
+
+    names = list(held.values())
+    rows = list_index.search(terms, limit=limit, bots=names)
+    matched, empty = list_index.bots_with_a_match(terms, names)
+
+    # One group per (bot, folder), in the order the index returned them so
+    # that a bot's own list order survives rather than being re-sorted into
+    # one the operator does not recognise.
+    order = []
+    groups = {}
+    for row in rows:
+        # The index stores a bot under one NORMALISED key, so that a refetch
+        # under different capitalisation replaces the list rather than
+        # doubling it. The operator should still see the nick as that bot
+        # spells it, and the fetch should be addressed that way - so the
+        # display name comes back from `held`, which is keyed the same way and
+        # holds the real spelling.
+        bot = held.get(str(row.get("bot") or "").strip().lower(),
+                       str(row.get("bot") or ""))
+        folder = str(row.get("folder") or "")
+        key = (bot.lower(), folder.lower())
+        group = groups.get(key)
+        if group is None:
+            group = {"folder": folder, "bot": bot, "count": 0, "entries": []}
+            groups[key] = group
+            order.append(key)
+        filename = str(row.get("filename") or "")
+        group["entries"].append({
+            "title": filename,
+            "size": str(row.get("size") or ""),
+            "format": os.path.splitext(filename)[1].lstrip(".").upper(),
+            # The BOT, which is what makes cross-list selection work: the
+            # checkbox takes its bot from here, so a page of results from
+            # four different bots queues correctly without the frontend
+            # knowing anything about which list a row came from.
+            "source": bot,
+            "folder": folder,
+        })
+        group["count"] += 1
+
+    marks = fetch_marks_by_bot()
+    for group in groups.values():
+        mark_rows_with_fetch_state(group["entries"], marks)
+
+    folders = [groups[key] for key in order]
+    payload = dict(empty_payload)
+    payload.update({
+        "folders": folders,
+        "total": len(folders),
+        "total_files": sum(group["count"] for group in folders),
+        "returned": len(folders),
+        # The cap was reached, so there are probably more. Said plainly rather
+        # than implied by a count the reader would need to know the cap to
+        # interpret.
+        "truncated": len(rows) >= (limit or list_index.DEFAULT_SEARCH_LIMIT),
+        "matched": sorted(matched),
+        "empty": sorted(empty),
+    })
+    return payload
+
+
+# The source key for our own lists. "__own__" alone still means the PRIMARY,
+# which is what GET /api/filelists with no ?list= has always returned - so
+# every existing caller, and every install that serves one list, is unchanged.
+OWN_SOURCE = "__own__"
+
+
+def own_list_source(served_list):
+    """The List Browser source key for one of OUR served lists.
+
+    The primary keeps the bare "__own__" it has always had. Naming it as well
+    would have been tidier and would have changed the meaning of a URL that
+    predates lists having names at all.
+    """
+    if served_list.primary:
+        return OWN_SOURCE
+    return f"{OWN_SOURCE}:{served_list.name}"
+
+
+def own_list_name(source):
+    """The served-list name a source key refers to, or None if it is not ours.
+
+    None for the bare "__own__" too: that means the primary, and the primary
+    is what every list function already resolves `name=None` to. Returning its
+    name instead would be the same answer by a longer route, and would break
+    the moment an operator renamed it.
+    """
+    text = str(source or "")
+    if text == OWN_SOURCE:
+        return None
+    if text.startswith(OWN_SOURCE + ":"):
+        return text[len(OWN_SOURCE) + 1:] or None
+    return None
+
+
+def source_is_ours(source):
+    text = str(source or "")
+    return text == OWN_SOURCE or text.startswith(OWN_SOURCE + ":")
+
+
+def requested_own_list(name):
+    """Validate a ?list= against the lists we actually serve.
+
+    Returns the served list's own name, or None for "the primary" - which
+    covers an absent parameter and a name we do not serve alike. Deliberately
+    not an error: this route is polled continuously, and a list renamed or
+    removed between one poll and the next would otherwise turn the table into
+    an error message without anybody having touched it.
+
+    It also keeps an arbitrary string away from list.find_latest_list(), which
+    joins the name into a directory path.
+    """
+    wanted = str(name or "").strip()
+    if not wanted:
+        return None
+    try:
+        import library
+        for entry in library.lists():
+            if entry.name == wanted:
+                return None if entry.primary else entry.name
+    except Exception as err:
+        print(f"[WEBUI] Could not resolve the requested list: {err}")
+    return None
+
+
+def present_nicks():
+    """Every nick the daemon can currently see, lower-cased.
+
+    Synced from 353/JOIN/PART for every channel this bot is in - the same
+    mirror dcc.py has read as proof of presence before dispatching a send
+    since long before this. An empty set means we have not finished joining
+    yet, which callers have to tell apart from "nobody is here".
+    """
+    with runtime.channel_users_lock():
+        return {str(nick).lower()
+                for users in (getattr(config, "channel_users", {}) or {}).values()
+                for nick in users}
+
+
+def build_own_list_summaries():
+    """One row per list THIS bot serves, in the operator's own order.
+
+    FOUND IN A BETA. An operator built a second list through the dashboard,
+    put every film in it, and then could not find it: "in list browser i dont
+    see all my lists ... video list isnt there". The list was being served
+    correctly and advertised correctly in its own channel - only the page that
+    browses lists stopped at the primary, because build_filelists_payload()
+    resolved `name=None` and the sidebar hard-coded a single row.
+
+    Multi-list is this release's headline feature, and the dashboard is where
+    the operator created the list. A page that offers to make a thing and then
+    will not show it is a round trip that does not close.
+
+    LABELLED "Our own list" WHEN THERE IS ONLY ONE. Every install today has
+    exactly one, called "Main" by default - a name the operator never chose
+    and has no reason to recognise. Showing it would be a change with no
+    information in it. With several, each carries its own name, which is
+    exactly what the operator typed.
+
+    No count: it would mean parsing every list on every poll of this route,
+    which the File Lists tab makes every few seconds, on libraries measured in
+    hundreds of thousands of files. The row existing at all is the fix.
+    """
+    import library
+
+    try:
+        served = library.lists()
+    except Exception as err:
+        # This route is polled continuously; a malformed lists.json must cost
+        # the extra rows, not the whole sidebar.
+        print(f"[WEBUI] Could not read the served lists: {err}")
+        served = []
+
+    if not served:
+        return [{"bot": OWN_SOURCE, "nick": OWN_SOURCE, "list": "",
+                 "label": "Our own list", "held": True, "freshness": "own",
+                 "online": True,
+                 "own": True, "fetched_at": 0, "count": None,
+                 "advert_then": {}, "advert_now": {}}]
+
+    single = len(served) == 1
+    rows = []
+    for entry in served:
+        rows.append({
+            "bot": own_list_source(entry),
+            "nick": own_list_source(entry),
+            "list": "",
+            "label": "Our own list" if single else entry.name,
+            "held": True,
+            "online": True,
+            "freshness": "own",
+            "own": True,
+            "fetched_at": 0,
+            "count": None,
+            "advert_then": {},
+            "advert_now": {},
+        })
+    return rows
+
+
+def build_fetched_bot_list_summaries():
+    """GET /api/filelists/bots payload: one row per source the List Browser
+    can show, for the list of bots above its table.
+
+    Two kinds, told apart by "held". A bot whose list we hold can be browsed,
+    and carries a real freshness verdict and the count we parsed at fetch
+    time. A bot we have only seen advertising cannot - it is here because
+    #133 makes "not downloaded" one of the states the list shows, and its
+    count is what THAT BOT claims, absent when it did not say.
+
+    "count" on a held row reads the "entry_count" field process_fetched_list_zip() computes
     ONCE at fetch time (issue #76, option 2) rather than the actual row list -
     which is no longer stored at all - so this stays a cheap dict lookup even
     though the File Lists tab's switcher polls this route every
@@ -694,20 +1353,267 @@ def build_fetched_bot_list_summaries():
     Re-parsing each bot's whole list from disk just to report a count on every
     poll would defeat much of the point of no longer retaining it in memory.
     """
+    import runtime
+
     store = dict(getattr(config, "fetched_bot_lists", {}) or {})
-    rows = [
-        {
-            "bot": entry.get("bot", key),
-            "fetched_at": entry.get("fetched_at", 0),
-            "count": entry.get("entry_count", 0),
-        }
-        for key, entry in store.items()
-    ]
+    known = dict(getattr(runtime, "known_bots", {}) or {})
+
+    rows = []
+    import list_fetch
+
+    # WHO IS ACTUALLY THERE, built ONCE for the whole payload. This route is
+    # polled every few seconds and a busy channel has dozens of advertisers;
+    # asking user_is_present_in_ram() per row would rescan every channel's
+    # membership per row, per poll.
+    present = present_nicks()
+
+    for key, entry in store.items():
+        bot = entry.get("bot", key)
+        then = dict(entry.get("advert_when_fetched") or {})
+        now = _advert_now(known, bot)
+        freshness = _freshness(then, now)
+
+        # ONE ROW PER LIST IN THE ARCHIVE. A peer routinely publishes more
+        # than one - loose files and packed albums, or music and films - and
+        # until the fetch kept them all, everything but the largest was
+        # discarded on the way in. `lists` is absent on an entry stored before
+        # that, and a one-list archive is still the ordinary case, so the
+        # fallback here is the single row this always produced.
+        held = entry.get("lists")
+        if not isinstance(held, dict) or not held:
+            held = {"": {"entry_count": entry.get("entry_count", 0)}}
+
+        # The main list first, then the rest by name - a stable order, and one
+        # that keeps a bot's principal list where the eye already looks.
+        for marker in sorted(held, key=lambda m: (m != "", str(m).lower())):
+            info = held[marker] if isinstance(held[marker], dict) else {}
+            rows.append({
+                # The IDENTITY, which is no longer just a nick: a bot's other
+                # lists are "<nick>/<marker>". Everything that acts on the BOT
+                # rather than the list - re-fetching, packing a folder, the
+                # freshness verdict - reads "nick" below instead.
+                #
+                # "bot" stays the REAL nick this list is actually keyed under
+                # - re-fetching, purging and the online check all still target
+                # it untouched. "nick" is the one field #376's alt-nick
+                # merge may substitute, and only for grouping/labelling the
+                # sidebar row - see runtime.resolve_display_nick()'s own
+                # comment for why nothing else is allowed to change here.
+                "bot": list_fetch.index_key(bot, marker),
+                "nick": _display_nick(bot, present),
+                "list": marker,
+                "label": f"{bot} - {marker}" if marker else bot,
+                "held": True,
+                # PRESENCE, which is a different question from freshness and
+                # was being answered by the same dot. A list can be perfectly
+                # current from a bot that signed off an hour ago, and asking
+                # that bot for anything is a request nobody will see.
+                #
+                # None, not False, when we know nothing yet: an empty
+                # membership mirror is a bot still joining, and "offline" is a
+                # claim we have not earned.
+                "online": (bot.lower() in present) if present else None,
+                "fetched_at": entry.get("fetched_at", 0),
+                "count": info.get("entry_count", 0),
+                # PER BOT, not per list. One advert covers the archive and one
+                # "@<nick>" fetches all of it, so every list a bot published
+                # is exactly as fresh as the fetch that brought them.
+                "freshness": freshness,
+                "advert_then": then,
+                "advert_now": now,
+            })
+
+    # AND THE BOTS WE HAVE ONLY SEEN ADVERTISING. #133's colour rule makes
+    # "never downloaded" one of the three states, so the list has to contain
+    # bots there is no list for - that is the whole point of showing it in
+    # red. They cannot be browsed, and the page says so rather than offering
+    # a source that would come back empty.
+    #
+    # `count` is what THEY advertise, not something we parsed, and is absent
+    # when they did not say - the same "did not say is not zero" rule the
+    # freshness comparison follows.
+    for key, entry in known.items():
+        if key in store or not isinstance(entry, dict):
+            continue
+        bot = entry.get("nick") or key
+        now = _advert_now(known, bot)
+        rows.append({
+            "bot": bot,
+            "nick": _display_nick(bot, present),
+            "list": "",
+            "label": bot,
+            "held": False,
+            "online": (bot.lower() in present) if present else None,
+            "fetched_at": 0,
+            "count": now.get("files"),
+            "freshness": "not_held",
+            "advert_then": {},
+            "advert_now": now,
+        })
+
     rows.sort(key=lambda row: str(row["bot"]).lower())
     return rows
 
 
-def build_fetched_bot_list_payload(nick, offset=0, limit=None):
+def _display_nick(bot, present):
+    """resolve_display_nick(), minus any alias the network is CURRENTLY
+    disproving.
+
+    #376's alt-nick merge bounds how long it TRUSTS a departure
+    (ALT_NICK_RECONNECT_WINDOW_SECONDS in irc.py) but not how long the
+    resulting alias is APPLIED: runtime.nick_aliases never expires, so a
+    merge made from good evidence fifteen seconds ago is still asserted
+    indefinitely afterwards - including at a moment the network has since
+    disproved it.
+
+    Two nicks present at the same instant are two connections; one bot
+    cannot be both. So if the alias's primary and the row's own real nick
+    are BOTH currently online, that is not weaker evidence than the
+    departure/rejoin pattern that created the alias - it is evidence of the
+    opposite, arriving later, and it is preferred. `present` is already
+    computed once for the whole payload, so this costs nothing extra and
+    stays exactly as "display only" as resolve_display_nick() itself: it
+    changes what one row is grouped under, never fetched_bot_lists,
+    known_bots, or a download counter.
+    """
+    primary = runtime.resolve_display_nick(bot)
+    if primary == bot or not present:
+        return primary
+    if primary.lower() in present and bot.lower() in present:
+        return bot
+    return primary
+
+
+def build_purge_offline_fetched_lists_result():
+    """POST /api/filelists/purge-offline payload: forget every held list
+    whose bot is showing the List Browser's red dot right now.
+
+    "Red dot" is `online is False` from build_fetched_bot_list_summaries()'s
+    own rule - present_nicks() answered and this bot was not in it. A bot
+    this daemon has not finished joining channels for yet reads `online:
+    None` (the grey dot, "cannot tell yet"), and is left alone: an empty
+    presence mirror is not evidence the bot is gone, it is evidence nobody
+    has looked yet, and issue #385 asked for the red dot specifically.
+
+    A bot with any request still outstanding (list, folder, or a plain file)
+    is skipped even if it is showing red - see dcc_fetch.
+    has_any_outstanding_request()'s docstring for why forgetting it under a
+    reply in flight is unsafe, not just untidy.
+
+    A currently-online bot is never a candidate at all, by construction: this
+    only iterates config.fetched_bot_lists, which is what list_fetch.
+    forget_bot() removes from, and never consults `known`/advert-only rows -
+    there is nothing held for those to purge.
+    """
+    import dcc_fetch
+    import list_fetch
+
+    store = dict(getattr(config, "fetched_bot_lists", {}) or {})
+    present = present_nicks()
+
+    purged = []
+    skipped_in_flight = []
+    for key, entry in store.items():
+        bot = entry.get("bot", key) if isinstance(entry, dict) else key
+        online = (bot.lower() in present) if present else None
+        if online is not False:
+            continue
+        if dcc_fetch.has_any_outstanding_request(bot):
+            skipped_in_flight.append(bot)
+            continue
+        if list_fetch.forget_bot(bot):
+            purged.append(bot)
+
+    return 200, {"purged": purged, "count": len(purged),
+                 "skipped_in_flight": skipped_in_flight}
+
+
+# JavaScript's Number.MAX_SAFE_INTEGER. Past this a JSON number no longer
+# survives the trip into the page unchanged.
+_MAX_SAFE_JS_INT = 2 ** 53 - 1
+
+
+def _advert_now(known, bot):
+    """The fields `bot` is advertising at this moment, or {}.
+
+    Same shape and same rule as list_fetch._advert_snapshot(): only what that
+    bot actually published, and a missing key means "did not say".
+    """
+    # isinstance rather than `or {}`: a malformed entry is not falsy, and
+    # dict(5) raises. The held rows read this too, so a hand-edited registry
+    # would take the whole List Browser down and not just its own row.
+    entry = known.get(str(bot).strip().lower())
+    entry = entry if isinstance(entry, dict) else {}
+    current = {}
+    for field in ("files", "list_date"):
+        value = entry.get(field)
+        if value in (None, "", 0):
+            continue
+        # A COUNT WE CANNOT REPEAT FAITHFULLY IS ONE WE DO NOT REPEAT. This
+        # is another bot's advert text, parsed with irc._as_int(), which
+        # builds a Python int of any size at all. JSON has no such limit and
+        # JavaScript does: JSON.parse() turns anything past 2**53 into the
+        # nearest float before the page ever sees it, so a bot advertising
+        # twenty-three digits had a DIFFERENT twenty-three digit number
+        # rendered beside its nick, in thousands separators, looking exact.
+        # Dropped rather than clamped: this module's rule throughout is that
+        # an absent field means "they did not say", which is the truthful
+        # reading of a number we cannot carry.
+        if field == "files" and isinstance(value, int) and abs(value) > _MAX_SAFE_JS_INT:
+            continue
+        current[field] = value
+    return current
+
+
+def _freshness(then, now):
+    """"current", "changed", or "unknown" for one held list.
+
+    DATE FIRST, COUNT SECOND. #133 settled this against the obvious
+    alternative: a count can coincidentally match after an edit, a date
+    cannot - and 31 of the 32 bots observed advertising in one channel publish
+    a date, so it is very nearly universal.
+
+    "unknown" whenever either side is missing the field being compared, and
+    that is not a hedge: we fetch from bots whose advert we have not seen, and
+    a bot that publishes no date at all should show no freshness claim rather
+    than an invented one. Saying "we cannot tell" is the honest answer and the
+    page renders it as such.
+    """
+    # No early return for an empty advert: the loop below already reaches
+    # "unknown" for one, because every field is missing on one side, every
+    # iteration continues, and the fall-through says so. A guard here changed
+    # no answer a test could see, which is what a mutation run showed.
+    for field in ("list_date", "files"):
+        before, after = then.get(field), now.get(field)
+        if before in (None, "") or after in (None, ""):
+            continue
+        return "current" if str(before) == str(after) else "changed"
+
+    return "unknown"
+
+
+def _fetched_list_entry(entry, marker):
+    """`entry` re-pointed at one of the bot's lists.
+
+    A shallow copy with list_path and entry_count swapped for the chosen
+    list's, so get_fetched_bot_page() needs to know nothing about markers - it
+    reads the two fields it always read. Returns the entry unchanged for the
+    main list, which is what those two fields already describe.
+    """
+    wanted = str(marker or "")
+    if not wanted:
+        return entry
+    held = entry.get("lists")
+    info = held.get(wanted) if isinstance(held, dict) else None
+    if not isinstance(info, dict) or not info.get("list_path"):
+        return entry
+    picked = dict(entry)
+    picked["list_path"] = info["list_path"]
+    picked["entry_count"] = info.get("entry_count", 0)
+    return picked
+
+
+def build_fetched_bot_list_payload(nick, offset=0, limit=None, list_marker="", q=""):
     """GET /api/filelists/bot/<nick> payload: (http_status, payload_dict).
 
     Issue #76, options 2 and 3 together: the fetched bot's rows are no longer
@@ -718,6 +1624,11 @@ def build_fetched_bot_list_payload(nick, offset=0, limit=None):
     for this bot's own list (both go through list.entries_to_filelist_rows()),
     so the frontend's File Lists table rendering needs no changes to display
     either one - only the data source (which endpoint it polled) differs.
+
+    `q` is the same per-list search build_filelists_payload() takes (#399's
+    follow-up) - split here, once, rather than inside get_fetched_bot_page(),
+    so that function keeps taking pre-split words the way find_matching_entries()
+    itself does everywhere else it is called.
 
     A 404 covers "never fetched" (no entry in config.fetched_bot_lists at
     all); a 502 covers "was fetched, but the on-disk file behind it can no
@@ -736,10 +1647,26 @@ def build_fetched_bot_list_payload(nick, offset=0, limit=None):
     if limit is None:
         limit = FILELISTS_DEFAULT_PAGE_SIZE
 
-    page, total_folders, total_rows, error = list_fetch.get_fetched_bot_page(
-        entry, offset, limit)
+    # WHICH OF THAT BOT'S LISTS. An archive holds more than one often enough
+    # that a peer's albums or films used to be dropped on the way in; they are
+    # all kept now, and this picks the one being browsed. An absent or unknown
+    # marker resolves to the main list rather than erroring, for the same
+    # reason ?list= does on our own: the sidebar is polled continuously and a
+    # peer's next archive need not carry the same lists as the last.
+    entry = _fetched_list_entry(entry, list_marker)
+
+    search_words = split_list_search_words(q)
+    page, total_folders, total_rows, row_capped, error = list_fetch.get_fetched_bot_page(
+        entry, offset, limit, search_words=search_words)
     if error:
         return 502, {"error": error}
+
+    # What we have already asked this bot for. One list, so the bot is passed
+    # in rather than read per row - every row here belongs to it.
+    marks = fetch_marks_by_bot()
+    for group in page:
+        mark_rows_with_fetch_state(group.get("entries", []), marks,
+                                   bot=entry.get("bot", nick))
 
     return 200, {
         "bot": entry.get("bot", nick),
@@ -750,6 +1677,7 @@ def build_fetched_bot_list_payload(nick, offset=0, limit=None):
         "offset": offset,
         "limit": limit,
         "returned": len(page),
+        "row_capped": row_capped,
     }
 
 
@@ -931,6 +1859,14 @@ def build_fetch_enqueue_result(payload):
         if not bot or not filename:
             errors.append({"error": "Both 'bot' and 'filename' are required.", "item": raw})
             continue
+        # PER ITEM, not per request: a bulk paste is routinely several bots at
+        # once, and one of them having signed off is no reason to refuse the
+        # rest. It joins `errors`, which this route already reports beside
+        # whatever it did manage to queue.
+        absent = bot_not_here_error(bot)
+        if absent:
+            errors.append({"error": absent, "item": raw})
+            continue
         request_id = dcc_fetch.enqueue_fetch(bot, filename)
         if request_id is None:
             # Only reachable via the queue cap: enqueue_fetch()'s other refusal
@@ -949,8 +1885,17 @@ def build_fetch_enqueue_result(payload):
 
 
 def build_fetch_status_payload():
-    """GET /api/fetch/status payload: every fetch_queue row, oldest first, so
-    the dashboard's Downloads panel has a stable order to render.
+    """GET /api/fetch/status payload: every fetch_queue row, NEWEST FIRST, so
+    the dashboard's Downloads panel has a stable order to render and the row
+    an operator just created is the one they are already looking at.
+
+    An operator's request, and the right way round for a log: the reason to
+    open this view is
+    almost always the most recent thing that happened. Oldest-first meant
+    scrolling past every completed fetch to find it.
+
+    Still ordered by time, so it is no less stable than before - rows do not
+    reshuffle between polls, they are simply counted from the other end.
 
     Reads config.fetch_queue under the same lock dcc_fetch.py's writers use
     (enqueue_fetch() inserting a new row, check_fetch_queue() promoting or
@@ -964,7 +1909,9 @@ def build_fetch_status_payload():
         queue = {request_id: dict(row)
                  for request_id, row in getattr(config, "fetch_queue", {}).items()}
     rows = []
-    for request_id, row in sorted(queue.items(), key=lambda kv: kv[1].get("requested_at", 0)):
+    for request_id, row in sorted(queue.items(),
+                                  key=lambda kv: kv[1].get("requested_at", 0),
+                                  reverse=True):
         row["id"] = request_id
         rows.append(row)
     return rows
@@ -1046,6 +1993,30 @@ def build_fetch_delete_result(request_id):
     return 200, {"deleted": request_id}
 
 
+def build_fetched_list_purge_result(source):
+    """POST /api/filelists/<source>/purge: forget one bot's fetched list(s).
+
+    Thin on purpose. list_fetch.purge_fetched_list() owns the store, its lock
+    and the three things that have to go together; this decides only what an
+    HTTP caller is told, the same split every other builder in this file
+    keeps.
+
+    409 rather than 400 for a fetch in flight: the request is well formed and
+    would be valid in a moment, which is what that code means and what tells
+    the page to say "try again" rather than "that was wrong".
+    """
+    import list_fetch
+
+    ok, detail = list_fetch.purge_fetched_list(source)
+    if ok:
+        return 200, {"purged": True, "detail": detail}
+    if "in progress" in detail:
+        return 409, {"error": detail}
+    if detail.startswith("Nothing is held"):
+        return 404, {"error": detail}
+    return 400, {"error": detail}
+
+
 def build_verify_list_payload():
     """GET /api/tools/verify-list payload: filenames the master list carries
     under more than one folder.
@@ -1110,10 +2081,91 @@ def build_update_list_status_payload():
     or False for whether that one succeeded; `error` names why when it did
     not.
     """
-    return {
+    payload = {
         "running": bool(getattr(config, "update_inprogress", False)),
         "ok": getattr(config, "last_list_update_ok", None),
         "error": getattr(config, "last_list_update_error", None),
+        # How long the LAST finished rebuild took, whole seconds. None until
+        # one has finished in this process - the same "never run yet is not a
+        # claim about the last run" rule `ok` follows just above.
+        "seconds": getattr(config, "last_list_update_seconds", None),
+    }
+    progress = read_list_progress()
+    if progress:
+        payload["progress"] = progress
+    return payload
+
+
+def read_list_progress():
+    """What a running rebuild last reported, or None.
+
+    update_list.py runs as a SUBPROCESS, so it has no shared memory with this
+    process to report into - it writes LIST_PROGRESS_FILE and this reads it.
+    Written whole and renamed into place at the other end, so a read landing
+    mid-write gets the previous complete object rather than half of one.
+
+    Returns None on anything unexpected. This feeds a progress bar: a missing,
+    unreadable or malformed file should cost the bar, not the page.
+    """
+    import json
+
+    path = getattr(config, "LIST_PROGRESS_FILE", None)
+    if not path:
+        return None
+    try:
+        with open(platform_compat.long_path(path), encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(loaded, dict):
+        return None
+
+    def whole(name):
+        try:
+            return max(0, int(loaded.get(name) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    # HOW LONG IT HAS BEEN GOING, computed here rather than in the page.
+    #
+    # The page cannot do it: it has no idea when the rebuild started, only
+    # when it happened to open. Subtracting here also means one clock is used
+    # for both ends - the daemon's - where a browser with a skewed clock
+    # against a server timestamp can produce a negative elapsed, or an hour of
+    # it, on the first frame.
+    #
+    # `started_at` is absent from a progress file written by an older build
+    # mid-upgrade, which is `None` and not zero: "not reported" and "started
+    # at the epoch" are different claims, and the second would render as
+    # 56 years.
+    started_at = loaded.get("started_at")
+    elapsed = None
+    try:
+        if started_at is not None:
+            # Clamped at zero rather than shown negative. The child stamps its
+            # own clock, so a machine whose time steps backwards mid-rebuild
+            # (ntp correcting a drift) would otherwise report a run that has
+            # not begun.
+            elapsed = max(0, int(time.time() - float(started_at)))
+    except (TypeError, ValueError):
+        elapsed = None
+
+    folder_count = whole("folder_count")
+    folder_index = min(whole("folder_index"), folder_count) if folder_count else 0
+    percent = None
+    if folder_count:
+        # Folders COMPLETED, not the one in hand: a bar that jumps to 100% as
+        # the last folder starts is telling the operator it has finished
+        # while it is still walking.
+        percent = int(max(0, folder_index - 1) * 100 / folder_count)
+    return {
+        "phase": str(loaded.get("phase") or "")[:40],
+        "folder": str(loaded.get("folder") or "")[:120],
+        "folder_index": folder_index,
+        "folder_count": folder_count,
+        "files": whole("files"),
+        "percent": percent,
+        "elapsed": elapsed,
     }
 
 
@@ -1158,34 +2210,114 @@ def start_list_update():
 # actual annotations by SettingsPayloadTests' completeness guard, so a
 # setting added to config.py later and never slotted in here fails a test
 # instead of silently never showing up on the page.
+# REGROUPED, and the old grouping is worth recording because it is how any
+# grouping ends up: by accretion. Each feature put its settings wherever there
+# was room, so "Slots & queue" had grown to 25 and "Paths & storage" to 31 -
+# between them two thirds of the page - while the two settings that tune a
+# transfer sat in DIFFERENT categories.
+#
+# From the operator: "Settings pages at webpage are a mess. Need better
+# grouping, hiding some that are never used like folder locations under
+# advanced settings etc. Also why is packet size on different page than buffer
+# size."
+#
+# THREE RULES, applied here and worth keeping:
+#
+#   * Settings that are read together live together. DCC_BLOCK_SIZE and
+#     DCC_SEND_BUFFER are the transfer-tuning pair - the 3 MB/s investigation
+#     needed both - and were a category apart.
+#   * A category is named for what an operator came looking for, not for the
+#     part of the code it configures. The colour theme was under "Advertising
+#     & search" because announce.py draws it.
+#   * The things set once at install and never again go last, in their own
+#     section. Seventeen file paths at the same level as MAX_DCC_SLOTS is
+#     seventeen chances to wonder whether you should be changing one.
+#
+# NOTHING MOVES ON DISK. settings.conf is flat; a category is a grouping for
+# this page and nothing else, so this reorders what an operator reads without
+# touching a single stored value.
+#
+# Every name here is checked against config.py's actual annotations by
+# SettingsPayloadTests' completeness guard, so a setting added later and never
+# slotted in fails a test instead of silently never showing up.
 SETTINGS_CATEGORIES = (
-    ("identity",      "Identity & network",   ["SERVER", "PORT", "NICKNAME", "ALT_NICKNAME",
+    ("identity",      "Identity & network",    ["SERVER", "PORT", "NICKNAME", "ALT_NICKNAME", "REJOIN_ATTEMPTS",
                                                 "ADMIN_NICK", "CHANNEL", "DEBUG_CHANNEL"]),
-    ("slots-queue",   "Slots & queue",         ["MAX_DCC_SLOTS", "MAX_USER_QUEUE", "MAX_GLOBAL_QUEUE",
-                                                "MAX_SEARCH_RESULTS", "MSG_DELAY", "DEBUG_MSG_DELAY",
-                                                "DCC_PORT_START", "DCC_PORT_END", "MAX_FETCH_SLOTS", "FETCH_HISTORY_DAYS", "FETCH_HISTORY_MAX_ROWS",
-                                                "MAX_FETCH_FILE_SIZE", "FETCH_TRANSFER_TIMEOUT",
-                                                "FETCH_OFFER_TIMEOUT", "FETCH_FOLDER_OFFER_TIMEOUT",
-                                                "MAX_FETCH_FOLDER_FILE_SIZE", "MAX_FETCH_LIST_FILE_SIZE",
-                                                "FETCH_FOLDER_TRANSFER_TIMEOUT"]),
-    ("paths",         "Paths & storage",       ["LIST_BASE_NAME", "PAUSE_ON_UPDATE", "FILE_DIRECTORY",
-                                                "LIST_FORMAT", "RAR_ENABLED", "RAR_BINARY", "TMP_ZIP_DIR", "LOCAL_LIST_DIR",
-                                                "FETCHED_FILES_DIR", "BANS_FILE", "STATS_FILE",
-                                                "HARD_BANS_FILE", "KNOWN_BOTS_FILE", "FETCHED_BOT_LISTS_FILE",
-                                                "FETCH_HISTORY_FILE", "DOWNLOAD_COUNTS_FILE",
-                                                "LIST_SIZE_FILE", "LIST_RAWBYTES_FILE"]),
-    ("advertising",   "Advertising & search",  ["THEME", "CUSTOM_THEME_BORDER", "CUSTOM_THEME_SEPARATOR",
-                                                "CUSTOM_THEME_TEXTBOX", "CUSTOM_THEME_VALUE",
-                                                "CUSTOM_THEME_ALERT", "CUSTOM_THEME_ACCENT",
-                                                "ANNOUNCE_INTERVAL", "BROADCAST_SEARCH_CHANNEL",
-                                                "BROADCAST_SEARCH_COOLDOWN"]),
-    ("anti-flood",    "Anti-flood",            ["MAX_REQUESTS", "REQUEST_WINDOW", "MUTE_TIME", "FLOOD_BAN_SECONDS",
-                                                "MAX_SEND_FAILS", "RAR_TIMEOUT", "LIST_UPDATE_TIMEOUT"]),
+    ("sharing",       "Sharing & queue",       ["MAX_DCC_SLOTS", "MAX_USER_QUEUE",
+                                                "MAX_GLOBAL_QUEUE", "MAX_SEARCH_RESULTS",
+                                                "PAUSE_ON_UPDATE", "REHASH_TRANSFER_WAIT"]),
+    # The transfer-tuning pair, together. Anyone reaching for one wants the
+    # other in front of them.
+    ("transfers",     "Transfers",             ["DCC_BLOCK_SIZE", "DCC_SEND_BUFFER",
+                                                "DCC_PORT_START", "DCC_PORT_END",
+                                                "MAX_SEND_FAILS"]),
+    ("your-list",     "Your list",             ["FILE_DIRECTORY", "LIST_BASE_NAME",
+                                                "LIST_FORMAT", "LIST_IGNORED_EXTENSIONS",
+                                                "SEPARATE_VIDEO_LIST", "LIST_VIDEO_EXTENSIONS",
+                                                "RAR_ENABLED", "RAR_EXTENSIONS", "RAR_BINARY",
+                                                "MAX_RAR_FOLDER_SIZE", "RAR_TIMEOUT",
+                                                "LIST_UPDATE_TIMEOUT",
+                                                "LIST_UPDATE_STALL_SECONDS",
+                                                "LIST_HEADER_FILE",
+                                                "LIST_HEADER_MAX_BYTES"]),
+    ("fetching",      "Fetching from bots",    ["MAX_FETCH_SLOTS", "AUTO_REFETCH_LISTS",
+                                                "AUTO_REFETCH_INTERVAL_HOURS",
+                                                "AUTO_REFETCH_MAX_PER_RUN",
+                                                "FETCH_OFFER_TIMEOUT",
+                                                "FETCH_TRANSFER_TIMEOUT",
+                                                "FETCH_FOLDER_OFFER_TIMEOUT",
+                                                "FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED",
+                                                "FETCH_FOLDER_TRANSFER_TIMEOUT",
+                                                "MAX_FETCH_FILE_SIZE",
+                                                "MAX_FETCH_FOLDER_FILE_SIZE",
+                                                "MAX_FETCH_LIST_FILE_SIZE",
+                                                "MAX_LIST_TEXT_SIZE",
+                                                "FETCH_HISTORY_DAYS",
+                                                "FETCH_HISTORY_MAX_ROWS"]),
+    ("advertising",   "Advertising & search",  ["ANNOUNCE_INTERVAL", "ANNOUNCE_TRANSFERS",
+                                                "BROADCAST_SEARCH_CHANNEL",
+                                                "BROADCAST_SEARCH_COOLDOWN", "CTCP_VERSION_REPLY",
+                                                "MSG_DELAY", "DEBUG_MSG_DELAY"]),
+    # Its own category, not a corner of "Advertising & search". The theme
+    # lived there because announce.py is what draws it - which is a fact about
+    # the code, not about what an operator came looking for.
+    ("appearance",    "Appearance",            ["THEME", "CUSTOM_THEME_BORDER",
+                                                "CUSTOM_THEME_SEPARATOR", "CUSTOM_THEME_TEXTBOX",
+                                                "CUSTOM_THEME_VALUE", "CUSTOM_THEME_ALERT",
+                                                "CUSTOM_THEME_ACCENT"]),
+    ("anti-flood",    "Anti-flood",            ["MAX_REQUESTS", "REQUEST_WINDOW", "MUTE_TIME",
+                                                "FLOOD_BAN_SECONDS"]),
+    # Its own category for the reason Appearance gives above. The cooldown
+    # below is an anti-flood setting by mechanism, but an operator looking
+    # for it is thinking about private messages, not about flooding.
+    ("private-messages", "Private messages",   ["PRIVATE_MESSAGES_ENABLED",
+                                                "PRIVATE_MESSAGE_COOLDOWN_SECONDS",
+                                                "PRIVATE_MESSAGE_DECLINE_TEXT",
+                                                "PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS",
+                                                "PRIVATE_MESSAGE_DECLINE_BURST",
+                                                "PRIVATE_MESSAGE_DECLINE_BURST_SECONDS"]),
     ("admin-console", "Admin console",         ["ADMIN_HOSTMASKS", "ADMIN_CHAT_MODE",
                                                 "ADMIN_CHANNEL_COMMANDS"]),
-    ("web-dashboard", "Web dashboard",         ["WEBUI_ENABLED", "WEBUI_HOST", "WEBUI_PORT"]),
-    ("debug",         "Debug & logging",       ["DEBUG_MODE", "DEBUG_TO_CHANNEL", "DEBUG_TO_CONSOLE",
-                                                "SCRIPT_VERSION"]),
+    ("web-dashboard", "Web dashboard",         ["WEBUI_ENABLED", "WEBUI_HOST", "WEBUI_PORT",
+                                                "WEBUI_CONSOLE_ENABLED", "WEBUI_OPEN_BROWSER",
+                                                "WEBUI_FOLDER_BROWSER_ENABLED"]),
+    ("debug",         "Debug & logging",       ["DEBUG_MODE", "DEBUG_TO_CHANNEL",
+                                                "DEBUG_TO_CONSOLE", "PROJECT_URL"]),
+    # LAST, and named so nobody opens it by accident. Set once at install, and
+    # a wrong value here loses a queue or a statistics file rather than
+    # mis-tuning something. They were interleaved with the settings changed
+    # weekly.
+    ("advanced",      "Advanced: file locations",
+                                               ["TMP_ZIP_DIR", "LOCAL_LIST_DIR",
+                                                "FETCHED_FILES_DIR", "BANS_FILE", "HARD_BANS_FILE",
+                                                "STATS_FILE", "KNOWN_BOTS_FILE",
+                                                "FETCHED_BOT_LISTS_FILE", "LIST_INDEX_FILE",
+                                                "FETCH_HISTORY_FILE", "DOWNLOAD_COUNTS_FILE",
+                                                "LIST_SIZE_FILE", "LIST_RAWBYTES_FILE",
+                                                "LIST_PROGRESS_FILE", "LIBRARY_FOLDERS_FILE",
+                                                "LISTS_FILE", "ON_CONNECT_FILE",
+                                                "NOTICES_FILE",
+                                                "PRIVATE_MESSAGES_FILE"]),
 )
 
 # A human-readable label per setting, since the raw config.py name
@@ -1215,32 +2347,69 @@ SETTINGS_LABELS = {
     "MAX_FETCH_SLOTS": "Max fetch slots",
     "FETCH_HISTORY_DAYS": "Keep finished downloads for (days)",
     "FETCH_HISTORY_MAX_ROWS": "Maximum finished downloads kept",
-    "MAX_FETCH_FILE_SIZE": "Max fetch file size (bytes)",
+    "MAX_FETCH_FILE_SIZE": "Max fetch file size",
+    "MAX_LIST_TEXT_SIZE": "Largest list text accepted from a peer",
+    "DCC_BLOCK_SIZE": "Packet size",
+    "DCC_SEND_BUFFER": "Socket send buffer (0 = the default for your platform)",
+    "REHASH_TRANSFER_WAIT": "Seconds a rehash waits for transfers to finish",
+    "AUTO_REFETCH_LISTS": "Re-fetch a held list when its bot advertises a new one",
+    "AUTO_REFETCH_INTERVAL_HOURS": "Least time between re-fetches of one bot (hours)",
+    "AUTO_REFETCH_MAX_PER_RUN": "Most lists to re-fetch in one sweep",
     "FETCH_TRANSFER_TIMEOUT": "Fetch transfer timeout (seconds)",
-    "FETCH_OFFER_TIMEOUT": "Fetch offer timeout (seconds)",
-    "FETCH_FOLDER_OFFER_TIMEOUT": "Folder (.rar) fetch offer timeout (seconds)",
-    "MAX_FETCH_FOLDER_FILE_SIZE": "Max folder (.rar) fetch size (bytes)",
-    "MAX_FETCH_LIST_FILE_SIZE": "Max fetched master-list zip size (bytes)",
+    # Named from the operator's side, like the pill in the Downloads table:
+    # this is the wait AFTER we send a request, not a timeout on an offer
+    # anybody made us.
+    "FETCH_OFFER_TIMEOUT": "Wait for a reply to a fetch request (seconds)",
+    "FETCH_FOLDER_OFFER_TIMEOUT": "Wait for a reply to a folder (.rar) request (seconds)",
+    "FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED":
+        "...from a bot that publishes no .rar list (seconds)",
+    "MAX_FETCH_FOLDER_FILE_SIZE": "Max folder (.rar) fetch size",
+    "MAX_FETCH_LIST_FILE_SIZE": "Max fetched master-list zip size",
     "FETCH_FOLDER_TRANSFER_TIMEOUT": "Folder (.rar) fetch transfer timeout (seconds)",
 
     "LIST_BASE_NAME": "List base name",
     "PAUSE_ON_UPDATE": "Pause sharing during !update",
-    "FILE_DIRECTORY": "Music directory",
+    # Named for what it now IS. From an operator: "under Paths & Storage, this is not
+    # needed anymore" - not quite, it is still the fallback for an install
+    # with no folder list, which is most of them. But presenting it as a
+    # plain "Music directory" beside a folder editor that overrides it is
+    # what made it read as the setting that matters.
+    "FILE_DIRECTORY": "Music directory (used only when no folders are set)",
     "LIST_FORMAT": "List delivery format",
+    "LIST_IGNORED_EXTENSIONS": "File types to leave out of the list",
+    "SEPARATE_VIDEO_LIST": "Publish film and series as a separate list",
+    "LIST_VIDEO_EXTENSIONS": "File types that go in the film list",
+    "RAR_EXTENSIONS": "File types a folder needs to be !rar-packable",
     "RAR_ENABLED": "Enable !rar folder packing",
     "RAR_BINARY": "RAR binary path",
     "TMP_ZIP_DIR": "Temp archive directory",
+    "MAX_RAR_FOLDER_SIZE": "Largest folder !rar will pack (0 = no limit)",
     "LOCAL_LIST_DIR": "Master list directory",
     "FETCHED_FILES_DIR": "Fetched files directory",
     "BANS_FILE": "Bans file",
     "STATS_FILE": "Stats file",
     "HARD_BANS_FILE": "Hard bans file",
     "KNOWN_BOTS_FILE": "Known bots file",
+    "LIST_INDEX_FILE": "Cross-list search index",
     "DOWNLOAD_COUNTS_FILE": "Download counts file",
     "FETCHED_BOT_LISTS_FILE": "Fetched bot lists file",
     "FETCH_HISTORY_FILE": "Fetch history file",
+    "NOTICES_FILE": "Operator notices file",
+    "PRIVATE_MESSAGES_FILE": "Private messages file",
+    "PRIVATE_MESSAGE_COOLDOWN_SECONDS": "Record one private message per sender every (seconds)",
+    "PRIVATE_MESSAGES_ENABLED": "Keep private messages (off: keep none, reply once instead)",
+    "PRIVATE_MESSAGE_DECLINE_TEXT": "That reply's wording (%admin becomes the admin nick)",
+    "PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS": "Reply to the same sender once every (seconds)",
+    "PRIVATE_MESSAGE_DECLINE_BURST": "Most replies to send in one burst window",
+    "PRIVATE_MESSAGE_DECLINE_BURST_SECONDS": "How long that burst window is (seconds)",
     "LIST_SIZE_FILE": "List size file",
+    "LIST_PROGRESS_FILE": "List rebuild progress file",
     "LIST_RAWBYTES_FILE": "List raw bytes file",
+    "LIST_HEADER_FILE": "List banner file",
+    "LIST_HEADER_MAX_BYTES": "List banner size limit",
+    "LIBRARY_FOLDERS_FILE": "Served folders file",
+    "LISTS_FILE": "Served lists file",
+    "ON_CONNECT_FILE": "On-connect commands file",
 
     "THEME": "Colour theme",
     "CUSTOM_THEME_BORDER": "Custom theme: border colour",
@@ -1249,9 +2418,12 @@ SETTINGS_LABELS = {
     "CUSTOM_THEME_VALUE": "Custom theme: value colour",
     "CUSTOM_THEME_ALERT": "Custom theme: alert colour",
     "CUSTOM_THEME_ACCENT": "Custom theme: accent colour",
+    "ANNOUNCE_TRANSFERS": "Announce finished transfers in the channel",
+    "REJOIN_ATTEMPTS": "Rejoin attempts after a kick (0 = never)",
     "ANNOUNCE_INTERVAL": "Advert interval (seconds)",
     "BROADCAST_SEARCH_CHANNEL": "Broadcast search channel",
     "BROADCAST_SEARCH_COOLDOWN": "Broadcast search cooldown (seconds)",
+    "CTCP_VERSION_REPLY": "Answer CTCP VERSION",
 
     "MAX_REQUESTS": "Max requests per window",
     "REQUEST_WINDOW": "Request window (seconds)",
@@ -1259,7 +2431,8 @@ SETTINGS_LABELS = {
     "FLOOD_BAN_SECONDS": "Ban after flooding while muted (seconds)",
     "MAX_SEND_FAILS": "Max send failures",
     "RAR_TIMEOUT": "RAR pack timeout (seconds)",
-    "LIST_UPDATE_TIMEOUT": "List update timeout (seconds)",
+    "LIST_UPDATE_TIMEOUT": "List rebuild hard cap (seconds, 0 = none)",
+    "LIST_UPDATE_STALL_SECONDS": "Give up if a rebuild reports nothing for (seconds)",
 
     "ADMIN_HOSTMASKS": "Admin hostmasks",
     "ADMIN_CHAT_MODE": "DCC chat connection mode",
@@ -1268,11 +2441,45 @@ SETTINGS_LABELS = {
     "WEBUI_ENABLED": "Enable web dashboard",
     "WEBUI_HOST": "Host",
     "WEBUI_PORT": "Port",
+    "WEBUI_FOLDER_BROWSER_ENABLED": "Folder picker on the Settings page",
+    "WEBUI_CONSOLE_ENABLED": "Enable the Console page (remote admin)",
+    "WEBUI_OPEN_BROWSER": "Open the dashboard in a browser at startup",
 
     "DEBUG_MODE": "Debug mode",
     "DEBUG_TO_CHANNEL": "Send debug lines to channel",
     "DEBUG_TO_CONSOLE": "Send debug lines to admin console",
-    "SCRIPT_VERSION": "Script version",
+    "PROJECT_URL": "Project URL",
+}
+
+
+# A size an operator reads in the unit they think in, while the file keeps
+# bytes. Counting the zeros in 10737418240 to check it says ten gigabytes is
+# not work anybody should be doing, and the sizes here span 8 KB to 10 GB.
+#
+# STORED IN BYTES, UNCHANGED. settings.conf, admin_config.py and every reader
+# in the daemon keep the number they have always had, so nothing migrates and
+# an operator who edits the file by hand sees exactly what they saw before.
+# Only the dashboard divides, and only for display.
+#
+# The unit is per setting rather than picked from the magnitude: a value that
+# changed unit as it grew would move under the operator mid-edit, and 0 -
+# which several of these use for "no limit" - has no magnitude to read.
+# KB where MB would print 0.0078.
+SETTINGS_UNITS = {
+    "MAX_RAR_FOLDER_SIZE": ("MB", 1024 * 1024),
+    "MAX_FETCH_FILE_SIZE": ("MB", 1024 * 1024),
+    "MAX_LIST_TEXT_SIZE": ("MB", 1024 * 1024),
+    "MAX_FETCH_FOLDER_FILE_SIZE": ("MB", 1024 * 1024),
+    "MAX_FETCH_LIST_FILE_SIZE": ("MB", 1024 * 1024),
+    "DCC_SEND_BUFFER": ("KB", 1024),
+    "LIST_HEADER_MAX_BYTES": ("KB", 1024),
+}
+
+# DCC_BLOCK_SIZE is a menu, not a number to type, so it keeps its byte values
+# as the stored choice and gains readable text beside each one.
+CHOICE_LABELS = {
+    "DCC_BLOCK_SIZE": {str(1024 * n): f"{n} KB"
+                       for n in (4, 8, 16, 32, 64, 128)},
 }
 
 
@@ -1289,7 +2496,261 @@ def _settings_field(name, declared, value):
              "type": declared.__name__, "value": value}
     if name in settings_file.CHOICES:
         field["choices"] = list(settings_file.CHOICES[name])
+        labels = CHOICE_LABELS.get(name)
+        if labels:
+            field["choice_labels"] = [labels.get(str(c), str(c))
+                                      for c in field["choices"]]
+
+    # A COLOUR THE OPERATOR CAN READ, AND PICK. config holds the decoded
+    # bytes - a role of "\x0313" is four characters, two of them a control
+    # code - and the page was being handed them raw. A text input cannot show
+    # 0x03, so the field for that accent read "13": the code was present,
+    # invisible, and what the operator could see was not what was set. Typing
+    # back what they read would have put a literal "13" in every advert.
+    #
+    # So the value crosses as the escape text settings.conf.sample documents,
+    # which is also what the save writes back - and `irc_colour` tells the
+    # page it may offer the sixteen colours as menus instead of asking for a
+    # control code to be typed into a box that cannot display one.
+    if name.startswith("CUSTOM_THEME_"):
+        import settings_file as _settings_file
+        field["value"] = _settings_file.encode_irc_escapes(value or "")
+        field["irc_colour"] = True
+
+    unit = SETTINGS_UNITS.get(name)
+    if unit:
+        field["unit"], field["unit_factor"] = unit
+
+    # A TRI-STATE NEEDS A THIRD ANSWER. WEBUI_CONSOLE_ENABLED is declared
+    # `bool = None`, and None does not mean False: console_is_enabled() reads
+    # it as "yes if nobody else can reach it", so a stock loopback install has
+    # the Console ON. The page renders a bool as a checkbox from `!!value`,
+    # which drew None as unchecked - telling the operator that ban, unban,
+    # clearqueue, rehash and update were NOT reachable behind the dashboard
+    # password when they were.
+    #
+    # A note rather than sending the effective value as `value`: that would
+    # make the checkbox truthful, but the next save would then write an
+    # explicit True, and an operator who later moved the dashboard onto the
+    # LAN would keep a Console that should have switched itself off. The
+    # value stays unset; what changes is that the page says what unset means
+    # here and now.
+    if name == "WEBUI_CONSOLE_ENABLED" and value is None:
+        field["note"] = ("Not set: on while the dashboard is loopback-only. "
+                         "Currently " + ("ON" if console_is_enabled() else "OFF") + ".")
     return field
+# The roles a theme has, and the one sample line each of them shows up in.
+# Named here so the page can say which setting it is that the operator just
+# changed nothing visible with - and so a role added later without a sample is
+# a failing test rather than a silent gap.
+THEME_PREVIEW_ROLES = {
+    "border": "both", "separator": "both", "textbox": "both",
+    "value": "both", "alert": "both", "accent": "notice",
+}
+
+
+def build_theme_preview(overrides=None):
+    """The two lines a theme is judged by, rendered with `overrides`.
+
+    WHY A PREVIEW EXISTS. The six CUSTOM_THEME_* settings hold raw mIRC colour
+    codes, typed into text boxes. Finding out what a change did meant saving
+    it, rehashing, and watching the channel for the next advert - and the next
+    advert is up to ANNOUNCE_INTERVAL away, on a bot other people are using.
+
+    WHY BOTH LINES. Between them they use all six roles, and neither uses all
+    six alone: the advert never touches `accent`, only the completion notice
+    does. A single sample would leave one setting looking like it does
+    nothing, which is the confusion this is meant to end.
+
+    Built by announce.py's own builders, not by a copy of their templates. A
+    copy drifts the first time one of them changes, and then the preview lies
+    with a straight face.
+
+    `overrides` is what the operator has typed and not saved. It never reaches
+    config: a live daemon is serving a channel while they are choosing
+    colours.
+
+    Returns the RAW lines, colour codes and all. Rendering them is the page's
+    job - it is the one that knows how wide the box is.
+    """
+    import announce
+
+    settings = dict(overrides or {})
+    nick = str(getattr(config, "NICKNAME", "") or "DCCore")
+    channel = (str(getattr(config, "CHANNEL", "") or "#channel")
+               .split(",")[0].strip() or "#channel")
+
+    # Plausible rather than real. Reading the live figures would make the
+    # preview flicker as transfers come and go, and a sample that changes
+    # while you are comparing two colours is a sample you cannot compare.
+    advert = announce.build_advert_line(
+        channel, nick, "719,041", "5.48 TB", "Sep 7th", "3/3", "0",
+        "2.4MB/s", "24.7MB/s", "1,204 Files (8.9 TB)",
+        str(config.SCRIPT_VERSION), settings=settings)
+    notice = announce.build_transfer_complete_line(
+        channel, "someuser", "Some Artist - Some Album - 01 - A Track.flac",
+        "1,204 Files (8.9 TB)", "37", "12", "3:04 pm", "24.7MB/s",
+        settings=settings)
+
+    # The PRIVMSG envelope is protocol, not something anybody sees in a
+    # channel. Showing it would put "PRIVMSG #chan :" at the front of a
+    # preview of what the channel looks like.
+    def body(line):
+        return line.split(" :", 1)[1].rstrip("\r\n") if " :" in line else line
+
+    return {
+        "advert": body(advert),
+        "notice": body(notice),
+        "roles": THEME_PREVIEW_ROLES,
+    }
+
+
+def theme_preview_overrides(payload):
+    """The subset of a posted body that may steer a preview.
+
+    A whitelist, not a filter: this reaches theme.palette(), and everything
+    else on the settings page has nothing to say about colour. THEME is
+    checked against the presets that exist, because an unknown name would
+    otherwise pick the configured one and quietly preview the wrong thing.
+
+    AND IT COERCES THE WAY THE FILE WOULD. A colour crosses the wire as the
+    escape text `\x0313` - see _settings_field() for why it must, and
+    settings_file.encode_irc_escapes() for the other half of that trip - while
+    theme.palette() deals in the decoded BYTE, which is what theme.CLASSIC and
+    every other preset holds.
+
+    Nothing was decoding it here, so the preview rendered the operator's typed
+    text as nine literal characters. The advert sample began with a visible
+    `\x0309,07` and overflowed to the right, which is exactly the failure the
+    preview exists to show them they are about to cause. Reported against the
+    colour picker, but it arrived with the preview itself and would have hit
+    anyone who typed a code by hand.
+
+    Through settings_file.coerce(), not a private copy of the rule: the
+    preview's whole claim is that it shows what saving would produce, and two
+    functions that merely happen to agree today are two functions that can
+    stop agreeing.
+    """
+    import settings_file
+    import theme
+
+    body = json_object(payload)
+    wanted = {}
+    name = str(body.get("THEME", "") or "").strip().lower()
+    if name in theme.THEMES:
+        wanted["THEME"] = name
+    for role in theme.ROLES:
+        key = f"CUSTOM_THEME_{role.upper()}"
+        if key in body:
+            value = body.get(key)
+            wanted[key] = (settings_file.coerce(key, value, "", str)
+                           if isinstance(value, str) else "")
+    return wanted
+
+
+def build_notices_payload():
+    """GET /api/notices: what the operator has not been told, and the rest.
+
+    Newest FIRST here, and oldest first in storage. The store appends, which
+    is the cheap end to write; a panel is read from the top, which is where
+    the thing that just happened belongs. Reversing at the boundary keeps both
+    ends natural rather than making one of them pay for the other.
+
+    `unread` and `severity` are what the badge draws, and they are computed
+    here rather than in the page: the page would have to know the read marker
+    to work them out, and two places computing "is there anything new" is two
+    places that can disagree about whether to light up.
+    """
+    import announce
+
+    count, worst = announce.unread_notices()
+    with runtime.notices_lock:
+        rows = list(reversed(config.notices))
+        seen = int(config.notice_state.get("seen_id", 0) or 0)
+
+    return {
+        "notices": rows,
+        "unread": count,
+        "severity": worst,
+        "seen_id": seen,
+    }
+
+
+def mark_notices_read_result():
+    """POST /api/notices/read: the operator has looked. Returns the payload
+    the page would have got from a fresh GET, so the badge clears from the
+    same answer that cleared it rather than from a second round trip that
+    could race a notice arriving in between."""
+    import announce
+
+    announce.mark_notices_read()
+    return build_notices_payload()
+
+
+def messages_are_off():
+    """True when this bot keeps no private messages at all."""
+    return not getattr(config, "PRIVATE_MESSAGES_ENABLED", True)
+
+
+def messages_payload_or_404():
+    """(payload, status) for GET /api/messages.
+
+    404, NOT an empty list. An empty list means "nobody has messaged you",
+    which is a fact about the world; this is "there is no such page here",
+    which is a fact about the bot. web/app.js hides the Messages nav item on
+    exactly this status - the same signal the Console has used since it got
+    an off-switch.
+
+    Out here rather than inside the route because Flask is an optional
+    dependency: a bot running without it still serves nothing, and logic that
+    lives in a route body is logic no test in this repo can reach.
+    """
+    if messages_are_off():
+        return {"error": "Private messages are turned off."}, 404
+    return build_messages_payload(), 200
+
+
+def messages_read_or_404():
+    """(payload, status) for POST /api/messages/read. Same gate: turned off
+    while somebody had the page open must not be a button that silently does
+    nothing."""
+    if messages_are_off():
+        return {"error": "Private messages are turned off."}, 404
+    return mark_messages_read_result(), 200
+
+
+def build_messages_payload():
+    """GET /api/messages: private messages nobody answered.
+
+    Newest FIRST here and oldest first in storage, for the reason
+    build_notices_payload() gives: appending is the cheap end to write, and a
+    list is read from the top.
+
+    No reply field and no per-message action that sends anything. The bot has
+    no conversation path at all - see announce.record_private_message() - and
+    an API that looked like it could answer would be a promise the daemon
+    cannot keep.
+    """
+    import announce
+
+    with runtime.private_messages_lock:
+        rows = list(reversed(config.private_messages))
+        seen = int(config.private_message_state.get("seen_id", 0) or 0)
+
+    return {
+        "messages": rows,
+        "unread": announce.unread_private_messages(),
+        "seen_id": seen,
+    }
+
+
+def mark_messages_read_result():
+    """POST /api/messages/read: the operator has looked. Returns what a fresh
+    GET would say, so the count and the list cannot disagree."""
+    import announce
+
+    announce.mark_private_messages_read()
+    return build_messages_payload()
 
 
 def build_settings_payload():
@@ -1308,8 +2769,25 @@ def build_settings_payload():
     still reachable rather than silently missing from the page (see
     SettingsPayloadTests' completeness guard, which currently keeps this at
     zero entries by keeping SETTINGS_CATEGORIES exhaustive).
+
+    Read under runtime.config_reload_lock, because this page is what found the
+    reload window (see that lock's comment). Saving a setting from here starts
+    a rehash on a background thread and returns immediately; the browser then
+    re-fetches this endpoint at once and, without the lock, read config while
+    importlib.reload(defaults) was part way through re-executing it - so the
+    Settings page rendered Nickname, Admin nick(s) and Channels blank on a
+    daemon whose settings.conf had all three. The lock makes this wait for the
+    reload it just triggered rather than reporting its halfway state.
     """
     import settings_file
+    with runtime.config_reload_lock:
+        return _settings_payload_unlocked(settings_file)
+
+
+def _settings_payload_unlocked(settings_file):
+    """build_settings_payload()'s body, split out only so the lock above wraps
+    one expression and cannot be left un-taken by a later edit adding an early
+    return."""
     types = settings_file.declared_types(vars(config))
     categories = []
     seen = set()
@@ -1348,7 +2826,444 @@ def build_settings_payload():
 # commands.py's CORE_MODULES, so a rehash after saving one of these three
 # cannot apply it live. Surfaced in the save response's "restart_required" so
 # the frontend can tell the operator, rather than implying "rehash" fixed it.
-SETTINGS_RESTART_ONLY = {"WEBUI_ENABLED", "WEBUI_HOST", "WEBUI_PORT"}
+# Settings a running daemon cannot pick up, whatever it reloads.
+#
+# NOT "everything to do with the network" - most of it IS live, and listing
+# those here would train an operator to ignore the notice. The DCC port range
+# is read per send, so a rehash applies it to the very next transfer; the
+# channel list is compared and JOIN/PARTed by the rehash itself.
+#
+# What is genuinely stuck is anything read ONCE, against a socket already open:
+#
+#   WEBUI_*        oserve.startup() starts the dashboard thread once, bound to
+#                  the host and port it read then. Changing them from inside
+#                  that dashboard cannot move it.
+#   SERVER / PORT  irc.py reads these in connect(), and the connection the bot
+#                  is on was made with the old ones. #302 named this exactly -
+#                  "when a user changes ports ... the changes do not take
+#                  effect immediately" - and they were the two missing here, so
+#                  the save said nothing and the operator was left to work out
+#                  why the bot was still on the old server.
+#
+# A restart is PROMPTED, not performed. #302 offered either; restarting a
+# process from inside itself while it holds live transfers is a different order
+# of risk from telling the operator what to do next.
+SETTINGS_RESTART_ONLY = {"WEBUI_ENABLED", "WEBUI_HOST", "WEBUI_PORT",
+                         "SERVER", "PORT"}
+
+
+# ---------------------------------------------------------------------
+# SERVED FOLDERS
+#
+# A list of {label, path} pairs, which is why it is not on the Settings page
+# with everything else: every other setting there is one scalar an operator
+# types into one box, and settings_file.save() writes exactly that. This is
+# ordered, validated as a SET (two folders can each be fine and still conflict
+# with each other), and stored as JSON in its own file - so it gets its own
+# endpoint pair rather than being bent into the settings shape.
+#
+# #164 step 4. Steps 1-3 shipped in v1.11.0 and made the daemon serve from a
+# list of folders; until now the only way to WRITE that list was to create
+# data/library_folders.json by hand, so the feature existed and no operator
+# could reach it.
+#
+# `library` is imported inside each function, never at module scope: see
+# tests/test_import_graph.py, which holds this module to a short list of
+# imports that must work with no daemon running.
+# ---------------------------------------------------------------------
+
+def build_folders_payload():
+    """GET /api/folders: the served folders, and where they came from.
+
+    `source` is the honest answer to "what is this bot serving", which the
+    folder list alone cannot give:
+
+      "file"           - data/library_folders.json exists and is being used
+      "file_directory" - no folder list; the single FILE_DIRECTORY is served
+      "none"           - neither, so nothing is served at all
+
+    An operator looking at one folder needs to know which of the first two
+    they are in, because editing the list is what switches them.
+    """
+    import library
+
+    stored = library.load_folders()
+    single = str(getattr(config, "FILE_DIRECTORY", "") or "").strip()
+    if stored:
+        source = "file"
+    elif single:
+        source = "file_directory"
+    else:
+        source = "none"
+
+    return {
+        "folders": [{"name": entry.name, "path": entry.path}
+                    for entry in library.folders()],
+        "source": source,
+        "file_directory": single,
+        "path": library.folders_file(),
+        # So the page can offer a Browse button, or say plainly why there
+        # isn't one, instead of the operator wondering.
+        "browser_enabled": bool(getattr(config, "WEBUI_FOLDER_BROWSER_ENABLED",
+                                        False)),
+    }
+
+
+def browse_roots():
+    """The top of the tree: drive letters on Windows, "/" everywhere else.
+
+    Probed rather than assumed. A machine has the drives it has, and a letter
+    that is mapped but disconnected raises rather than answering, which is why
+    each one is tested individually and a failure just leaves it out.
+    """
+    if not platform_compat.IS_WINDOWS:
+        return ["/"]
+
+    found = []
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        root = f"{letter}:\\"
+        try:
+            if os.path.isdir(platform_compat.long_path(root)):
+                found.append(root)
+        except OSError:
+            continue
+    return found
+
+
+def build_folder_browse_payload(raw_path):
+    """GET /api/folders/browse: the immediate SUBDIRECTORIES of `raw_path`.
+
+    DIRECTORIES ONLY, NEVER FILES. The caller is choosing a folder to serve;
+    listing files would expose far more of the machine and answer nothing the
+    picker asks. This is also why there are no sizes, no timestamps and no
+    contents anywhere in the payload - a name and whether it can be opened is
+    the whole of what a picker needs.
+
+    An empty path means the top of the tree rather than the working directory,
+    because "where does the operator start" has no sensible relative answer.
+
+    Every entry is tested individually and a failure drops that entry rather
+    than the listing: a directory holding one item the daemon may not stat -
+    a system folder, a dead symlink, a disconnected network mount - must still
+    list the other forty.
+    """
+    target = str(raw_path or "").strip()
+    roots = browse_roots()
+
+    if not target:
+        return {"path": "", "parent": None, "at_root": True,
+                "entries": [{"name": root, "path": root} for root in roots],
+                "truncated": False}
+
+    target = os.path.abspath(target)
+    if not os.path.isdir(platform_compat.long_path(target)):
+        return {"error": f"{target} is not a folder on this machine."}
+
+    names = []
+    try:
+        with os.scandir(platform_compat.long_path(target)) as scan:
+            for entry in scan:
+                try:
+                    if entry.is_dir():
+                        names.append(entry.name)
+                except OSError:
+                    continue
+    except OSError as err:
+        return {"error": f"Could not read {target}: {err}"}
+
+    names.sort(key=str.lower)
+    truncated = len(names) > FOLDER_BROWSE_MAX_ENTRIES
+    names = names[:FOLDER_BROWSE_MAX_ENTRIES]
+
+    parent = os.path.dirname(target.rstrip(os.sep)) or None
+    # At a drive root, dirname() answers the drive itself and the operator
+    # would climb to where they already are. "" sends them to the root list.
+    #
+    # Compared with normcase, because browse_roots() builds its entries from
+    # the uppercase letters A-Z while os.path.abspath() preserves whatever
+    # case the caller sent. "c:\\" therefore missed the root list, and the
+    # parent fell through to ntpath.dirname("c:") - which is "c:", a
+    # DRIVE-RELATIVE path meaning "the current directory on C:". Clicking Up
+    # from a lowercase drive root browsed the daemon's own working directory.
+    # Found by audit.
+    normalised_roots = {os.path.normcase(root) for root in roots}
+    if parent == target or os.path.normcase(target) in normalised_roots:
+        parent = ""
+
+    return {
+        "path": target,
+        "parent": parent,
+        "at_root": False,
+        "entries": [{"name": name, "path": os.path.join(target, name)}
+                    for name in names],
+        "truncated": truncated,
+    }
+
+
+MAX_SERVED_LISTS = 16
+
+
+def build_on_connect_payload():
+    """GET /api/on-connect: the commands sent once registered, and the gap.
+
+    THE COMMANDS COME BACK IN FULL, and that is a decision rather than an
+    oversight. One of them is very likely an X login with a password in it, so
+    the alternative is a box an operator can overwrite but never read - which
+    means never correcting a typo without retyping the lot.
+
+    They are already behind the dashboard login, and anybody who has that can
+    read data/on_connect.json off the disk anyway. What must NOT happen is the
+    text reaching a log or a debug channel, and that is enforced where it would
+    happen - see on_connect.redacted().
+    """
+    import on_connect
+
+    commands, delay = on_connect.load()
+    return {
+        "commands": commands,
+        "delay_seconds": delay,
+        "max_commands": on_connect.MAX_COMMANDS,
+        "max_delay_seconds": on_connect.MAX_DELAY_SECONDS,
+    }
+
+
+def apply_on_connect_changes(payload):
+    """POST /api/on-connect: validate the whole set, then write it.
+
+    Returns (http_status, payload_dict).
+
+    NO REHASH. These are read fresh at every connect, so the next one picks
+    them up - and rehashing to apply them would be misleading, because what
+    they need is a reconnect, not a reload. The response says so.
+    """
+    import on_connect
+
+    if not isinstance(payload, dict):
+        return 400, {"error": "Expected an object with 'commands'."}
+
+    raw = payload.get("commands")
+    if isinstance(raw, str):
+        # The page sends a textarea, one command per line, because that is what
+        # an operator pastes. Splitting here rather than in the browser keeps
+        # the API usable by hand.
+        raw = raw.splitlines()
+    if raw is None:
+        raw = []
+    if not isinstance(raw, list):
+        return 400, {"error": "'commands' must be a list or a block of text."}
+
+    delay = payload.get("delay_seconds", on_connect.DEFAULT_DELAY_SECONDS)
+
+    try:
+        written = on_connect.save(raw, delay)
+    except ValueError as err:
+        return 400, {"error": str(err)}
+    except OSError as err:
+        return 500, {"error": f"Could not write the commands: {err}"}
+
+    return 200, {
+        "commands": written,
+        "delay_seconds": float(delay),
+        "reconnect_required": bool(written),
+        "message": ("Saved. They run at the next connection - use them now "
+                    "by reconnecting." if written
+                    else "Cleared. Nothing is sent on connect."),
+    }
+
+
+def build_lists_payload():
+    """GET /api/lists: every configured list, and whether one is implied.
+
+    `source` answers "is this what I configured, or what the daemon fell back
+    to", which the rows alone cannot: with no lists.json there is still
+    exactly one list in this payload - the implicit one, over whatever
+    FILE_DIRECTORY or the folder file resolved to - and an operator needs to
+    know that editing it is what makes it real.
+    """
+    import library
+
+    stored = library.load_lists()
+    rows = []
+    for entry in library.lists():
+        rows.append({
+            "name": entry.name,
+            "primary": entry.primary,
+            "channels": list(entry.channels),
+            "folders": [{"name": f.name, "path": f.path} for f in entry.folders],
+        })
+    return {
+        "lists": rows,
+        "source": "file" if stored else "implied",
+        "max_lists": MAX_SERVED_LISTS,
+    }
+
+
+def apply_list_changes(payload):
+    """POST /api/lists: validate the whole set, then write it.
+
+    Returns (http_status, payload_dict).
+
+    THE WHOLE SET, not each row, for the reason apply_folder_changes() gives
+    and one more of its own: two lists can each be perfectly good and still be
+    an invalid pair - the same channel bound to both, or the same name twice -
+    and only the set can show that.
+
+    AN EMPTY LIST IS ALLOWED and means "go back to one list over the
+    configured folders". The file is REMOVED rather than written as [],
+    because library.load_lists() already returns None for an empty file and
+    falls back - so writing [] would leave a file on disk that does nothing.
+
+    NO REHASH, same as folders: library.lists() re-reads on every call, so the
+    running daemon picks this up immediately. It does NOT rebuild the
+    published lists, and a list with no index is one nobody can request from -
+    hence rebuild_required.
+    """
+    import library
+
+    if not isinstance(payload, dict):
+        return 400, {"error": "Expected an object with a 'lists' list."}
+    rows = payload.get("lists")
+    if not isinstance(rows, list):
+        return 400, {"error": "'lists' must be a list."}
+    if len(rows) > MAX_SERVED_LISTS:
+        return 400, {"error": f"At most {MAX_SERVED_LISTS} lists."}
+
+    entries = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return 400, {"error": "Each list must be an object with a 'name'."}
+        name = str(row.get("name", "") or "").strip()
+        if len(name) > MAX_FOLDER_PATH_LEN:
+            return 400, {"error": f"A list name is longer than "
+                                  f"{MAX_FOLDER_PATH_LEN} characters."}
+        raw_channels = row.get("channels")
+        if raw_channels is None:
+            raw_channels = []
+        if not isinstance(raw_channels, list):
+            return 400, {"error": f"{name or 'A list'}: 'channels' must be a list."}
+        raw_folders = row.get("folders")
+        if raw_folders is None:
+            raw_folders = []
+        if not isinstance(raw_folders, list):
+            return 400, {"error": f"{name or 'A list'}: 'folders' must be a list."}
+        if len(raw_folders) > MAX_SERVED_FOLDERS:
+            return 400, {"error": f"{name or 'A list'}: at most "
+                                  f"{MAX_SERVED_FOLDERS} folders."}
+
+        folders = []
+        for folder in raw_folders:
+            if not isinstance(folder, dict):
+                return 400, {"error": "Each folder must be an object with "
+                                      "'name' and 'path'."}
+            raw_path = str(folder.get("path", "") or "").strip()
+            raw_name = str(folder.get("name", "") or "").strip()
+            if (len(raw_path) > MAX_FOLDER_PATH_LEN
+                    or len(raw_name) > MAX_FOLDER_PATH_LEN):
+                return 400, {"error": f"A folder path or label is longer than "
+                                      f"{MAX_FOLDER_PATH_LEN} characters."}
+            folders.append(library.Folder(
+                raw_name or library.default_label(raw_path), raw_path))
+
+        entries.append(library.ServedList(
+            name, bool(row.get("primary")),
+            [str(c).strip() for c in raw_channels if str(c).strip()],
+            folders))
+
+    if not entries:
+        import os as os_mod
+        try:
+            os_mod.remove(library.lists_file())
+        except OSError:
+            pass
+        return 200, {"lists": build_lists_payload()["lists"],
+                     "rebuild_required": True,
+                     "message": "Back to one list over the configured folders."}
+
+    try:
+        library.save_lists(entries)
+    except ValueError as err:
+        return 400, {"error": str(err)}
+    except OSError as err:
+        return 500, {"error": f"Could not write the list definitions: {err}"}
+
+    return 200, {"lists": build_lists_payload()["lists"],
+                 "rebuild_required": True,
+                 "message": "Saved. Rebuild the lists to publish them."}
+
+
+def apply_folder_changes(payload):
+    """POST /api/folders: validate the whole set, then write it.
+
+    Returns (http_status, payload_dict).
+
+    THE WHOLE SET, not each row. Two folders can each be perfectly good and
+    still be an invalid pair - one nested inside the other lists every file
+    under it twice, and two sharing a label make the label useless for telling
+    them apart. library.problems() returns every fault at once for the same
+    reason: an operator fixing three things should be told about three things.
+
+    AN EMPTY LIST IS ALLOWED and means "go back to the single Music
+    directory". The file is REMOVED rather than written as [], because
+    library.load_folders() already returns None for an empty list and falls
+    back - so writing [] would leave a file on disk that does nothing, and the
+    next operator to read it would have to work that out.
+
+    NO REHASH. Unlike a settings save, nothing here needs reloading:
+    library.folders() re-reads the file on every call, so the running daemon
+    picks this up immediately. What it does NOT do is rebuild the published
+    list, and a folder nobody can see in the list is not really served yet -
+    hence rebuild_required, which the page turns into a sentence rather than
+    leaving the operator to discover it.
+    """
+    import library
+
+    if not isinstance(payload, dict):
+        return 400, {"error": "Expected an object with a 'folders' list."}
+    rows = payload.get("folders")
+    if not isinstance(rows, list):
+        return 400, {"error": "'folders' must be a list."}
+    if len(rows) > MAX_SERVED_FOLDERS:
+        return 400, {"error": f"At most {MAX_SERVED_FOLDERS} folders."}
+
+    entries = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return 400, {"error": "Each folder must be an object with "
+                                  "'name' and 'path'."}
+        raw_path = str(row.get("path", "") or "").strip()
+        raw_name = str(row.get("name", "") or "").strip()
+        if len(raw_path) > MAX_FOLDER_PATH_LEN or len(raw_name) > MAX_FOLDER_PATH_LEN:
+            return 400, {"error": f"A folder path or label is longer than "
+                                  f"{MAX_FOLDER_PATH_LEN} characters."}
+        # An unnamed folder is named after itself, exactly as the file format
+        # does - so an operator who only wants to add a path can.
+        entries.append(library.Folder(raw_name or library.default_label(raw_path),
+                                      raw_path))
+
+    faults = library.problems(entries)
+    if faults:
+        return 400, {"error": "Those folders cannot be served.",
+                     "problems": faults}
+
+    target = library.folders_file()
+    if not entries:
+        try:
+            if os.path.exists(target):
+                os.remove(target)
+        except OSError as err:
+            return 400, {"error": f"Could not remove {os.path.basename(target)}: {err}"}
+        return 200, dict(build_folders_payload(), written=0,
+                         rebuild_required=True)
+
+    try:
+        library.save_folders(entries)
+    except (ValueError, OSError) as err:
+        return 400, {"error": str(err)}
+
+    return 200, dict(build_folders_payload(), written=len(entries),
+                     rebuild_required=True)
+
+
 
 
 def _save_settings_and_rehash(changes):
@@ -1510,6 +3425,272 @@ def _clear_bad_web_ip(ip):
         _web_bad_ips.pop(ip, None)
 
 
+# ---------------------------------------------------------------------
+# CONSOLE
+#
+# A web-native alternative to the DCC CHAT admin console (adminchat.py) and
+# the debug channel, for an operator who wants neither: no second IRC client
+# to keep open, no channel broadcasting the daemon's internals to whoever
+# joins it.
+#
+# Two halves, kept separate on purpose:
+#   - the LOG is the ambient stream every announce.send_debug() call already
+#     produces. Registering below as another consumer of the same fan-out
+#     adminchat.py's own DCC sessions use (announce.add_debug_sink) - nothing
+#     downstream of send_debug() has to learn a new destination exists, and
+#     DEBUG_TO_CONSOLE (already on by default, independent of DEBUG_TO_CHANNEL
+#     / DEBUG_CHANNEL) is the only switch that gates it - see send_debug()'s
+#     own "ROUTING" comment. An operator who wants no debug channel at all
+#     still gets this for free.
+#   - a COMMAND is request/response: POST one line, get back exactly the
+#     lines that one command produced, not interleaved with the ambient log.
+#
+# adminchat.COMMANDS is reused directly rather than re-implemented: a second
+# copy of "queue", "status", "rehash" and the rest would drift the moment one
+# of them changed - the same shape as every drift this codebase has already
+# been bitten by (PRESERVE_RUNTIME, the two check-setup.py copies).
+#
+# announce.py is reloaded on every !rehash (it is in commands.CORE_MODULES),
+# which resets announce._debug_sinks to [] - but commands.py's rehash handler
+# already snapshots every live sink before that reload and reattaches the
+# same objects after (see reattach_debug_sinks()), generically, regardless of
+# which module registered them. webserver.py is NOT itself in CORE_MODULES -
+# it is never reloaded - so _console_log and _console_next_id need none of
+# the "survive my own reload" handling announce._debug_queue uses for itself.
+# ---------------------------------------------------------------------
+
+_console_log = collections.deque(maxlen=500)
+_console_log_lock = threading.Lock()
+_console_next_id = 1
+_console_sink_registered = False
+
+
+def _console_debug_sink(msg_text, category="INFO"):
+    """announce.add_debug_sink's callback shape: (plain text, category).
+
+    Must not block and must not raise - announce.py's own comment on the sink
+    contract says why: send_debug() is called from the IRC read thread. A
+    plain append under a short lock, the same shape as
+    adminchat.Session.send().
+
+    strip_irc_formatting(), not a fresh copy of it: some send_debug() callers
+    embed mIRC control characters of their own inside msg_text for the
+    channel's benefit, and adminchat.Session.debug_sink() already strips them
+    for the identical reason - a console is read as a log, not rendered by an
+    IRC client.
+    """
+    global _console_next_id
+    with _console_log_lock:
+        _console_log.append({
+            "id": _console_next_id,
+            "category": str(category),
+            "time": time.time(),
+            "text": adminchat.strip_irc_formatting(msg_text),
+        })
+        _console_next_id += 1
+
+
+def _open_in_browser(host, port, opener=None, log=print):
+    """Open the dashboard in the default browser, if that was asked for.
+
+    LOOPBACK ONLY, and not because of security - because of what the machine
+    probably is. A dashboard bound to the LAN is as likely to be running on a
+    headless box as on somebody's desktop, and a daemon that tries to spawn a
+    browser there is doing something nobody asked for and nobody will see.
+
+    Never fatal. A machine with no browser, no display, or a wayward
+    BROWSER variable is not a reason to stop the bot starting - the address
+    was printed a line above either way.
+    """
+    if not getattr(config, "WEBUI_OPEN_BROWSER", True):
+        return False
+    if not dashboard_is_loopback_only(host):
+        return False
+    try:
+        import webbrowser
+
+        (opener or webbrowser.open)(f"http://{host}:{port}/")
+        return True
+    except Exception as err:
+        log(f"[WEBUI] Could not open a browser ({err}); the dashboard is "
+            f"still running at http://{host}:{port}/")
+        return False
+
+
+def dashboard_is_loopback_only(host=None):
+    """Is the dashboard reachable only from the machine it runs on?
+
+    The whole question the Console's default turns on. Anything that is not a
+    loopback address means somebody else can reach the login page, and from
+    there the Console is admin behind one factor.
+
+    Unparseable is treated as NOT loopback. A host this cannot read is a host
+    this cannot vouch for, and the safe answer to "is this exposed" is yes.
+    """
+    import ipaddress
+
+    text = str(host if host is not None
+               else getattr(config, "WEBUI_HOST", "127.0.0.1")).strip()
+    if not text:
+        return False
+    if text.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(text).is_loopback
+    except ValueError:
+        return False
+
+
+def console_is_enabled():
+    """Whether the dashboard's Console is available.
+
+    An explicit True or False in the operator's own configuration always wins:
+    somebody who has already made this choice does not get it made again for
+    them on upgrade.
+
+    With no explicit value the answer is "yes if nobody else can reach it".
+    The Console puts ban/unban/clearqueue/rehash/update behind the dashboard
+    password alone - one factor, over plain HTTP - which is a real widening
+    when the dashboard is on the LAN and no widening at all when it is on
+    loopback, where the only person who can reach it already has the files and
+    admin_config.py.
+    """
+    configured = getattr(config, "WEBUI_CONSOLE_ENABLED", None)
+    if configured is not None:
+        return bool(configured)
+    return dashboard_is_loopback_only()
+
+
+def _quiet_the_request_log():
+    """Stop werkzeug printing a line per HTTP request onto the operator's
+    console, unless DEBUG_MODE asks for it.
+
+    From the beta: "maybe those lines shouldnt be visible on cmd.exe except
+    you run dccore on something like debug mode. you miss the important lines
+    like search results etc".
+
+    Exactly that. The dashboard polls five endpoints every two seconds, so an
+    idle bot with one page open writes on the order of a hundred lines a
+    minute:
+
+        127.0.0.1 - - [...] "GET /api/console/log?since=33 HTTP/1.1" 200 -
+
+    Every one of them says the same thing - the dashboard is still open - and
+    together they push the lines that matter (a search, a transfer, a
+    disconnect) off the screen faster than anyone can read them. The console
+    is the operator's only view on a daemon with no window; filling it with
+    the dashboard's own heartbeat costs them that view.
+
+    SILENCED, NOT REDIRECTED. Werkzeug's log is a development convenience,
+    and every request it reports is one this process just served itself - the
+    information is not lost, it was never news. ERROR is left through so a
+    genuine failure inside the server still reaches the console.
+
+    Never raises: a logging tweak is not a reason for the dashboard not to
+    start.
+    """
+    if getattr(config, "DEBUG_MODE", False):
+        return
+    try:
+        import logging
+        logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    except Exception as err:
+        print(f"[WEBUI] Could not quieten the request log: {err}")
+
+
+def _ensure_console_sink():
+    """Register the console's debug sink, at most once.
+
+    Safe to call from more than one place - the log route and start() both
+    do, since a test that calls build_console_log_payload() directly never
+    runs start() - because announce.add_debug_sink() is itself idempotent
+    (a no-op when the sink is already present). The module-level flag just
+    avoids importing announce on every poll.
+    """
+    global _console_sink_registered
+    if _console_sink_registered:
+        return
+    import announce
+    announce.add_debug_sink(_console_debug_sink)
+    _console_sink_registered = True
+
+
+def build_console_log_payload(since=0):
+    """Every console log line newer than `since`, plus the cursor to poll
+    from next.
+
+    A cursor rather than an offset/limit pair: this is a live stream a client
+    polls repeatedly, and an offset would either replay lines already shown
+    or, worse, silently skip ones that arrived between two polls. since=0 -
+    the first poll - returns whatever is currently buffered (up to 500
+    lines): a newly opened console showing recent history is strictly more
+    useful than one that starts blank, and costs nothing extra since the
+    buffer already exists.
+    """
+    _ensure_console_sink()
+    try:
+        since = int(since)
+    except (TypeError, ValueError):
+        since = 0
+    with _console_log_lock:
+        lines = [line for line in _console_log if line["id"] > since]
+        cursor = _console_next_id - 1
+    return {"lines": lines, "cursor": cursor}
+
+
+# Commands that make no sense over a stateless HTTP request. "quit" closes a
+# DCC CHAT session (session.close()) - _WebConsoleSession below has no socket
+# to close and no persistent identity for that to mean anything about.
+_CONSOLE_UNSUPPORTED_COMMANDS = frozenset({"quit"})
+
+
+class _WebConsoleSession:
+    """Just enough of adminchat.Session's shape for COMMANDS' handlers, which
+    is only ever .send() plus the two attributes handle_command() itself
+    touches (.nick, .last_activity) - checked directly against adminchat.py,
+    not guessed at. Never a real Session: no socket, no writer thread,
+    nothing to close.
+    """
+
+    def __init__(self, nick):
+        self.nick = nick
+        self.last_activity = time.time()
+        self.lines = []
+
+    def send(self, text=""):
+        self.lines.append(str(text))
+
+
+def build_console_command_result(command_text, remote_addr=None):
+    """Run one admin command through adminchat.handle_command() and return
+    exactly the lines it produced.
+
+    Reuses the real command set rather than a second copy of it - see the
+    CONSOLE section's own comment above for why.
+
+    ASYNC COMMANDS RETURN AN ACKNOWLEDGEMENT, NOT THE RESULT. ban, unban,
+    clearqueue, rehash and update each run the real work on a background
+    thread (adminchat._run_detached) and reply immediately with only a
+    "Banning ..." / "Rehashing ..." line - the same as a DCC CHAT session
+    sees. Their eventual result is not lost: the handlers underneath all call
+    announce.send_debug() when they finish, which reaches this same page
+    through the LOG half above, a few seconds later. A caller of this
+    function only ever gets what handle_command() produced synchronously.
+    """
+    stripped = str(command_text or "").strip()
+    if not stripped:
+        return 400, {"error": "No command given."}
+
+    name = stripped.split(None, 1)[0].lower()
+    if name in _CONSOLE_UNSUPPORTED_COMMANDS:
+        return 200, {"lines": ["'quit' closes a DCC CHAT session; there is not "
+                               "one here. Just close this tab."]}
+
+    session = _WebConsoleSession(f"web:{remote_addr or 'unknown'}")
+    adminchat.handle_command(session, stripped)
+    return 200, {"lines": session.lines}
+
+
 if HAVE_FLASK:
 
     def create_app():
@@ -1519,6 +3700,16 @@ if HAVE_FLASK:
         # all POST; Lax is the app's own decision instead of whatever the
         # visitor's browser happens to default to.
         app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+        # A CEILING ON THE REQUEST BODY. Without one, Flask reads whatever is
+        # sent into memory before any route decides what to do with it, and
+        # this daemon shares a machine with transfers it must not starve.
+        # 8MB is far above every legitimate body here - the largest by a wide
+        # margin is a pasted vars.ini, a text file of a few hundred lines -
+        # and Flask answers anything past it with 413 rather than buffering
+        # it. The login page is behind this too, which is the point: the
+        # ceiling applies before authentication, where the daemon has the
+        # least reason to trust what it is being handed.
+        app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
 
         @app.before_request
         def require_login():
@@ -1567,6 +3758,31 @@ if HAVE_FLASK:
         def api_queue():
             return jsonify(build_queue_payload(user=request.args.get("user")))
 
+        @app.route("/api/stats/import/variables")
+        def api_stats_import_variables():
+            # Served rather than written into app.js so the page's filter and
+            # the parser cannot drift: a field added to omenserve_import.FIELDS
+            # is kept by the page without the JavaScript changing at all. If
+            # they disagreed, the page would strip out a counter the parser
+            # was waiting for, and the operator would be told their file has
+            # nothing in it.
+            import omenserve_import
+            return jsonify({"variables": list(omenserve_import.variable_names())})
+
+        @app.route("/api/stats/import/preview", methods=["POST"])
+        def api_stats_import_preview():
+            # Reads and writes nothing. POST rather than GET because the
+            # vars.ini text travels in the body - it is a file's contents,
+            # not an identifier.
+            body = json_object(request.get_json(silent=True))
+            return jsonify(build_stats_import_preview(body.get("text", "")))
+
+        @app.route("/api/stats/import", methods=["POST"])
+        def api_stats_import():
+            body = json_object(request.get_json(silent=True))
+            status, result = apply_stats_import(body)
+            return jsonify(result), status
+
         @app.route("/api/stats")
         def api_stats():
             return jsonify(build_stats_payload())
@@ -1579,7 +3795,12 @@ if HAVE_FLASK:
         def api_filelists():
             offset, limit = parse_pagination_params(
                 request.args.get("offset"), request.args.get("limit"))
-            return jsonify(build_filelists_payload(offset, limit))
+            # ?list= names one of OUR served lists; absent means the primary.
+            # ?q= narrows it to rows matching every word in it (#399's
+            # follow-up) - absent or blank means unfiltered, same as before.
+            return jsonify(build_filelists_payload(
+                offset, limit, name=requested_own_list(request.args.get("list")),
+                q=request.args.get("q", "")))
 
         # ------------------------------------------------------------------
         # These routes below DO mutate state (queuing an outbound IRC line,
@@ -1634,15 +3855,53 @@ if HAVE_FLASK:
                 body.get("bot", ""), body.get("folder", ""))
             return jsonify(result), status
 
+        @app.route("/api/settings/theme-preview", methods=["POST"])
+        def api_theme_preview():
+            # POST because it carries what the operator has typed. It changes
+            # nothing - see build_theme_preview() - and sits behind the same
+            # login as every other route here.
+            return jsonify(build_theme_preview(
+                theme_preview_overrides(request.get_json(silent=True))))
+
         @app.route("/api/filelists/bots")
         def api_filelists_bots():
-            return jsonify(build_fetched_bot_list_summaries())
+            # EVERY source the List Browser can show: ours, then theirs.
+            #
+            # Ours first and in the operator's own order rather than
+            # alphabetically - they arranged that order themselves, and the
+            # primary being first is the one piece of it the page should not
+            # reshuffle. Composed HERE rather than inside either builder,
+            # because each of those answers a question its own name states and
+            # neither should start answering the other's.
+            return jsonify(build_own_list_summaries()
+                           + build_fetched_bot_list_summaries())
+
+        @app.route("/api/filelists/purge-offline", methods=["POST"])
+        def api_filelists_purge_offline():
+            # POST, not DELETE: it does not name what to remove - the caller
+            # asks "clear whatever is offline right now" rather than naming a
+            # specific bot, so there is no resource URL for DELETE to name.
+            status, result = build_purge_offline_fetched_lists_result()
+            return jsonify(result), status
+
+        @app.route("/api/filelists/search")
+        def api_filelists_search():
+            # Read-only, and it stays that way: this answers a question about
+            # lists already on disk and queues nothing. Selecting a result and
+            # queueing it goes through the existing POST /api/fetch/enqueue,
+            # which is where the admission control for that already lives.
+            _offset, limit = parse_pagination_params(
+                None, request.args.get("limit"))
+            return jsonify(build_crosslist_search_payload(
+                request.args.get("q", ""), limit))
 
         @app.route("/api/filelists/bot/<nick>")
         def api_filelists_bot(nick):
             offset, limit = parse_pagination_params(
                 request.args.get("offset"), request.args.get("limit"))
-            status, result = build_fetched_bot_list_payload(nick, offset, limit)
+            status, result = build_fetched_bot_list_payload(
+                nick, offset, limit, list_marker=request.args.get("list", ""),
+                q=request.args.get("q", ""))
             return jsonify(result), status
 
         @app.route("/api/fetch/<request_id>/download")
@@ -1667,9 +3926,40 @@ if HAVE_FLASK:
             # filename through dcc.is_safe_path()) is what actually gets
             # opened.
             directory = os.path.abspath(getattr(config, "FETCHED_FILES_DIR", "./data/fetched"))
-            return send_from_directory(
-                directory, stored_filename, as_attachment=True,
-                download_name=download_name)
+
+            # NOT send_from_directory(), and the reason is specific.
+            #
+            # dcc_fetch fits a stored name to MAX_NAME_BYTES (255) and touches
+            # every path through platform_compat.long_path(). This route was
+            # the one that did not, so on Windows a fetch with a long
+            # remote-chosen name was written, marked "complete", listed in the
+            # UI - and its Download button answered 404 for ever, while the
+            # file sat there the whole time. Found by audit.
+            #
+            # Handing send_from_directory() the WRAPPED directory does not fix
+            # it either: werkzeug's safe_join() joins with a FORWARD SLASH, and
+            # a \\?\ path is the one kind Windows will not accept those in. So
+            # the path is built here, with a backslash, and wrapped after.
+            #
+            # The containment safe_join() was providing is kept explicitly:
+            # dcc.is_safe_path() is the same gate every request path in the
+            # project uses, and it resolves symlinks, which safe_join() does
+            # not. `import dcc` is deferred exactly like `import dcc_fetch`
+            # above - see tests/test_import_graph.py.
+            import dcc
+
+            candidate = os.path.join(directory, stored_filename)
+            if not dcc.is_safe_path(directory, candidate):
+                print(f"[WEB SECURITY] Refused a fetch download outside "
+                      f"{directory}: {stored_filename!r}")
+                return jsonify({"error": "Unknown, incomplete, or failed fetch."}), 404
+
+            wrapped = platform_compat.long_path(candidate)
+            if not os.path.isfile(wrapped):
+                return jsonify({"error": "The fetched file is no longer on disk."}), 404
+
+            return send_file(wrapped, as_attachment=True,
+                             download_name=download_name)
 
         @app.route("/api/fetch/<request_id>/delete", methods=["POST"])
         def api_fetch_delete(request_id):
@@ -1686,11 +3976,117 @@ if HAVE_FLASK:
             status, result = apply_settings_changes(body)
             return jsonify(result), status
 
+        @app.route("/api/folders")
+        def api_folders():
+            return jsonify(build_folders_payload())
+
+        # 404 rather than 403 when it is off, for the reason the console
+        # routes give: 403 confirms the route exists and is merely disabled,
+        # which tells anyone probing that this build has one worth returning
+        # for.
+        def _browser_is_available():
+            return bool(getattr(config, "WEBUI_FOLDER_BROWSER_ENABLED", False))
+
+        @app.route("/api/folders/browse")
+        def api_folders_browse():
+            if not _browser_is_available():
+                return jsonify({"error": "not found"}), 404
+            payload = build_folder_browse_payload(request.args.get("path", ""))
+            return jsonify(payload), (400 if "error" in payload else 200)
+
+        @app.route("/api/folders", methods=["POST"])
+        def api_folders_save():
+            body = json_object(request.get_json(silent=True))
+            status, result = apply_folder_changes(body)
+            return jsonify(result), status
+
+        @app.route("/api/lists")
+        def api_lists():
+            return jsonify(build_lists_payload())
+
+        @app.route("/api/lists", methods=["POST"])
+        def api_lists_save():
+            body = json_object(request.get_json(silent=True))
+            status, result = apply_list_changes(body)
+            return jsonify(result), status
+
+        @app.route("/api/on-connect")
+        def api_on_connect():
+            return jsonify(build_on_connect_payload())
+
+        @app.route("/api/on-connect", methods=["POST"])
+        def api_on_connect_save():
+            body = json_object(request.get_json(silent=True))
+            status, result = apply_on_connect_changes(body)
+            return jsonify(result), status
+
         @app.route("/api/settings/password", methods=["POST"])
         def api_settings_password():
             body = json_object(request.get_json(silent=True))
             status, result = build_password_change_result(
                 body.get("new_password", ""), body.get("confirm_password", ""))
+            return jsonify(result), status
+
+        # 404, not 403, when the Console is off. 403 would confirm the routes
+        # exist and are merely disabled, which tells anyone probing that this
+        # build has an admin console worth coming back for. Not found is the
+        # honest answer to "is there a console here" when there is not one
+        # reachable, and the operator who wants it is looking at the setting,
+        # not at the URL.
+        #
+        # Both routes check independently rather than sharing a decorator: they
+        # are the whole attack surface of this feature, and a decorator applied
+        # to one and forgotten on the other is a silent hole. Two lines each is
+        # cheap enough to not be clever about.
+        def _console_is_available():
+            # ONE answer to "is the Console on", shared with the startup
+            # notice and with anything else that asks. Reading the setting
+            # directly here would have kept the old flat default alive on the
+            # only paths that actually gate the feature - the routes - while
+            # everything else moved.
+            return console_is_enabled()
+
+        @app.route("/api/filelists/<path:source>/purge", methods=["POST"])
+        def api_filelists_purge(source):
+            # POST, and <path:source> because a bot's other lists are named
+            # "<nick>/<marker>" - a plain <source> stops at the slash and
+            # would 404 on exactly those rows.
+            status, result = build_fetched_list_purge_result(source)
+            return jsonify(result), status
+
+        @app.route("/api/messages")
+        def api_messages():
+            payload, status = messages_payload_or_404()
+            return jsonify(payload), status
+
+        @app.route("/api/messages/read", methods=["POST"])
+        def api_messages_read():
+            # POST because it changes what the operator has acknowledged.
+            payload, status = messages_read_or_404()
+            return jsonify(payload), status
+
+        @app.route("/api/notices")
+        def api_notices():
+            return jsonify(build_notices_payload())
+
+        @app.route("/api/notices/read", methods=["POST"])
+        def api_notices_read():
+            # POST because it changes what the operator has acknowledged.
+            return jsonify(mark_notices_read_result())
+
+        @app.route("/api/console/log")
+        def api_console_log():
+            if not _console_is_available():
+                return jsonify({"error": "not found"}), 404
+            return jsonify(build_console_log_payload(request.args.get("since")))
+
+        @app.route("/api/console/command", methods=["POST"])
+        def api_console_command():
+            if not _console_is_available():
+                return jsonify({"error": "not found"}), 404
+            body = json_object(request.get_json(silent=True))
+            status, result = build_console_command_result(
+                body.get("command", ""), request.remote_addr)
             return jsonify(result), status
 
         return app
@@ -1722,8 +4118,14 @@ def start():
     # is a decision the operator should make explicitly, not by omission.
     host = getattr(config, "WEBUI_HOST", "127.0.0.1")
     port = getattr(config, "WEBUI_PORT", 8420)
+    _ensure_console_sink()
     app = create_app()
     print(f"[WEBUI] Dashboard starting on http://{host}:{port}/ (login required).")
+    if console_is_enabled():
+        print("[WEBUI] The Console is on. It reaches ban, rehash and update "
+              "behind this one password - see WEBUI_CONSOLE_ENABLED.")
+    _quiet_the_request_log()
+    _open_in_browser(host, port)
     try:
         # use_reloader=False is NOT optional: Flask's reloader re-execs the whole
         # process, and this runs on an already-live daemon thread - a re-exec

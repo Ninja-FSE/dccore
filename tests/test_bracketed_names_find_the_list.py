@@ -207,6 +207,13 @@ class TheUpdateCounterReadsTheSameIndex(DCCoreTestCase):
     This is the half a mutation run caught and the list.py tests could not:
     the counter was a closure inside handle_list_update_request(), so reaching
     it meant running a real subprocess. It is a module-level function now.
+
+    The glob these tests were written about is gone: the counter calls
+    list.get_file_count_date_size_and_raw_bytes(), which goes through
+    find_latest_list(), which is where the escaping lives. So bracketed names
+    are safe by construction rather than by two copies of glob.escape() being
+    kept in step - and these tests now prove that the delegation preserves it,
+    which is the same protection asked of a stronger design.
     """
 
     def setUp(self):
@@ -215,9 +222,18 @@ class TheUpdateCounterReadsTheSameIndex(DCCoreTestCase):
         os.makedirs(self.tree.lists, exist_ok=True)
 
     def write_index(self, base_name, count):
+        """A list with real REQUEST ROWS.
+
+        The counter reads rows now, not the header - it calls the advert's own
+        counting function rather than keeping a second copy of the filtering
+        in step by hand, which is what let it drift onto the film list. A
+        header-only fixture is a file no generator produces.
+        """
         path = os.path.join(self.tree.lists, f"{base_name}-2026-01-01.txt")
         with io.open(path, "w", encoding="utf-8") as handle:
             handle.write(f"List of {count} Files\n")
+            for i in range(int(str(count).replace(",", ""))):
+                handle.write(f"!{base_name} Track {i}.flac  ::INFO:: 4.00MB\n")
         return path
 
     def test_a_bracketed_name_counts_its_files(self):
@@ -239,6 +255,8 @@ class TheUpdateCounterReadsTheSameIndex(DCCoreTestCase):
         with io.open(os.path.join(awkward_dir, "DCCoreTest-2026-01-01.txt"),
                      "w", encoding="utf-8") as handle:
             handle.write("List of 77 Files\n")
+            for i in range(77):
+                handle.write(f"!DCCoreTest Track {i}.flac  ::INFO:: 4.00MB\n")
 
         self.assertEqual(commands.count_from_master_list(), 77)
 

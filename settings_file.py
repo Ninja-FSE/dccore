@@ -43,6 +43,7 @@ clearly which line it ignored.
 import configparser
 import io
 import os
+import sys
 import re
 import platform_compat
 import tempfile
@@ -177,8 +178,36 @@ _FALSE = {"0", "false", "no", "off"}
 # "kept the default" line in the startup log for a hand-edited settings.conf.
 #
 # Case is not part of the choice: an operator typing "ZIP" means "zip".
+#
+# THEME is the same shape as LIST_FORMAT - a fixed few names, not free text -
+# but theme.THEMES is not imported here to build this tuple. theme.py does
+# `import defaults as config`, and defaults.py does `import settings_file` at
+# module scope (to apply admin_config.py/settings.conf on top of its own
+# declarations) - so `import theme` here closes that into a cycle. It does
+# not always fail: whichever of settings_file/defaults happens to be
+# imported FIRST anywhere in the process decides whether Python resolves it
+# from a module already fully built or from one still mid-import, so the
+# failure would depend on import order rather than on anything about this
+# file. Verified by trying it: importing defaults before settings_file
+# happened to work, importing settings_file first raised
+# "partially initialized module 'settings_file' has no attribute 'apply_to'"
+# - the same values, opposite failure depending on which module a test or
+# entry point happens to touch first. Named here instead, same as
+# LIST_FORMAT; tests/test_theme.py pins it against theme.THEMES so the two
+# cannot drift silently if a preset is ever added or renamed.
 CHOICES = {
     "LIST_FORMAT": ("txt", "zip", "rar"),
+    "THEME": ("classic", "midnight", "forest", "orchid", "plain"),
+    # adminchat.handle_dcc_chat() tests for "listen" and "connect" and treats
+    # everything else as "auto", so a typo did not fail - it silently selected
+    # the default. The operator who wrote "lisen" got automatic mode and no
+    # indication their setting had not taken. Found by audit.
+    "ADMIN_CHAT_MODE": ("auto", "listen", "connect"),
+    # mIRC's own packet-size menu, in bytes: 4, 8, 16, 32, 64, 128 KB. A list
+    # rather than a free number because that is what an operator is comparing
+    # against - "the same setting mIRC has" - and because the six of them are
+    # the only values anyone actually wants to try.
+    "DCC_BLOCK_SIZE": ("4096", "8192", "16384", "32768", "65536", "131072"),
 }
 
 
@@ -189,6 +218,45 @@ class SettingsError(Exception):
 
 def settings_path():
     return os.environ.get("DCCORE_SETTINGS_FILE") or DEFAULT_PATH
+
+
+# Uppercase names that describe the CODE rather than the installation.
+#
+# SCRIPT_VERSION was an editable field on the dashboard's Settings page. Saving
+# it wrote the number into settings.conf, and settings.conf is applied AFTER
+# the shipped defaults - so from that moment the value in the file won, for
+# ever. The next upgrade shipped a new version and the daemon went on
+# reporting the old one, in the advert, the list masthead, the CTCP VERSION
+# reply and the dashboard's own header, with nothing to say why. "What version
+# are you running?" is the first question asked about any install, and this
+# made the answer unreliable in the one direction nobody checks.
+#
+# PROJECT_URL is deliberately NOT here: a fork pointing at its own repository
+# is a real configuration, and the rule above already stops it being blanked.
+NOT_SETTINGS = frozenset({"SCRIPT_VERSION"})
+
+
+# NAMES THE DAEMON ASSIGNS TO ITSELF WHILE IT RUNS (#465).
+#
+# Neither is declared in config.py, so both land in apply_to()'s `unknown`
+# list and are ignored - correctly. What was wrong is what the operator was
+# then told: "not a setting this version recognises. Check the spelling"
+# sends somebody to check a name that is spelled perfectly and is simply not
+# set from this file. MY_IP_OR_DOCK in particular is named by two runtime
+# messages as something to configure, so an operator reaching this line has
+# usually just been told to set it.
+#
+# A MESSAGE, NOT A GATE. Nothing here makes either name applicable, and
+# _check_writable() still refuses to WRITE one for the reason in its own
+# comment: MY_IP_OR_DOCK is the address DETECTED at startup, and a value in
+# the file would freeze one session's answer into every session after it.
+RUNTIME_ASSIGNED = {
+    "MY_IP_OR_DOCK": ("the daemon detects this address at startup rather than "
+                      "reading it from a file. Set it in admin_config.py if "
+                      "you need to pin it"),
+    "ORIGINAL_NICK": ("the daemon remembers this for itself, from NICKNAME, so "
+                      "it can go back to it after a nick collision"),
+}
 
 
 def is_overridable(name, value):
@@ -204,6 +272,8 @@ def is_overridable(name, value):
         return False
     if name.startswith("C_"):
         return False
+    if name in NOT_SETTINGS:
+        return False
     return isinstance(value, (str, bool, int, float, list, type(None)))
 
 
@@ -217,6 +287,32 @@ def parse(text):
     # interpolation=None: configparser otherwise treats '%' as a reference and
     # a Windows path or a password containing one fails in a way that reads
     # like a corrupt file.
+    # An INDENTED line is a continuation to configparser, and silently becomes
+    # part of the previous value - newline and all. settings.conf is one
+    # setting per line (save() refuses to write a value containing a line
+    # break for exactly that reason), so an indented line is always a mistake,
+    # and the mistake was invisible:
+    #
+    #     NICKNAME = MyBot
+    #         a stray indented line
+    #
+    # gave NICKNAME the value "MyBot\na stray indented line", which then went
+    # out on the wire. Found by audit. Refused here, naming the line, rather
+    # than left to be discovered as a nickname the server rejects.
+    #
+    # Indented COMMENTS are still fine - they are comments wherever they sit.
+    for number, raw_line in enumerate(text.split("\n"), start=1):
+        if not raw_line[:1] in (" ", "\t"):
+            continue
+        stripped = raw_line.strip()
+        if not stripped or stripped[0] in "#;":
+            continue
+        raise SettingsError(
+            f"line {number} is indented: {stripped[:60]!r}. Every setting "
+            f"starts at the beginning of its own line - an indented line is "
+            f"read as a continuation of the setting above it, which is almost "
+            f"never what was meant.")
+
     parser = configparser.ConfigParser(interpolation=None)
     # Keep the case of keys. Settings are uppercase; the default optionxform
     # lowercases everything and nothing would ever match.
@@ -252,9 +348,99 @@ def declared_types(namespace):
 
     Anything whose annotation is not a plain type is ignored rather than
     guessed at, and the caller falls back to the default's own type.
+
+    PYTHON 3.14 DOES NOT PUT THEM IN `__dict__`. PEP 649 made annotations
+    lazy: a module grows an `__annotate__` function, and `__annotations__` is
+    computed the first time the ATTRIBUTE is read. `vars(module)` hands back
+    the raw `__dict__`, which does not contain it until then - so this
+    returned {} on 3.14 while `config.__annotations__` held all 94.
+
+    Nothing raised. Every caller simply saw a config with no declared
+    settings: the dashboard's Settings page rendered zero fields in every
+    category, and both the reader and the writer fell back to the default's
+    runtime type - which for `WEBUI_CONSOLE_ENABLED: bool = None` is
+    NoneType, so the value came through as raw text rather than a bool.
+
+    Found by running the daemon on 3.14 during the RC1 beta. CI covers 3.10
+    and 3.12, and the README promises "3.10+", which now includes this.
     """
-    annotations = namespace.get("__annotations__") or {}
-    return {name: kind for name, kind in annotations.items() if isinstance(kind, type)}
+    annotations = namespace.get("__annotations__")
+    if annotations is None:
+        # Read it as an ATTRIBUTE, which is what triggers the lazy build. The
+        # module is found by its own __name__ rather than being passed in, so
+        # every existing caller keeps handing us vars(config) unchanged.
+        module = sys.modules.get(str(namespace.get("__name__", "")))
+        annotations = getattr(module, "__annotations__", None)
+    return {name: kind for name, kind in (annotations or {}).items()
+            if isinstance(kind, type)}
+
+
+_IRC_ESCAPE_RE = re.compile(r"\\x([0-9A-Fa-f]{2})")
+
+
+def decode_irc_escapes(text):
+    r"""Turn the `\xHH` sequences an operator can TYPE into the bytes mIRC
+    actually reads.
+
+    settings.conf.sample documents each CUSTOM_THEME_* override as "a raw mIRC
+    code string like \x0306,06", and defaults.py says the same. Neither was
+    true: coerce() returned the text verbatim, so the nine literal characters
+    went into every advert, every "Sent:" notice and every search header,
+    broadcast on a five-minute cycle with no error anywhere.
+
+    Nor could the operator work around it. A colour code starts with 0x03,
+    which is a control character: settings.conf is a text file they edit in an
+    editor, and the dashboard field is a browser text input that cannot
+    produce that byte at all. Typing the escape was the only route there was,
+    and it was the one route that did not work.
+
+    ONLY \xHH, deliberately. That covers every code mIRC uses - 0x03 colour,
+    0x02 bold, 0x1F underline, 0x0F reset - and leaves every other backslash
+    alone, so a Windows path in some future string setting is not quietly
+    mangled by a decoder that was only ever meant for control codes. A literal
+    backslash-x-digit-digit is therefore not expressible here, which no theme
+    string wants.
+    """
+    return _IRC_ESCAPE_RE.sub(lambda match: chr(int(match.group(1), 16)),
+                              str(text))
+
+
+_IRC_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+# #436: a real theme role is a handful of mIRC control codes - "\x0302,02" is
+# 8 bytes, the longest in the shipped THEMES table - so this leaves an
+# operator plenty of room to combine a couple of codes while still bounding
+# how much one role can eat out of announce.IRC_LINE_BUDGET when it is
+# interpolated 8-9 times into a single line.
+CUSTOM_THEME_MAX_BYTES = 30
+
+
+def encode_irc_escapes(text):
+    r"""The way back out: control bytes as the `\xHH` an operator can read.
+
+    decode_irc_escapes() has been half a round trip. It turns typed `\x0313`
+    into the byte mIRC reads, and nothing turned it back - so a colour that
+    had been through config once was a raw 0x03 from then on, and 0x03 is not
+    a character a text file or a browser input can show. The dashboard field
+    for an accent of `\x0313` read `13`: the code was there, invisible, and
+    what the operator could see was not what was set. Typing back what they
+    read would have put a literal "13" into every advert.
+
+    It also decides what lands in settings.conf, which is a file people edit
+    by hand. A raw control byte in it is invisible in an editor and is exactly
+    the kind of thing an editor strips on save.
+
+    EVERY control character, not just the ones a theme uses. The set that
+    cannot survive a text file is the set below, and picking a shorter one
+    would mean deciding today which codes a future theme may want.
+
+    Lowercase hex, so a value has ONE spelling once it has been through here -
+    the decoder accepts either case, and two spellings of the same colour
+    would each read as an edit of the other. Idempotent on text that is
+    already escaped, since that text holds no control characters at all.
+    """
+    return _IRC_CONTROL_RE.sub(
+        lambda match: "\\x%02x" % ord(match.group()), str(text))
 
 
 def coerce(name, raw, default, declared=None):
@@ -279,6 +465,20 @@ def coerce(name, raw, default, declared=None):
         if lowered not in CHOICES[name]:
             raise ValueError(
                 f"expected one of {list(CHOICES[name])}, got {raw!r}")
+        # A NUMERIC choice still comes back as a number. Every choice was a
+        # string until DCC_BLOCK_SIZE, and returning "65536" for a setting
+        # declared `int` would hand the send loop a str to read() with - the
+        # kind of type drift that only shows up on the one code path nobody
+        # exercised. The declared default decides, exactly as it does for
+        # every non-choice setting below.
+        #
+        # `is not True/False` rather than `not isinstance(default, bool)`
+        # would be the same thing here, but bool IS an int in Python and a
+        # future True/False choice must not be turned into 1/0.
+        if isinstance(default, bool):
+            return lowered
+        if isinstance(default, int):
+            return int(lowered)
         return lowered
 
     if default is None and not text:
@@ -320,6 +520,9 @@ def coerce(name, raw, default, declared=None):
         # become, so it stays the text the operator wrote.
         return text
 
+    if name.startswith("CUSTOM_THEME_"):
+        return decode_irc_escapes(text)
+
     return raw.strip("\n")
 
 
@@ -337,7 +540,14 @@ def apply_to(namespace, path=None, log=print):
         return report
 
     try:
-        with io.open(path, encoding="utf-8") as handle:
+        # "utf-8-sig", not "utf-8" (#446). A byte-order mark is three bytes
+        # that decode to U+FEFF and render as nothing at all. Notepad writes
+        # one by default, and read as plain utf-8 it stays attached to the
+        # first line - so the FIRST setting in the file parses as
+        # "\ufeffMSG_DELAY", lands in `unknown`, and is silently ignored while
+        # the operator looks at a file that plainly sets it. utf-8-sig
+        # consumes a BOM when present and is identical to utf-8 when not.
+        with io.open(path, encoding="utf-8-sig") as handle:
             entries = parse(handle.read())
     except (OSError, UnicodeDecodeError, SettingsError) as err:
         report["read_error"] = str(err)
@@ -367,6 +577,10 @@ def _log_summary(report, path, log):
     if report["applied"]:
         log(f"[CONFIG] Applied {len(report['applied'])} setting(s) from {name}.")
     for key in report["unknown"]:
+        assigned = RUNTIME_ASSIGNED.get(key)
+        if assigned:
+            log(f"[CONFIG] {name}: ignoring {key!r} - {assigned}.")
+            continue
         log(f"[CONFIG] {name}: ignoring {key!r} - not a setting this version "
             f"recognises. Check the spelling against settings.conf.sample.")
     for key, why in report["bad"]:
@@ -493,7 +707,78 @@ def _check_writable(name, value, namespace, types):
             f"Clearing it here would leave no way to set it again except by "
             f"editing settings.conf by hand.")
 
+    # Nor can a setting the daemon has no blank behaviour FOR, which REQUIRED
+    # does not cover: it holds the three an operator must supply, not the many
+    # that already work and simply cannot be empty.
+    #
+    # The shipped default answers it without a list to maintain. A default of
+    # None means "unset unless you say otherwise", and blank is how an
+    # operator says it again - RAR_BINARY cleared is "look on PATH", and
+    # DEBUG_CHANNEL ships blank precisely because no debug channel is a real
+    # configuration. A non-empty shipped default is the opposite: there is no
+    # code path for empty anywhere.
+    #
+    # Found by a sweep of every string field the dashboard offers. Four were
+    # accepted blank and each is used verbatim on the wire or on disk -
+    # SERVER as the connect() host, ALT_NICKNAME as "NICK <alt>" after a 433,
+    # LIST_BASE_NAME as the master list's filename, WEBUI_HOST as the
+    # interface the dashboard binds, where empty means EVERY interface rather
+    # than the loopback the default is careful to specify.
+    #
+    # The SHIPPED default, not the current one: after a first blank save the
+    # current value IS empty, and a rule reading that would let every save
+    # after it through.
+    shipped = (namespace.get("SHIPPED_VALUES") or {}).get(name)
+    if (isinstance(shipped, str) and shipped.strip()
+            and not str(value).strip()):
+        raise SettingsWriteError(
+            f"{name} cannot be blank - it ships as {shipped!r} and the daemon "
+            f"has no behaviour for an empty one. Set it to the value you want "
+            f"instead of clearing it.")
+
     text = render(value)
+
+    # A COLOUR GOES BACK OUT THE WAY IT CAME IN. coerce() above has just
+    # decoded "\\x0313" into the byte mIRC reads, and writing that byte is
+    # what put a raw 0x03 into settings.conf - a file people edit by hand,
+    # where it is invisible in an editor and is exactly what an editor strips
+    # on save. decode_irc_escapes() was half a round trip; this is the half
+    # that was missing.
+    #
+    # #436: the ENCODED form is what the line-break check below is blind
+    # to - an escaped "\x0a" holds no line break at all, so
+    # decode_irc_escapes() (already run by coerce() above) is the last
+    # point that ever sees the real byte before it goes back into hiding.
+    # theme.blocks() interpolates a CUSTOM_THEME_* value 8-9 times into a
+    # single outbound line, so a real \n or \r here - typed as the
+    # documented \x0a/\x0d escape, which is otherwise perfectly legal -
+    # turned one advert into nine separate IRC commands sent in a single
+    # send(), reserving exactly one runtime.outbound_pacer slot for all
+    # nine: an Excess Flood disconnect on every reconnect, with nothing in
+    # the log naming the setting. \x00 is refused for the same reason
+    # settings.conf itself cannot carry it. The length cap exists because
+    # 8-9 repeats of one role compete with everything else for
+    # announce.IRC_LINE_BUDGET.
+    if name.startswith("CUSTOM_THEME_") and text:
+        if any(ch in text for ch in ("\x00", "\x0a", "\x0d")):
+            raise SettingsWriteError(
+                f"{name}: cannot contain a newline or a null byte, even "
+                f"written as the \\x0a/\\x0d escape - it would be "
+                f"interpolated into every outbound line as a real one.")
+        encoded_len = len(text.encode("utf-8", "ignore"))
+        if encoded_len > CUSTOM_THEME_MAX_BYTES:
+            raise SettingsWriteError(
+                f"{name}: too long ({encoded_len} bytes, max "
+                f"{CUSTOM_THEME_MAX_BYTES}) - this is interpolated 8-9 "
+                f"times into a single outbound line, so a long value can "
+                f"push an ordinary advert over the IRC line budget.")
+
+    # BEFORE the checks below, not after, so they weigh what will actually be
+    # written. The line-break check in particular: an escaped value holds no
+    # line break at all, so a control character that would have been refused
+    # is now simply written in the form the file can carry.
+    if name.startswith("CUSTOM_THEME_"):
+        text = encode_irc_escapes(text)
 
     if "\n" in text or "\r" in text:
         raise SettingsWriteError(
@@ -521,6 +806,17 @@ def _check_writable(name, value, namespace, types):
             f"{name}: {value!r} would be read back as {back!r}.")
 
     return text, value
+
+
+# The explanation appended above a setting that was not already in the file.
+# A tuple, and consulted rather than retyped, so "is it already there?" and
+# "what do we write?" cannot drift into two different answers - which is how
+# a real install came to have it twice.
+_ADDED_HEADER = (
+    "# Added by DCCore because these settings were not already",
+    "# in this file. Section headers are cosmetic; a setting",
+    "# works wherever it appears.",
+)
 
 
 def _rewrite(existing, wanted):
@@ -588,16 +884,36 @@ def _rewrite(existing, wanted):
 
     missing = [name for name in wanted if name not in edited]
     if missing:
-        tail = [] if existing.endswith("\n") or not existing else [""]
-        tail.append("")
-        tail.append("# Added by DCCore because these settings were not already")
-        tail.append("# in this file. Section headers are cosmetic; a setting")
-        tail.append("# works wherever it appears.")
+        # Exactly one blank line between what the file already says and what
+        # is being appended, however the file happened to end. The old form
+        # added a blank line to whatever split("\n") had already left
+        # behind, so a file ending with a newline - which is to say every file
+        # this function has ever written - grew two blank lines per save.
+        while lines and not lines[-1].strip():
+            lines.pop()
+        tail = [""]
+
+        # ONCE. The header is prose explaining where these lines came from,
+        # and a second copy explains nothing. A real install ended up with it
+        # twice: the operator saved one setting from the dashboard and the
+        # block was appended again underneath the one already there, because
+        # this only ever asked whether a SETTING was missing and never
+        # whether the EXPLANATION was.
+        if not any(line.strip() == _ADDED_HEADER[0] for line in lines):
+            tail.extend(_ADDED_HEADER)
         for name in missing:
             tail.append("%s = %s" % (name, wanted[name]))
         lines.extend(tail)
 
-    return "\n".join(lines), sorted(edited), sorted(missing)
+    text = "\n".join(lines)
+    # A text file ends with a newline. The append path above could not
+    # produce one - it extended the list past split("\n")'s trailing
+    # "" - so every settings.conf that had ever had a setting added to it
+    # ended mid-line. Harmless to parse() and wrong for everything else that
+    # reads it, starting with the next append onto the end of that line.
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return text, sorted(edited), sorted(missing)
 
 def _atomic_write(path, text):
     """Write `text` to `path` atomically, so a reader sees the whole old file
@@ -676,7 +992,7 @@ def save(namespace, changes, path=None, log=print):
         if os.path.exists(path):
             try:
                 with io.open(path, "rb") as handle:
-                    raw = handle.read().decode("utf-8")
+                    raw = handle.read().decode("utf-8-sig")
             except (OSError, UnicodeDecodeError) as err:
                 raise SettingsWriteError(
                     f"could not read the existing {os.path.basename(path)} to edit "

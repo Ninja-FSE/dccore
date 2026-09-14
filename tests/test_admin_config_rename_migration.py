@@ -11,7 +11,7 @@ gate refuses to boot, even though every one of those settings is correctly
 filled in, one file over.
 
 Same shape as test_side_file_migration.py's coverage of
-db.migrate_legacy_side_files() and test_list_base_name_migration.py's
+the removed side-file migration and test_list_base_name_migration.py's
 coverage of update_list.migrate_list_base_name(): deliberately narrow, only
 fires when the new name is not already there, moves rather than copies.
 """
@@ -113,7 +113,7 @@ class ItRefusesToGuess(MigrationCase):
 
 
 class ItRunsBeforeTheOverrideImport(unittest.TestCase):
-    """The reason this cannot be db.migrate_legacy_side_files()'s shape,
+    """The reason this cannot be the side-file migration's shape,
     called from oserve.startup(): by then `from admin_config import *` has
     already run, and the override this migration exists to redirect would
     already have been skipped."""

@@ -4,6 +4,7 @@ import sys
 import builtins
 import socket
 import defaults as config
+import runtime
 import stats_mgr
 
 # The ordinary flood-protection queue
@@ -52,13 +53,46 @@ def queue_worker():
                 continue
 
             # ---------------------------------------------------------------------
-            # EXPRESS LANE (priority 1): drain the separate VIP list first.
+            # sendall(), not send() (#456). send() returns how many bytes it
+            # actually took, and both lanes discarded that number - so on
+            # Linux, with the socket's kernel send buffer within a few hundred
+            # bytes of full, a short write truncated an IRC line mid-message
+            # and the server read whatever arrived as a complete command.
+            # announce.py's debug drain has used sendall() for exactly this
+            # reason; these two were the last places that did not. The same
+            # encode arguments too: a filename the socket cannot spell must
+            # drop a character rather than raise on the worker thread.
+            # EXPRESS LANE (priority 1): drain one VIP line first, if there is one.
+            #
+            # #426: this used to `continue` straight back to the top after every
+            # VIP send, skipping the standard lane below entirely for as long as
+            # ANYTHING remained in vip_queue - which is strict priority with no
+            # aging, not "priority". oserve.queue_message() put every is_vip=True
+            # reply in this lane, including per-user command replies (-help alone
+            # queues 5 lines per request), and is_flooding() permits 10 commands
+            # per 5s per nick - so ONE user well inside the ordinary flood limit
+            # could inject VIP lines faster than MSG_DELAY drains them, peg
+            # vip_queue at its MAX_VIP_QUEUE cap indefinitely, and starve
+            # config.send_queue completely: @find results, "Preparing full list"
+            # and queue-position notices stopped reaching ANYONE, silently.
+            #
+            # No `continue` now: at most one VIP line is sent here, and the
+            # standard lane below always gets its own turn in the SAME pass
+            # rather than only when VIP happens to run dry. VIP still drains as
+            # fast as before whenever it has a backlog - this does not slow it
+            # down - it just no longer does so at the standard lane's total
+            # exclusion.
             # ---------------------------------------------------------------------
             if hasattr(config, 'vip_queue') and config.vip_queue:
                 msg = config.vip_queue.pop(0)
+                # Shared with announce.py's debug drain - see runtime.OutboundPacer.
+                # Reserved before the send, not slept after it, so a message that
+                # fails to send still costs its slot rather than letting a broken
+                # pipe retry in a tight loop.
+                runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)
                 try:
                     if current_sock:
-                        current_sock.send(msg.encode())
+                        current_sock.sendall(msg.encode("utf-8", errors="ignore"))
                         if getattr(config, 'DEBUG_MODE', False):
                             print(f"[RAW OUT VIP] {msg.strip()}")
                 except socket.error as net_err:
@@ -72,22 +106,22 @@ def queue_worker():
                     del config.vip_queue[:]
                     time.sleep(1.0)
                     continue
-
-                time.sleep(config.MSG_DELAY)
-                continue  # Straight back up to check for more VIP data
             # ---------------------------------------------------------------------
 
-            # STANDARD LANE (priority 2): with VIP empty, work the ordinary queue (round-robin)
+            # STANDARD LANE: one round-robin pass over every user with something
+            # queued, every iteration - not only when the express lane is empty.
             if config.send_queue:
                 active_users = builtins.list(config.send_queue.keys())
 
                 for user in active_users:
                     if user in config.send_queue and config.send_queue[user]:
                         msg = config.send_queue[user].pop(0)
+                        # See the VIP lane above: same shared clock.
+                        runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)
 
                         try:
                            if current_sock:
-                               current_sock.send(msg.encode())
+                               current_sock.sendall(msg.encode("utf-8", errors="ignore"))
                                if getattr(config, 'DEBUG_MODE', False):
                                    print(f"[RAW OUT] {msg.strip()}")
                         except socket.error as net_err:
@@ -95,8 +129,6 @@ def queue_worker():
                            break
                         except Exception as e:
                            print(f"[ERROR] Failed to send queued message: {e}")
-
-                        time.sleep(config.MSG_DELAY)
 
                     if user in config.send_queue and not config.send_queue[user]:
                         del config.send_queue[user]

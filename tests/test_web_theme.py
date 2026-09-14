@@ -118,6 +118,31 @@ def contrast(one, two):
     return (max(first, second) + 0.05) / (min(first, second) + 0.05)
 
 
+# THE ONE PLACE A LITERAL COLOUR IS CORRECT, and it is worth stating why
+# rather than adding a name to an ignore list.
+#
+# The theme preview shows what the CHANNEL will look like - the sixteen mIRC
+# colours, on the dark ground every IRC client ships. Those are a property of
+# IRC, not of this page: they are identical whether the dashboard is in light
+# or dark mode, because a channel does not have a dashboard theme. Painting
+# them from the palette would misrepresent the one thing the panel exists to
+# show, which is the only reason it is there.
+#
+# So the exemption is narrow - this selector prefix and the renderer's own
+# table - and the tests below make it a positive statement rather than a hole:
+# the literals inside it must BE the mIRC sixteen, and nothing else may claim
+# the exemption.
+IRC_PREVIEW_PREFIX = ".theme-preview"
+
+# mIRC's sixteen, plus nothing. Any literal in the exempt region must be one
+# of these; a colour that is not is somebody painting the preview by hand.
+IRC_PALETTE = {
+    "#ffffff", "#000000", "#00007f", "#009300", "#ff0000", "#7f0000",
+    "#9c009c", "#fc7f00", "#ffff00", "#00fc00", "#009393", "#00ffff",
+    "#0000fc", "#ff00ff", "#7f7f7f", "#d2d2d2",
+}
+
+
 class EveryColourComesFromThePalette(unittest.TestCase):
     """The property the whole feature rests on. A colour written into a
     component rule follows neither theme, and nothing about the page breaks to
@@ -133,6 +158,8 @@ class EveryColourComesFromThePalette(unittest.TestCase):
 
         offenders = []
         for selector, body in components:
+            if selector.strip().startswith(IRC_PREVIEW_PREFIX):
+                continue  # see IRC_PREVIEW_PREFIX above, and the class below
             for line in body.split("\n"):
                 if re.search(r"#[0-9a-fA-F]{3,8}\b|rgba?\(", line):
                     offenders.append("%s { %s }" % (selector, line.strip()))
@@ -161,8 +188,56 @@ class EveryColourComesFromThePalette(unittest.TestCase):
             with self.subTest(file=name):
                 source = re.sub(r"//[^\n]*", "", read(name))
                 found = re.findall(r"#[0-9a-fA-F]{6}\b|rgba?\([\d\s,.]+\)", source)
+                # The renderer's own table of the mIRC sixteen is exempt, and
+                # only it: anything outside that set is a colour somebody
+                # picked, and it will not follow the theme.
+                found = [c for c in found if c.lower() not in IRC_PALETTE]
 
                 self.assertEqual(found, [], "%s sets a colour of its own" % name)
+
+
+class TheIrcPreviewExemptionIsNarrow(unittest.TestCase):
+    """An exemption nobody checks is a hole. These make it a claim: the only
+    literals it admits are the mIRC sixteen, and only the preview may use
+    them."""
+
+    def preview_rules(self):
+        _palette, components = palette_and_components(
+            strip_comments(read("style.css")))
+        return [(selector, body) for selector, body in components
+                if selector.strip().startswith(IRC_PREVIEW_PREFIX)]
+
+    def test_the_exempt_region_exists(self):
+        """Guard on the guard. With no such rules the exemption would be
+        vacuous and these tests would pass on anything."""
+        self.assertTrue(self.preview_rules(),
+                        "nothing claims the exemption - has the preview gone?")
+
+    def test_every_literal_in_it_is_an_irc_colour(self):
+        for selector, body in self.preview_rules():
+            for found in re.findall(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)", body):
+                with self.subTest(rule=selector):
+                    self.assertIn(found.lower(), IRC_PALETTE,
+                                  "%s uses %s, which is not one of the mIRC "
+                                  "sixteen - a colour somebody picked will "
+                                  "not follow either theme" % (selector, found))
+
+    def test_it_still_takes_its_border_from_the_palette(self):
+        """The panel is a box on the dashboard as well as a window onto a
+        channel. Its FRAME belongs to the page even though its contents do
+        not."""
+        bodies = " ".join(body for _selector, body in self.preview_rules())
+
+        self.assertIn("var(--border", bodies)
+
+    def test_the_renderer_maps_all_sixteen(self):
+        """A short table would render some codes as no colour at all, which
+        reads as a bug in the theme rather than in the preview."""
+        table = read("app.js").split("var IRC_COLOURS = [", 1)[1].split("]", 1)[0]
+        found = re.findall(r"#[0-9a-fA-F]{6}", table)
+
+        self.assertEqual(len(found), 16)
+        self.assertEqual({c.lower() for c in found}, IRC_PALETTE)
 
 
 class BothThemesDefineTheSameNames(unittest.TestCase):
