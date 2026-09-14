@@ -1,6 +1,6 @@
 # DCCore
 
-**v1.12.0** · Python 3.10+ · Linux and Windows
+**v1.12.1** · Python 3.10+ · Linux and Windows
 
 An IRC DCC file-sharing daemon — a modern reimplementation of OmenServe, the mIRC script that has run these channels for twenty years.
 
@@ -62,7 +62,7 @@ The optional dashboard is `webserver.py` and `web/`, and disables itself cleanly
 python3 -m unittest discover -s tests -t .
 ```
 
-4746 of them, stdlib-only, on Linux and Windows and Python 3.10, 3.12 and 3.14 in CI.
+4762 of them, stdlib-only, on Linux and Windows and Python 3.10, 3.12 and 3.14 in CI.
 
 ## License
 

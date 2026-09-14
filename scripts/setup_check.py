@@ -97,6 +97,106 @@ WINDOWS = Platform(
 )
 
 
+def library_report(config, ok, warn, fail, detail):
+    """The Paths section's library check, resolved the way the daemon resolves it.
+
+    Asked of library.folders(), NOT of FILE_DIRECTORY. That setting is only the
+    fallback for an install with no folder list, and this check treated it as
+    the only truth - so an operator who had configured folders on the
+    dashboard and left FILE_DIRECTORY blank was told at every start that the
+    daemon "cannot search or serve anything until it is set", which was simply
+    untrue. oserve.py's own startup check received exactly this correction
+    (see its comment above `configured = library.folders()`); the setup check
+    had kept the old rule, and it is what the operator reads first.
+
+    The three outcomes are the daemon's own, so this cannot say "ready" for a
+    library the daemon will refuse, or refuse one it will serve:
+
+      no folders at all  -> WARN.  Not chosen yet, not misconfigured. The
+                            daemon boots so the dashboard can be where it
+                            gets set.
+      every folder gone  -> FAIL.  The daemon exits at startup on this, and
+                            so does update_list's own entry point.
+      some folders gone  -> WARN.  A scan-time condition the build already
+                            skips with a warning. Not worth refusing for,
+                            and the daemon does not.
+
+    An install with only FILE_DIRECTORY set reads exactly as it did before:
+    that path is unchanged, wording included. The per-folder listing is new
+    and only appears when a folder file is in use.
+
+    `detail` prints an indented sub-line under the last ok/warn/fail; it is
+    a reporter like the other three rather than a print() here, so this
+    function - which sits above main()'s console-encoding guard in the file -
+    holds no print of its own for that guard's ordering test to trip on.
+
+    Pulled out of main() so it can be exercised with a fake config and
+    recording reporters, instead of only through a child process against
+    whatever config the developer's own checkout happens to hold.
+    """
+    import library
+    import update_list
+
+    configured = library.folders()
+    if not configured:
+        warn("no music folders configured yet - the daemon will start, but cannot "
+             "search or serve anything until a folder is added from the web "
+             "dashboard's Library page, or FILE_DIRECTORY is set in settings.conf "
+             "or admin_config.py.")
+        return
+
+    def count_listed(folders):
+        # The SAME predicate the list build uses, not a second copy of it. A
+        # count here that disagreed with what update_list.py indexes would
+        # report a healthy library and then publish a list that does not
+        # match it - which is the shape of the defect that made this a
+        # setting at all.
+        total = 0
+        for folder in folders:
+            for _root, _dirs, files in os.walk(folder.path):
+                total += sum(1 for f in files if update_list.is_listed_file(f))
+                if total > 5000:
+                    return total
+        return total
+
+    def report_count(folders):
+        count = count_listed(folders)
+        ok(f"{'over 5000' if count > 5000 else count} file(s) would be "
+           f"listed - the first scan walks all of them")
+
+    # No folder file: the single FILE_DIRECTORY, exactly as before.
+    if library.load_folders() is None:
+        music = configured[0].path
+        if not os.path.isdir(music):
+            fail(f"FILE_DIRECTORY does not exist: {music}  "
+                 f"(the daemon exits at startup if this is set but missing)")
+            return
+        ok(f"music directory {music}")
+        report_count(configured)
+        return
+
+    # A folder file: every folder, by name, with its reachability.
+    present = [f for f in configured if os.path.isdir(f.path)]
+    missing = [f for f in configured if f not in present]
+
+    ok(f"library: {len(configured)} folder(s) from "
+       f"{os.path.basename(library.folders_file())}, {len(present)} reachable")
+    for folder in configured:
+        state = "ok     " if folder in present else "MISSING"
+        detail(f"{state}  {folder.name} -> {folder.path}")
+
+    if not present:
+        fail("none of the configured music folders exist - the daemon exits at "
+             "startup on this, and so does the list build")
+        return
+    if missing:
+        warn(f"{len(missing)} of {len(configured)} folder(s) cannot be reached right "
+             f"now - the list build skips a missing folder with a warning, so "
+             f"the daemon will start, but its list will be short until the "
+             f"drive is back")
+    report_count(present)
+
+
 def main(platform):
     """Run every check and print the report. Returns the process exit code:
     1 if anything failed, 0 otherwise - warnings do not fail."""
@@ -140,6 +240,9 @@ def main(platform):
 
     def ok(text):
         print(f"  ok     {text}")
+
+    def detail(text):
+        print(f"           {text}")
 
 
     print()
@@ -266,35 +369,9 @@ def main(platform):
     print()
     print("Paths")
 
-    # A WARN, not a FAIL, when unset: FILE_DIRECTORY is deliberately not in
-    # settings_file.REQUIRED (see its own comment) - the daemon boots fine
-    # without it chosen yet, specifically so the web dashboard's own
-    # Settings page can be where it gets set. A value that IS set but wrong
-    # stays a hard FAIL - that is a real misconfiguration, not an unmade
-    # choice.
-    music = getattr(config, "FILE_DIRECTORY", "")
-    if not music:
-        warn("FILE_DIRECTORY is not set yet - the daemon will start, but cannot "
-             "search or serve anything until it is set from the web dashboard's "
-             "Settings page, settings.conf, or admin_config.py.")
-    elif not os.path.isdir(music):
-        fail(f"FILE_DIRECTORY does not exist: {music}  "
-             f"(the daemon exits at startup if this is set but missing)")
-    else:
-        # The SAME predicate the list build uses, not a second copy of it.
-        # A count here that disagreed with what update_list.py indexes would
-        # report a healthy library and then publish a list that does not
-        # match it - which is the shape of the defect that made this a
-        # setting at all.
-        import update_list
-        count = 0
-        for _root, _dirs, files in os.walk(music):
-            count += sum(1 for f in files if update_list.is_listed_file(f))
-            if count > 5000:
-                break
-        ok(f"music directory {music}")
-        ok(f"{'over 5000' if count > 5000 else count} file(s) would be "
-           f"listed - the first scan walks all of them")
+    # Asked of the LIBRARY, not of FILE_DIRECTORY - the same correction
+    # oserve.py's startup check already received. See library_report().
+    library_report(config, ok, warn, fail, detail)
 
     for label, path in (("lists", getattr(config, "LOCAL_LIST_DIR", "")),
                         ("temp archives", getattr(config, "TMP_ZIP_DIR", ""))):
