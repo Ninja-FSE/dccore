@@ -85,7 +85,6 @@ import platform_compat
 # --------------------------------------------------------------------------
 CONNECT_TIMEOUT = 10.0        # dialling the operator's client
 LISTEN_TIMEOUT = 60.0         # waiting for the operator to accept our offer back
-SEND_TIMEOUT = 30.0           # a blocked write gives up rather than hanging forever
 AUTH_TIMEOUT = 60.0           # seconds to supply a password before the socket closes
 IDLE_TIMEOUT = 1800.0         # authenticated session, so a forgotten window expires
 MAX_PASSWORD_ATTEMPTS = 3
@@ -104,6 +103,7 @@ PBKDF2_ITERATIONS = 200_000
 # --------------------------------------------------------------------------
 _session = None               # the one authenticated session, or None
 _pending = None               # at most one connected-but-unauthenticated session
+_listening = False            # at most one passive listener WAITING to be dialled
 _state_lock = threading.Lock()
 
 _bad_ips = {}                 # ip -> [failure_count, blocked_until]
@@ -1017,9 +1017,25 @@ def _serve(sock, peer_ip, nick, host, description):
     """Banner, prompt and reader loop. Shared by both transports."""
     global _pending
 
-    # A short recv timeout keeps the reader loop responsive enough to notice its
-    # own auth/idle deadlines; the send timeout stops a stalled peer wedging the
-    # writer thread forever.
+    # ONE TIMEOUT, BOTH DIRECTIONS - which is what settimeout() means (#458).
+    #
+    # This used to be described as two: a short recv timeout, and a separate
+    # send timeout said to be SEND_TIMEOUT (30s). There was no second timeout.
+    # SEND_TIMEOUT was declared, never referenced, and the writer's sendall()
+    # has always run under this same one second.
+    #
+    # A real send deadline is not available cheaply here: the writer runs on
+    # its own thread and shares this socket with the reader loop, and
+    # settimeout() is per SOCKET rather than per direction - raising it around
+    # a send would raise it for a recv another thread is sitting in.
+    # SO_SNDTIMEO is direction-specific but interacts badly with Python's own
+    # timeout handling.
+    #
+    # One second is defensible for this workload rather than merely tolerated:
+    # the console sends short lines, so sendall() only blocks if the kernel
+    # buffer is full, and that means the peer has already stopped reading long
+    # enough to fill it. Tearing the session down then is the right answer.
+    # What was wrong was a constant claiming otherwise.
     sock.settimeout(1.0)
     platform_compat.apply_keepalive(sock, idle=60, interval=15, count=4)
 
@@ -1091,6 +1107,54 @@ def _listen_and_serve(irc_sock, nick, host, token=None):
     """
     import dcc
 
+    global _listening
+
+    # ONE LISTENER AT A TIME, and this is the earliest point it can be
+    # enforced.
+    #
+    # Every other limit on this path runs AFTER accept(): is_bad_ip() is
+    # consulted on the connecting address, and the single-_pending rule inside
+    # _serve() applies to a session that already exists. Nothing bounded how
+    # many listeners could be OPEN at once - and irc.py deliberately leaves
+    # DCC CHAT out of the set security.is_flooding() meters, so the CTCPs that
+    # start them are not rate-limited either.
+    #
+    # So a handful of passive DCC CHAT offers took every port in
+    # DCC_PORT_START..DCC_PORT_END and held them for LISTEN_TIMEOUT, which is
+    # the same range DCC SEND needs: the bot stops being able to send files at
+    # all, and recovers only when the listeners time out. Found by audit.
+    #
+    # The same shape as the _pending rule one step further on - "at most one
+    # connected-but-unauthenticated session" - applied to the step before it.
+    # A refused offer costs the sender nothing but another CTCP once the
+    # current one resolves, and a real operator makes one at a time.
+    with _state_lock:
+        if _listening:
+            print(f"[ADMINCHAT] A console listener is already waiting to be "
+                  f"dialled; ignoring the offer from {nick}.")
+            return
+        _listening = True
+    try:
+        _listen_and_serve_locked(irc_sock, nick, host, token)
+    finally:
+        # #423: a safety net now, not the release point. The two return paths
+        # in _listen_and_serve_locked before it ever opens a listener land
+        # here directly, and so would any exception neither of its own
+        # try/finally blocks catches - but the normal path already cleared
+        # this flag itself, right after the listener closed, well before
+        # _serve() started blocking for the session's life. Clearing an
+        # already-clear flag here is a harmless no-op.
+        with _state_lock:
+            _listening = False
+
+
+def _listen_and_serve_locked(irc_sock, nick, host, token=None):
+    """The listener itself. Only ever called with _listening set, so at most
+    one of these holds a port at a time."""
+    import dcc
+
+    global _listening
+
     ip_long = dcc.get_public_ip_long()
     if not ip_long:
         print("[ADMINCHAT] Cannot offer a DCC CHAT: the bot's own public IP is unknown "
@@ -1115,7 +1179,12 @@ def _listen_and_serve(irc_sock, nick, host, token=None):
         # request it is waiting on, and silently ignores us.
         suffix = f" {token}" if token else ""
         offer = f"PRIVMSG {nick} :\x01DCC CHAT chat {ip_long} {port}{suffix}\x01\r\n"
-        irc_sock.send(offer.encode())
+        # sendall(), not send() (#504). send() returns how many bytes it
+        # actually took and the caller has to loop on the rest; with the
+        # kernel send buffer nearly full this line would go out truncated
+        # and the server would read the fragment as a complete command.
+        # Guarded by tests/test_no_socket_write_is_a_partial_write.py.
+        irc_sock.sendall(offer.encode("utf-8", errors="ignore"))
         print(f"[ADMINCHAT] Offered DCC CHAT to {nick} on "
               f"{getattr(config, 'MY_IP_OR_DOCK', '?')}:{port}; waiting for the connection.")
         sock, addr = listener.accept()
@@ -1132,6 +1201,18 @@ def _listen_and_serve(irc_sock, nick, host, token=None):
             listener.close()
         except OSError:
             pass
+        # #423: released HERE, not left to the wrapper in _listen_and_serve.
+        # That wrapper's own finally only fires once THIS function returns -
+        # and it used to return only after _serve() did, which blocks for the
+        # whole session's life (up to IDLE_TIMEOUT, 1800s). For that entire
+        # window every other passive DCC CHAT offer was refused outright, so
+        # an operator whose own client could not be dialled had no way to
+        # take over an existing console session at all - the one thing
+        # _promote() exists to guarantee. The port itself is already given
+        # back by listener.close() just above; the one-SESSION rule from here
+        # on is _pending's and _promote()'s job, not this flag's.
+        with _state_lock:
+            _listening = False
 
     # The peer address is only known now, so the blocklist is checked here rather
     # than before the offer, as it is on the dial-out path.
@@ -1161,11 +1242,15 @@ def active_session():
 
 def reset_state_for_tests():
     """Drop all sessions and bad-IP records. Tests only."""
-    global _session, _pending
+    global _session, _pending, _listening
     with _state_lock:
         sessions = [s for s in (_session, _pending) if s is not None]
         _session = None
         _pending = None
+        # The one-listener flag is module state like the two above, and a test
+        # whose listener thread outlives it would otherwise refuse every
+        # passive offer in every test that ran afterwards.
+        _listening = False
     for session in sessions:
         session.close(announce_text=None)
     with _bad_lock:
@@ -1191,6 +1276,10 @@ def _read_password(prompt):
 
 
 if __name__ == "__main__":
+    # An entry point of its own - see update_list.py.
+    import platform_compat
+    platform_compat.install_console_encoding_guard()
+
     print("Generate the value for admin_config.ADMIN_PASSWORD_HASH.")
     first = _read_password("Password: ")
     second = _read_password("Again: ")

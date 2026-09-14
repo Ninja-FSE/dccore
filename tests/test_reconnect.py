@@ -13,6 +13,9 @@ Every case here guards a defect that actually shipped:
     still lost their queue once the freeze timestamp passed 300s.
   * queue_mgr.queue_worker popped messages off both lanes BEFORE checking whether a
     socket existed, so everything queued during a reconnect was silently dropped.
+  * the NAMES-sync thaw sent one debug line per channel, all landing within the
+    same few seconds after a reconnect - the exact burst that let a 14-channel
+    reconnect flood a bot off the network (#406).
 """
 
 import contextlib
@@ -30,7 +33,9 @@ import defaults as config
 import announce
 import db
 import dcc
+import irc
 import queue_mgr
+import runtime
 
 
 FREEZE_TIMEOUT = 300.0  # dcc.check_queue_and_send's hard-coded stale-freeze timeout
@@ -335,19 +340,45 @@ class QueueWorkerReconnectTests(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
-        config.MSG_DELAY = 0.05
+        # SMALL, not the operator-facing default (5.0) or even 0.05 this used
+        # to read: the pacing sleep this pays now lives in
+        # runtime.OutboundPacer.wait_for_slot() (#406), which loops against
+        # time.monotonic() rather than sleeping a single, cappable duration -
+        # so _SleepShim's cap on queue_mgr.time.sleep() below no longer
+        # shortens it at all, it only makes the loop check more often over
+        # the SAME real wall-clock span. The value itself is what has to be
+        # small now.
+        config.MSG_DELAY = 0.01
         config.vip_queue = []
         config.send_queue = {}
         self._real_time = queue_mgr.time
         self.shim = _SleepShim()
         queue_mgr.time = self.shim
         self.worker = None
+        # A fresh clock per test - runtime.outbound_pacer is a process-wide
+        # singleton, and a reservation left over from whichever test ran
+        # immediately before this one must not delay this one's first send.
+        self._real_pacer = runtime.outbound_pacer
+        runtime.outbound_pacer = runtime.OutboundPacer()
+        # DEFENSIVE, against a pre-existing gap this shared pacer makes worse:
+        # once any earlier test in the suite triggers a real send_debug()
+        # without silencing it, announce._ensure_debug_drain() starts a REAL
+        # background thread that never stops for the rest of the process -
+        # _debug_drain_started has no reset. That thread re-reads
+        # sys.modules['oserve'] and runtime.outbound_pacer on every loop, so
+        # it happily attaches itself to whatever THIS test's fake oserve and
+        # fresh pacer are - writing stray debug lines into this test's own
+        # RecordingSocket and eating shared-clock slots meant for it. This
+        # cannot stop such a thread (it is not this test's to stop), only
+        # keep it from having anything queued to drain at the start.
+        announce._debug_queue.clear()
 
     def tearDown(self):
         self.shim.stopped.set()
         if self.worker is not None:
             self.worker.join(timeout=3.0)
         queue_mgr.time = self._real_time
+        runtime.outbound_pacer = self._real_pacer
         super().tearDown()
 
     def start_worker(self):
@@ -359,7 +390,13 @@ class QueueWorkerReconnectTests(DCCoreTestCase):
         self.worker = threading.Thread(target=run, daemon=True)
         self.worker.start()
 
-    def wait_until(self, predicate, timeout=1.0):
+    # 5.0s, not 1.0s: a stray real debug-drain thread from an earlier,
+    # unrelated test (see the setUp comment above) competes for the same
+    # shared runtime.outbound_pacer, which can delay - never lose - this
+    # worker's own sends past a short window under a full-suite run. A
+    # ceiling, not a delay: the ordinary case is still done in well under a
+    # second.
+    def wait_until(self, predicate, timeout=5.0):
         deadline = time.time() + timeout
         while time.time() < deadline:
             if predicate():
@@ -421,6 +458,117 @@ class QueueWorkerReconnectTests(DCCoreTestCase):
         self.assertTrue(self.wait_until(lambda: "fresh vip" in sock.text()),
                         "the worker thread must still be pumping after a broken pipe")
         self.assertTrue(self.worker.is_alive())
+
+
+class ReconnectThawSummaryTests(DCCoreTestCase):
+    """#406: a NAMES sync fires once per channel, all within a few seconds of
+    the same JOIN command - one debug line per channel there is the burst
+    that flooded a 14-channel bot off the network. Batched into one line per
+    burst instead."""
+
+    def setUp(self):
+        super().setUp()
+        self.captured = silence_debug(announce)
+        self._real_quiet_seconds = irc._RECONNECT_THAW_QUIET_SECONDS
+        irc._RECONNECT_THAW_QUIET_SECONDS = 0.05
+
+    def tearDown(self):
+        timer = irc._reconnect_thaw_summary["timer"]
+        if timer is not None:
+            timer.cancel()
+        irc._reconnect_thaw_summary["total"] = 0
+        irc._reconnect_thaw_summary["channels"] = set()
+        irc._reconnect_thaw_summary["timer"] = None
+        irc._RECONNECT_THAW_QUIET_SECONDS = self._real_quiet_seconds
+        super().tearDown()
+
+    def wait_for_flush(self, timeout=1.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline and not self.captured:
+            time.sleep(0.01)
+
+    def test_a_single_channel_still_gets_one_line(self):
+        irc._note_reconnect_thaw("#one", 3)
+        self.wait_for_flush()
+
+        self.assertEqual(len(self.captured), 1)
+        category, text = self.captured[0]
+        self.assertEqual(category, "JOIN")
+        self.assertIn("3", text)
+        self.assertIn("1 channel", text)
+        self.assertNotIn("1 channels", text, "one channel is not plural")
+
+    def test_several_channels_in_one_burst_collapse_into_one_line(self):
+        """The actual incident, at a smaller scale: five channels' worth of
+        NAMES-sync thaws, all inside the same burst, must cost one debug
+        line - not five."""
+        irc._note_reconnect_thaw("#one", 2)
+        irc._note_reconnect_thaw("#two", 1)
+        irc._note_reconnect_thaw("#three", 4)
+        irc._note_reconnect_thaw("#four", 0)  # a channel that thawed nobody
+        irc._note_reconnect_thaw("#five", 3)
+        self.wait_for_flush()
+
+        self.assertEqual(len(self.captured), 1,
+                         "one burst of channels must cost one debug line")
+        _, text = self.captured[0]
+        self.assertIn("10", text)  # 2 + 1 + 4 + 0 + 3
+        self.assertIn("5 channels", text)
+
+    def test_a_channel_with_nobody_thawed_does_not_start_a_summary(self):
+        irc._note_reconnect_thaw("#empty", 0)
+        time.sleep(irc._RECONNECT_THAW_QUIET_SECONDS * 3)
+
+        self.assertEqual(self.captured, [],
+                         "a channel that thawed nobody has nothing worth reporting")
+
+    def test_two_separate_bursts_each_get_their_own_line(self):
+        """Debounced, not deduplicated forever: a second reconnect later on
+        must be reported on its own, not silently merged into the first."""
+        irc._note_reconnect_thaw("#one", 2)
+        self.wait_for_flush()
+        self.assertEqual(len(self.captured), 1)
+
+        irc._note_reconnect_thaw("#one", 5)
+        self.wait_for_flush(timeout=1.0)
+        deadline = time.time() + 1.0
+        while time.time() < deadline and len(self.captured) < 2:
+            time.sleep(0.01)
+
+        self.assertEqual(len(self.captured), 2)
+        self.assertIn("5", self.captured[1][1])
+
+    def test_a_late_channel_restarts_the_quiet_window(self):
+        """The debounce must reset on every new arrival, so the summary
+        fires shortly after the LAST channel in the burst settles - not a
+        fixed time after the first, which would still split a slow burst
+        into two lines."""
+        irc._note_reconnect_thaw("#one", 1)
+        time.sleep(irc._RECONNECT_THAW_QUIET_SECONDS * 0.6)
+        self.assertEqual(self.captured, [],
+                         "must not have flushed yet - a second channel is still due")
+        irc._note_reconnect_thaw("#two", 1)
+
+        self.wait_for_flush()
+        self.assertEqual(len(self.captured), 1,
+                         "the late arrival must have joined the first, not split off")
+        self.assertIn("2 channels", self.captured[0][1])
+
+    def test_the_353_handler_actually_calls_the_batched_helper(self):
+        """A source-text check, not an executed one - the NAMES-sync handler
+        lives inside irc_loop(), a single function reading a live socket
+        that this suite does not run line-by-line. Weaker than executing it,
+        but real: every test above happily proves the helper batches
+        correctly even if the call site quietly went back to calling
+        send_debug() directly, so something has to check the wiring too."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(repo_root, "irc.py"), encoding="utf-8") as handle:
+            source = handle.read()
+
+        self.assertIn(
+            "_note_reconnect_thaw(chan, len(thawed_users))", source,
+            "the NAMES-sync handler must call the batching helper, not "
+            "send_debug() directly - see #406")
 
 
 if __name__ == "__main__":

@@ -144,8 +144,12 @@ class ItAppliesEverywhereItShould(unittest.TestCase):
             m.group(1) for m in re.finditer(r'id="view-([a-z-]+)"', html)
             if "<table" in html[m.start():html.find("</section>", m.start())])
 
+        # "queue" left this list when the Queue tab was folded into Stats
+        # (#133). The table itself did not go anywhere - it is inside the
+        # stats view now, and inside a .table-wrap there, which the assertion
+        # above checks for every table in the page.
         self.assertEqual(with_tables,
-                         ["download", "filelists", "queue", "search", "stats"])
+                         ["download", "filelists", "search", "stats"])
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # DCCore
 
-**v1.10.0** · Python 3.10+ · Linux and Windows
+**v1.12.0** · Python 3.10+ · Linux and Windows
 
 An IRC DCC file-sharing daemon — a modern reimplementation of OmenServe, the mIRC script that has run these channels for twenty years.
 
@@ -8,7 +8,7 @@ It sits in a channel, advertises a catalogue, and serves files over DCC to whoev
 
 ## What it does
 
-- **Serves files over DCC** — per-user and global queues, configurable slots, `!rar` album packing on demand
+- **Serves files over DCC** — per-user and global queues, configurable slots, `!rar` album packing on demand, and DCC RESUME so an interrupted download continues instead of starting over
 - **Keeps a searchable master list** in `.txt`, `.zip` and `.rar`, rebuilt atomically so a failed scan never overwrites a good one
 - **Fetches from other bots** — request a file or a whole list, or broadcast one `@find` and collect every reply
 - **Remembers people** — a user who disconnects keeps their queue for five minutes and resumes on rejoin
@@ -21,13 +21,20 @@ See [docs/FUTURE.md](docs/FUTURE.md) for the full picture, including what is *no
 ## Quick start
 
 ```bash
-python3 configure.py                        # a few questions
+python3 configure.py                    # a few questions
 ./scripts/linux/start-dccore.sh check   # verify, without touching the network
 ./scripts/linux/start-dccore.sh         # go
 python3 update_list.py                  # build the first list
 ```
 
-Windows is the same with `scripts\windows\start-dccore.bat`.
+On Windows, `py` rather than `python3` — a python.org install gives you `py` and `python`, not `python3`, and Windows ships an alias that makes `python3` open the Microsoft Store instead:
+
+```bat
+py configure.py
+scripts\windows\start-dccore.bat check
+scripts\windows\start-dccore.bat
+py update_list.py
+```
 
 Full guide, including configuring it by hand and upgrading from an older install: **[docs/INSTALL.md](docs/INSTALL.md)**.
 
@@ -40,7 +47,7 @@ Full guide, including configuring it by hand and upgrading from an older install
 | [ADMIN-CONSOLE.md](docs/ADMIN-CONSOLE.md) | the authenticated DCC CHAT console |
 | [WINDOWS.md](docs/WINDOWS.md) | the Windows guide |
 | [CONVENTIONS.md](docs/CONVENTIONS.md) | how this codebase is written, if you want to contribute |
-| [UPDATES.md](docs/UPDATES.md) | changelog |
+| [UPDATES.md](docs/UPDATES.md) | the changelog |
 | [SECURITY.md](docs/SECURITY.md) | how to report a vulnerability |
 
 ## How it is put together
@@ -55,7 +62,7 @@ The optional dashboard is `webserver.py` and `web/`, and disables itself cleanly
 python3 -m unittest discover -s tests -t .
 ```
 
-2071 of them, stdlib-only, on Linux and Windows and Python 3.10 and 3.12 in CI. `scripts/preflight.py` runs the same suite twice, once with host tooling hidden, to catch anything that only passes because of what happens to be installed.
+4746 of them, stdlib-only, on Linux and Windows and Python 3.10, 3.12 and 3.14 in CI.
 
 ## License
 

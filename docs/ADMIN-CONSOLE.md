@@ -136,6 +136,12 @@ changes too, but a restart is the sure thing while you are setting this up.
 
 ## Using it
 
+**Would rather not open a second IRC client at all?** The web dashboard's
+Console page runs the exact same command set and shows the exact same live
+log, in the browser, behind the same password — see the Console entry in
+the dashboard's own nav once `WEBUI_ENABLED` is on. Everything below still
+applies to it except the connection steps, which do not exist over HTTP.
+
 From your IRC client:
 
 ```
@@ -266,6 +272,108 @@ when the channel or a console did take the line, nothing extra is printed.
 A console that has been switched on but is *not connected* counts as nobody
 listening, and so does a console whose sink raised. Both fall through to stdout.
 
+### The short list, next to the long one
+
+The Console and the debug channel are a **log**: everything the daemon does,
+in order. That is the right shape for reading back what happened, and the
+wrong shape for *"did anything go wrong while I was asleep?"* - everything is
+in it, so nothing stands out.
+
+The dashboard's status panel carries the other shape. When something happens
+that changed the bot's ability to do its job, a coloured badge appears under
+the queue counts saying how many things are waiting to be looked at. Clicking
+it opens **What happened**, which lists them newest first, and **Mark all
+read** clears the badge.
+
+Two severities, and the difference is whether it is over:
+
+| | |
+|---|---|
+| amber | it happened, and it is finished. Kicked from a channel and rejoined. |
+| red | it is still true. Gave up rejoining a channel; a list rebuild that failed. |
+
+The badge takes the worse of the two, and it counts only what has not been
+marked read - so a red that was acknowledged last week does not keep it lit.
+
+**There is no badge at all when there is nothing unread.** It is not a panel
+that sits there showing a zero; it means something by appearing.
+
+What raises one, and nothing else does:
+
+- being kicked from a channel (amber - a rejoin is already scheduled)
+- giving up on a channel after the configured number of rejoin attempts (red)
+- a list rebuild that failed or timed out (red)
+
+DCCore banning or muting a **user** does not, and that is deliberate: it is
+routine, it happens often, and a badge that counts routine events is a badge
+nobody reads. The Console still logs every one of them.
+
+The notices are kept in `data/notices.json` and survive a restart, which is
+the point of them - the events worth a badge are the ones that happen while
+nobody is looking. The last 200 are kept; `NOTICES_FILE` moves the file, and
+deleting it is safe.
+
+### Getting rid of a downloaded list
+
+Nothing used to remove one. A bot's list, once fetched, stayed in the List
+Browser forever - including for a bot that had renamed, left, or would never
+reconnect. Open the list and press **Purge this list** under the file table.
+
+It removes three things together, because leaving any one of them behind makes
+the operation a lie:
+
+- the entry, or the browser keeps offering a list whose files are gone
+- the extracted files under `FETCHED_FILES_DIR/lists/<bot>/`, which is the
+  disk you were trying to get back
+- the bot's rows in the cross-list search index, which is roughly as large
+  again as the lists it describes
+
+The button appears only where it can do something: not for your own lists,
+whose files are your library, and not for a bot you have merely seen
+advertising. It asks first, because **fetching the list again is the only way
+back** and that needs the bot to still be around.
+
+It refuses while a fetch from that bot is running or queued - that fetch would
+write into the directory being deleted, and it would put back what you just
+removed. Wait for it to finish, or delete the fetch from Downloads first.
+
+**To clear out several at once**, use **Purge offline bots' lists** in the
+toolbar above the bot list instead. That one takes every bot showing the red
+dot - offline right now - and leaves alone anything grey ("cannot tell yet",
+which is what every bot looks like before the daemon has finished joining its
+channels). Use the per-list button when you want a specific one gone whatever
+its dot: a bot that renamed, a list fetched by mistake, or one of a pair of
+rows left by a bot that reconnected under its alternate nickname.
+
+### Messages people send the bot
+
+The bot answers commands. Anything else sent to it privately - *"are you
+there?"*, *"how do I get X?"* - gets **no reply**, and that is deliberate: a
+bot that answers every stray line is one that can be made to flood itself off
+the network.
+
+It is written down now, which it never used to be. The dashboard's
+**Messages** page lists who wrote and what they said, newest first, with an
+unread count on the tab. **Mark all read** clears it.
+
+What is recorded, and nothing else:
+
+- **private** messages only - a channel line is one you can already see;
+- that are **not** a recognised command;
+- that are **not** a CTCP (a DCC offer or a VERSION reply is a client talking
+  to a client, not a person);
+- from somebody who is **not banned** - a ban silences them here too.
+
+**One message per person every five minutes.** Somebody typing four lines
+because the first got no answer is one person asking one thing, and four rows
+of it buries the next person who writes. `PRIVATE_MESSAGE_COOLDOWN_SECONDS`
+changes it; 0 records everything.
+
+The last 50 are kept, in `data/private_messages.json`, and they survive a
+restart. **You cannot reply from the page** - the bot has no conversation
+path, and a reply box would be a promise it cannot keep. Message them from
+your own client.
+
 ## Retiring the channel commands
 
 `!ban`, `!unban`, `!rehash`, `!update` and `!clearqueue` still work when typed in
@@ -308,7 +416,7 @@ cannot learn whether they guessed the mask correctly. It also means a wrong mask
 looks identical to a broken bot. Check the daemon log:
 
 ```
-[ADMINCHAT] Ignored DCC CHAT from unauthorised host: cpe-91-22-33-44.isp.net
+[ADMINCHAT] Ignored DCC CHAT from unauthorised host: cpe-198-51-100-7.isp.net
 ```
 
 That line tells you the host the server actually saw. Usually it means `+x` is not

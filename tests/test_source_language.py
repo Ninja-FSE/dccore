@@ -50,10 +50,16 @@ translating those would destroy what they test.
 import io
 import os
 import re
+import sys
 import tokenize
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from exported_tree import _this_is_an_export  # noqa: E402
 
 # Words with no English homograph, so a single hit is conclusive. Deliberately
 # excludes ones that read as English too - "men", "till", "per", "med", "name"
@@ -349,7 +355,16 @@ class TheShippedDocsAreEnglish(unittest.TestCase):
         self.assertEqual(
             offenders, [],
             "Swedish in shipped documentation:\n  " + "\n  ".join(offenders))
-        self.assertIn("UPDATES.md", [os.path.basename(q) for q in scanned],
+        # This assertion exists so an empty file list cannot make everything
+        # above vacuously true. The name to look for depends on which tree
+        # this is: the development repository has docs/UPDATES-PUBLIC.md
+        # (docs/UPDATES.md there is the internal changelog, export-ignored
+        # and never scanned here); a released public tree has neither -
+        # extraction step 3 renamed UPDATES-PUBLIC.md onto docs/UPDATES.md,
+        # so THAT name is what a reader there actually has. See
+        # tests/exported_tree.py for the signal used to tell them apart.
+        expected = "UPDATES.md" if _this_is_an_export(self) else "UPDATES-PUBLIC.md"
+        self.assertIn(expected, [os.path.basename(q) for q in scanned],
                       "the changelog was not scanned - an empty file "
                       "list makes every assertion above vacuously true")
 

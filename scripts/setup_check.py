@@ -54,7 +54,7 @@ class Platform:
     """
 
     def __init__(self, display, os_name, wrong_os, rar_hint, python,
-                 start_cmd, stop_where):
+                 start_cmd, stop_where, pip_hint):
         self.display = display          # "Linux" / "Windows"
         self.os_name = os_name          # what os.name reads as
         self.wrong_os = wrong_os        # said when run on the other one
@@ -62,6 +62,11 @@ class Platform:
         self.python = python            # python3 / python
         self.start_cmd = start_cmd      # how to launch the daemon
         self.stop_where = stop_where    # "terminal" / "window"
+        # How to install an optional dependency INTO THE INTERPRETER THE
+        # LAUNCHER USES. A bare `pip` follows whatever `python` resolves to,
+        # which on a machine with more than one is not necessarily the one
+        # that will run the daemon - see the Flask check further down.
+        self.pip_hint = pip_hint
 
 
 LINUX = Platform(
@@ -73,6 +78,7 @@ LINUX = Platform(
     python="python3",
     start_cmd="./scripts/linux/start-dccore.sh",
     stop_where="terminal",
+    pip_hint="python3 -m pip install -r requirements-web.txt",
 )
 
 WINDOWS = Platform(
@@ -84,6 +90,10 @@ WINDOWS = Platform(
     python="python",
     start_cmd="scripts\\windows\\start-dccore.bat",
     stop_where="window",
+    # `py -3 -m pip`, not a bare `pip`. start-dccore.bat prefers `py -3` and
+    # only falls back to `python`, so on a machine with both this is the one
+    # that puts the package where the daemon will actually look for it.
+    pip_hint="py -3 -m pip install -r requirements-web.txt",
 )
 
 
@@ -97,6 +107,22 @@ def main(platform):
     if REPO not in sys.path:
         sys.path.insert(0, REPO)
     os.chdir(REPO)
+
+    # #428: BEFORE the first print below, not after `import defaults`
+    # succeeds a hundred-odd lines down. start-dccore.bat runs this check
+    # with stdout redirected (`>nul 2>&1`), which makes Python fall back to
+    # the machine's ANSI code page instead of the real console encoding
+    # (PEP 528 only applies to an actual console). A configured path holding
+    # a character that code page cannot spell then raised UnicodeEncodeError
+    # on one of the many prints between here and the old import site - the
+    # launcher printed "Setup check failed - not starting", re-ran the same
+    # check on the real console where PEP 528 makes it succeed, and reported
+    # "Ready to start." The refusal and the diagnosis contradicted each
+    # other, and the daemon never started, for a reason nothing in the
+    # report explained. Same guard oserve.py and update_list.py install at
+    # their own top, before their own first print.
+    import platform_compat
+    platform_compat.install_console_encoding_guard()
 
     problems = []
     warnings = []
@@ -191,8 +217,6 @@ def main(platform):
         print("  Cannot continue without a config.")
         return 1
 
-    import platform_compat  # noqa: E402
-
     ok(f"version {getattr(config, 'SCRIPT_VERSION', '?')}")
     ok(f"nickname {getattr(config, 'NICKNAME', '?')} "
        f"(alt {getattr(config, 'ALT_NICKNAME', '?')})")
@@ -257,14 +281,20 @@ def main(platform):
         fail(f"FILE_DIRECTORY does not exist: {music}  "
              f"(the daemon exits at startup if this is set but missing)")
     else:
+        # The SAME predicate the list build uses, not a second copy of it.
+        # A count here that disagreed with what update_list.py indexes would
+        # report a healthy library and then publish a list that does not
+        # match it - which is the shape of the defect that made this a
+        # setting at all.
+        import update_list
         count = 0
         for _root, _dirs, files in os.walk(music):
-            count += sum(1 for f in files if f.lower().endswith((".mp3", ".flac")))
+            count += sum(1 for f in files if update_list.is_listed_file(f))
             if count > 5000:
                 break
         ok(f"music directory {music}")
-        ok(f"{'over 5000' if count > 5000 else count} audio file(s) visible - "
-           f"the first scan walks all of them")
+        ok(f"{'over 5000' if count > 5000 else count} file(s) would be "
+           f"listed - the first scan walks all of them")
 
     for label, path in (("lists", getattr(config, "LOCAL_LIST_DIR", "")),
                         ("temp archives", getattr(config, "TMP_ZIP_DIR", ""))):
@@ -284,6 +314,30 @@ def main(platform):
     else:
         warn(f"{platform.rar_hint} - whole-album (!rar) packing will fail, "
              f"single files are unaffected")
+
+    # Flask, checked with THIS interpreter on purpose. The launcher runs both
+    # the daemon and this check through the same `%PY%` / `$PY`, so importing
+    # it here answers the only question that matters: will the dashboard come
+    # up when the bot starts.
+    #
+    # Found in beta. A machine with both a `py` launcher and a `python` on
+    # PATH can have two interpreters - and `pip install -r requirements-web
+    # .txt`, which is what the docs say, follows `python` while the launcher
+    # prefers `py -3`. Flask went into one and the daemon started under the
+    # other, so the dashboard was silently absent and the only clue was a log
+    # line AFTER the bot had already connected. The check said "Ready to
+    # start" and meant it - it just was not answering this question.
+    if getattr(config, "WEBUI_ENABLED", False):
+        try:
+            import flask  # noqa: F401
+            ok("Flask available - the web dashboard will start")
+        except ImportError:
+            warn(f"WEBUI_ENABLED is on but Flask is not installed FOR THIS "
+                 f"INTERPRETER ({sys.executable}) - the daemon will start and "
+                 f"the dashboard will not. Install it with the same one: "
+                 f"{platform.pip_hint}")
+    else:
+        ok("web dashboard disabled (WEBUI_ENABLED) - Flask not needed")
 
     # --- DCC ports -----------------------------------------------------------
     print()
@@ -329,10 +383,29 @@ def main(platform):
     # --- admin console -------------------------------------------------------
     print()
     print("Admin console")
+    # ASK THE DAEMON WHAT IT WILL ACTUALLY ACCEPT (#447), rather than counting
+    # the raw list. ADMIN_HOSTMASKS = [""] is a truthy list of one, so
+    # counting it reported "enabled for 1 host pattern(s)" while
+    # adminchat.admin_host_patterns() returned [] and the console was in fact
+    # off - and [""] is exactly what a fresh install can end up with, because
+    # configure.py's password prompt is mandatory while the hostmask is not.
+    #
+    # A pre-flight check that reports a feature as enabled when it is disabled
+    # is worse than one that says nothing: the operator stops looking.
     masks = getattr(config, "ADMIN_HOSTMASKS", []) or []
+    try:
+        import adminchat
+        patterns = adminchat.admin_host_patterns()
+    except Exception:
+        # The check must never be what breaks the check. Fall back to the raw
+        # list, stripped, which is the same question asked less precisely.
+        patterns = [m for m in masks if str(m or "").strip()]
     has_hash = bool(getattr(config, "ADMIN_PASSWORD_HASH", ""))
-    if not masks:
-        ok("disabled (ADMIN_HOSTMASKS is empty) - this is fine")
+    if not patterns:
+        if masks:
+            ok("disabled (ADMIN_HOSTMASKS has no usable pattern) - this is fine")
+        else:
+            ok("disabled (ADMIN_HOSTMASKS is empty) - this is fine")
     elif not has_hash:
         # A warning, not a failure. With no hash the console refuses every
         # connection, so it fails CLOSED - nothing unsafe happens, the feature is
@@ -341,7 +414,7 @@ def main(platform):
         warn(f"ADMIN_HOSTMASKS is set but ADMIN_PASSWORD_HASH is empty - the console "
              f"will refuse every connection until you run: {platform.python} adminchat.py")
     else:
-        ok(f"enabled for {len(masks)} host pattern(s)")
+        ok(f"enabled for {len(patterns)} host pattern(s)")
 
     # --- verdict --------------------------------------------------------------
     print()

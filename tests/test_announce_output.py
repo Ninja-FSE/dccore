@@ -365,6 +365,11 @@ class DebugDrainDeliveryTests(QuietTestCase):
         self.addCleanup(self._close_gate)
         # Speed the pump up; the default pause between lines is 0.5s.
         self.config.DEBUG_MSG_DELAY = 0.01
+        # #424: send_debug() now requires a non-blank DEBUG_CHANNEL before
+        # queuing at all, which ships blank - unrelated to what this class
+        # tests (the drain thread's own two gates), so a channel is set here
+        # purely to keep these lines reaching the queue in the first place.
+        self.config.DEBUG_CHANNEL = "#chan"
 
     def _close_gate(self):
         self.oserve.irc_connection = None
@@ -564,6 +569,23 @@ class TheQueuePositionNoticeReadsTheSetting(QuietTestCase):
         self.assertIn("42", full_text)
 
 
+def _sentinel_constants(test_node):
+    """Every string constant a comparison's right-hand side names, whether
+    written as `x == "A"` or `x in ("A", "B")` - #433 turned this exact
+    check from the first shape into the second, and a scan that only
+    understood `==` would report the guard gone the moment it did."""
+    import ast
+
+    found = []
+    for comparator in test_node.comparators:
+        if isinstance(comparator, ast.Constant):
+            found.append(comparator.value)
+        elif isinstance(comparator, (ast.Tuple, ast.List, ast.Set)):
+            found.extend(elt.value for elt in comparator.elts
+                        if isinstance(elt, ast.Constant))
+    return found
+
+
 class TheAdvertNeverPublishesTheNoListSentinel(unittest.TestCase):
     """#229: list.get_file_count_date_size_and_raw_bytes() answers "No List"
     as the DATE when no master list exists yet - a fresh install before its
@@ -572,6 +594,12 @@ class TheAdvertNeverPublishesTheNoListSentinel(unittest.TestCase):
     channel every ANNOUNCE_INTERVAL until the first list build finished.
     commands.py's -stats reply already guarded the same sentinel; the advert
     - far more publicly visible - never had the matching guard.
+
+    #433 added a second sentinel to the same guard: "Error", which the same
+    function answers with when an OSError interrupts reading any one of its
+    list files (a permission change, a vanished path, or another process
+    holding one open with no sharing). Both are checked here together, since
+    they are now the same `if ... in (...)` guard in the source.
 
     announce_worker() is a `while True:` loop that owns the process (see
     tests/uncovered_functions.txt) and cannot be driven directly the way most
@@ -586,49 +614,144 @@ class TheAdvertNeverPublishesTheNoListSentinel(unittest.TestCase):
         with _io.open(announce.__file__, encoding="utf-8") as handle:
             return handle.read()
 
-    def test_the_sentinel_is_checked_before_the_message_is_built(self):
-        source = self._source()
-
-        guard_at = source.find('list_date == "No List"')
-        message_at = source.find("announce_msg = (")
-
-        self.assertNotEqual(guard_at, -1,
-                            "no check for the \"No List\" sentinel found in announce.py")
-        self.assertNotEqual(message_at, -1,
-                            "fixture invariant: could not find the advert template "
-                            "build - the scan is broken, not the code")
-        self.assertLess(guard_at, message_at,
-                        "the sentinel check comes AFTER the advert template is "
-                        "already built, which is too late to skip publishing it")
-
-    def test_the_guard_actually_skips_rather_than_falling_through(self):
-        """The old "if False:"-shaped survivor this whole session has been
-        finding elsewhere: a check that exists but is never reached would
-        satisfy the test above while changing nothing. Parsed with ast so a
-        `continue`/`return`/`break` in the same if-body counts, and a check
-        that merely logs and falls through does not."""
+    def _sentinel_if_node(self):
         import ast
 
         tree = ast.parse(self._source())
-        found_skip = False
         for node in ast.walk(tree):
             if not isinstance(node, ast.If):
                 continue
             test = node.test
-            is_sentinel_check = (
-                isinstance(test, ast.Compare)
-                and any(isinstance(comp, ast.Constant) and comp.value == "No List"
-                       for comp in test.comparators))
-            if not is_sentinel_check:
-                continue
-            if any(isinstance(stmt, (ast.Continue, ast.Return, ast.Break))
-                  for stmt in node.body):
-                found_skip = True
+            if isinstance(test, ast.Compare) and "No List" in _sentinel_constants(test):
+                return node
+        return None
+
+    def test_the_sentinel_is_checked_before_the_message_is_built(self):
+        source = self._source()
+        node = self._sentinel_if_node()
+        message_at = source.find("announce_msg = ")
+
+        self.assertIsNotNone(node,
+                             "no check for the \"No List\" sentinel found in announce.py")
+        self.assertNotEqual(message_at, -1,
+                            "fixture invariant: could not find the advert template "
+                            "build - the scan is broken, not the code")
+        self.assertLess(node.lineno, source[:message_at].count("\n") + 1,
+                        "the sentinel check comes AFTER the advert template is "
+                        "already built, which is too late to skip publishing it")
+
+    def test_the_guard_also_covers_the_error_sentinel(self):
+        """#433: an OSError reading any list file collapses the same tuple
+        to (0, "Error", "0B", 0) - a second sentinel a check for only "No
+        List" lets straight through."""
+        node = self._sentinel_if_node()
+        self.assertIsNotNone(node)
+
+        self.assertIn("Error", _sentinel_constants(node.test),
+                     "the guard checks \"No List\" but not \"Error\" - the "
+                     "second sentinel from #433 reaches the advert unchecked")
+
+    def test_the_guard_actually_skips_rather_than_falling_through(self):
+        """The old "if False:"-shaped survivor this whole session has been
+        finding elsewhere: a check that exists but is never reached would
+        satisfy the test above while changing nothing."""
+        import ast
+
+        node = self._sentinel_if_node()
+        self.assertIsNotNone(node)
+
+        found_skip = any(isinstance(stmt, (ast.Continue, ast.Return, ast.Break))
+                        for stmt in node.body)
 
         self.assertTrue(found_skip,
-                        "found a \"No List\" check, but its body does not "
+                        "found the sentinel check, but its body does not "
                         "continue/return/break - it would fall through and "
                         "publish the sentinel anyway")
+
+
+class TheAdvertRespectsTheIrcLineBudget(unittest.TestCase):
+    """#434: build_advert_line() was the one outbound template with no
+    fit_irc_line() enforcement - announce.py's other four templates
+    (send_transfer_complete, send_dcc_sending_notice,
+    send_search_result_header, send_pack_error_notice) all go through it.
+
+    A large library in a long channel name (or a CUSTOM_THEME_* override,
+    which interpolates each role 8-9 times) can push the advert past
+    IRC_LINE_BUDGET, and a recipient with a long enough hostmask then has the
+    SERVER cut the line - which can land inside a colour code and smear the
+    background to the end of the line, exactly what fit_irc_line() exists to
+    prevent.
+    """
+
+    def test_the_reported_over_budget_channel_now_fits(self):
+        """The shape from the issue's own repro (figures only - the channel
+        and nick there were a live operator's real ones and are not
+        reproduced here): a seven-figure library, a long channel name, and a
+        long-named bot together push an unguarded line past
+        IRC_LINE_BUDGET."""
+        line = announce.fit_irc_line(
+            lambda ts: announce.build_advert_line(
+                "#fake-metal-channel", "DCCoreTestBot",
+                "1,412,908", "26.71 TB",
+                "Sep 13th", "3/3", "0", "2.4MB/s", "24.7MB/s", ts,
+                "DCCore v1.12.0-RC2"),
+            "214,776 Files (41.2 TB)")
+
+        self.assertLessEqual(encoded_len(line), announce.IRC_LINE_BUDGET)
+
+    def test_an_ordinary_advert_is_unaffected(self):
+        """The fix must not trim a line that already fits."""
+        unfitted = announce.build_advert_line(
+            "#example", "DCCoreTest", "100,000", "1.2TB",
+            "Sep 13th", "3/3", "0", "2.4MB/s", "24.7MB/s",
+            "10,000 Files (500GB)", "DCCore v1.12.0-RC2")
+        fitted = announce.fit_irc_line(
+            lambda ts: announce.build_advert_line(
+                "#example", "DCCoreTest", "100,000", "1.2TB",
+                "Sep 13th", "3/3", "0", "2.4MB/s", "24.7MB/s", ts,
+                "DCCore v1.12.0-RC2"),
+            "10,000 Files (500GB)")
+
+        self.assertEqual(fitted, unfitted)
+        self.assertNotIn("...", fitted)
+
+    def _source(self):
+        import io as _io
+        with _io.open(announce.__file__, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_the_advert_call_site_actually_goes_through_fit_irc_line(self):
+        """The two tests above prove the helper WORKS - this proves
+        announce_worker() actually CALLS it. A fix that only lives in a test
+        fixture would satisfy the tests above and change nothing in
+        production, the same "if False:"-shaped survivor found elsewhere in
+        this file."""
+        source = self._source()
+
+        # The LAST occurrence: the first is the function's own
+        # `def build_advert_line(`, and a docstring elsewhere in the file
+        # references it by name too - only the actual call site, at the end
+        # of announce_worker()'s per-channel loop, comes after it.
+        second_call_at = source.rfind("build_advert_line(")
+        self.assertNotEqual(second_call_at, -1,
+                            "fixture invariant: build_advert_line() call site "
+                            "not found in announce.py")
+        assign_at = source.rfind("announce_msg = ", 0, second_call_at)
+        self.assertNotEqual(assign_at, -1,
+                            "fixture invariant: no announce_msg assignment "
+                            "found before the advert call site")
+
+        # ONLY the span between the assignment and the call - not the whole
+        # file up to that point, which would also match fit_irc_line's own
+        # `def fit_irc_line(` and the four unrelated call sites in the
+        # sibling templates above this one, passing regardless of what this
+        # particular assignment actually does.
+        between = source[assign_at:second_call_at]
+
+        self.assertIn("fit_irc_line(", between,
+                     "announce_msg is assigned straight from "
+                     "build_advert_line(), not routed through "
+                     "fit_irc_line() first")
 
 
 if __name__ == "__main__":

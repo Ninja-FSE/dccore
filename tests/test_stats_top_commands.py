@@ -104,15 +104,18 @@ class ItAnswersThePersonNotTheChannel(CommandCase):
                 self.assertTrue(line.startswith("NOTICE dave :"), line)
                 self.assertNotIn("#dccore-test", line)
 
-    def test_both_go_out_on_the_vip_lane(self):
-        """Same lane as -help and -que: an answer to a direct question should
-        not queue behind a channel advert."""
+    def test_both_go_out_on_the_standard_lane(self):
+        """#426: this used to go out on the VIP lane, same as -help and -que,
+        but that lane is meant for searches and adverts - one user repeatedly
+        asking for stats could inject enough VIP lines to starve everyone
+        else's replies. Per-user command replies now share the standard lane
+        instead."""
         self.write_counts()
         for handler in (commands.handle_stats_request, commands.handle_top_request):
             with self.subTest(handler=handler.__name__):
                 self.ask(handler)
 
-                self.assertTrue(all(vip for _u, _m, vip in self.oserve.queued))
+                self.assertFalse(any(vip for _u, _m, vip in self.oserve.queued))
 
 
 class WhatStatsReports(CommandCase):
@@ -155,6 +158,24 @@ class WhatStatsReports(CommandCase):
         body = self.plain(self.stats())
 
         self.assertNotIn("built No List", body)
+        self.assertIn("No list has been built yet", body)
+
+    def test_an_io_fault_reading_the_list_does_not_print_error_as_a_date(self):
+        """#433: the SECOND sentinel the same function can answer with - an
+        OSError reading any list file collapses its whole return to
+        (0, "Error", "0B", 0). Before this guard covered both, "Sharing 0
+        files (0B), list built Error." answered a direct question with the
+        fault itself rather than with "not built yet"."""
+        import list as list_mod
+        real = list_mod.get_file_count_date_size_and_raw_bytes
+        list_mod.get_file_count_date_size_and_raw_bytes = \
+            lambda *a, **k: (0, "Error", "0B", 0)
+        self.addCleanup(setattr, list_mod,
+                        "get_file_count_date_size_and_raw_bytes", real)
+
+        body = self.plain(self.stats())
+
+        self.assertNotIn("built Error", body)
         self.assertIn("No list has been built yet", body)
 
 
@@ -300,8 +321,18 @@ class ItIsReachable(unittest.TestCase):
         and -help. Left out, they would be the user commands anybody could
         repeat without limit - and -top reads a file on every call."""
         source = self.source("irc.py")
-        block = source[source.index("is_bot_command = ("):]
-        block = block[:block.index(")\n")]
+        # Walked line by line to the gate's OWN closing paren, not sliced to
+        # the first ")\n" in the text. That slice broke the moment the gate
+        # called a helper: the first line became "is_list_request(msg,
+        # msg_lower)" and the block ended there, so this failed while the
+        # metering it checks was perfectly intact.
+        lines = source[source.index("is_bot_command = ("):].splitlines()
+        body = []
+        for raw in lines[1:]:
+            if raw.strip() == ")":
+                break
+            body.append(raw)
+        block = "\n".join(body)
 
         self.assertIn("-stats", block)
         self.assertIn("-top", block)

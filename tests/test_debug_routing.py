@@ -43,6 +43,16 @@ class DebugRouting(DCCoreTestCase):
             original = getattr(config, name, True)
             self.addCleanup(lambda n=name, v=original: setattr(config, n, v))
 
+        # #424: send_debug() now also requires a non-blank DEBUG_CHANNEL
+        # before queuing - it ships blank, which used to be silently queued
+        # as a recipient-less PRIVMSG. That guard is a separate concern from
+        # the two switches this file tests, covered on its own in
+        # tests/test_debug_channel_default.py; a channel is configured here
+        # so the switch tests below keep testing only the switch.
+        original_channel = getattr(config, "DEBUG_CHANNEL", "")
+        config.DEBUG_CHANNEL = "#chan"
+        self.addCleanup(setattr, config, "DEBUG_CHANNEL", original_channel)
+
         # The drain thread would empty the queue underneath the assertions, so
         # it is kept from starting; what matters here is what was ENQUEUED.
         self._drain = announce._debug_drain_started

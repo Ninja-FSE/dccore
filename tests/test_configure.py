@@ -24,6 +24,8 @@ if os.path.join(REPO_ROOT, "scripts") not in sys.path:
 import adminchat  # noqa: E402
 import defaults as config  # noqa: E402
 import configure  # noqa: E402
+import shutil  # noqa: E402
+import webserver  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
 
@@ -274,6 +276,130 @@ class CollectAnswersEndToEndTests(DCCoreTestCase):
         ])
         self.assertEqual(answers["WEBUI_ENABLED"], True)
         self.assertEqual(answers["WEBUI_HOST"], "0.0.0.0")
+
+
+class TheImportIsOfferedAtFirstRun(DCCoreTestCase):
+    """The Stats page has imported OmenServe totals since #69. Somebody
+    migrating is looking at THIS script - not at a dashboard they have not
+    enabled yet, on a feature they have no reason to know exists.
+
+    The point is WHEN, so what these pin is that the offer reaches the same
+    parse, the same validation and the same write - not a second copy of them.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.said = []
+
+    def vars_ini(self, text, name="vars.ini"):
+        path = os.path.join(self.dir, name)
+        with io.open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def run_offer(self, answers):
+        """Drive the prompts with a scripted list of replies."""
+        replies = list(answers)
+
+        def ask(_prompt):
+            return replies.pop(0) if replies else ""
+
+        return configure.offer_to_import_omenserve_stats(
+            ask=ask, log=self.said.append), "\n".join(self.said)
+
+    def test_declining_writes_nothing(self):
+        before = webserver.current_importable_stats()
+
+        done, _out = self.run_offer(["n"])
+
+        self.assertFalse(done)
+        self.assertEqual(webserver.current_importable_stats(), before)
+
+    def test_accepting_writes_the_figures(self):
+        path = self.vars_ini("n0=%mx.rarsent 45902\nn1=%mx.rartsent 16295360049140\n")
+
+        done, out = self.run_offer(["y", path, "y"])
+
+        self.assertTrue(done, out)
+        after = webserver.current_importable_stats()
+        self.assertEqual(after["total_files"], 45902)
+        self.assertEqual(after["total_bytes"], 16295360049140)
+
+    def test_it_shows_them_before_writing_and_takes_no_for_an_answer(self):
+        """A number read out of somebody's file is not a number they have
+        agreed to."""
+        path = self.vars_ini("n0=%mx.rarsent 45902\n")
+        before = webserver.current_importable_stats()
+
+        done, out = self.run_offer(["y", path, "n"])
+
+        self.assertFalse(done)
+        self.assertIn("45902", out, "the figures were not shown before asking")
+        self.assertEqual(webserver.current_importable_stats(), before)
+
+    def test_a_path_that_does_not_exist_does_not_end_the_setup_run(self):
+        """A setup script that dies on a mistyped path has cost the operator
+        the whole run."""
+        done, out = self.run_offer(["y", os.path.join(self.dir, "nope.ini"), "y"])
+
+        self.assertFalse(done)
+        self.assertIn("Could not read it", out)
+
+    def test_a_quoted_path_works(self):
+        """Dragging a file onto a terminal hands you a quoted path on both
+        platforms, and an operator who does that is doing the sensible thing."""
+        path = self.vars_ini("n0=%mx.rarsent 45902\n")
+
+        done, out = self.run_offer(["y", '"' + path + '"', "y"])
+
+        self.assertTrue(done, out)
+
+    def test_a_file_with_nothing_importable_says_so(self):
+        path = self.vars_ini("n0=%mx.somethingelse 5\nn1=%nick Bob\n")
+
+        done, out = self.run_offer(["y", path, "y"])
+
+        self.assertFalse(done)
+        self.assertIn("Nothing in that file", out)
+
+    def test_a_file_mirc_wrote_in_a_code_page_still_reads(self):
+        """mIRC writes vars.ini in the machine's ANSI code page, so a nickname
+        with an accent is enough to make it invalid UTF-8. The numbers are
+        ASCII either way, and a mangled character in a variable NAME just
+        stops that line matching a field - the same outcome as it being
+        absent."""
+        path = os.path.join(self.dir, "cp.ini")
+        with open(path, "wb") as handle:
+            handle.write(b"n0=%nick Fr\xe9d\xe9ric\nn1=%mx.rarsent 45902\n")
+
+        done, out = self.run_offer(["y", path, "y"])
+
+        self.assertTrue(done, out)
+        self.assertEqual(webserver.current_importable_stats()["total_files"], 45902)
+
+    def test_setup_actually_calls_it(self):
+        """An offer nothing reaches is not an offer. Read out of the source:
+        driving main() means driving every other prompt in the script."""
+        with io.open(os.path.join(REPO_ROOT, "configure.py"), encoding="utf-8") as fh:
+            code = chr(10).join(line.split("#", 1)[0]
+                                for line in fh.read().splitlines())
+        main_body = code.split("def main(", 1)[1].split("if __name__", 1)[0]
+
+        self.assertIn("offer_to_import_omenserve_stats()", main_body)
+
+    def test_it_does_not_reimplement_the_import(self):
+        """A second copy of "which variables, what is a sane number, what
+        actually landed" is precisely how two answers to one question drift."""
+        with io.open(os.path.join(REPO_ROOT, "configure.py"), encoding="utf-8") as fh:
+            code = fh.read()
+
+        self.assertIn("webserver.build_stats_import_preview(", code)
+        self.assertIn("webserver.apply_stats_import(", code)
+        self.assertNotIn("%mx.", code,
+                         "configure.py names OmenServe variables itself, so the "
+                         "field list now lives in two places")
 
 
 if __name__ == "__main__":

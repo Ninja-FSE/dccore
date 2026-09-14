@@ -12,11 +12,149 @@ round-tripped, DCC listener bound, WinRAR found at its install path.
 
 ---
 
+## The seven steps
+
+The whole install, in order. Each one is covered in detail below - this is
+here because the sequence is one thing an operator does once, and it was split
+across two separately numbered sections.
+
+1. **Install Python.** [Python 3.10.0 (64-bit)](https://www.python.org/ftp/python/3.10.0/python-3.10.0-amd64.exe),
+   or any later 3.10+.
+2. **Tick both boxes in the installer:** *Add Python to PATH* and *py launcher*.
+3. **Check it took**, in a NEW Command Prompt:
+   `python --version`, `py --version`, `where python`, `where py`.
+4. **Only if you want the web dashboard:** `py -3 -m pip install -r requirements-web.txt`
+5. **Configure:** `py configure.py`
+6. **Check the setup:** `scripts\windows\start-dccore.bat check`
+7. **Start it, and read the first few lines:** `scripts\windows\start-dccore.bat`
+
+Steps 4 and 7 are the two that catch people out, and step 7 is how you find
+out about step 4 - see below.
+
+---
+
+## Did it actually start?
+
+Step 7 prints a lot. Three lines tell you whether the **web dashboard** came
+up, and they are worth knowing apart because they send you to different
+places.
+
+**It is running:**
+
+```
+[WEBUI] Dashboard starting on http://127.0.0.1:8420/ (login required).
+```
+
+The host and port are your own `WEBUI_HOST`/`WEBUI_PORT`. Open that address.
+
+**It is switched off:**
+
+```
+[WEBUI] Disabled via config.WEBUI_ENABLED = False.
+```
+
+The dashboard is opt-in - it is a network listener, so a missing switch is
+never read as consent to open one. Set `WEBUI_ENABLED = True` in
+`admin_config.py` or `settings.conf`. `py configure.py` asks you this.
+
+**Flask is not installed:**
+
+```
+[WEBUI] Flask not installed; dashboard disabled.
+```
+
+That is step 4. The daemon itself needs nothing beyond the standard library
+and carries on serving files perfectly well - only the dashboard is
+unavailable, which is why a missing Flask is a message rather than a failure.
+
+(A different line, `[WEBUI] Could not import webserver: ...`, means
+`webserver.py` itself failed to import - a damaged file rather than a missing
+package.)
+
+There is a fourth, and it stops the dashboard rather than the daemon:
+
+```
+[WEBUI] ADMIN_PASSWORD_HASH is not set; refusing to start the dashboard
+```
+
+Run `python adminchat.py` to set one.
+
+**The IRC side is separate** and reports itself separately - look for the
+`[JOIN]` line naming how many channels it asked for. A daemon that is serving
+files with no dashboard is a working daemon.
+
+---
+
 ## Before you start
 
-**Python 3.10 or newer.** Install from python.org and tick *Add python.exe to
-PATH*. Nothing else is required — the daemon and its test suite are stdlib-only,
-which is why they run on a bare machine with no `pip install` step.
+**Python 3.10 or newer.** Nothing else is required — the daemon and its test
+suite are stdlib-only, which is why they run on a bare machine with no
+`pip install` step.
+
+1. **Download Python.** [Python 3.10.0 (64-bit)](https://www.python.org/ftp/python/3.10.0/python-3.10.0-amd64.exe),
+   or any later 3.10+ from [python.org](https://www.python.org/downloads/windows/).
+
+2. **Tick both boxes in the installer:** *Add Python to PATH* and *py launcher*.
+   They are what make steps 3 onwards work from any directory — see the note on
+   `py` below for why the launcher in particular matters here.
+
+3. **Check it took.** In a *new* Command Prompt — an open one still has the old
+   PATH:
+
+   ```cmd
+   python --version
+   py --version
+   where python
+   where py
+   ```
+
+   `where` printing a path under `WindowsApps` and nothing else means the
+   installer's PATH box was not ticked: that is the App Execution Alias, not
+   Python. Re-run the installer and choose *Modify*.
+
+4. **Only if you want the web dashboard:**
+
+   ```cmd
+   py -3 -m pip install -r requirements-web.txt
+   ```
+
+   `py -3 -m pip`, not a bare `pip`. `start-dccore.bat` runs the daemon with
+   `py -3` and only falls back to `python`, while a bare `pip` follows
+   whatever `python` resolves to. On a machine with two Pythons installed -
+   which step 3 above is precisely how you find out you have - those are
+   different interpreters, so `pip install` succeeds, the daemon starts, and
+   the dashboard silently never appears. The only clue is
+   `[WEBUI] Flask not installed; dashboard disabled.` in the log, after the
+   bot has already connected.
+
+   `start-dccore.bat check` now says so before you get that far, and names
+   the interpreter it looked in.
+
+   Skip it otherwise. The daemon starts and serves files without Flask; the
+   dashboard is the only thing that needs it.
+
+5. **Configure it:**
+
+   ```cmd
+   py configure.py
+   ```
+
+6. **Check before the first real start:**
+
+   ```cmd
+   scripts\windows\start-dccore.bat check
+   ```
+
+7. **Start it:**
+
+   ```cmd
+   scripts\windows\start-dccore.bat
+   ```
+
+   If you did step 4, look for `[WEBUI] Dashboard starting on http://...` in
+   the output — that is the dashboard confirming Flask was found and the
+   server is up. See [Did it actually start?](#did-it-actually-start) for what
+   the other three possible lines mean.
 
 **WinRAR is optional.** Without it, single-file transfers work normally and only
 whole-album (`!rar`) packing fails. If you have it, no configuration is needed:
@@ -27,7 +165,16 @@ on PATH, because WinRAR does not add itself to PATH.
 
 ## Setup
 
-### The fast path: `python3 configure.py`
+### The fast path: `py configure.py`
+
+> **`py`, not `python3`.** A python.org install gives you `py` and
+> `python`; it does not give you `python3`. Worse, Windows 10 and 11 ship
+> an App Execution Alias for that exact name, so typing `python3` opens
+> the Microsoft Store or prints *"Python was not found"* even though
+> Python is installed and working. `py` is the launcher Windows installs
+> for you and is the one to use here. (`python` works too if you ticked
+> *Add python.exe to PATH*.)
+
 
 Asks nickname, IRC server, channel(s), admin nick, the admin console
 password, the music directory (optional - easier to set from the web
@@ -99,6 +246,10 @@ scripts\windows\start-dccore.bat
 Ctrl-C in that window stops it. The launcher runs the setup check first and
 refuses to start if it fails.
 
+Then read the first few lines it prints - see [Did it actually
+start?](#did-it-actually-start) above for the four that tell you whether the
+dashboard came up, and which of them means you skipped step 4.
+
 ---
 
 ## Why there is a launcher at all
@@ -130,9 +281,14 @@ console borrows a port from it too when it has to listen.
 
 This is not a bug. The daemon advertises its **public** IP in every DCC offer,
 and most routers will not route a connection from inside the network back to
-themselves. Either test from a second machine or a phone, or set
-`MY_IP_OR_DOCK` to this PC's LAN address in `admin_config.py` for local testing
-only — and remove it before real use.
+themselves. Test from a second machine or a phone.
+
+Pinning `MY_IP_OR_DOCK` to this PC's LAN address does **not** work as a way
+round it, and this page used to suggest it. `dcc.is_offerable_to_strangers()`
+refuses every private, loopback, link-local and reserved address — an offer
+carrying one is an offer to nobody — so the send is refused outright rather
+than failing to connect. The symptom is the daemon declining to send at all,
+which looks like a different fault entirely.
 
 ---
 

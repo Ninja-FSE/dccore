@@ -253,7 +253,11 @@ class GuardsAreWiredToTheRightHandlers(unittest.TestCase):
     # --- the nick handlers ------------------------------------------------
 
     def test_the_nick_change_handler_is_gated_on_nick(self):
-        condition = _guard_condition_for("old_nick = nick_match.group(1).lower()")
+        # Marker moved when the body became note_nick_change() - the gate it
+        # checks is unchanged, and so is what this asserts about it. Anchored
+        # on the CALL rather than on the function name, which also appears at
+        # the definition and would match two lines.
+        condition = _guard_condition_for("note_nick_change(nick_match.group(1)")
         self.assertTrue(_evaluate(condition, GENUINE["NICK"]), condition)
         self.assertTrue(_evaluate(condition, GENUINE["NICK_BARE"]), condition)
         self.assertFalse(

@@ -263,6 +263,17 @@ html, body {
   color: var(--accent-strong);
 }
 
+/* #438: `.nav-item` above is an author-origin `display: flex`, which
+   outranks the UA stylesheet's `display: none` for `hidden` at equal
+   specificity regardless of load order - the same trap documented where
+   `.status-row[hidden]` needs its own pair, below. Without this,
+   disableConsoleUi() setting navButton.hidden = true (app.js, on the
+   Console's first 404) left the button on screen: clickable, opening an
+   empty log pane, with anything typed there posting into a 404 route. */
+.nav-item[hidden] {
+  display: none;
+}
+
 .nav-icon {
   width: 18px;
   text-align: center;
@@ -314,6 +325,229 @@ html, body {
 
 .status-dot.is-down {
   background: var(--danger);
+}
+
+/* ---------------------------------------------------------------- Notices
+   The badge in the status card, and the panel it opens.
+
+   No new colour tokens: a warning borrows --status-frozen and an error
+   borrows --danger, which are already defined for all three theme states.
+   Anything new here would be a fourth thing to keep in step across them, for
+   two shades an operator would read as "amber" and "red" either way.
+
+   Each tinted background declares a solid colour FIRST and the color-mix
+   second, so a browser without color-mix takes the flat one instead of
+   nothing. The severity is carried by the border and the text as well as the
+   tint, so it survives even then - and survives a colour-blind reader, who
+   gets the same panel with a less useful tint. */
+
+/* `hidden` is an attribute and the UA gives it display:none at the lowest
+   specificity there is, so BOTH of these class rules outrank it. Without this
+   pair the badge is on screen from first paint and never goes away, which is
+   the opposite of what it is for - it means something by appearing. */
+.status-row[hidden] {
+  display: none;
+}
+
+.status-row.status-notices[hidden] {
+  display: none;
+}
+
+.status-row.status-notices {
+  /* The badge is the whole row: there is no label beside it, because a label
+     saying "Notices" next to a button saying what they are would be the same
+     word twice in a panel with no room for it. */
+  display: block;
+}
+
+.notice-badge {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 9px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* The dot, so the severity reads before the words do. */
+.notice-badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: currentColor;
+}
+
+.notice-badge.is-warning {
+  color: var(--status-frozen);
+  border-color: var(--status-frozen);
+  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--status-frozen) 12%, var(--bg-raised));
+}
+
+.notice-badge.is-error {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-raised));
+}
+
+.notice-badge:hover {
+  filter: brightness(1.12);
+}
+
+.notice-badge:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ------------------------------------------------------------- Messages
+   An inbox for a bot that never replies. Styled like something you READ
+   rather than something you act on: no affordance that looks like a reply,
+   because there is nothing behind it. Quieter than the notices beside it -
+   a message is not a problem. */
+
+.nav-count {
+  margin-left: auto;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The nav item lays its children out in a row; `hidden` is an attribute at
+   the lowest specificity there is, so without this the count sits there
+   showing nothing. Same pair as .status-row and .filelists-tabs. */
+.nav-count[hidden] {
+  display: none;
+}
+
+.messages-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.message-row {
+  padding: 11px 13px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+/* Unread is a left edge and a tint, not a colour on the text: the text is
+   somebody's words and recolouring them would read as the bot's own. */
+.message-row.is-unread {
+  border-left: 3px solid var(--accent);
+  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-raised));
+}
+
+.message-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 5px;
+}
+
+.message-who {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.message-when {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.message-text {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+  /* Somebody else's text: it wraps, it never stretches the panel, and a very
+     long word does not push the timestamp off the edge. */
+  overflow-wrap: anywhere;
+}
+
+.message-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.notice-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 12px;
+}
+
+.notice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notice-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-soft);
+  border-left-width: 3px;
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  font-size: 13px;
+}
+
+.notice-row.is-warning { border-left-color: var(--status-frozen); }
+.notice-row.is-error   { border-left-color: var(--danger); }
+
+/* Unread is a weight and a tint, not a second colour: the severity already
+   owns the colour here, and a row cannot say two things with the same
+   property. */
+.notice-row.is-unread {
+  background: var(--bg-raised);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg-raised));
+  font-weight: 600;
+}
+
+.notice-when {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.notice-text {
+  color: var(--text);
+  /* Long paths and channel names wrap rather than pushing the panel sideways. */
+  overflow-wrap: anywhere;
+}
+
+.notice-empty {
+  color: var(--text-dim);
+  font-size: 13px;
 }
 
 .sidebar-foot {
@@ -517,6 +751,41 @@ html, body {
   max-height: var(--table-max-h);
   overflow-x: auto;
   overflow-y: auto;
+}
+
+/* The two "most downloaded" tables, side by side rather than stacked - same
+   minmax(0, 1fr) reasoning as .filelists-layout above: a bare 1fr track
+   would grow to fit a long filename instead of letting the name truncate
+   inside its own column. */
+.stat-top-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 700px) {
+  .stat-top-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Fixed, so the two columns keep a stable width regardless of what the
+   longest row happens to contain - without it, "Times sent" would still be
+   pushed around by "File", the one column meant to give way. */
+.stat-top-table {
+  table-layout: fixed;
+}
+
+.stat-top-table .col-num {
+  width: 92px;
+}
+
+.stat-top-table td:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .data-table {
@@ -804,24 +1073,516 @@ html, body {
   font-size: 13px;
 }
 
-.filelists-switcher {
+.filelists-filter {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.filelists-filter .search-input {
+  flex: 1;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+.filelists-filter-status {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Binding a list to channels, picked from the ones already configured. */
+.served-list-channels {
+  margin: 8px 0 0;
+}
+
+.served-list-channels-label {
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.served-list-channel-boxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.served-list-channel {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  font-family: var(--font-mono);
   font-size: 12.5px;
+}
+
+/* Bound here, but not a channel the bot joins - so nothing ever arrives from
+   it, and under library.py's rule 3 its presence can silence the channels
+   that DO exist. Marked rather than hidden or dropped: an install already in
+   this state has no other place the mistake is visible. */
+.served-list-channel.is-unconfigured {
+  color: var(--danger);
+}
+
+.served-list-channels-warning {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+.served-list-channels-empty {
+  margin: 8px 0 0;
+  font-size: 11.5px;
   color: var(--text-dim);
 }
 
-.filelists-switcher select {
+/* The colour picker: two menus and the block they make between them.
+
+   NO LITERAL COLOURS HERE, and that is not an oversight - the swatch takes
+   its two colours from IRC_COLOURS in app.js, set as properties by
+   paintIrcSwatch(). The sixteen belong to IRC and live in one place; a copy
+   of them in this file would be a second place to keep them right. */
+.irc-colour {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.irc-colour select {
+  min-width: 9.5rem;
+}
+
+.irc-colour select:disabled {
+  opacity: 0.45;
+}
+
+/* A solid block, the way a border or separator role is drawn in a channel -
+   see theme.py on why fg == bg fills the cell. The character is a full block
+   so a foreground with no background still reads as its colour. */
+.irc-colour-swatch {
+  flex: none;
+  width: 1.5rem;
+  height: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+}
+
+.irc-colour-swatch::before {
+  content: "\2588\2588";
+  display: block;
+  line-height: 1.4rem;
+  text-align: center;
+  font-size: 0.9rem;
+}
+
+/* Said next to the menus rather than in the preview, because the preview
+   already shows the RESULT and this says the reason. */
+.irc-colour-warning {
+  flex-basis: 100%;
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+/* Nothing picked is not a colour, so it does not get drawn as one. */
+.irc-colour-swatch.is-unset {
+  background: repeating-linear-gradient(
+    45deg, transparent, transparent 3px,
+    var(--border) 3px, var(--border) 4px);
+}
+
+.irc-colour-swatch.is-unset::before {
+  content: "";
+}
+
+/* The sample of what the channel sees. Deliberately NOT themed by the
+   dashboard's palette: it is showing IRC colours on an IRC client's own
+   ground, and painting it in the dashboard's colours would misrepresent the
+   one thing it exists to show. A dark plate is what these channels look like
+   in every client that ships a default. */
+.theme-preview {
+  background: #000000;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 18px;
+  overflow-x: auto;
+}
+
+.theme-preview-label {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #d2d2d2;
+}
+
+/* Monospace and unwrapped, like a client's own window: these lines are built
+   to a 512-byte budget and wrapping them would hide that they are long. */
+.theme-preview-line {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+  white-space: pre;
+  color: #d2d2d2;
+}
+
+.theme-preview-note {
+  margin: 10px 0 0;
+  font-size: 11.5px;
+  color: #7f7f7f;
+}
+
+/* Where the typed text sits inside a title. The default <mark> is a browser
+   yellow that belongs to neither theme, so it takes the palette's own accent -
+   as a tint behind the text rather than a block, because a title is read as a
+   whole and a solid highlight breaks it into pieces. */
+mark.filter-hit {
+  background: var(--accent-dim);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 1px;
+  font-weight: 600;
+}
+
+/* A bot with nothing matching the current filter, still on screen - because
+   it is the list currently open, or holds keyboard focus, or the operator has
+   asked to see the ones that were hidden.
+
+   IT USED TO BE THE ONLY BEHAVIOUR, and the argument for it was that the
+   sidebar is also the answer to "who has this", so a row that vanished would
+   take that answer with it. Right about what matters, wrong about what to do:
+   dimming asks somebody to scan thirty rows and judge opacity, where a count
+   above the list states it outright. The answer is kept and read more easily;
+   see applyFilterHighlight() in app.js. */
+.bot-row.is-filtered-out {
+  opacity: 0.4;
+}
+
+/* Taken off the screen by the filter. display:none rather than visibility or
+   opacity, so it leaves no gap and is skipped by tabbing - a row nobody can
+   see should not be a stop on the way to the ones they can. */
+.bot-row.is-filtered-away {
+  display: none;
+}
+
+/* Switched off by the operator, not by the search. Kept visually distinct
+   from is-filtered-out: one says "this list has nothing", the other says
+   "you asked me to hide this one", and clicking again undoes only the
+   second. */
+.bot-row.is-excluded {
+  opacity: 0.55;
+  border-style: dashed;
+  border-color: var(--border);
+}
+
+.bot-row.is-excluded .bot-row-count { visibility: hidden; }
+
+/* What has already been asked of this bot. Deliberately quiet: it is an
+   annotation on a row, not a status of its own, and the table is read by
+   scanning filenames. */
+.file-mark {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+.file-mark.is-requested {
+  color: var(--status-queued);
+  border: 1px solid var(--status-queued);
+}
+
+.file-mark.is-received {
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
+/* `display` and `hidden` on the same element: the attribute sets
+   `display: none` from the UA stylesheet, which ANY class rule outranks, so
+   the row of buttons showed while the markup said it was hidden. Every
+   element in here that carries `hidden` needs this pair. */
+/* #26's list blocks reuse the served-folder controls, so only what is new
+   to them is styled here. */
+.on-connect-commands {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.9em;
+  margin-bottom: 8px;
+  resize: vertical;
+}
+
+/* The stepper the number input gives us natively - up/down arrows, keyboard
+   arrows, and a typed value all in one control. */
+.on-connect-delay {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.on-connect-delay-input {
+  width: 6em;
+}
+
+.served-list-block {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 10px;
+}
+
+.served-list-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.served-list-name {
+  flex: 1 1 auto;
+}
+
+.served-list-primary-label {
+  white-space: nowrap;
+  font-size: 0.9em;
+}
+
+.served-list-channels {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.list-folder-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.list-folder-path {
+  flex: 1 1 auto;
+}
+
+.filelists-filter-actions[hidden] {
+  display: none;
+}
+
+.filelists-filter-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.bot-row.is-filtered-out .bot-row-name {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+/* Whose list to show. Capped and scrolling rather than growing without
+   limit: this holds a row for every bot seen advertising, and one channel in
+   the capture #133 was written from had thirty-two of them. Six rows is
+   roughly where the table below still starts above the fold. */
+/* THE LIST BROWSER IS TWO COLUMNS: which list, and what is in it.
+   They were stacked, so a column of nicks took the full width and pushed the
+   table below the fold - on a wide screen the files began some 600px down and
+   then scrolled inside whatever height was left. Side by side, the sources
+   are as wide as they need to be and the table gets the height. */
+.filelists-layout {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+/* minmax(0, ...) above, not a bare 1fr, and it is load-bearing: a grid track
+   sized 1fr takes min-width:auto, so a wide table inside it pushes the TRACK
+   wider rather than scrolling within it - and the whole page gains a
+   horizontal scrollbar. The floor of 0 lets the column be narrower than its
+   content, which is what hands the overflow back to .table-wrap, where it is
+   already handled. The min-width on the items themselves is the other half:
+   a floor on the track is undone by an item that will not shrink. */
+.filelists-sources {
+  min-width: 0;
+}
+
+.filelists-files {
+  min-width: 0;
+}
+
+/* In a column of its own the source list has the height to be useful - it was
+   capped at 216px because it sat above the table and every pixel it took came
+   off the files. Side by side it costs the table nothing. */
+.filelists-layout .bot-list {
+  max-height: 60vh;
+}
+
+@media (max-width: 900px) {
+  /* Below this the two columns are narrower than either wants. Stacked is the
+     arrangement that was there before, which is the right thing to fall back
+     to rather than a squeeze - and the source list gives its height back,
+     because stacked it costs the table again. */
+  .filelists-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .filelists-layout .bot-list {
+    max-height: 216px;
+  }
+}
+
+.bot-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 216px;
+  overflow-y: auto;
+  padding: 6px;
+  margin-bottom: 8px;
   background: var(--bg-inset);
   border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.bot-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 7px;
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 13px;
-  padding: 8px 10px;
-  border-radius: var(--radius);
-  outline: none;
+  text-align: left;
+  cursor: pointer;
 }
+
+.bot-row:hover { background: var(--bg-raised); }
+
+.bot-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.bot-row.is-active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* A bot with no list held is still worth showing - it is somewhere you might
+   GO - but it should not read as somewhere you have already been.
+ *
+ * That used to be `.bot-row[data-held="no"] .bot-row-name { color: dim }`,
+ * written when the dot carried freshness and the name carried nothing. Once
+ * the name took the freshness colour, that rule outranked it: (0,3,0) against
+ * the modifier's (0,2,0), on exactly the rows it applies to - so every
+ * not-downloaded bot stayed dim grey while the legend beside it promised red.
+ * Reported from the beta as "shouldnt names be red of those not downloaded
+ * yet".
+ *
+ * It is gone. .bot-row-name.is-not-held says the same thing in the colour the
+ * legend names, and one rule saying it beats two disagreeing. The WEIGHT is
+ * what is kept: a bot with nothing held is not emphasised. */
+.bot-row[data-held="no"] .bot-row-name { font-weight: 400; }
+
+.bot-row-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-row-count {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* How many lists a grouped row (#399) speaks for - open it and the tabs
+   above the table are where the rest of them are. Absent on every ungrouped
+   row, which is every own list and most fetched ones. */
+.bot-row-lists-badge {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-faint);
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+/* The dot is never the only carrier of the state: every one has a title, the
+   row that cannot be browsed is dimmed, and the legend below names all four
+   in words. Colour alone would leave the distinction invisible to about one
+   man in twelve. */
+.led {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 50%;
+  background: var(--status-empty);
+}
+
+/* THE DOT IS PRESENCE. It carried the list's freshness until the beta asked
+   for the two apart, which left "is this bot even here" shown nowhere - and
+   that is the one that decides whether asking is worth anything. */
+.led.is-online  { background: var(--accent); }
+.led.is-offline { background: var(--danger); }
+/* Not "offline": the membership mirror is empty while the bot is still
+   joining, and every nick would read as gone. */
+.led.is-presence-unknown { background: var(--status-empty); }
+
+/* Kept for the freshness LEGEND swatches and for any older markup: the same
+   four colours the dot used to carry, now on the name. */
+.led.is-current  { background: var(--accent); }
+.led.is-changed  { background: var(--status-frozen); }
+.led.is-not-held { background: var(--danger); }
+.led.is-unknown  { background: var(--status-empty); }
+
+/* THE NAME IS WHAT WE HOLD. Colour rather than a second dot, because the row
+   is already a nick and a count and a dot, and a fourth mark to decode is
+   worse than the two it replaced. */
+.bot-row-name.is-current  { color: var(--accent); }
+.bot-row-name.is-changed  { color: var(--status-frozen); }
+.bot-row-name.is-not-held { color: var(--danger); }
+.bot-row-name.is-unknown  { color: var(--text-dim); }
+
+/* The legend's own sample of each, so the colours are named rather than left
+   to be worked out from the rows. */
+.legend-name {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.legend-name.is-current  { color: var(--accent); }
+.legend-name.is-changed  { color: var(--status-frozen); }
+.legend-name.is-not-held { color: var(--danger); }
+.legend-name.is-unknown  { color: var(--text-dim); }
+
+.bot-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 0 0 10px;
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+.bot-legend span { display: flex; align-items: center; gap: 6px; }
 
 .filelists-pager {
   display: flex;
@@ -901,11 +1662,108 @@ html, body {
   color: var(--text-dim);
 }
 
+/* A rebuild's progress. Determinate while walking - the folder count is known
+   before the scan starts - and striped-indeterminate while writing, where
+   there is no honest number and a frozen bar would read as a stall. */
+.progress-bar {
+  margin-top: 10px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--border-soft);
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--accent-strong);
+  transition: width 0.4s ease;
+}
+
+.progress-bar.is-indeterminate .progress-bar-fill {
+  width: 40%;
+  animation: progress-slide 1.1s ease-in-out infinite;
+}
+
+@keyframes progress-slide {
+  0%   { margin-left: -40%; }
+  100% { margin-left: 100%; }
+}
+
+/* An animation that cannot be stopped is a problem for anybody who has asked
+   the system not to move things. Still shows activity, without the motion. */
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar.is-indeterminate .progress-bar-fill {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+  .progress-bar-fill { transition: none; }
+}
+
+/* The Queue table: the file actually being sent right now, its progress
+   bar, and the full list of what is waiting behind it - reusing the same
+   bar the list rebuild already draws (.progress-bar/.progress-bar-fill
+   above), just narrower and with no margin of its own since it sits inside
+   a table cell rather than under a heading. */
+.queue-current {
+  color: var(--text);
+}
+
+.queue-progress {
+  margin: 4px 0 0;
+  width: 140px;
+}
+
+.queue-files summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.queue-files summary::-webkit-details-marker {
+  display: none;
+}
+
+.queue-files summary::before {
+  content: "▸ ";
+  color: var(--text-faint);
+}
+
+.queue-files[open] summary::before {
+  content: "▾ ";
+}
+
+.queue-file-list {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  color: var(--text-dim);
+}
+
+.queue-file-list li {
+  padding: 1px 0;
+}
+
 .tool-status {
   margin: 14px 0 0;
   font-family: var(--font-mono);
   font-size: 12.5px;
   color: var(--text);
+}
+
+/* #461: showImportStatus() toggles `is-error` on #import-status to mark a
+   rejected vars.ini, and there was no `.import-status` rule of any kind - so
+   the element had no styling at all and the error state was a no-op. Mirrors
+   .tool-status above, which is the same shape of message in the same panel. */
+.import-status {
+  margin: 14px 0 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.import-status.is-error {
+  color: var(--danger);
 }
 
 .tool-status.is-error {
@@ -984,6 +1842,99 @@ html, body {
   text-transform: uppercase;
 }
 
+/* --------------------------------------------------------------- Console */
+
+.console-card {
+  max-width: 900px;
+  display: flex;
+  flex-direction: column;
+}
+
+.console-log {
+  margin-top: 14px;
+  height: min(60vh, 520px);
+  overflow-y: auto;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.console-log:empty::before {
+  content: "Nothing logged yet.";
+  color: var(--text-faint);
+}
+
+.console-line {
+  display: flex;
+  gap: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.console-line-time {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.console-line-text {
+  color: var(--text-dim);
+}
+
+/* HARDBAN is send_debug()'s own name for a blocked path-traversal or a
+   poisoned queue entry - see announce.py's own comment on why that one gets
+   a [SECURITY] tag and a colour nothing else does. Mirrored here so the same
+   line reads as urgent in the web console too, not just on the channel. */
+.console-line[data-category="HARDBAN"] .console-line-text {
+  color: var(--danger);
+}
+
+/* A line this page produced itself - a command's own reply, or the local
+   "Unknown command" / error text build_console_command_result() returns -
+   rather than something that arrived through the ambient debug log. */
+.console-line.is-local .console-line-text {
+  color: var(--text);
+}
+
+.console-input-row {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.console-prompt {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  font-size: 14px;
+}
+
+.console-input {
+  flex: 1 1 auto;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.console-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.console-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-faint);
+}
+
 .verify-tag.is-dim {
   background: transparent;
   color: var(--text-faint);
@@ -1003,6 +1954,22 @@ html, body {
   padding: 0;
   background: var(--bg-inset);
   border-bottom: 1px solid var(--border);
+}
+
+/* The folder row's own checkbox, in the same column as the file checkboxes it
+   commands - which is the whole reason the heading cell is split rather than
+   spanning all five. The rule above sets padding to 0 so the toggle button can
+   fill the rest of the row; this cell needs its own back. */
+.folder-row td.col-check {
+  padding: 0;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.folder-row td.col-check input {
+  margin: 0;
+  vertical-align: middle;
+  cursor: pointer;
 }
 
 .folder-toggle {
@@ -1193,10 +2160,38 @@ html, body {
   color: var(--accent-strong);
 }
 
+/* What an unset tri-state actually resolves to right now. Its own line under
+   the label, because it is a sentence rather than a word and the label column
+   is already narrow. Quieter than the label: it is context, not the name of
+   the thing being set. */
+.settings-field-note {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--font-sans, inherit);
+  font-size: 11.5px;
+  color: var(--text-dim, var(--text));
+  opacity: 0.85;
+}
+
+/* The unit a size is typed in. Beside the box rather than in the label,
+   because it belongs to the number being entered - an operator reading
+   "Max fetch file size ... 200 MB" should not have to look in two places to
+   know what the 200 means. */
+.settings-field-unit {
+  margin-left: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-dim, var(--text));
+  opacity: 0.8;
+}
+
 .settings-field-control {
   flex: 0 0 auto;
   width: 260px;
   max-width: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
 }
 
 .settings-field-control select,
@@ -1297,4 +2292,220 @@ html, body {
 
 .settings-password-form input[type="password"]:focus {
   border-color: var(--accent);
+}
+
+/* ------------------------------------------------------------------ */
+/* SERVED FOLDERS (#164 step 4)                                        */
+/*                                                                     */
+/* Sits at the top of the Paths & storage category. Built from the     */
+/* same tokens as every other control here, so it follows the theme    */
+/* toggle and both prefers-color-scheme states without its own rules.  */
+/* ------------------------------------------------------------------ */
+.served-folder-section {
+  padding-bottom: 22px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.served-folder-summary {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0 0 14px;
+  max-width: 68ch;
+}
+
+.served-folder-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.served-folder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.served-folder-row input {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 8px 10px;
+  min-width: 0;          /* or a long path stretches the row past the panel */
+}
+
+.served-folder-row input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* The label is one word; the path is everything else. */
+.served-folder-row .served-folder-name { flex: 0 0 160px; }
+.served-folder-row .served-folder-path { flex: 1 1 auto; }
+
+.served-folder-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 8px 10px;
+}
+
+.served-folder-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.served-folder-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.served-folder-actions {
+  display: flex;
+  gap: 10px;
+  padding-top: 14px;
+}
+
+.served-folder-note {
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 14px 0 0;
+  max-width: 68ch;
+}
+
+.served-folder-note.is-ok    { color: var(--accent); }
+.served-folder-note.is-error { color: var(--danger); }
+
+@media (max-width: 720px) {
+  /* A path field 160px wide is unusable; stack instead. */
+  .served-folder-row { flex-wrap: wrap; }
+  .served-folder-row .served-folder-name { flex: 1 1 100%; }
+  .served-folder-row .served-folder-path { flex: 1 1 100%; }
+}
+
+/* The folder picker (#164 step 5). Same tokens as the rows above it. */
+.browse-panel {
+  border: 1px solid var(--border);
+  background: var(--bg-inset);
+  margin-top: 14px;
+  padding: 12px;
+}
+
+.browse-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 10px;
+}
+
+.browse-where {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow-wrap: anywhere;   /* a deep path must wrap, not widen the panel */
+}
+
+.browse-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.browse-entry {
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  cursor: pointer;
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 5px 6px;
+  text-align: left;
+  width: 100%;
+}
+
+.browse-entry:hover { background: var(--accent-dim); color: var(--accent); }
+.browse-entry:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.browse-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 10px 0 0;
+}
+
+.browse-actions { padding-top: 12px; }
+
+/* One tab per list the open bot publishes (#399) - hidden by
+   renderFilelistsTabs() whenever there is only one, so it never sits above
+   the table as an empty bar. */
+.filelists-list-tabs[hidden] {
+  display: none;
+}
+
+.filelists-list-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+/* Outlined in the accent colour even before anything is picked - asked for
+   after the first version shipped too small and too close to the sidebar's
+   own colours to read as a separate, clickable choice at a glance. */
+.filelists-list-tab {
+  background: var(--bg-inset);
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--accent);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 600;
+  padding: 9px 22px;
+}
+
+.filelists-list-tab:hover { background: var(--accent-dim); }
+
+/* Same pairing as .btn-accent - filled, not just outlined, so the one
+   currently open reads as pressed rather than merely highlighted. */
+.filelists-list-tab.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.filelists-list-search {
+  margin: 0 0 12px;
+}
+
+.filelists-list-search .search-input {
+  width: 100%;
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+/* The List Browser's staleness banner (#133).
+   --status-frozen rather than --danger, because this is not an error: the
+   list works, it is simply not what that bot is offering now. It is also
+   already #f2b84b in every theme block, which is the exact amber the design
+   mockup picked for this - so the palette had the colour, just not under a
+   name that reads like "warning". */
+.filelists-freshness {
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--status-frozen);
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 0 0 12px;
+  padding: 10px 12px;
 }

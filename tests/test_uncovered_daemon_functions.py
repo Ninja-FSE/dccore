@@ -15,6 +15,7 @@ one caller that would notice it disappearing. Several are richer than that
 because the function turned out to be interesting once looked at.
 """
 
+import contextlib
 import io
 import os
 import sys
@@ -29,6 +30,7 @@ import commands  # noqa: E402
 import defaults as config  # noqa: E402
 import irc  # noqa: E402
 import list as list_mod  # noqa: E402
+import runtime  # noqa: E402
 import update_list  # noqa: E402
 
 from tests.support import DCCoreTestCase, RecordingSocket  # noqa: E402
@@ -288,6 +290,19 @@ class ThePingCommand(DCCoreTestCase):
     """commands.handle_ping_request / handle_pong_response - a matched pair
     that communicate through three module-level names on config."""
 
+    def setUp(self):
+        super().setUp()
+        # #425: handle_ping_request() now reserves a slot from
+        # runtime.outbound_pacer before sending. It is a process-wide
+        # singleton the harness does not reset between tests (see
+        # tests/test_reconnect.py's identical fix for the same reason), so
+        # a reservation left behind by an unrelated earlier test could make
+        # this one block for up to the real MSG_DELAY (5.0s by default)
+        # instead of running instantly.
+        self._real_pacer = runtime.outbound_pacer
+        runtime.outbound_pacer = runtime.OutboundPacer()
+        self.addCleanup(setattr, runtime, "outbound_pacer", self._real_pacer)
+
     def test_the_probe_reaches_the_server_socket(self):
         sock = RecordingSocket()
 
@@ -433,7 +448,7 @@ class TheFirstRunWizardsEntryPoint(unittest.TestCase):
 
     tests/test_configure.py covers the pure functions the wizard pulls out for
     exactly that purpose, and stops there - so the function that decides the
-    ORDER those four run in, and the one that decides whether a freshly
+    ORDER the steps run in, and the one that decides whether a freshly
     configured install ends up with a list at all, were never entered.
 
     Order matters here: write_settings_conf has to land before the subprocess
@@ -444,6 +459,12 @@ class TheFirstRunWizardsEntryPoint(unittest.TestCase):
     def setUp(self):
         import configure
         self.setup = configure
+        # The stats-import offer reads from the terminal, so every test that
+        # drives main() has to insulate itself from it or block on stdin.
+        # Stubbed here rather than in each test: what it does is
+        # test_configure.py's subject, and what main() does with it is only
+        # that it is reached, which the first test below asserts off this.
+        self.import_offer = self.stub("offer_to_import_omenserve_stats")
 
     def stub(self, name, result=None):
         calls = []
@@ -457,7 +478,7 @@ class TheFirstRunWizardsEntryPoint(unittest.TestCase):
         self.addCleanup(setattr, self.setup, name, real)
         return calls
 
-    def test_main_runs_the_four_steps(self):
+    def test_main_runs_every_step(self):
         answers = self.stub("collect_answers", ({"NICKNAME": "Bot"}, "hash"))
         settings = self.stub("write_settings_conf")
         password = self.stub("write_admin_config_password")
@@ -469,9 +490,13 @@ class TheFirstRunWizardsEntryPoint(unittest.TestCase):
         self.assertEqual(len(settings), 1)
         self.assertEqual(len(password), 1)
         self.assertEqual(len(listing), 1)
+        # The OmenServe import, added after this test was written and the
+        # reason it is no longer "the four steps": an offer nothing reaches
+        # is not an offer.
+        self.assertEqual(len(self.import_offer), 1)
 
     def test_the_answers_reach_the_writers(self):
-        """A main() that called all four with nothing would satisfy the counts
+        """A main() that called them all with nothing would satisfy the counts
         above."""
         self.stub("collect_answers", ({"NICKNAME": "Bot"}, "the-hash"))
         settings = self.stub("write_settings_conf")
@@ -549,6 +574,193 @@ class TheFirstRunWizardsEntryPoint(unittest.TestCase):
         self.setup.offer_to_generate_master_list(True)
 
         self.assertTrue(asked, "the operator was never asked")
+
+
+class TheWebDependenciesAreOfferedOnFirstRun(unittest.TestCase):
+    """configure.py's offer_to_install_web_requirements() (#69): answering
+    "yes" to enabling the dashboard used to just print `pip install flask`
+    and leave it there, so the very first run of a freshly enabled
+    dashboard failed with an ImportError the operator had to go find
+    themselves. Now offers to run the install there and then.
+
+    Flask is genuinely installed in this test environment - webserver.py's
+    own tests need it - so "missing" is simulated with sys.modules['flask']
+    = None, the standard way to make the NEXT `import flask` raise
+    ImportError without touching whatever already-loaded modules elsewhere
+    in the suite hold onto from their own earlier `from flask import ...`.
+    Restored in tearDown either way, so no other test sees Flask as absent.
+    """
+
+    def setUp(self):
+        import configure
+        self.setup = configure
+        self._real_flask_entry = sys.modules.get("flask")
+        self._real_pip_entry = sys.modules.get("pip")
+        self._real_is_windows = configure.platform_compat.IS_WINDOWS
+        import builtins
+        self._real_input = builtins.input
+        import subprocess
+        self._real_run = subprocess.run
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        import builtins
+        import subprocess
+        if self._real_flask_entry is not None:
+            sys.modules["flask"] = self._real_flask_entry
+        else:
+            sys.modules.pop("flask", None)
+        if self._real_pip_entry is not None:
+            sys.modules["pip"] = self._real_pip_entry
+        else:
+            sys.modules.pop("pip", None)
+        self.setup.platform_compat.IS_WINDOWS = self._real_is_windows
+        builtins.input = self._real_input
+        subprocess.run = self._real_run
+
+    def make_flask_missing(self):
+        sys.modules["flask"] = None
+
+    def make_pip_missing(self):
+        sys.modules["pip"] = None
+
+    def fake_input(self, *answers):
+        import builtins
+        answer_iter = iter(answers)
+        builtins.input = lambda prompt="": next(answer_iter)
+
+    def record_subprocess(self, returncode=0):
+        import subprocess
+
+        class _Result:
+            pass
+
+        calls = []
+
+        def fake_run(*args, **kwargs):
+            calls.append(args)
+            result = _Result()
+            result.returncode = returncode
+            return result
+
+        subprocess.run = fake_run
+        return calls
+
+    def test_flask_already_installed_asks_nothing_and_installs_nothing(self):
+        """The common case, on every run after the first: no network
+        access, no prompt, for an operator who already has it."""
+        import builtins
+
+        def fail_if_asked(prompt=""):
+            raise AssertionError("must not prompt when Flask is already importable")
+
+        builtins.input = fail_if_asked
+        calls = self.record_subprocess()
+
+        self.setup.offer_to_install_web_requirements()
+
+        self.assertEqual(calls, [])
+
+    def test_flask_missing_and_the_operator_says_yes_installs_it(self):
+        self.make_flask_missing()
+        self.fake_input("y")
+        calls = self.record_subprocess()
+
+        self.setup.offer_to_install_web_requirements()
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0][0], sys.executable)
+        self.assertIn("requirements-web.txt", calls[0][0][-1])
+
+    def test_a_blank_answer_defaults_to_installing(self):
+        """[Y/n] - the operator just asked to enable the dashboard, so the
+        default has to be the thing that makes it work, not the thing that
+        leaves it broken."""
+        self.make_flask_missing()
+        self.fake_input("")
+        calls = self.record_subprocess()
+
+        self.setup.offer_to_install_web_requirements()
+
+        self.assertEqual(len(calls), 1)
+
+    def test_flask_missing_and_the_operator_declines_does_not_install(self):
+        self.make_flask_missing()
+        self.fake_input("n")
+        calls = self.record_subprocess()
+
+        self.setup.offer_to_install_web_requirements()
+
+        self.assertEqual(calls, [])
+
+    def test_a_failed_install_does_not_raise(self):
+        """Nothing here is fatal - a dashboard that cannot import Flask
+        already logs it and stays off; this must not make setup itself
+        crash on top of that."""
+        self.make_flask_missing()
+        self.fake_input("y")
+        self.record_subprocess(returncode=1)
+
+        self.setup.offer_to_install_web_requirements()  # must not raise
+
+    def test_pip_missing_asks_nothing_and_installs_nothing(self):
+        """Asking "Install it now?" when pip cannot possibly do it would be
+        asking about something already known to fail - checked and refused
+        before the prompt, not discovered by running a subprocess that was
+        never going to work."""
+        import builtins
+
+        def fail_if_asked(prompt=""):
+            raise AssertionError("must not prompt when pip is not importable")
+
+        self.make_flask_missing()
+        self.make_pip_missing()
+        builtins.input = fail_if_asked
+        calls = self.record_subprocess()
+
+        self.setup.offer_to_install_web_requirements()
+
+        self.assertEqual(calls, [])
+
+    def test_pip_missing_on_windows_points_at_windows_md(self):
+        import builtins
+
+        def fail_if_asked(prompt=""):
+            raise AssertionError("must not prompt when pip is not importable")
+
+        self.make_flask_missing()
+        self.make_pip_missing()
+        self.setup.platform_compat.IS_WINDOWS = True
+        builtins.input = fail_if_asked
+        buf = io.StringIO()
+
+        with contextlib.redirect_stdout(buf):
+            self.setup.offer_to_install_web_requirements()
+
+        self.assertIn("docs/WINDOWS.md", buf.getvalue())
+        self.assertNotIn("docs/INSTALL.md", buf.getvalue())
+
+    def test_pip_missing_elsewhere_points_at_install_md(self):
+        """Not Windows - the "tick the py launcher/pip boxes" fix in
+        WINDOWS.md does not apply, so this must not send a Linux operator
+        looking for a Windows installer checkbox that does not exist for
+        them."""
+        import builtins
+
+        def fail_if_asked(prompt=""):
+            raise AssertionError("must not prompt when pip is not importable")
+
+        self.make_flask_missing()
+        self.make_pip_missing()
+        self.setup.platform_compat.IS_WINDOWS = False
+        builtins.input = fail_if_asked
+        buf = io.StringIO()
+
+        with contextlib.redirect_stdout(buf):
+            self.setup.offer_to_install_web_requirements()
+
+        self.assertIn("docs/INSTALL.md", buf.getvalue())
+        self.assertNotIn("docs/WINDOWS.md", buf.getvalue())
 
 
 class TheRehashHandlerIsEntered(DCCoreTestCase):

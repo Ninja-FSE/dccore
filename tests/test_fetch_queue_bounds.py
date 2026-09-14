@@ -230,9 +230,17 @@ class TheDashboardOffersTheButton(unittest.TestCase):
     def test_a_pending_row_reaches_the_action_cell(self):
         """The button existing is not enough - the if/else chain that builds
         `action` had no pending branch, so it would have been built and then
-        dropped on the floor."""
+        dropped on the floor.
+
+        No fixed-length cap on the slice: an earlier version took the next
+        600 characters, and a later branch added to this same chain (a
+        completed row with nothing left to download) pushed the pending
+        branch this test checks for past that arbitrary window - a real
+        chain growing, not a chain breaking. `window` is already bounded to
+        renderDownloads()'s own body by render_downloads() above, so the
+        rest of it from `var action;` on is exactly what this needs."""
         window = self.render_downloads()
-        chain = window[window.index("var action;"):][:600]
+        chain = window[window.index("var action;"):]
 
         self.assertIn('state === "pending"', chain)
         self.assertIn("action = deleteBtn", chain)

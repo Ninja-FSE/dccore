@@ -76,6 +76,71 @@ RUNTIME_CONTAINERS = {
     "broadcast_search_results": list,
     "fetch_queue": dict,
     "fetched_bot_lists": dict,
+    # Added late, and the reason is worth keeping: this was the one container
+    # runtime.py exposes that nothing here reset. It cost nothing while only
+    # irc.py read it, and became three failures the day a dashboard view
+    # started reading it too - all of them passing alone and failing in the
+    # full run. test_runtime_state.py now derives the comparison rather than
+    # leaving the next one to be found the same way.
+    "known_bots": dict,
+    # Offers in flight. A leftover here is not inert: it is keyed by (nick,
+    # port), the DCC port range is small and reused, and a stale entry would
+    # hand the next test's send an offset agreed for a different file.
+    "dcc_send_offers": dict,
+    # Channels we have been kicked from, and how many rejoins have been
+    # refused. Left behind, a test that provokes a kick makes the next one
+    # think it is banned from a channel it never left - and the advert worker
+    # would try to rejoin it.
+    "kicked_channels": dict,
+    # Operator notices. A leftover here is a badge in the next test
+    # counting an event from the last one.
+    "notices": list,
+    "notice_state": dict,
+    # #376's alt-nick merge. A leftover departure or alias here is exactly
+    # the false positive the feature's own safeguards exist to avoid - a
+    # later, unrelated test's nick could match a timestamp this test left
+    # behind and get merged with it in the List Browser.
+    "recent_departures": dict,
+    "nick_aliases": dict,
+    # Same reasoning: a leftover is one test's message showing up in the next
+    # test's panel.
+    "private_messages": list,
+    "private_message_state": dict,
+    # And the burst window, or one test's flood ceiling is still half full
+    # when the next test asks whether a reply went out.
+    "private_message_decline_sends": list,
+}
+
+# SETTINGS A TEST MAY CHANGE AND MUST NOT LEAVE CHANGED.
+#
+# Distinct from RUNTIME_FLAGS below, which is live state. These are ordinary
+# config values with a module-level default - and the trouble with those is
+# that a test which sets one is usually testing something else entirely, so
+# nothing about it looks like state management.
+#
+# BROADCAST_SEARCH_CHANNEL is the one that proved it. tests/
+# test_config_overrides.py sets it while checking that settings.conf overrides
+# a module default - which is exactly what that file is for - and nothing put
+# it back. Every later test then saw a channel it never configured.
+#
+# What that cost: test_a_bot_nowhere_we_know_of_falls_back_to_the_first_channel
+# reads the fallback channel through the same value, so it failed with
+# "'PRIVMSG #one :' not found in 'PRIVMSG #dccore-test :...'" - naming a
+# channel from a test file it has nothing to do with, in a run where three
+# consecutive full suites had just passed. It was read as a flake twice before
+# it was read as a leak.
+SETTINGS_DEFAULTS = {
+    "BROADCAST_SEARCH_CHANNEL": None,
+    # A test that turns private messages off, or names an admin, must not
+    # leave either behind: the next test would be talking to strangers.
+    "PRIVATE_MESSAGES_ENABLED": True,
+    "PRIVATE_MESSAGE_DECLINE_TEXT": (
+        "This bot does not accept private messages. "
+        "Please message %admin instead."),
+    "PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS": 86400,
+    "PRIVATE_MESSAGE_DECLINE_BURST": 20,
+    "PRIVATE_MESSAGE_DECLINE_BURST_SECONDS": 600,
+    "ADMIN_NICK": None,
 }
 
 RUNTIME_FLAGS = {
@@ -86,6 +151,9 @@ RUNTIME_FLAGS = {
     "update_inprogress": False,
     "last_list_update_ok": None,
     "last_list_update_error": None,
+    # A leftover here is worse than a missing one: it would be shown against
+    # a rebuild it did not measure.
+    "last_list_update_seconds": None,
     "connection_epoch": 1,
     "broadcast_search_inprogress": False,
     "broadcast_search_deadline": 0,
@@ -93,6 +161,42 @@ RUNTIME_FLAGS = {
     "last_broadcast_search_at": 0,
     "fetch_feature_disabled": False,
 }
+
+
+# Where a write from a thread that outlived its test goes. One path for the
+# whole run, inside the system temp directory, and never created: the point is
+# that it is not data/, not that anything reads it.
+_ORPHANED_WRITE_DIR = os.path.join(
+    tempfile.gettempdir(), "dccore-orphaned-test-write")
+_ORPHANED_WRITE_SINK = os.path.join(_ORPHANED_WRITE_DIR, "fetch_history.json")
+
+# The queue file needs one of its own, and for a worse reason than the fetch
+# history did.
+#
+# dcc.py's dispatch runs on threads that outlive the test which started them -
+# tests/test_queue_progress_is_recorded.py and the #430 tests both start a real
+# start_dcc_send() - and every path out of it settles the queue row through
+# db.save_dcc_queue(). A thread still finishing after teardown restored the
+# REAL db.DCC_QUEUE_FILE therefore writes the operator's own
+# data/dcc_queue.txt. It was observed writing a two-byte file: an EMPTY queue,
+# i.e. every queued transfer on that install silently dropped by running the
+# test suite.
+#
+# Same treatment #415 gave the fetch history: a late write lands on a dead
+# path nobody reads, and the real one is never a target at any point.
+_ORPHANED_QUEUE_SINK = os.path.join(_ORPHANED_WRITE_DIR, "dcc_queue.txt")
+
+# The same outliving start_dcc_send() thread that settles the queue row
+# through db.save_dcc_queue() also settles the TRANSFER's own outcome, on
+# success, through two more writers on the identical path:
+# db.update_stats_on_complete() (dcc.py:2538) writes SPEED_RECORD_FILE, and
+# db.record_download() (dcc.py:2554) writes DOWNLOAD_COUNTS_FILE. Both were
+# still being restored to the real path in tearDown() below when the queue
+# file's hole was found and closed - which means a late tick from the exact
+# same thread could silently overwrite the operator's own speed record or
+# download-count history the same way it emptied the queue.
+_ORPHANED_SPEED_RECORD_SINK = os.path.join(_ORPHANED_WRITE_DIR, "speed_record.txt")
+_ORPHANED_DOWNLOAD_COUNTS_SINK = os.path.join(_ORPHANED_WRITE_DIR, "download_counts.json")
 
 
 def reset_config(**overrides):
@@ -119,8 +223,18 @@ def reset_config(**overrides):
         else:
             del canonical[:]
         setattr(config, name, canonical)
+    for name, value in SETTINGS_DEFAULTS.items():
+        setattr(config, name, value)
     for name, value in RUNTIME_FLAGS.items():
         setattr(config, name, value)
+
+    # A FRESH OUTBOUND CLOCK PER TEST. runtime.outbound_pacer is a
+    # process-wide singleton holding "the earliest moment the next line may
+    # leave", so a test that sends anything leaves the next test's first send
+    # blocked for up to MSG_DELAY - five seconds by default. That is leaked
+    # state like any other, and it costs real wall-clock on every suite run.
+    # test_a_shared_outbound_pace.py already did this by hand for itself.
+    runtime.outbound_pacer = runtime.OutboundPacer()
 
     config.debug_flood_lock = threading.Lock()
     config.fetch_queue_lock = threading.Lock()
@@ -220,7 +334,11 @@ def silence_debug(announce_module):
     """
     captured = []
 
-    def fake_send_debug(msg_text, category="INFO"):
+    # Signature kept in step with announce.send_debug() itself. A double
+    # that is narrower than the real thing turns "a caller started
+    # passing a new argument" into a TypeError inside unrelated tests,
+    # reported as whatever those tests were actually about.
+    def fake_send_debug(msg_text, category="INFO", notice=None):
         captured.append((category, msg_text))
 
     announce_module.send_debug = fake_send_debug
@@ -299,6 +417,14 @@ class CapturedDispatch:
 class TempTree:
     """A throwaway music library and lists directory.
 
+    NOTE THE CASE: `music` and `lists` are lowercase, and a test that wants a
+    directory of its own must CREATE it rather than assume a differently-cased
+    spelling resolves to one of these. On NTFS it does; on the ubuntu runner
+    it does not, so such a test passes on the developer's machine and fails
+    every CI run. That has happened once already - see
+    tests/test_audit_multilist_and_thaw.py's TheDownloadCounterKeepsARelativeKey.
+
+
     Uses real files because several of the behaviours under test are about the
     filesystem itself - path containment, atomic replacement, long names.
     """
@@ -335,6 +461,54 @@ class DCCoreTestCase(unittest.TestCase):
     def setUp(self):
         restore_daemon_functions()
         self.config = reset_config()
+
+        # THE LAST CLEANUP TO RUN, because it is registered first and unittest
+        # runs them LIFO. Every set_config() restore below is registered later
+        # and therefore runs earlier, putting the real paths back; this then
+        # takes them away again.
+        #
+        # Why it has to exist at all: db.py derives DCC_QUEUE_FILE,
+        # SPEED_RECORD_FILE and DOWNLOAD_COUNTS_FILE from config at IMPORT,
+        # and a !rehash reloads db - so a reload re-derives all three from
+        # whatever config says at that moment. dcc.py's start_dcc_send() also
+        # dispatches on threads that outlive the test that started them, and
+        # every exit path settles the queue row through db.save_dcc_queue() -
+        # while a SUCCESSFUL one additionally settles the transfer itself
+        # through db.update_stats_on_complete() and db.record_download().
+        # Put those together and a late thread, after a reload, writes the
+        # operator's own data/dcc_queue.txt, data/speed_record.txt or
+        # data/download_counts.json. The queue file was caught writing two
+        # bytes: an EMPTY queue, i.e. running the suite on a live install
+        # silently drops every transfer anybody had queued. The other two
+        # write from the identical thread and were found by inspection
+        # rather than by being caught outright - not yet observed corrupting
+        # anything is not the same claim as safe.
+        #
+        # #415 gave the fetch history the same treatment for the same reason.
+        self.addCleanup(self._park_thread_written_files_on_dead_paths)
+        # NO TEST MAY WRITE THE OPERATOR'S OWN settings.conf. Anything that
+        # reaches settings_file.save() - the /api/settings route most
+        # obviously - writes DEFAULT_PATH unless this variable says otherwise,
+        # and that file is gitignored, so the damage does not show up in
+        # `git status`: it shows up as unrelated tests failing later, on a
+        # different branch, for reasons that have nothing to do with them.
+        #
+        # That is not hypothetical. Two route tests posting to /api/settings
+        # left MAX_DCC_SLOTS and SERVER in the real file, and the next
+        # preflight failed on main with a JSON decode error in the import
+        # graph - because the subprocess it reads stdout from had started
+        # printing "[CONFIG] Wrote 1 setting(s)".
+        settings_home = tempfile.mkdtemp(prefix="dccore-settings-")
+        self.addCleanup(shutil.rmtree, settings_home, ignore_errors=True)
+        previous_settings_file = os.environ.get("DCCORE_SETTINGS_FILE")
+        os.environ["DCCORE_SETTINGS_FILE"] = os.path.join(
+            settings_home, "settings.conf")
+        self.addCleanup(
+            lambda: os.environ.__setitem__("DCCORE_SETTINGS_FILE",
+                                           previous_settings_file)
+            if previous_settings_file is not None
+            else os.environ.pop("DCCORE_SETTINGS_FILE", None))
+
         self.oserve = install_fake_oserve()
         self._trees = []
         # dcc_fetch.check_fetch_queue() persists finished fetches to disk on
@@ -350,15 +524,185 @@ class DCCoreTestCase(unittest.TestCase):
         self._fetch_history_dir = tempfile.mkdtemp(prefix="dccore-fetch-history-")
         self._real_fetch_history_file = db.FETCH_HISTORY_FILE
         db.FETCH_HISTORY_FILE = os.path.join(self._fetch_history_dir, "fetch_history.json")
+        # Fourth file, same rule. This one is easy to write by accident:
+        # announce.record_notice() persists on every call, and it is reached
+        # from send_debug(notice=...) - so any test exercising a kick, a
+        # rejoin or a failed rebuild writes it without mentioning notices at
+        # all, and the next run of the suite would start with the previous
+        # run's badge already showing.
+        self._real_notices_file = db.NOTICES_FILE
+        db.NOTICES_FILE = os.path.join(self._fetch_history_dir, "notices.json")
+        # Fifth file, same rule. Reached from the IRC read loop, so any test
+        # that feeds it a private message writes this without mentioning it.
+        self._real_pm_file = db.PRIVATE_MESSAGES_FILE
+        db.PRIVATE_MESSAGES_FILE = os.path.join(self._fetch_history_dir,
+                                                "private_messages.json")
         dcc_fetch._last_persisted_terminal_snapshot = {}
+        # Same reason, for the bot registry. oserve.start() loads it at boot,
+        # so every test that boots the daemon was reading whatever bots this
+        # machine's own bot has met - which made the suite's behaviour depend
+        # on live local data, passing on CI where the file does not exist and
+        # failing here. The registry is gitignored, so nobody saw it until a
+        # test asserted on the contents of that dict.
+        # Same rule as DCCORE_SETTINGS_FILE above: no test may write a real
+        # file under data/. This one holds an X login in plain text, so a test
+        # that wrote it would put a password in the developer's working
+        # directory - and data/ is gitignored, so it would not show up in
+        # `git status` any more than settings.conf did.
+        self.set_config(ON_CONNECT_FILE=os.path.join(self._fetch_history_dir,
+                                                     "on_connect.json"))
+
+        # Third file, same rule, and it got in the same way: a test called
+        # library.save_lists() and wrote data/lists.json for real. The paths
+        # in it were that test's temp directory, deleted the moment it ended -
+        # so every LATER test read a lists.json defining folders that no
+        # longer exist. It cost 147 failures and 27 errors in one preflight
+        # run, all of them in tests that never mentioned lists.
+        #
+        # data/ is gitignored, so `git status` was clean throughout. That is
+        # the third time this exact shape has bitten: settings.conf, then
+        # on_connect.json, now lists.json. The rule is the file, not the
+        # feature - anything a test can persist has to be redirected here.
+        self.set_config(LISTS_FILE=os.path.join(self._fetch_history_dir,
+                                                "lists.json"))
+        self.set_config(LIBRARY_FOLDERS_FILE=os.path.join(
+            self._fetch_history_dir, "library_folders.json"))
+
+        self._real_known_bots_file = db.KNOWN_BOTS_FILE
+        db.KNOWN_BOTS_FILE = os.path.join(self._fetch_history_dir,
+                                          "known_bots.json")
+
+        # Same shape, found the same way: the state guard caught it the first
+        # time a test drove a transfer all the way to completion, because
+        # db.record_download() is only reached on the success path and
+        # nothing had ever taken one. A module-level constant like the two
+        # above, so it is rebound here and restored in tearDown.
+        self._real_download_counts_file = db.DOWNLOAD_COUNTS_FILE
+        db.DOWNLOAD_COUNTS_FILE = os.path.join(self._fetch_history_dir,
+                                               "download_counts.json")
+
+        # And five more the new preflight state guard found the moment it
+        # existed: bans.txt, dcc_queue.txt, fetched_bot_lists.json,
+        # list_index.db and stats.txt were all being written for real by the
+        # suite. Nobody had noticed, because data/ is gitignored.
+        #
+        # It is worse than untidy. The daemon runs from its own directory on
+        # the production LXC, so running the suite there overwrote the live
+        # bot's queue, its ban list and its accumulated stats with test
+        # fixtures - the exact totals the OmenServe import exists to preserve.
+        #
+        # db.DCC_QUEUE_FILE and db.FETCHED_BOT_LISTS_FILE are module-level
+        # constants read at import, so they are rebound directly and restored
+        # in tearDown; the rest are config values and go through set_config().
+        # AND the config values behind them, not only the module constants.
+        # db.py derives each of these once at import - FETCH_HISTORY_FILE =
+        # getattr(config, "FETCH_HISTORY_FILE", "data/fetch_history.json") -
+        # and a !rehash reloads db, which re-runs that line. Any test that
+        # exercises a reload therefore threw the redirect away mid-run and
+        # every later write in that process went to the developer's real
+        # data/ directory. defaults.py does not define these names, so the
+        # fallback is the real path; setting them on config means the reload
+        # re-derives the temp one instead.
+        #
+        # Found by the preflight state guard, on a run where nothing else had
+        # changed - which is exactly the kind of intermittent leak it exists
+        # to make loud.
+        self.set_config(
+            FETCH_HISTORY_FILE=os.path.join(self._fetch_history_dir,
+                                            "fetch_history.json"),
+            SPEED_RECORD_FILE=os.path.join(self._fetch_history_dir,
+                                           "speed_record.txt"),
+            LIST_PROGRESS_FILE=os.path.join(self._fetch_history_dir,
+                                            "list_progress.json"),
+            KNOWN_BOTS_FILE=os.path.join(self._fetch_history_dir,
+                                         "known_bots.json"),
+            DCC_QUEUE_FILE=os.path.join(self._fetch_history_dir,
+                                        "dcc_queue.txt"),
+            FETCHED_BOT_LISTS_FILE=os.path.join(self._fetch_history_dir,
+                                                "fetched_bot_lists.json"))
+
+        # Ninth file, found the same way as the previous five: a new test
+        # wrote the real one and the leak showed up as a value bleeding
+        # between tests. db.SPEED_RECORD_FILE is the bot's all-time record -
+        # exactly the kind of accumulated number an operator cannot get back,
+        # and the sort the OmenServe import exists to carry across.
+        self._real_speed_record_file = db.SPEED_RECORD_FILE
+        db.SPEED_RECORD_FILE = os.path.join(self._fetch_history_dir,
+                                            "speed_record.txt")
+
+        self._real_dcc_queue_file = db.DCC_QUEUE_FILE
+        db.DCC_QUEUE_FILE = os.path.join(self._fetch_history_dir, "dcc_queue.txt")
+        self._real_fetched_bot_lists_file = db.FETCHED_BOT_LISTS_FILE
+        db.FETCHED_BOT_LISTS_FILE = os.path.join(self._fetch_history_dir,
+                                                 "fetched_bot_lists.json")
+        self.set_config(
+            BANS_FILE=os.path.join(self._fetch_history_dir, "bans.txt"),
+            STATS_FILE=os.path.join(self._fetch_history_dir, "stats.txt"),
+            LIST_INDEX_FILE=os.path.join(self._fetch_history_dir, "list_index.db"))
 
     def tearDown(self):
         restore_daemon_functions()
+        # The cross-list index caches ONE sqlite connection at module level and
+        # keeps it for the life of the process, which is right for the daemon
+        # and wrong for a test run: a test that opens one indirectly - through
+        # a fetch completing, or a dashboard route - leaves it open, pointing
+        # at a temp directory this teardown is about to delete. On Windows that
+        # is a locked file in a directory being removed, and the connection
+        # survives to interpreter shutdown, where it surfaces as a
+        # ResourceWarning with no test name attached to it.
+        import list_index
+        list_index.close()
+
         for tree in self._trees:
             tree.cleanup()
         import db
-        db.FETCH_HISTORY_FILE = self._real_fetch_history_file
+        # NOT RESTORED to the real path, deliberately. dcc_fetch's dispatcher
+        # persists the fetch history every 2s on a daemon thread that outlives
+        # the test that started it, so restoring the real path here opens a
+        # window: a tick landing between this line and the end of the run
+        # writes the operator's own data/fetch_history.json. That is what
+        # preflight's state-write guard kept catching - intermittently, because
+        # it needs a 2s tick to land inside a teardown, which is exactly the
+        # kind of failure that reads as a flake and is not one.
+        #
+        # Pointed at a dead temp path instead: a late tick then fails to write
+        # a file nobody reads, which costs nothing, while the real one is never
+        # a target at any point in the run.
+        db.FETCH_HISTORY_FILE = _ORPHANED_WRITE_SINK
+        db.NOTICES_FILE = self._real_notices_file
+        db.PRIVATE_MESSAGES_FILE = self._real_pm_file
+        db.KNOWN_BOTS_FILE = self._real_known_bots_file
+        # NOT self._real_download_counts_file / self._real_speed_record_file
+        # / self._real_dcc_queue_file - see the three _ORPHANED_*_SINK
+        # constants above. A start_dcc_send() thread still settling its
+        # queue row, its stats or its speed record after this line would
+        # otherwise write into the operator's own data/ files.
+        db.DOWNLOAD_COUNTS_FILE = _ORPHANED_DOWNLOAD_COUNTS_SINK
+        db.DCC_QUEUE_FILE = _ORPHANED_QUEUE_SINK
+        db.SPEED_RECORD_FILE = _ORPHANED_SPEED_RECORD_SINK
+        db.FETCHED_BOT_LISTS_FILE = self._real_fetched_bot_lists_file
         shutil.rmtree(self._fetch_history_dir, ignore_errors=True)
+
+    def _park_thread_written_files_on_dead_paths(self):
+        """Point every name a start_dcc_send() thread can still reach, after
+        this test has already finished, at a sink instead of the real file.
+
+        BOTH names per file: db.X is what the writer reads, and config.X is
+        what a db reload (a !rehash test causes one) re-derives it from.
+        Leaving either one on the real path leaves the hole open. All three
+        files are settled from the same outliving thread - the queue row
+        unconditionally, the other two only when the transfer succeeded -
+        so all three get the identical treatment.
+        """
+        import db as _db
+
+        for name, sink in (
+            ("DCC_QUEUE_FILE", _ORPHANED_QUEUE_SINK),
+            ("SPEED_RECORD_FILE", _ORPHANED_SPEED_RECORD_SINK),
+            ("DOWNLOAD_COUNTS_FILE", _ORPHANED_DOWNLOAD_COUNTS_SINK),
+        ):
+            setattr(_db, name, sink)
+            setattr(self.config, name, sink)
 
     def set_config(self, **overrides):
         """Set config attributes for the duration of one test, restoring

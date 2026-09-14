@@ -36,7 +36,7 @@ This project has now been bitten **four times**:
 | | |
 |---|---|
 | Issue #34 | `get_speed_record()` read a hardcoded path while `save_speed_record()` used the `SPEED_RECORD_FILE` constant. They agreed only because the daemon happened to start from the repo root. |
-| List side files | `dccore-size.txt` was a literal in both `list.py` and `update_list.py`, under its old `flac-serv-` name. `db.migrate_legacy_side_files()` carries the old files across at startup. |
+| List side files | `dccore.size.txt` was a literal in both `list.py` and `update_list.py`, under an older name taken from one operator's own server. Both the name and the startup migration that carried the old files across were removed before the public release. |
 | `!list` | Metered case-insensitively by the flood gate, dispatched case-sensitively — so `!LIST` was charged against your flood budget and then did nothing. |
 | Import checks | CI listed 11 modules, `preflight.py` listed 12, the project had 14. `adminchat.py` and `oserve.py` were in neither, so a check called *"every module imports cleanly"* had never looked at the admin console. |
 

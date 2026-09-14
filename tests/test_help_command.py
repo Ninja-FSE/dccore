@@ -69,12 +69,14 @@ class ItAnswersThePersonNotTheChannel(HelpCase):
         self.assertTrue(all(line.startswith("NOTICE someoneelse :")
                             for line in self.ask(user="someoneelse")))
 
-    def test_it_goes_out_on_the_vip_lane(self):
-        """Same lane as the other user commands: an answer to a direct
-        question should not queue behind a channel advert."""
+    def test_it_goes_out_on_the_standard_lane(self):
+        """#426: this used to go out on the VIP lane, but that lane is meant
+        for searches and adverts - a single user asking for help repeatedly
+        could inject enough VIP lines to starve everyone else's replies. Per-
+        user command replies now share the standard lane instead."""
         self.ask()
 
-        self.assertTrue(all(vip for _user, _message, vip in self.oserve.queued))
+        self.assertFalse(any(vip for _user, _message, vip in self.oserve.queued))
 
 
 class ItOnlySuggestsWhatTheBotWillDo(HelpCase):
@@ -161,8 +163,18 @@ class ItIsReachable(unittest.TestCase):
         beside -que and -remove. Left out, it would be the one user command
         somebody could repeat without limit."""
         source = self.source("irc.py")
-        block = source[source.index("is_bot_command = ("):]
-        block = block[:block.index(")\n")]
+        # Walked line by line to the gate's OWN closing paren, not sliced to
+        # the first ")\n" in the text. That slice broke the moment the gate
+        # called a helper: the first line became "is_list_request(msg,
+        # msg_lower)" and the block ended there, so this failed while the
+        # metering it checks was perfectly intact.
+        lines = source[source.index("is_bot_command = ("):].splitlines()
+        body = []
+        for raw in lines[1:]:
+            if raw.strip() == ")":
+                break
+            body.append(raw)
+        block = "\n".join(body)
 
         self.assertIn("-help", block)
         self.assertIn("-que", block, "the block being checked is the wrong one")

@@ -490,6 +490,19 @@ class RehashPreservesEveryRuntimeContainer(unittest.TestCase):
         "ADMIN_HOSTMASKS":
             "a setting read from admin_config.py, not runtime state - it is "
             "SUPPOSED to be re-read from the file on a rehash",
+        "LIST_IGNORED_EXTENSIONS":
+            "the same: a setting, not runtime state. Which file types to "
+            "skip is read from settings.conf, and re-reading it is the "
+            "whole reason an operator runs !rehash after editing it. "
+            "Preserving it would mean the edit did nothing until a restart",
+        "LIST_VIDEO_EXTENSIONS":
+            "the same again: which file types go in the film list rather "
+            "than the music one is a setting, re-read on a rehash",
+        "RAR_EXTENSIONS":
+            "and again: which file types make a folder packable with !rar. "
+            "An operator narrowing this after finding something packable "
+            "that should not be needs the change to take effect on the "
+            "rehash, not on the next restart",
         "vip_queue":
             "transient OUTPUT, not state. commands.py says so explicitly: "
             "restoring it would replay lines addressed to channels the "
@@ -557,6 +570,24 @@ class RehashPreservesEveryRuntimeContainer(unittest.TestCase):
                 if isinstance(target, ast.Name):
                     names.append(target.id)
         return names
+
+    def test_nothing_is_both_preserved_and_deliberately_excluded(self):
+        """The two lists are opposite claims, and the test below is satisfied
+        by EITHER - so a name in both passes it while the code does the
+        opposite of what its own reason says.
+
+        Found by mutation: adding LIST_IGNORED_EXTENSIONS to PRESERVE_RUNTIME,
+        while its NOT_PRESERVED entry says re-reading it is the whole point,
+        broke nothing. An operator's edited setting would then do nothing
+        until a full restart, with no error to explain it.
+        """
+        both = sorted(set(self.NOT_PRESERVED) & set(commands.PRESERVE_RUNTIME))
+
+        self.assertEqual(
+            both, [],
+            "these are listed as deliberately NOT preserved across a rehash "
+            "and are preserved anyway, so the reason written beside each one "
+            "is false: " + ", ".join(both))
 
     def test_every_runtime_container_is_preserved_or_explicitly_excluded(self):
         containers = self._config_containers()
@@ -824,23 +855,91 @@ class SubprocessFailureMessageTests(unittest.TestCase):
     half. update_list.py's own error handling prints via plain print() -
     stdout, not stderr - so a script-level failure used to leave stderr
     empty and the admin saw "Unknown script error" with no filename and no
-    reason at all, from the exact line this now replaces."""
+    reason at all, from the exact line this now replaces.
+
+    AND THEN IT REPORTED THE ONE LINE THAT NEVER EXPLAINS ANYTHING. "Take
+    the last line" was right when update_list.py's own summary was last. Its
+    __main__ now prints a generic banner after it, so the last line became
+    "--- ERROR: could not generate the list. ---" every time, with the reason
+    sitting in the output above it - captured, and thrown away.
+
+    The test below used to assert exactly that. It passed a Permission denied
+    and expected the trailing status line instead, which is the defect written
+    down as the expectation."""
 
     def test_stderr_wins_when_present(self):
         msg = commands.subprocess_failure_message(
             "Traceback...\nValueError: boom", "some stdout noise")
         self.assertEqual(msg, "ValueError: boom")
 
-    def test_falls_back_to_the_last_line_of_stdout_when_stderr_is_empty(self):
+    def test_the_reason_is_taken_from_stdout_not_the_status_line_after_it(self):
         """The exact gap this fixes: update_list.py's own error handler
-        prints its summary to stdout, not stderr."""
+        prints its summary to stdout, not stderr - and then keeps printing."""
         stdout = ("[LIST-GEN] Scanning the library in /music...\n"
                   "[LIST-GEN ERROR] Failed to generate the lists: "
                   "[Errno 13] Permission denied\n"
                   "[LIST-GEN] The previous list was left untouched and is still in use.")
+
         msg = commands.subprocess_failure_message("", stdout)
-        self.assertEqual(
-            msg, "[LIST-GEN] The previous list was left untouched and is still in use.")
+
+        self.assertEqual(msg, "[LIST-GEN ERROR] Failed to generate the lists: "
+                              "[Errno 13] Permission denied")
+
+    def test_the_final_banner_never_wins(self):
+        """What a live install actually saw. Every failed run ends with this
+        line, so taking the last one reported it every time."""
+        stdout = ("[LIST-GEN ERROR] 'Music' failed: [WinError 3] The system "
+                  "cannot find the path specified\n"
+                  "[LIST-GEN ERROR] These lists were not rebuilt and are still "
+                  "serving what they last built: 'Music'\n"
+                  "--- ERROR: could not generate the list. ---")
+
+        msg = commands.subprocess_failure_message("", stdout)
+
+        self.assertIn("WinError 3", msg)
+        self.assertNotIn("could not generate the list", msg)
+
+    def test_the_first_tagged_line_wins_because_the_rest_follow_from_it(self):
+        """"These lists were not rebuilt" is true and is a consequence. Only
+        the first names what broke."""
+        stdout = ("[LIST-GEN ERROR] 'Music' failed: disk full\n"
+                  "[LIST-GEN ERROR] These lists were not rebuilt\n")
+
+        self.assertEqual(commands.subprocess_failure_message("", stdout),
+                         "[LIST-GEN ERROR] 'Music' failed: disk full")
+
+    def test_a_critical_line_counts_as_a_reason(self):
+        """update_list.py refuses a missing library with [CRITICAL], so
+        that tag has to be recognised too.
+
+        Asserted with a line AFTER it, which is what makes the tag do any
+        work: on its own it is also the last line, so the untagged
+        fallback returns it either way and the test proves nothing. It
+        was written that way first and a mutation run said so."""
+        stdout = ("[CRITICAL] None of the configured music folders exist\n"
+                  "Check the mount and run it again.")
+
+        self.assertIn("None of the configured music folders exist",
+                      commands.subprocess_failure_message("", stdout))
+
+    def test_an_untagged_failure_still_reports_something_useful(self):
+        """A traceback carries no tag. The last line is still the best guess -
+        as long as the banner is not it."""
+        stdout = ("Traceback (most recent call last):\n"
+                  "  File \"update_list.py\", line 1\n"
+                  "MemoryError\n"
+                  "--- ERROR: could not generate the list. ---")
+
+        self.assertEqual(commands.subprocess_failure_message("", stdout),
+                         "MemoryError")
+
+    def test_a_banner_on_its_own_is_better_than_nothing(self):
+        """Guard against the filter emptying the list and returning nothing at
+        all, which would read as a run that produced no output."""
+        msg = commands.subprocess_failure_message(
+            "", "--- ERROR: could not generate the list. ---")
+
+        self.assertTrue(msg.strip())
 
     def test_no_stderr_and_no_stdout_says_so_rather_than_nothing(self):
         self.assertEqual(commands.subprocess_failure_message("", ""), "Unknown script error")
@@ -893,37 +992,91 @@ class ListUpdateTimeoutTests(DCCoreTestCase):
         time.sleep = lambda *_a, **_k: None
         self.addCleanup(setattr, time, "sleep", real_sleep)
 
-    def test_the_subprocess_is_given_the_configured_timeout_not_none(self):
-        import subprocess
-        seen_kwargs = {}
-        real_run = subprocess.run
+    def fake_runner(self, result=None, raises=None):
+        """Stand in for commands.run_watching_for_a_stall().
 
-        def fake_run(cmd, **kwargs):
-            seen_kwargs.update(kwargs)
-            import types
-            return types.SimpleNamespace(returncode=0, stdout="List of 1 Files\n", stderr="")
+        The seam moved here from subprocess.run(): the child is now watched
+        rather than timed, so "what timeout was subprocess given" is no longer
+        a question that has an answer. What the caller must still get right is
+        which limits it hands over and how it reports each ending.
+        """
+        import types
 
-        subprocess.run = fake_run
-        self.addCleanup(setattr, subprocess, "run", real_run)
+        seen = {}
+
+        def runner(argv, **kwargs):
+            seen.update(kwargs)
+            if raises is not None:
+                raise raises
+            return result or types.SimpleNamespace(
+                returncode=0, stdout="List of 1 Files\n", stderr="")
+
+        real = commands.run_watching_for_a_stall
+        commands.run_watching_for_a_stall = runner
+        self.addCleanup(setattr, commands, "run_watching_for_a_stall", real)
+        return seen
+
+    def test_the_runner_is_given_both_limits_from_config(self):
+        """Rewritten from test_the_subprocess_is_given_the_configured_timeout_
+        not_none, whose contract this change deliberately replaces.
+
+        A wall clock cannot tell a rebuild that is working from one that is
+        hung, and #162's fix - "the timeout must not be None" - made an 80 TB
+        library impossible to index at all, because any number an operator
+        guesses is either too small for their library or too large to be a
+        safety net. The child is watched instead, so what the caller must hand
+        over is the stall window, and the hard cap only if one is set.
+        """
+        self.set_config(LIST_UPDATE_TIMEOUT=0, LIST_UPDATE_STALL_SECONDS=900)
+        seen = self.fake_runner()
 
         commands.handle_list_update_request("admin", "#chan", authorised=True)
 
-        self.assertEqual(seen_kwargs.get("timeout"), config.LIST_UPDATE_TIMEOUT)
-        self.assertIsNotNone(seen_kwargs.get("timeout"),
-                             "a hung update_list.py must not be able to wedge "
-                             "search_inprogress/update_inprogress forever")
+        self.assertEqual(seen.get("stall"), 900)
+        self.assertEqual(seen.get("ceiling"), 0)
+
+    def test_an_operator_who_sets_a_hard_cap_still_gets_one(self):
+        """0 is the default, not the only value. Somebody who wants a rebuild
+        abandoned after two hours whatever it is doing can still say so."""
+        self.set_config(LIST_UPDATE_TIMEOUT=7200)
+        seen = self.fake_runner()
+
+        commands.handle_list_update_request("admin", "#chan", authorised=True)
+
+        self.assertEqual(seen.get("ceiling"), 7200)
+
+    def test_a_stall_is_reported_as_a_stall_not_as_a_timeout(self):
+        """Different endings, different causes. Going quiet points at the
+        library - a mount that went away mid-walk - while running past a cap
+        points at a limit the operator chose."""
+        self.fake_runner(raises=commands.ListUpdateStalled(1200))
+
+        commands.handle_list_update_request("admin", "#chan", authorised=True)
+
+        messages = [msg for _cat, msg in self.debug]
+        self.assertTrue(any("nothing reported for" in msg for msg in messages),
+                        messages)
+        self.assertFalse(config.last_list_update_ok)
+        self.assertIn("stalled", config.last_list_update_error)
+        self.assertFalse(config.search_inprogress)
+        self.assertFalse(config.update_inprogress)
+
+    def test_a_stall_says_how_long_the_silence_was(self):
+        """"No progress for a while" is not actionable. Twenty minutes of
+        silence on a library that normally reports twice a second is."""
+        self.fake_runner(raises=commands.ListUpdateStalled(1200))
+
+        commands.handle_list_update_request("admin", "#chan", authorised=True)
+
+        self.assertIn("20m 00s", " ".join(msg for _cat, msg in self.debug))
 
     def test_a_real_timeout_reports_the_configured_limit_not_a_stale_90(self):
         """The dead handler used to claim '90 seconds' unconditionally,
         regardless of what timeout was actually (not) applied."""
         import subprocess
 
-        def fake_run(cmd, **kwargs):
-            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
-
-        real_run = subprocess.run
-        subprocess.run = fake_run
-        self.addCleanup(setattr, subprocess, "run", real_run)
+        self.set_config(LIST_UPDATE_TIMEOUT=7200)
+        self.fake_runner(raises=subprocess.TimeoutExpired(["x"], 7200))
 
         commands.handle_list_update_request("admin", "#chan", authorised=True)
 
@@ -947,8 +1100,22 @@ class ListUpdateTimeoutTests(DCCoreTestCase):
         share was told nothing happened."""
         tree = self.make_tree()
         list_path = os.path.join(tree.lists, "DCCore-2026-09-02.txt")
-        with open(list_path, "w", encoding="utf-8") as handle:
-            handle.write("List of 100 Files\n")
+
+        def write_list(path, count):
+            """A list with real REQUEST ROWS, not a bare header line.
+
+            The count is taken by counting rows across every published list,
+            the same way the advert counts - so the two can never report
+            different totals for one library. A fixture writing only a header
+            is a file no generator produces, and it made this test turn on the
+            counting mechanism rather than on the behaviour it is about.
+            """
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("List of %d Files\n" % count)
+                for i in range(count):
+                    handle.write("!DCCore Track %d.flac  ::INFO:: 4.00MB\n" % i)
+
+        write_list(list_path, 100)
 
         def fake_run(cmd, **kwargs):
             import types
@@ -957,14 +1124,17 @@ class ListUpdateTimeoutTests(DCCoreTestCase):
             # started with - a partial mount failure that still found SOME
             # files is exactly the case generate_master_list()'s all-or-
             # nothing zero-file guard does not catch.
-            with open(list_path, "w", encoding="utf-8") as handle:
-                handle.write("List of 40 Files\n")
+            write_list(list_path, 40)
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
         import subprocess
-        real_run = subprocess.run
-        subprocess.run = fake_run
-        self.addCleanup(setattr, subprocess, "run", real_run)
+        # The seam is run_watching_for_a_stall() now, not subprocess.run:
+        # the child is watched rather than timed, so it is started with
+        # Popen and nothing patches subprocess.run any more.
+        real_runner = commands.run_watching_for_a_stall
+        commands.run_watching_for_a_stall = fake_run
+        self.addCleanup(setattr, commands, "run_watching_for_a_stall",
+                        real_runner)
 
         commands.handle_list_update_request("admin", "#chan", authorised=True)
 

@@ -14,13 +14,30 @@
 # now, and are bound below in section 8. See that module's docstring for why:
 # !rehash reloads THIS file, which reset every one of them.
 import os
+import re
 import runtime
 
 # ---------------------------------------------------------------------
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False
-SCRIPT_VERSION: str = "DCCore v1.10.0"
+SCRIPT_VERSION: str = "DCCore v1.12.0"
+
+# Where this bot came from. Defined once because two things say it: the CTCP
+# VERSION reply, and the header of every generated list. Before this there was
+# no project URL anywhere in the tree, so anyone who received a list had no way
+# to find out what produced it.
+PROJECT_URL: str = "https://github.com/Ninja-FSE/dccore"
+
+# Answer CTCP VERSION with SCRIPT_VERSION and PROJECT_URL. Operators who would
+# rather not advertise a version can turn this off; the bot then ignores the
+# query exactly as it did before, rather than answering with something evasive.
+#
+# The reply is a NOTICE, never a PRIVMSG. That is the CTCP rule, and the reason
+# is practical: two bots that both answer CTCP with a privmsg answer each other
+# forever. It is also why nothing here lands in a channel - the reply goes
+# straight back to whoever asked, and no one else sees it.
+CTCP_VERSION_REPLY: bool = True
 # Names every generated list file ("<LIST_BASE_NAME>-<date>.txt" and its
 # .zip/.rar counterparts). Automatically takes NICKNAME's own value once
 # NICKNAME is set, unless this is given an explicit value of its own first -
@@ -110,6 +127,123 @@ LOCAL_LIST_DIR: str   = "./lists"
 # serve at all.
 LIST_FORMAT: str      = "zip"      # "txt", "zip" or "rar"
 
+# EVERY file under FILE_DIRECTORY goes into the list, except the extensions
+# named here. Comma-separated, with or without the leading dot, matched
+# case-insensitively - ".DB", "db" and ".db" are the same thing. Blank means
+# nothing is skipped.
+#
+# The walk used to ask `endswith(('.mp3', '.flac'))`, which meant a library of
+# anything else - video, .m4a, .ogg - scanned to nothing and published an
+# empty list while reporting success. Naming what to KEEP could never be
+# right: the set of things people serve is open-ended, and every format left
+# out is silently invisible. Naming what to SKIP is a short, closed list, and
+# the failure mode of getting it wrong is a file listed that need not have
+# been, rather than a library that does not appear.
+#
+# OmenServe has the same shape (`Exclude = .mpu,.db`), so this is also the
+# form operators coming from it already know.
+#
+# The default is only what is never a served file: Windows and browser
+# droppings, and the partial-download suffixes. Covers, .nfo, .cue and
+# playlists are NOT skipped - people do serve them, and an operator who does
+# not want them can say so here. Add to this rather than expecting the
+# shipped list to guess.
+#
+# WORTH KNOWING: "every file" means exactly that. Anything sitting under
+# FILE_DIRECTORY is offered to anyone who asks - a stray backup, a document,
+# a private note dropped in the tree by accident. That directory is the
+# public face of the bot; keep out of it whatever should not leave.
+#
+# A note before relying on the list from a script: every row is written
+# "!<nick> <filename>  ::INFO:: <size>". This project's own parser (list.py)
+# splits on the ::INFO:: marker regardless of extension, as do the OmenServe
+# bots the convention came from.
+#
+# AutoQ, the queue script most of these channels use, never looks at that
+# marker: for a file row it keeps only up to the end of the file extension
+# and discards the rest, so the size never reaches the request. What decides
+# whether it queues a row at all is mIRC's own accept list, which AutoQ seeds
+# with *.mp3 and *.rar - a row in any other format is dropped without a word.
+# See docs/INSTALL.md for what that means when choosing what to serve, and
+# update_list.py's note at the row write for the script's own code.
+LIST_IGNORED_EXTENSIONS: list = [
+    ".db", ".ini", ".lnk", ".url",          # Windows and shell droppings
+    ".tmp", ".part", ".crdownload", ".!ut",  # downloads still in flight
+]
+
+# Publish film and series as a SEPARATE list from the music, instead of one
+# list carrying both.
+#
+# Off is a real answer, not a fallback. There are two ways to end up with a
+# music list and a film list, and they suit different libraries:
+#
+#   - This switch, when audio and video are mixed together in the same
+#     folders and only the file itself says which is which.
+#   - Several lists, each over its own set of folders, when the library is
+#     already sorted that way on disk. That is the roadmap's multi-list
+#     feature, and for an operator who keeps films and music apart it is the
+#     better route - the folders already carry the answer, and the lists then
+#     differ in more than content type.
+#
+# Turning this off gives the single combined list again.
+SEPARATE_VIDEO_LIST: bool = True
+
+# WHICH LIST a file goes into, when SEPARATE_VIDEO_LIST is on. One scan
+# publishes two: the music list, and a separate one for film and series.
+# Same comma-separated form as the setting above - dots optional, spacing
+# free, case ignored.
+#
+# They travel together. "@<botnick>" already hands out ONE archive containing
+# several text files (the master list and the !rar album list), so the video
+# list is a third member of the same download: no new trigger, nothing for
+# anyone to learn.
+#
+# The split exists because a list carrying tracks and episodes mixed together
+# is one a person or a script has to sort out afterwards. It follows the
+# pattern already here rather than inventing one - the !rar album list has
+# been a separate file built from the same walk since long before this.
+#
+# Anything that is NOT one of these goes into the music list, including a
+# file with no extension at all. That is the rule for artwork, cue sheets and
+# notes, which sit beside the tracks they belong to; a film's subtitles land
+# there too, which is the one rough edge of deciding per file rather than per
+# folder. Per file is deliberate: a folder holding both an album and a video
+# should not have to pick.
+#
+# The video list is only published when there is video to put in it, so a
+# music-only library never gains an empty file it has no use for.
+LIST_VIDEO_EXTENSIONS: list = [
+    ".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".mpg", ".mpeg",
+    ".flv", ".webm", ".ts", ".m2ts", ".vob", ".divx", ".ogv", ".3gp",
+]
+
+# WHICH FOLDERS may be packed on demand with "!rar <folder>".
+#
+# A folder earns a !rar row only if it holds one of these. Everything else is
+# still listed and still directly requestable by name - this decides packing,
+# nothing else.
+#
+# It is a set of its own, and not simply "whatever is in the list", because
+# for a while it WAS that: a folder became packable if it held any file the
+# scan indexed. While the scan only took .mp3 and .flac that read as "album
+# folders", and it was fine. The moment the scan took everything, every
+# folder in the library became packable - including one holding a single
+# text file, and including a season of a series that is tens of gigabytes.
+#
+# There is no size cap anywhere on packing (see the roadmap), so an
+# unbounded amount of CPU, disk and one transfer slot sat behind a line
+# anybody in the channel could paste. RAR_ENABLED was the only defence and
+# it is all-or-nothing: an operator who wanted albums packable had to accept
+# films packable too.
+#
+# An album is a genuine multi-file collection - tracks, a cover, a cue sheet
+# - which is what makes packing it useful. A film is one large file that can
+# simply be requested by name.
+RAR_EXTENSIONS: list = [
+    ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".wav", ".aac", ".wma",
+    ".ape", ".wv", ".alac", ".aiff", ".aif",
+]
+
 # Where files fetched FROM other bots (dcc_fetch.py) land. Deliberately
 # separate from FILE_DIRECTORY: that directory is the served library, scanned
 # by update_list.py and offered to everyone via @find/!<nick> - fetched files
@@ -122,11 +256,61 @@ BANS_FILE: str      = "./data/bans.txt"
 STATS_FILE: str     = "./data/stats.txt"
 HARD_BANS_FILE: str = "./data/hard_bans.txt"
 
+# The ordered set of folders served, once there is more than one of them
+# (#164). JSON rather than a settings.conf list for the reason KNOWN_BOTS_FILE
+# gives - the record has more than one field - and because settings_file.py
+# refuses a list entry containing a comma, which music paths routinely have
+# ("D:\Rock, Metal").
+#
+# An OVERRIDE, not a replacement: with no file here, library.folders() returns
+# one folder built from FILE_DIRECTORY, which is every install today. So an
+# upgrade migrates nothing, and this file appears the first time an operator
+# saves a folder set from the dashboard.
+LIBRARY_FOLDERS_FILE: str = "./data/library_folders.json"
+# Where the served LISTS are defined (#26). Absent on every install today,
+# which resolves to one implicit list over LIBRARY_FOLDERS_FILE/FILE_DIRECTORY
+# - so nothing changes until an operator defines more than one.
+LISTS_FILE: str = "./data/lists.json"
+# Commands sent to the server once registered and BEFORE joining - X
+# login, usermodes, whatever the network wants. See on_connect.py for why
+# the ordering matters and why the file is never logged.
+ON_CONNECT_FILE: str = "./data/on_connect.json"
+
+# The operator's own banner, printed at the top of every generated list above
+# the bot's identity line. Free-form: several lines, ASCII art, a channel name,
+# whatever should greet whoever opens the file. Missing or empty means no
+# banner, which is the normal state for most installs.
+#
+# A file rather than a settings.conf value because multi-line ASCII art does
+# not survive "key = value", and editing it there would be miserable.
+LIST_HEADER_FILE: str = "./data/list_header.txt"
+
+# Ceiling on the above. Someone will eventually point LIST_HEADER_FILE at the
+# wrong file, and without a cap that staples an arbitrary number of megabytes
+# onto every list request. Past this the banner is truncated and the run says
+# so, rather than shipping it silently.
+LIST_HEADER_MAX_BYTES: int = 8192
+
 # Other bots seen advertising in our channels, and what each last published
 # about its own list. JSON rather than the column format the files above use:
 # the record has several fields and will grow, and stats.txt's fixed seven
 # columns is exactly the shape that turns "add a field" into a migration.
 KNOWN_BOTS_FILE: str = "./data/known_bots.json"
+
+# The cross-list search index: every fetched bot list in one SQLite database,
+# so the List Browser's filter can search all of them at once.
+#
+# SQLite rather than JSON because this one is not tens of rows - ten held
+# lists is millions - and re-reading the list FILES to search them is out of
+# reach rather than merely slow: #133 measured that at two to eleven seconds
+# per keystroke. sqlite3 is stdlib, so the no-third-party-packages property
+# holds. See list_index.py for why it is FTS5 specifically.
+#
+# EXPECT IT TO BE LARGE. Roughly the size of the lists again - four million
+# rows measured at 452MB. Built as each list is fetched, and safe to delete:
+# the filter stops working until the next fetch rebuilds it, and nothing else
+# reads it.
+LIST_INDEX_FILE: str = "./data/list_index.db"
 
 # One row per thing this bot has ever sent, {relative path or archive name ->
 # {name, kind, count}}. Feeds the Stats page's "Most downloaded" table. Not
@@ -153,6 +337,96 @@ FETCHED_BOT_LISTS_FILE: str = "./data/fetched_bot_lists.json"
 # deliberately never written here, since none of those can mean anything
 # once the process that was driving them is gone.
 FETCH_HISTORY_FILE: str = "./data/fetch_history.json"
+
+# Where the operator-facing notices live - the kicks, the give-ups, the
+# rebuilds that failed. Persisted because the events worth telling somebody
+# about are the ones that happen while nobody is looking.
+NOTICES_FILE: str = "./data/notices.json"
+
+# Where unanswered private messages are kept. Persisted for the same reason
+# the notices are: the ones worth telling somebody about arrive while nobody
+# is looking.
+PRIVATE_MESSAGES_FILE: str = "./data/private_messages.json"
+
+# How long one sender is ignored for after their message has been recorded.
+#
+# The rate limiter upstream already stops a flood reaching the bot at all;
+# this is about the RECORD rather than the traffic. Somebody typing four
+# lines because the first got no answer is one person trying to ask
+# something, and four rows of it buries the next person who tries.
+PRIVATE_MESSAGE_COOLDOWN_SECONDS: int = 300
+
+# WHETHER THE BOT KEEPS PRIVATE MESSAGES AT ALL.
+#
+# True: an unrecognised private message is recorded and the Messages page
+# shows it. The bot still says nothing back - see
+# announce.record_private_message() for why silence is the behaviour.
+#
+# False: nothing is recorded, nothing is stored, the page and its nav item
+# disappear (its API answers 404, which is how the Console's own off-switch
+# already works), and the sender is told once where to go instead. Those are
+# two different contracts with the person messaging, not one feature with its
+# panel hidden - and the second one is the only mode that tells them anything.
+#
+# The default is the silent one. A bot that starts answering strangers
+# because somebody upgraded it is a surprise nobody asked for.
+PRIVATE_MESSAGES_ENABLED: bool = True
+
+# What that one reply says.
+#
+# "%admin" becomes ADMIN_NICK, or "the bot's owner" when no admin nick is
+# configured - grammatical in the same sentence, and it never puts a literal
+# "None" on the wire in front of a stranger.
+#
+# BLANK TURNS THE REPLY OFF while leaving the feature off too: no record, no
+# page, and no line on the wire either. That is a real third position and an
+# operator who wants the bot completely silent should be able to say so
+# without editing code.
+PRIVATE_MESSAGE_DECLINE_TEXT: str = (
+    "This bot does not accept private messages. Please message %admin instead.")
+
+# One reply per sender per day. Long on purpose: the reply exists so somebody
+# learns where to go, and telling the same person twice teaches them nothing
+# while costing another line on the wire.
+PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS: int = 86400
+
+# A ceiling across EVERY sender, which the per-sender interval above cannot
+# provide on its own: two hundred nicks messaging within a minute are two
+# hundred first messages, each one individually owed a reply. That would sit
+# in the send queue for minutes and delay the transfer notices people are
+# actually waiting on.
+#
+# A mass private-message flood is exactly when a bot should say less rather
+# than more, so past this the replies are dropped silently until the window
+# moves on. Nobody is owed an explanation of why they did not get one.
+PRIVATE_MESSAGE_DECLINE_BURST: int = 20
+PRIVATE_MESSAGE_DECLINE_BURST_SECONDS: int = 600
+# How many times to try rejoining a channel that has thrown us out, before
+# giving up on it.
+#
+# The retry rides on the advert timer rather than a clock of its own. That is
+# the moment the bot was about to speak there anyway, and it is slow enough
+# not to read as a fight with whoever kicked us - an instant rejoin is how a
+# kick becomes a ban.
+#
+# Giving up matters more than retrying. A channel that answers "you are
+# banned" will answer that way for as long as the ban stands, and a bot that
+# keeps asking is a bot that earns a longer one. After this many refusals
+# DCCore stops trying that channel and says so, rather than asking forever.
+#
+# 0 never rejoins at all.
+REJOIN_ATTEMPTS: int = 3
+
+
+# Announce a finished transfer in the channel it was requested from.
+#
+# This is the ONLY public message a transfer produces. The queue position, the
+# "Sending" notice and the DCC offer itself are private to whoever asked, so
+# turning this off does not make a request go unanswered - it only stops the
+# channel being told afterwards.
+#
+# Your own debug line still records every send either way.
+ANNOUNCE_TRANSFERS: bool = True
 
 # ---------------------------------------------------------------------
 # 4. CHANNEL ADVERTISING (THE ADVERT CLOCK)
@@ -241,14 +515,14 @@ DEBUG_TO_CONSOLE: bool = True
 # update_list.py: that split literal is the same shape as issue #34, where the
 # reader and the writer of speed_record.txt agreed only by coincidence.
 #
-# The "flac-serv" prefix these carried was one operator's server name, and it
-# was kept because renaming alone would orphan the stats on every existing
-# deployment until the next successful !update - the advert would publish "0B"
-# and @<nick>-que would report no size in the meantime.
+# These were once named after an operator's own server rather than after the
+# program. A startup migration carried the old files across so that renaming
+# would not orphan the published stats until the next successful !update - the
+# advert would otherwise publish "0B" and @<nick>-que report no size.
 #
-# So it is not a rename. db.migrate_legacy_side_files() moves the old files to
-# these names at startup, and only when the setting is still at the default
-# below, so an operator who chose their own name is left alone.
+# Both the migration and the old name were removed before the public release:
+# the name was an identifier, and the only installs that could still have held
+# those files had run the migration long before.
 # A DOT and not a dash, which is not cosmetic: find_latest_list() globs
 # LIST_BASE_NAME + "-*.txt", and on a case-insensitive filesystem
 # "dccore-size.txt" matches "DCCore-*.txt" and sorts AFTER the dated list - so
@@ -257,6 +531,54 @@ DEBUG_TO_CONSOLE: bool = True
 LIST_SIZE_FILE: str     = "dccore.size.txt"
 LIST_RAWBYTES_FILE: str = "dccore.rawbytes.txt"
 
+# Where a running rebuild reports what it is doing, for the dashboard to read.
+#
+# A FILE, because update_list.py runs as a SUBPROCESS (see
+# commands.handle_list_update_request) - it has no shared memory with the
+# daemon that started it, so there is nowhere else for it to say "folder 2 of
+# 5, 41,000 files so far". The alternative was parsing the child's stdout,
+# which makes prose meant for an operator into a wire format.
+#
+# Under data/ rather than beside the lists: it is transient state about a run,
+# not an artifact anybody serves, and a stale one from a killed process must
+# never be mistaken for part of a published list.
+LIST_PROGRESS_FILE: str = "./data/list_progress.json"
+
+# How many bytes are read and written per pass of a DCC send, in bytes.
+#
+# mIRC calls this the packet size and defaults it to 4 KB, which is why raising
+# it there is so noticeable. DCCore has always used 64 KB - sixteen times that
+# - and does not wait for the receiver to acknowledge each block before sending
+# the next, which is the other half of what mIRC's "fast send" does. So the
+# thing operators come here looking for is already on; this only exposes the
+# number.
+#
+# RAISING IT FURTHER USUALLY CHANGES NOTHING, and it is worth saying so rather
+# than implying a free win. Past a few tens of kilobytes the limit is TCP's own
+# window and the link, not how much this loop hands the kernel at a time - the
+# bytes are already in flight while the next read happens. Where it can help is
+# a very fast, very high-latency link; where it can hurt is memory, since each
+# concurrent transfer holds one buffer of this size.
+#
+# Clamped to 4 KB - 1 MB when read (see dcc.dcc_block_size), because a value
+# of 0 would busy-loop and a value of 500 MB would hold half a gigabyte per
+# transfer for no gain.
+DCC_BLOCK_SIZE: int = 65536      # 64 KB - one of 4096/8192/16384/32768/65536/131072
+
+# The socket send buffer for a DCC transfer, in bytes. 0 leaves it to the OS.
+#
+# THIS IS THE ONE THAT MATTERS ON A FAST, DISTANT LINK, and it is not the
+# packet size above. What bounds throughput on TCP is the bandwidth-delay
+# product: bytes in flight = bandwidth x round-trip time. At 100 Mbps and
+# 100 ms RTT that is about 1.25 MB, and a 64 KB send buffer caps the transfer
+# at roughly 5 Mbps no matter how big each write is - the writer simply waits
+# for the far end to acknowledge before it can put more on the wire.
+#
+# LEFT AT 0 BY DEFAULT, deliberately. Both Windows and Linux auto-tune this
+# buffer, and setting it explicitly TURNS THAT OFF - so a value chosen for one
+# link can be worse than the default on every other. It is here to be
+# experimented with on a link the operator knows, not to be set hopefully.
+DCC_SEND_BUFFER: int = 0         # 0 = per-platform default (4MB on Windows, OS auto-tuning on Linux)
 DCC_PORT_START: int = 55000
 DCC_PORT_END: int   = 55010
 
@@ -273,12 +595,63 @@ MAX_FETCH_SLOTS: int        = 3        # Max simultaneous in-flight/offered fetc
 # happened, not an archive; the row cap below is only a backstop for a burst of
 # activity inside the window. Pruning forgets the ROW, never the downloaded
 # file - that stays under FETCHED_FILES_DIR. 0 disables either rule.
+# Ask again, by itself, for a held list whose owner's advert says it has moved
+# on (#302). OFF by default: it spends other people's bandwidth and other
+# people's transfer slots, which is an operator's decision to make rather than
+# one to inherit.
+#
+# The ADVERT decides, not a timer - #286 already worked out what "moved on"
+# means. A timer alone would re-ask every bot for a list we already have.
+AUTO_REFETCH_LISTS: bool = False
+# How stale a held list may get before it is re-asked for, in hours. Not how
+# often the check runs (that is hourly); this is the floor on how often any one
+# bot is asked, so a bot rebuilding hourly is not re-fetched hourly.
+AUTO_REFETCH_INTERVAL_HOURS: int = 24
+# Most lists to ask for in one sweep. A bot back after a month offline has a
+# lot of stale lists, and asking for all of them at once is a burst of
+# outbound requests nobody asked for. The rest go next sweep, oldest first.
+AUTO_REFETCH_MAX_PER_RUN: int = 3
+# How long a rehash waits for transfers in flight to finish before reloading
+# anyway, in seconds (#310). A transfer can sit idle for as long as the far
+# end keeps its socket open, so this cannot be unbounded: a bot that cannot
+# be reconfigured while one stuck peer holds a socket is worse than one that
+# occasionally interrupts a transfer. 0 reloads immediately, as before.
+REHASH_TRANSFER_WAIT: int   = 120
 FETCH_HISTORY_DAYS: int     = 30       # Days a finished fetch stays in the history
 FETCH_HISTORY_MAX_ROWS: int = 500      # Hard cap on finished rows, whatever their age
 # Interacts with flood protection: a bot's DCC SEND offers are metered like any
 # other command, so this must stay well below MAX_REQUESTS (per REQUEST_WINDOW)
 # or a bot answering your own fetch requests can trip the flood gate and be muted.
-MAX_FETCH_FILE_SIZE: int    = 200 * 1024 * 1024   # 200 MB - reject the offer before we even connect
+# 0 DISABLES IT - #302 asked for these limits to go entirely, and switching
+# them off is the same outcome for the operator who wants that without
+# taking the choice from everyone else. Defensible here because a fetch is
+# SOLICITED: only an offer matching a row this operator created is ever
+# accepted, so it is their own request landing on their own disk.
+MAX_FETCH_FILE_SIZE: int    = 200 * 1024 * 1024   # 200 MB - reject the offer before we even connect; 0 = no limit
+# The largest EXTRACTED list text this bot will parse from a peer, in bytes.
+# Every "!" line in it becomes a retained row, so this bounds memory rather
+# than disk. It was a fixed 20 MB, set from this operator's own 4 MB list -
+# and three real lists in one channel arrived at 25-31 MB and were refused.
+# The right value depends on OTHER people's libraries, which is why it is a
+# setting now. 0 restores the default.
+MAX_LIST_TEXT_SIZE: int     = 128 * 1024 * 1024   # 128 MB - 4x the largest list actually seen
+
+# The largest folder !rar will pack, in bytes. 0 means no limit.
+#
+# NOTHING BOUNDED THIS BEFORE. A request packs whatever the folder holds, and
+# the only thing that ever stopped it was RAR_TIMEOUT - by which point the
+# archive is already on disk in TMP_ZIP_DIR, the pack slot has been held for
+# half an hour, and the requester has had no answer. The film list made it
+# reachable rather than theoretical: it publishes folder headings inside the
+# archive every user downloads, and a heading can be pasted straight back as a
+# request, so a folder deliberately kept out of the album list is nameable by
+# anyone in the channel.
+#
+# 10 GB is chosen to refuse the pathological case without refusing anything
+# real: a FLAC album is a few hundred megabytes and a large box set is a few
+# gigabytes, while the folders this exists for are tens or hundreds. An
+# operator who genuinely serves larger albums can raise it or set 0.
+MAX_RAR_FOLDER_SIZE: int = 10 * 1024 * 1024 * 1024   # 10 GB - refuse to pack more than this
 # A "list" request_type row (a fetched master-list zip, see list_fetch.py) is a
 # text index, never a real download - a whole 1.21TB/47,420-file library
 # compresses to a few MB. MAX_FETCH_FILE_SIZE's 200MB let a hostile "list" offer
@@ -287,7 +660,13 @@ MAX_FETCH_FILE_SIZE: int    = 200 * 1024 * 1024   # 200 MB - reject the offer be
 # anything) was already parsed - hundreds of MB of RAM and several seconds spent
 # on an archive that should have been refused at admission (#162 finding #10).
 # Enforced BEFORE connecting, same as MAX_FETCH_FILE_SIZE/MAX_FETCH_FOLDER_FILE_SIZE.
-MAX_FETCH_LIST_FILE_SIZE: int = 10 * 1024 * 1024  # 10 MB - generous over any real master-list zip
+#
+# 10MB was 'generous over any real master-list zip' on the same evidence
+# that put the text ceiling at 20MB: one 4MB list. Real lists in one
+# channel run to 31MB of text, and a zip of one is several MB - close
+# enough to this that the next library along lands on it. 64MB, and 0
+# disables it.
+MAX_FETCH_LIST_FILE_SIZE: int = 64 * 1024 * 1024  # 64 MB - the archive, not the text inside it; 0 = no limit
 FETCH_TRANSFER_TIMEOUT: int = 600      # Seconds - total wall-clock per transfer (against a slow "drip" that keeps resetting the idle timeout)
 FETCH_OFFER_TIMEOUT: int    = 60       # Seconds an "offered" row waits for a DCC SEND before it's marked failed
 
@@ -303,6 +682,20 @@ FETCH_OFFER_TIMEOUT: int    = 60       # Seconds an "offered" row waits for a DC
 # folder row waiting this long is lost on restart same as any other
 # offered/listening row - just for longer.
 FETCH_FOLDER_OFFER_TIMEOUT: int = 1800
+
+# ...AND HOW LONG TO WAIT FROM A BOT WITH NO SIGN OF PACKING ANYTHING.
+#
+# The long timeout above is for a bot that really is packing an album, which
+# takes real time on the other end. A bot that publishes no RAR list and
+# advertises none is not slow - it is not answering, and 1800 seconds of one
+# of MAX_FETCH_SLOTS is a heavy price for finding that out.
+#
+# Measured against one live registry: 2 of 51 known bots publish a RAR folder
+# list. The dashboard now only offers the button where a bot's own list says
+# it will pack that folder, so a request like this should be rare - this is
+# the net under the cases the list cannot cover: a request made through the
+# API, or a bot that has stopped packing since its list was fetched.
+FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED: int = 120
 # MAX_FETCH_FOLDER_FILE_SIZE: 2GB - separate, larger cap than
 # MAX_FETCH_FILE_SIZE for a whole packed album/discography archive.
 MAX_FETCH_FOLDER_FILE_SIZE: int = 2147483648
@@ -344,7 +737,36 @@ MUTE_TIME: int      = 30       # Mute in seconds on the first flood violation
 FLOOD_BAN_SECONDS: int = 3600  # Ban in seconds when someone floods while muted
 MAX_SEND_FAILS: int = 3        # Attempts per queued file before it is dropped (see dcc.release_queue_entry)
 RAR_TIMEOUT: int    = 1800     # Longest a rar packing run may take, in seconds, before it is abandoned
-LIST_UPDATE_TIMEOUT: int = 1800  # Longest a !update / update_list.py run may take, in seconds, before it is abandoned. A full NFS walk legitimately takes minutes, so this is shaped like RAR_TIMEOUT above, not a short fixed number.
+# A REBUILD THAT IS STILL WORKING IS NOT HUNG, and a wall clock cannot tell
+# the two apart. This used to be a flat 1800s, which is a bet that no library
+# takes longer than half an hour to walk - and an 80 TB library on a mapped
+# drive takes hours. Losing it at the thirty-minute mark costs the whole run
+# and leaves the old list in place, every time, with no setting an operator
+# could reasonably be expected to guess right.
+#
+# The child reports what it is doing to LIST_PROGRESS_FILE roughly twice a
+# second while scanning. So the question worth asking is not "how long has
+# this taken" but "when did it last do anything" - which is what
+# LIST_UPDATE_STALL_SECONDS below measures.
+#
+# 0 = no ceiling, and that is the default. The stall check is what protects
+# against a wedged mount now, and it does so in fifteen minutes rather than
+# thirty - strictly better than the old limit at both ends.
+LIST_UPDATE_TIMEOUT: int = 0  # Absolute cap on a !update run, in seconds. 0 = no cap; the stall check below is the real guard.
+
+# How long the rebuild may report NOTHING before it is treated as wedged.
+#
+# Generous on purpose. The scan writes on every directory it enters, but the
+# final phase - writing a several-hundred-megabyte list and packing it - is
+# one long step on a machine that has just walked 80 TB, and killing a rebuild
+# during the last thirty seconds of an eight-hour run would be the worst
+# possible outcome of a safety net.
+#
+# It only ever fires when the daemon can actually READ the progress file. A
+# rebuild that cannot report (a full disk, a read-only data/) is not evidence
+# of a rebuild that is stuck, so it is never killed for it - see
+# commands.handle_list_update_request().
+LIST_UPDATE_STALL_SECONDS: int = 900
 
 # ---------------------------------------------------------------------
 # 7. MIRC COLOUR CODES AND CONTROL CHARACTERS (IRC STANDARD)
@@ -422,6 +844,12 @@ user_requests     = runtime.user_requests      # Command timestamps per user, an
 muted_until       = runtime.muted_until        # Timers for temporarily muted users
 whois_status      = runtime.whois_status       # Online status via WHO reply (True = online)
 frozen_queues     = runtime.frozen_queues      # Saved timestamps for users in the freezer
+kicked_channels   = runtime.kicked_channels    # Channels we were thrown out of, and rejoin refusals
+notices           = runtime.notices             # Operator-facing events, newest last
+notice_state      = runtime.notice_state        # {"seen_id": highest acknowledged}
+private_messages  = runtime.private_messages   # PMs nobody answered, newest last
+private_message_state = runtime.private_message_state  # {"seen_id": .., "declined": ..}
+private_message_decline_sends = runtime.private_message_decline_sends  # burst window
 
 # The central queue structures
 dcc_queue         = runtime.dcc_queue          # The main sharing queue, {username: [files]}
@@ -491,6 +919,23 @@ fetched_bot_lists = runtime.fetched_bot_lists
 # Bound from runtime.py for the same reason as everything above it.
 known_bots = runtime.known_bots
 
+# DCC SEND offers that have gone out and not yet been picked up, keyed by
+# (nick, port). A receiver's DCC RESUME finds its offer here - see dcc.py's
+# DCC RESUME section. Bound from runtime.py for the same reason as everything
+# above it: a rehash re-executing this file must not strand a transfer that is
+# mid-handshake.
+dcc_send_offers = runtime.dcc_send_offers
+
+# Alt-nick reconnects (#376): a peer bot's own nick disappearing and an
+# ordinary collision variant of it (an added "_" or digit) joining shortly
+# after gets its List Browser sidebar row merged into one, display only - see
+# runtime.py's own comment above these two for what each holds and why
+# neither is ever allowed to touch fetched_bot_lists, known_bots, or a
+# download counter. Bound from runtime.py for the same reason as everything
+# above it.
+recent_departures = runtime.recent_departures
+nick_aliases = runtime.nick_aliases
+
 # ---------------------------------------------------------------------
 # WEB DASHBOARD (read-only status page, see webserver.py)
 # ---------------------------------------------------------------------
@@ -504,6 +949,81 @@ known_bots = runtime.known_bots
 # there. Install it yourself (`pip install flask`) to actually use the
 # dashboard.
 WEBUI_ENABLED: bool = False
+
+# The Console page - the admin console in a browser tab - is OFF unless this
+# says otherwise, separately from WEBUI_ENABLED above.
+#
+# The two ways to reach the admin command set are not equally protected:
+#
+#   DCC CHAT console   the operator's services host (ADMIN_HOSTMASKS) AND a
+#                      PBKDF2 password. Two factors.
+#   this dashboard     the same password, and nothing else. One factor, over
+#                      HTTP with no TLS (see WEBUI_HOST's own comment).
+#
+# So the Console makes ban, unban, clearqueue, rehash and update reachable
+# through the weaker door. That is a perfectly reasonable trade for an
+# operator who wants it - it is their LAN and their password - but it must be
+# a trade they CHOSE.
+#
+# Without this switch, turning the dashboard on for Search and Queue would
+# have started granting remote admin as a side effect, and an operator who
+# enabled it months ago would have gained a remote admin console on upgrade
+# with no setting changed and nothing recording that their exposure had
+# widened. WEBUI_ENABLED was deliberately made to fail closed (#116); this
+# keeps what saying yes to it grants from quietly growing.
+#
+# Same shape as ADMIN_CHANNEL_COMMANDS, which exists for the same reason: an
+# admin surface reachable from a weaker path gets its own switch and a written
+# reason for its default.
+# UNSET, not False. The default is now decided by EXPOSURE rather than being
+# a flat no - see webserver.console_is_enabled().
+#
+# The reasoning above is about the console being reachable through the weaker
+# door. When the dashboard is bound to loopback, there is no weaker door: the
+# only person who can reach it is somebody already sitting at the machine,
+# who can edit admin_config.py and read every served file anyway. Gating it
+# there protects nothing and costs the operator a setting they have to find.
+#
+# When WEBUI_HOST is anything else, the paragraph above applies in full and
+# the answer stays no until the operator says otherwise.
+#
+# An explicit True or False in settings.conf always wins, so nobody who has
+# already made this choice has it made again for them.
+WEBUI_CONSOLE_ENABLED: bool = None
+
+# Open the dashboard in the default browser when the daemon starts.
+#
+# Only ever when the dashboard is on AND bound to loopback: a browser on a
+# machine reachable from the LAN is as likely to be a headless box as a
+# desktop, and a daemon that tries to spawn one there is doing something
+# nobody asked for. Failure is ignored either way - a machine with no browser
+# is not a reason to stop the bot starting.
+WEBUI_OPEN_BROWSER: bool = True
+
+# The Settings page's folder picker (#164 step 5). Off, and its own switch
+# rather than riding along with WEBUI_CONSOLE_ENABLED, for the rule three
+# lines above: an admin surface reachable from a weaker path gets its own
+# switch and a written reason for its default.
+#
+# WHAT IT GRANTS. An authenticated dashboard session can list the names of
+# directories on the machine the daemon runs on - anywhere it can read, not
+# only under the served folders, because the whole point is to find a folder
+# that is not being served yet. Never files, never contents, never sizes.
+#
+# WHY THAT IS A NEW THING AND NOT A CONVENIENCE ON AN OLD ONE. Without it the
+# same session can already PROBE a path - saving a folder answers "not a
+# folder on this machine" - which tells you about one path you already
+# guessed. ENUMERATION is different in kind, and worth an explicit yes.
+#
+# WHY NOT GATED ON THE CONSOLE. The console is strictly the more dangerous of
+# the two: it runs ban, clearqueue, rehash and update. Gating the weaker
+# feature behind the stronger one would mean an operator who wants a folder
+# picker, and specifically does not want a web admin console, has to enable
+# the console to get it.
+#
+# The cost of leaving it off is typing a path instead of clicking one: the
+# folder rows on the Settings page work either way.
+WEBUI_FOLDER_BROWSER_ENABLED: bool = False
 
 # LOGIN REQUIRED, shared with the DCC CHAT admin console: every route,
 # including static assets, needs a session started by POSTing the password
@@ -551,6 +1071,22 @@ import settings_file
 SHIPPED_DEFAULTS = {name: globals()[name] for name in settings_file.REQUIRED
                     if name in globals()}
 
+# The same snapshot, for EVERY setting rather than only the REQUIRED three,
+# and taken at the same moment - before either override mechanism runs, so
+# these are the values this version of the code ships with rather than the
+# values this install happens to be running.
+#
+# settings_file._check_writable() needs it to answer one question: may this
+# setting be saved empty? A default of None means "unset unless you say
+# otherwise" and blank is how an operator says it again (RAR_BINARY back to
+# "look on PATH"). A non-empty shipped default means the daemon has no
+# behaviour for blank at all - SERVER = "" is a connect() to no host,
+# ALT_NICKNAME = "" is a NICK command with no nickname - and the CURRENT
+# value cannot answer that, because by the time a second save asks, the first
+# one has already blanked it.
+SHIPPED_VALUES = {name: value for name, value in list(globals().items())
+                  if settings_file.is_overridable(name, value)}
+
 def _migrate_local_config_to_admin_config(directory=None, log=print):
     """Carry an existing local_config.py across to admin_config.py's name.
 
@@ -565,7 +1101,7 @@ def _migrate_local_config_to_admin_config(directory=None, log=print):
     one of those settings is correctly filled in, one file over.
 
     Must run HERE, at module import time before `from admin_config import *`
-    below - not from oserve.startup() the way db.migrate_legacy_side_files()
+    below - not from oserve.startup() the way the side-file migration
     and update_list.migrate_list_base_name() are, both called well after that
     import has already happened. By the time startup() runs it is too late:
     the override this function exists to redirect would already have been
@@ -667,5 +1203,26 @@ if not BROADCAST_SEARCH_CHANNEL and CHANNEL:
 # one who never touched it at all. Narrow (it only misfires when the
 # explicit choice is the literal word "DCCore") and no worse than shipping
 # with no derivation at all, which is the alternative.
+# #427: NICKNAME is IRC-legal the moment it is a legal nick - RFC 2812's
+# specials are []\`_^{|} - but "|" is an ordinary nick character (Bot|Away is
+# one of the commonest shapes on the network) and both "|" and "\\" are
+# illegal in an NTFS path. Derived straight into LIST_BASE_NAME with no
+# sanitiser, either one made update_list.py's staging open() raise on every
+# scheduled rebuild, forever, on Windows - the identical run succeeds on
+# Linux because both are legal POSIX filenames. Same whitelist charset as
+# list_fetch._sanitize_bot_dir_name() applies to a fetched bot's nick for the
+# same reason (audit found that one first): what is legal in a nick and what
+# is legal in a path are different sets, and only one of them is ours to
+# choose. Not imported from there - list.py and list_fetch.py both `import
+# defaults as config`, and defaults.py loads first.
+_LIST_BASE_NAME_CHARSET_RE = re.compile(r'[^\w\-.\[\]{}^`]')
+
+
+def _sanitize_list_base_name(name):
+    cleaned = _LIST_BASE_NAME_CHARSET_RE.sub('_', str(name or ''))
+    cleaned = cleaned.strip().strip('.').strip()
+    return cleaned or "DCCore"
+
+
 if LIST_BASE_NAME == "DCCore" and NICKNAME:
-    LIST_BASE_NAME = NICKNAME
+    LIST_BASE_NAME = _sanitize_list_base_name(NICKNAME)

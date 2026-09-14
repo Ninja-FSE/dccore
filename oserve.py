@@ -123,19 +123,47 @@ def startup():
     # exist) still refuses to start - that is a real misconfiguration, not an
     # unmade choice, and is worth catching before anything tries to serve
     # from it.
-    if not config.FILE_DIRECTORY:
+    # ASKED OF THE LIBRARY, not of FILE_DIRECTORY. That setting is the
+    # fallback for an install with no folder list, and this check treated it as
+    # the only truth - so an operator who had configured folders (or, since
+    # #26, lists) and left it blank was told at every start that the daemon
+    # "cannot search or serve anything", which was simply untrue.
+    #
+    # Worse the other way round: a STALE FILE_DIRECTORY pointing at a drive
+    # that is no longer there made the daemon refuse to boot, while the folders
+    # it actually serves from sat there perfectly readable. A setting nothing
+    # reads any more was able to stop the bot starting.
+    import library
+
+    configured = library.folders()
+    if not configured:
         print("[WARNING] No music directory configured yet - the daemon will "
-              "connect, but cannot search or serve anything. Set FILE_DIRECTORY "
-              "from the web dashboard's Settings page, settings.conf, or "
+              "connect, but cannot search or serve anything. Set it from the "
+              "web dashboard's Settings page, settings.conf, or "
               "admin_config.py.")
-    elif not os.path.exists(config.FILE_DIRECTORY):
-        print(f"[CRITICAL] Missing directory: {config.FILE_DIRECTORY}")
+    elif not any(os.path.exists(folder.path) for folder in configured):
+        # EVERY one missing, not any one. A single unavailable folder is a
+        # scan-time condition the build already skips with a warning; only a
+        # library with nothing readable at all is a real misconfiguration, and
+        # that is what is worth refusing to start for. Same rule update_list's
+        # own entry point applies.
+        print("[CRITICAL] None of the configured music folders exist: "
+              + ", ".join(folder.path for folder in configured))
         sys.exit(1)
 
-    # Before anything reads the side files: carry them across from the old
-    # flac-serv-* names if this install predates the rename. A no-op on every
-    # run after the first, and on any install that never had them.
-    db.migrate_legacy_side_files()
+    # The side-file migration that used to run here was removed before the
+    # public release: it renamed two files whose old name was one operator's
+    # own, and every install that could have had them had already run it.
+    #
+    # Before anything serves: the counters are read
+    # by the dashboard and -stats, and both would show a half-migrated table.
+    db.migrate_download_counts_to_labels()
+    # And drop what the master list left in those counters before it stopped
+    # being counted - one row per rebuild, sitting at the top of a table meant
+    # for files. Runs every boot rather than once: it is a no-op the moment
+    # there is nothing to remove, and an operator restoring an old
+    # download_counts.json should not get the rows back for good.
+    db.prune_list_artifact_download_counts()
 
     # Before find_latest_list() below: defaults.py's LIST_BASE_NAME derivation
     # (an untouched value takes NICKNAME's own value once NICKNAME is set)
@@ -185,6 +213,20 @@ def startup():
     if config.fetched_bot_lists:
         print(f"[STARTUP] Fetched lists: {len(config.fetched_bot_lists)} bot(s) remembered.")
 
+        # And index any of them the search index has never seen. Only a fetch
+        # writes that index, while these lists survive restarts - so an
+        # operator upgrading with lists already held had a full map and an
+        # empty index, and the dashboard's filter stated positively that no
+        # list matched anything. Once per start, and only for what is
+        # missing; a library already indexed costs one query.
+        try:
+            import list_index
+            list_index.backfill_missing(config.fetched_bot_lists)
+        except Exception as err:
+            print(f"[STARTUP] Could not check the search index ({err}); the "
+                  f"dashboard's cross-list filter may be incomplete until the "
+                  f"next fetch.")
+
     # Finished cross-bot fetches (complete or failed), same restart-survival
     # reasoning as fetched_bot_lists just above: the actual files under
     # FETCHED_FILES_DIR were untouched by a restart, but the Downloads
@@ -192,6 +234,39 @@ def startup():
     # in-memory only until now, so a completed download and its Delete
     # button both silently vanished from the dashboard on every restart.
     config.fetch_queue.update(db.load_fetch_history())
+    # The notices survive a restart, which is the whole point of them: an
+    # event worth a badge is by definition one that happened while nobody was
+    # looking, and a kick at three in the morning that is gone by nine is a
+    # badge that never did its job.
+    #
+    # extend/update rather than assignment, like every other container loaded
+    # here - config.notices IS runtime.notices, and rebinding the name would
+    # leave the daemon writing into a list the dashboard cannot see.
+    try:
+        _notices, _notice_state = db.load_notices()
+        config.notices.extend(_notices)
+        config.notice_state.update(_notice_state)
+        if _notices:
+            print(f"[STARTUP] Notices: {len(_notices)} kept, "
+                  f"{announce.unread_notices()[0]} unread.")
+        _pms, _pm_state = db.load_private_messages()
+        config.private_messages.extend(_pms)
+        config.private_message_state.update(_pm_state)
+        if _pms and getattr(config, "PRIVATE_MESSAGES_ENABLED", True):
+            print(f"[STARTUP] Private messages: {len(_pms)} kept, "
+                  f"{announce.unread_private_messages()} unread.")
+        # Loaded either way - who has already been told is only useful across
+        # a restart - but said out loud only when it is about to matter.
+        if not getattr(config, "PRIVATE_MESSAGES_ENABLED", True):
+            if not str(getattr(config, "ADMIN_NICK", "") or "").strip():
+                print("[STARTUP] Private messages are off and ADMIN_NICK is "
+                      "not set, so anyone who messages this bot will be sent "
+                      "to \"the bot's owner\" by name. Set ADMIN_NICK to "
+                      "point them at you.")
+    except Exception as notices_err:
+        # A panel that cannot be restored is a panel; the bot still serves
+        # files. Nothing here is worth refusing to boot over.
+        print(f"[STARTUP] Could not restore the notices: {notices_err}")
     # #221: a bot that ran for months before retention existed loads all of it
     # back here. Pruning at startup as well as on the persist cycle means an
     # upgrade cleans up once rather than carrying the backlog forever.
@@ -236,6 +311,19 @@ def startup():
         threading.Thread(target=dcc_fetch.fetch_dispatcher_worker, daemon=True).start()
     except Exception as fetch_worker_err:
         print(f"[FETCH] Could not start fetch dispatcher: {fetch_worker_err}")
+
+    # Only when it is switched on: a thread that would sleep for an hour and
+    # then find the feature disabled is a thread nobody needs. !rehash cannot
+    # start it, which is the honest cost of not running it by default - turning
+    # it on takes a restart, and the setting says so.
+    if getattr(config, "AUTO_REFETCH_LISTS", False):
+        try:
+            import list_fetch
+            threading.Thread(target=list_fetch.auto_refetch_worker,
+                             daemon=True).start()
+        except Exception as refetch_err:
+            print(f"[LIST-FETCH] Could not start the automatic refresh: "
+                  f"{refetch_err}")
 
     # Optional web dashboard (mostly read-only status views, plus the
     # cross-bot search/fetch routes - see webserver.py's module docstring).

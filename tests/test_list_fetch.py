@@ -27,6 +27,7 @@ import defaults as config  # noqa: E402
 import db  # noqa: E402
 import list as list_module  # noqa: E402
 import list_fetch  # noqa: E402
+import list_index  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
 
@@ -57,7 +58,7 @@ def _read_all(entry):
     call list_fetch.get_fetched_bot_page() directly instead."""
     # Paged by FOLDER now, so flatten the groups back to a flat row list -
     # what every caller of this helper is actually asserting about.
-    groups, _folders, _rows, error = list_fetch.get_fetched_bot_page(
+    groups, _folders, _rows, _row_capped, error = list_fetch.get_fetched_bot_page(
         entry, 0, 10**9)
     rows = [row for group in groups for row in group["entries"]]
     assert error is None, f"unexpected read error: {error}"
@@ -393,7 +394,7 @@ class OnDemandReadingTests(DCCoreTestCase):
 
         os.remove(entry["list_path"])
 
-        rows, folders, files, error = list_fetch.get_fetched_bot_page(entry, 0, 100)
+        rows, folders, files, _row_capped, error = list_fetch.get_fetched_bot_page(entry, 0, 100)
         self.assertEqual(rows, [])
         self.assertEqual((folders, files), (0, 0))
         self.assertIsNotNone(error)
@@ -414,7 +415,7 @@ class OnDemandReadingTests(DCCoreTestCase):
         os.chmod(entry["list_path"], 0o000)
         self.addCleanup(os.chmod, entry["list_path"], 0o644)
 
-        rows, folders, files, error = list_fetch.get_fetched_bot_page(entry, 0, 100)
+        rows, folders, files, _row_capped, error = list_fetch.get_fetched_bot_page(entry, 0, 100)
         self.assertEqual(rows, [])
         self.assertEqual((folders, files), (0, 0))
         self.assertIsNotNone(error)
@@ -422,7 +423,7 @@ class OnDemandReadingTests(DCCoreTestCase):
     def test_a_missing_list_path_field_is_handled_gracefully(self):
         """Defense in depth: an entry somehow missing the field entirely
         (a future bug, or hand-edited state) must not raise either."""
-        rows, folders, files, error = list_fetch.get_fetched_bot_page(
+        rows, folders, files, _row_capped, error = list_fetch.get_fetched_bot_page(
             {"bot": "ghostbot"}, 0, 100)
         self.assertEqual(rows, [])
         self.assertEqual((folders, files), (0, 0))
@@ -438,7 +439,7 @@ class OnDemandReadingTests(DCCoreTestCase):
         list_fetch.process_fetched_list_zip("pagebot", self.zip_path)
         entry = config.fetched_bot_lists["pagebot"]
 
-        page, total_folders, total_files, error = list_fetch.get_fetched_bot_page(
+        page, total_folders, total_files, _row_capped, error = list_fetch.get_fetched_bot_page(
             entry, 3, 4)
         self.assertIsNone(error)
         self.assertEqual(total_folders, 10, "offset/limit count folders")
@@ -455,7 +456,7 @@ class OnDemandReadingTests(DCCoreTestCase):
         list_fetch.process_fetched_list_zip("otherbot", self.zip_path)
         entry = config.fetched_bot_lists["otherbot"]
 
-        page, total_folders, total_files, error = list_fetch.get_fetched_bot_page(
+        page, total_folders, total_files, _row_capped, error = list_fetch.get_fetched_bot_page(
             entry, 999, 100)
         self.assertIsNone(error)
         self.assertEqual(page, [])
@@ -554,9 +555,13 @@ class ExtractedTextSizeCeiling(DCCoreTestCase):
         config.FETCHED_FILES_DIR = self.tmp
         self.zip_path = os.path.join(self.tmp, "incoming.zip")
 
-        self._original_limit = list_fetch.MAX_LIST_TEXT_SIZE
-        self.addCleanup(setattr, list_fetch, "MAX_LIST_TEXT_SIZE", self._original_limit)
-        list_fetch.MAX_LIST_TEXT_SIZE = 1000
+        # The ceiling is a SETTING now, not a module constant - it depends on
+        # the libraries of bots in somebody else's channel, and the last time
+        # it was fixed at a number it refused three real lists.
+        self._original_limit = getattr(config, "MAX_LIST_TEXT_SIZE", None)
+        self.addCleanup(setattr, config, "MAX_LIST_TEXT_SIZE",
+                        self._original_limit)
+        config.MAX_LIST_TEXT_SIZE = 1000
 
     def test_an_extracted_list_over_the_ceiling_is_rejected(self):
         # Highly repetitive text compresses to a fraction of its real size -
@@ -596,15 +601,24 @@ class ExtractedTextSizeCeiling(DCCoreTestCase):
         self.assertTrue(ok, reason)
         self.assertIn("smallbot", config.fetched_bot_lists)
 
-    def test_the_shipped_default_has_real_headroom_over_a_genuine_library(self):
-        """Not a regression test for the patched value above - this pins the
-        actual shipped default (20MB) against the number that motivated it:
-        this operator's real 1.21TB/47,420-file library produces a 4MB list."""
-        self.assertEqual(self._original_limit, 20 * 1024 * 1024)
-        four_mb_real_library = 4 * 1024 * 1024
-        self.assertGreater(self._original_limit, four_mb_real_library,
-                           "the shipped ceiling no longer has headroom over a "
-                           "real library-sized list")
+    def test_the_shipped_default_clears_the_lists_that_were_actually_refused(self):
+        """This pinned 20MB against the number that motivated it - a 4MB list,
+        from this operator's own 1.21TB/47,420-file library. That was a sample
+        of ONE, and it was wrong about everyone else: three lists in a single
+        channel arrived at 25.7MB, 26.8MB and 31.5MB and were all refused.
+
+        So the figure to pin against is the largest one actually observed, not
+        the one nearest to hand. A FLAC library with long filenames produces a
+        far bigger text list than a similar MP3 one, and this ceiling has to
+        hold for libraries this operator will never see.
+        """
+        largest_seen = 31493819          # a real FLAC list, refused at the 20MB ceiling
+        self.assertGreater(self._original_limit, largest_seen,
+                           "the shipped ceiling still refuses a list that was "
+                           "actually offered to this bot")
+        # And it is not merely nudged past that one: the next FLAC library
+        # along would land straight back on it.
+        self.assertGreaterEqual(self._original_limit, 4 * largest_seen)
 
 
 class ListExtractDirTests(DCCoreTestCase):
@@ -858,6 +872,7 @@ class ConcurrentReadDuringSameBotRefetch(DCCoreTestCase):
 
     def test_reads_never_observe_a_torn_total_during_concurrent_refetches(self):
         import threading
+        import time
 
         bot = "racebot"
         count_a, count_b = 800, 1400
@@ -873,12 +888,40 @@ class ConcurrentReadDuringSameBotRefetch(DCCoreTestCase):
 
         READER_THREADS = 2
         READS_PER_THREAD = 40
-        # A generous safety cap on how many times the writer will re-fetch
-        # while waiting for the readers to finish their fixed quota of reads
-        # - not the thing that stops the writer under normal conditions (the
-        # readers finishing is), just a backstop so a stuck reader cannot
-        # wedge this test into looping forever.
-        MAX_FETCH_ROUNDS = 2000
+        # A safety cap on how many times the writer will re-fetch while
+        # waiting for the readers to finish their fixed quota - not the thing
+        # that stops the writer under normal conditions (the readers finishing
+        # is), just a backstop so a stuck reader cannot wedge this test into
+        # looping forever.
+        #
+        # LOWERED FROM 2000, because the backstop has to be reachable in less
+        # time than the 60-second join below allows. A re-fetch of this list
+        # measures ~25ms, so 2000 rounds is ~50 seconds of writer time on a
+        # developer machine and more than that on the Windows CI runner -
+        # which is where it eventually timed out, reporting a possible
+        # deadlock for what was really a cap set above the ceiling.
+        #
+        # 300 keeps every property this test has. Measured: a healthy run
+        # uses 41 rounds, because the readers finishing is what stops the
+        # writer - so the cap is never reached at 2000 and is not reached at
+        # 300 either. What changes is only the worst case, from about fifty
+        # seconds to about seven, which is the difference between a backstop
+        # inside the timeout and one above it.
+        #
+        # STILL NOT ENOUGH ON EVERY RUNNER. 300 rounds x ~25ms is ~7s on the
+        # machine that measurement came from - but a re-fetch does real
+        # filesystem work (rmtree, extract, rewrite), and a Windows CI runner
+        # under real-time antivirus scanning can cost several times that per
+        # round. A round count alone bets that EVERY runner is at least as
+        # fast as the one that set it; a wall-clock deadline does not. The
+        # writer now also stops at WRITER_DEADLINE_S regardless of how many
+        # rounds that reached - which additionally guarantees the readers get
+        # some UNCONTENDED tail time to finish their own quota in, rather
+        # than the writer's lock holding contend with them for the entire
+        # join() window on a slow runner.
+        MAX_FETCH_ROUNDS = 300
+        WRITER_DEADLINE_S = 45
+        JOIN_TIMEOUT_S = 90
         stop_writer = threading.Event()
         state_lock = threading.Lock()
         errors = []
@@ -888,7 +931,9 @@ class ConcurrentReadDuringSameBotRefetch(DCCoreTestCase):
 
         def writer():
             i = 0
-            while not stop_writer.is_set() and i < MAX_FETCH_ROUNDS:
+            deadline = time.time() + WRITER_DEADLINE_S
+            while (not stop_writer.is_set() and i < MAX_FETCH_ROUNDS
+                   and time.time() < deadline):
                 zip_path = zip_a if i % 2 == 0 else zip_b
                 ok, reason = list_fetch.process_fetched_list_zip(bot, zip_path)
                 if not ok:
@@ -904,7 +949,7 @@ class ConcurrentReadDuringSameBotRefetch(DCCoreTestCase):
                 # the same single folder, so only the ROW total can show a
                 # read that landed between the two - which is the torn read
                 # this test exists to catch.
-                _page, _folders, total_files, error = list_fetch.get_fetched_bot_page(
+                _page, _folders, total_files, _row_capped, error = list_fetch.get_fetched_bot_page(
                     entry, 0, 10 ** 9)
                 with state_lock:
                     read_count[0] += 1
@@ -921,7 +966,7 @@ class ConcurrentReadDuringSameBotRefetch(DCCoreTestCase):
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join(timeout=60)
+            thread.join(timeout=JOIN_TIMEOUT_S)
             self.assertFalse(thread.is_alive(),
                              "a writer/reader thread never finished within the "
                              "timeout - possible deadlock between the read and "
@@ -1199,7 +1244,7 @@ class FolderPaging(unittest.TestCase):
                 for i, size in enumerate(sizes)]
 
     def test_a_page_holds_whole_folders_and_reports_both_totals(self):
-        page, folders, rows = list_module.page_folder_groups(
+        page, folders, rows, _row_capped = list_module.page_folder_groups(
             self.groups([3, 4, 5]), 0, 2)
 
         self.assertEqual([g["folder"] for g in page], ["F00", "F01"])
@@ -1207,14 +1252,14 @@ class FolderPaging(unittest.TestCase):
         self.assertEqual(rows, 12, "twelve files across all three, not just this page")
 
     def test_offset_past_the_end_is_empty_with_the_totals_intact(self):
-        page, folders, rows = list_module.page_folder_groups(
+        page, folders, rows, _row_capped = list_module.page_folder_groups(
             self.groups([3, 4]), 99, 10)
 
         self.assertEqual(page, [])
         self.assertEqual((folders, rows), (2, 7))
 
     def test_a_negative_offset_reads_from_the_start(self):
-        page, _folders, _rows = list_module.page_folder_groups(
+        page, _folders, _rows, _row_capped = list_module.page_folder_groups(
             self.groups([3, 4]), -5, 1)
 
         self.assertEqual([g["folder"] for g in page], ["F00"])
@@ -1222,7 +1267,7 @@ class FolderPaging(unittest.TestCase):
     def test_the_row_ceiling_ends_a_page_before_the_folder_limit(self):
         """Folder sizes are uneven, so a folder count alone does not bound the
         response - which is the unbounded payload issue #76 removed."""
-        page, _folders, _rows = list_module.page_folder_groups(
+        page, _folders, _rows, _row_capped = list_module.page_folder_groups(
             self.groups([40, 40, 40]), 0, 10, max_rows=100)
 
         self.assertEqual(len(page), 2, "the third would take it to 120 rows")
@@ -1232,7 +1277,7 @@ class FolderPaging(unittest.TestCase):
         """The one place a folder is split. Returning nothing would leave the
         caller unable to advance past it, so it comes back cut and flagged -
         and `count` keeps reporting the true size."""
-        page, _folders, _rows = list_module.page_folder_groups(
+        page, _folders, _rows, _row_capped = list_module.page_folder_groups(
             self.groups([500]), 0, 10, max_rows=100)
 
         self.assertEqual(len(page), 1)
@@ -1243,7 +1288,7 @@ class FolderPaging(unittest.TestCase):
     def test_an_untruncated_folder_carries_no_truncated_flag(self):
         """Control: the view only marks a folder cut short, so the flag must
         be absent - or falsey - everywhere else."""
-        page, _folders, _rows = list_module.page_folder_groups(
+        page, _folders, _rows, _row_capped = list_module.page_folder_groups(
             self.groups([3]), 0, 10, max_rows=100)
 
         self.assertFalse(page[0].get("truncated"))
@@ -1267,7 +1312,7 @@ class FolderPaging(unittest.TestCase):
         while True:
             guard += 1
             self.assertLess(guard, 1000, "the walk failed to terminate")
-            page, total, _rows = list_module.page_folder_groups(
+            page, total, _rows, _row_capped = list_module.page_folder_groups(
                 groups, offset, limit, max_rows=ceiling)
             seen.extend(g["folder"] for g in page)
             if not page or offset + len(page) >= total:
@@ -1277,6 +1322,272 @@ class FolderPaging(unittest.TestCase):
         self.assertLess(guard, 200, "the ceiling should not reduce pages to one folder")
         self.assertEqual(len(seen), 200, "every folder was reached")
         self.assertEqual(len(set(seen)), 200, "and none was served twice")
+
+
+class RowCappedSaysWhyAPageWasShort(unittest.TestCase):
+    """#477: reported live - a page cut to a single folder by the row
+    ceiling is indistinguishable, from the outside, from a short LAST page,
+    and reads exactly like the pager is broken. row_capped tells the two
+    apart."""
+
+    def groups(self, sizes):
+        return [{"folder": "F%02d" % i, "count": size,
+                 "entries": [{"title": "t%d" % j} for j in range(size)]}
+                for i, size in enumerate(sizes)]
+
+    def test_a_page_that_reached_the_folder_limit_is_not_row_capped(self):
+        _page, _folders, _rows, row_capped = list_module.page_folder_groups(
+            self.groups([3, 4, 5]), 0, 2, max_rows=100)
+
+        self.assertFalse(row_capped)
+
+    def test_the_last_page_running_out_of_folders_is_not_row_capped(self):
+        """The exact confusion this exists to prevent: a genuinely short
+        LAST page must not look the same as one the valve cut short."""
+        _page, _folders, _rows, row_capped = list_module.page_folder_groups(
+            self.groups([3, 4]), 0, 50, max_rows=100)
+
+        self.assertFalse(row_capped)
+
+    def test_a_page_cut_short_by_the_row_ceiling_is_row_capped(self):
+        _page, _folders, _rows, row_capped = list_module.page_folder_groups(
+            self.groups([40, 40, 40]), 0, 10, max_rows=100)
+
+        self.assertTrue(row_capped)
+
+    def test_one_folder_larger_than_the_ceiling_is_row_capped_too(self):
+        """The reported case exactly: a single outsized folder is the whole
+        page, and it is the row ceiling that put it there alone."""
+        _page, _folders, _rows, row_capped = list_module.page_folder_groups(
+            self.groups([500]), 0, 10, max_rows=100)
+
+        self.assertTrue(row_capped)
+
+    def test_no_ceiling_at_all_is_never_row_capped(self):
+        _page, _folders, _rows, row_capped = list_module.page_folder_groups(
+            self.groups([500]), 0, 10, max_rows=None)
+
+        self.assertFalse(row_capped)
+
+
+class APeerRunningDCCoreSendsTwoLists(unittest.TestCase):
+    """Since the film-and-series split this bot's OWN archive carries two .txt
+    files, so a peer running DCCore is the ordinary case here."""
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def write(self, name, size):
+        with open(os.path.join(self.dir, name), "w", encoding="utf-8") as handle:
+            handle.write("x" * size)
+
+    def test_the_film_list_is_not_taken_for_the_master(self):
+        """The tiebreak picks the largest, and a bot whose films outweigh its
+        music hands us its film list as its whole catalogue - we would index
+        the films, show them as everything that bot has, and report its music
+        as absent."""
+        self.write("TheirBot-2026-08-30.txt", 400)
+        self.write("TheirBot-VIDEO-2026-08-30.txt", 4000)
+
+        picked = list_fetch._pick_list_file(self.dir)
+
+        self.assertEqual(os.path.basename(picked), "TheirBot-2026-08-30.txt")
+
+    def test_the_album_list_is_still_excluded_too(self):
+        self.write("TheirBot-2026-08-30.txt", 400)
+        self.write("TheirBot-RAR-2026-08-30.txt", 4000)
+
+        picked = list_fetch._pick_list_file(self.dir)
+
+        self.assertEqual(os.path.basename(picked), "TheirBot-2026-08-30.txt")
+
+    def test_a_film_list_on_its_own_is_still_better_than_nothing(self):
+        """Excluding a marker must not turn "one list we can read" into "no
+        recognisable list file": the fallback that already exists for an
+        album-only archive covers this one too."""
+        self.write("TheirBot-VIDEO-2026-08-30.txt", 4000)
+
+        picked = list_fetch._pick_list_file(self.dir)
+
+        self.assertEqual(os.path.basename(picked), "TheirBot-VIDEO-2026-08-30.txt")
+
+
+class AListThatArrivedAsPlainText(DCCoreTestCase):
+    """A bot that publishes its list as a .txt sends exactly that.
+
+    This was refused with "extraction aborted: File is not a zip file" - a
+    real fetch, completed at 100%, thrown away at the last step. update_list
+    has published .txt as a LIST_FORMAT since #201; there was never a reason
+    to expect only archives back.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="dccore-txtlist-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp,
+                                                            ignore_errors=True))
+        config.FETCHED_FILES_DIR = self.tmp
+        self.path = os.path.join(self.tmp, "OtherBot-default(2026-07-31)-OS.txt")
+
+    def write(self, text):
+        with io.open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def test_it_is_accepted_and_its_rows_are_read(self):
+        self.write(_list_txt(files=(("Real Track.flac", "5.0MB"),)))
+
+        ok, reason = list_fetch.process_fetched_list_zip("otherbot", self.path)
+
+        self.assertTrue(ok, reason)
+        held = dict(getattr(config, "fetched_bot_lists", {}) or {})
+        self.assertIn("otherbot", held)
+        self.assertGreater(held["otherbot"].get("entry_count", 0), 0)
+
+    def test_a_file_that_is_not_a_list_is_still_refused(self):
+        """The zip route gets its plausibility from the archive guards and
+        _pick_list_file(); this route has neither. Without a check, any
+        non-zip file at all would be stored as a bot's list - parsing to zero
+        rows, reported as a successful fetch, and answering every filter with
+        nothing."""
+        self.write("this is definitely not a file list\n")
+
+        ok, reason = list_fetch.process_fetched_list_zip("garbagebot", self.path)
+
+        self.assertFalse(ok)
+        self.assertIn("not a file list", reason)
+
+    def test_a_zip_named_txt_still_goes_through_the_archive_guards(self):
+        """Detected by CONTENT, not by the offered filename - which comes from
+        the sending bot. A peer calling an archive "list.txt" must not skip
+        the member and traversal checks by renaming it."""
+        _write_zip(self.path, [("OtherBot-2026-08-27.txt",
+                                _list_txt(files=(("A Track.flac", "1.0MB"),)))])
+
+        ok, reason = list_fetch.process_fetched_list_zip("ziptxtbot", self.path)
+
+        self.assertTrue(ok, reason)
+        held = dict(getattr(config, "fetched_bot_lists", {}) or {})
+        self.assertIn("ziptxtbot", held)
+
+    def test_the_text_ceiling_still_applies_to_it(self):
+        """The one guard that DOES apply to a single file already on disk runs
+        where it always did."""
+        original = getattr(config, "MAX_LIST_TEXT_SIZE", None)
+        self.addCleanup(setattr, config, "MAX_LIST_TEXT_SIZE", original)
+        config.MAX_LIST_TEXT_SIZE = 1000
+        self.write(_list_txt() + ("!OtherBot Filler.flac  ::INFO:: 1.0MB" + chr(10)) * 200)
+
+        ok, reason = list_fetch.process_fetched_list_zip("bigtxtbot", self.path)
+
+        self.assertFalse(ok)
+        self.assertIn("ceiling", reason)
+
+    def test_the_refusal_says_how_to_raise_the_ceiling(self):
+        """The operator who hit this had three real lists refused and no way
+        to tell from the message that it was adjustable."""
+        original = getattr(config, "MAX_LIST_TEXT_SIZE", None)
+        self.addCleanup(setattr, config, "MAX_LIST_TEXT_SIZE", original)
+        config.MAX_LIST_TEXT_SIZE = 1000
+        self.write(_list_txt() + ("!OtherBot Filler.flac  ::INFO:: 1.0MB" + chr(10)) * 200)
+
+        _ok, reason = list_fetch.process_fetched_list_zip("bigtxtbot2", self.path)
+
+        self.assertIn("MAX_LIST_TEXT_SIZE", reason)
+
+
+class ForgetBotTests(DCCoreTestCase):
+    """list_fetch.forget_bot(), issue #385's purge feature.
+
+    A held fetch is three things at once - the config.fetched_bot_lists
+    entry, the extracted files under FETCHED_FILES_DIR/lists/<bot>/, and the
+    bot's rows in the cross-list search index - and forget_bot() is the only
+    place all three are asked to agree that a bot is gone. Nothing has ever
+    called this in production before #385: these tests are also the first
+    exercise of the deletion path at all.
+    """
+
+    def setUp(self):
+        super().setUp()
+        import tempfile
+        self.tmp = tempfile.mkdtemp(prefix="dccore-forgetbot-test-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        config.FETCHED_FILES_DIR = self.tmp
+        self.zip_path = os.path.join(self.tmp, "incoming.zip")
+
+    def _seed(self, bot):
+        _write_zip(self.zip_path,
+                   [(f"{bot}-2026-09-10.txt", _list_txt())])
+        ok, reason = list_fetch.process_fetched_list_zip(bot, self.zip_path)
+        self.assertTrue(ok, reason)
+
+    def test_false_when_nothing_is_held_for_that_bot(self):
+        self.assertFalse(list_fetch.forget_bot("nosuchbot"))
+
+    def test_true_and_removes_the_registry_entry(self):
+        self._seed("otherbot")
+
+        self.assertTrue(list_fetch.forget_bot("otherbot"))
+
+        self.assertNotIn("otherbot", config.fetched_bot_lists)
+
+    def test_the_extracted_files_are_gone_from_disk(self):
+        self._seed("otherbot")
+        extract_dir = list_fetch.list_extract_dir("otherbot")
+        self.assertTrue(os.path.isdir(extract_dir))
+
+        list_fetch.forget_bot("otherbot")
+
+        self.assertFalse(os.path.exists(extract_dir))
+
+    def test_the_bot_is_dropped_from_the_search_index_too(self):
+        self._seed("otherbot")
+        self.assertIn("otherbot", list_index.indexed_bots())
+
+        list_fetch.forget_bot("otherbot")
+
+        self.assertNotIn("otherbot", list_index.indexed_bots())
+
+    def test_the_removal_is_persisted_to_disk(self):
+        """Not just the in-memory dict - a restart must not bring the
+        forgotten bot back, the same guarantee process_fetched_list_zip()
+        already gives on the way in."""
+        self._seed("otherbot")
+
+        list_fetch.forget_bot("otherbot")
+
+        reloaded = db.load_fetched_bot_lists()
+        self.assertNotIn("otherbot", reloaded)
+
+    def test_a_second_forget_of_the_same_bot_is_a_clean_no_op(self):
+        self._seed("otherbot")
+        self.assertTrue(list_fetch.forget_bot("otherbot"))
+
+        self.assertFalse(list_fetch.forget_bot("otherbot"))
+
+    def test_bot_name_comparison_is_case_and_whitespace_insensitive(self):
+        """The registry key is always lower-cased on the way in - see
+        process_fetched_list_zip() - so the way out must fold the same way,
+        or an operator who types the nick with different casing than the
+        advert used would see 'nothing to purge' for a bot plainly held."""
+        self._seed("OtherBot")
+
+        self.assertTrue(list_fetch.forget_bot(" otherbot "))
+        self.assertNotIn("otherbot", config.fetched_bot_lists)
+
+    def test_forgetting_one_bot_leaves_another_bots_list_untouched(self):
+        self._seed("firstbot")
+        self._seed("secondbot")
+
+        list_fetch.forget_bot("firstbot")
+
+        self.assertNotIn("firstbot", config.fetched_bot_lists)
+        self.assertIn("secondbot", config.fetched_bot_lists)
+        self.assertTrue(os.path.isdir(list_fetch.list_extract_dir("secondbot")))
+        self.assertIn("secondbot", list_index.indexed_bots())
 
 
 if __name__ == "__main__":

@@ -119,8 +119,8 @@ class Parsing(unittest.TestCase):
 
     def test_a_backslash_path_survives(self):
         """Windows operators write these constantly."""
-        parsed = settings_file.parse(r"FILE_DIRECTORY = Z:\1 Metal" + "\n")
-        self.assertEqual(parsed["FILE_DIRECTORY"], r"Z:\1 Metal")
+        parsed = settings_file.parse(r"FILE_DIRECTORY = Z:\1 Archive" + "\n")
+        self.assertEqual(parsed["FILE_DIRECTORY"], r"Z:\1 Archive")
 
 
 class WhatMayBeOverridden(unittest.TestCase):

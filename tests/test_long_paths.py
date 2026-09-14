@@ -112,8 +112,8 @@ class LongPathSpelling(unittest.TestCase):
 
     @unittest.skipUnless(platform_compat.IS_WINDOWS, WINDOWS_ONLY)
     def test_a_drive_path_gets_the_extended_prefix(self):
-        got = platform_compat.long_path("Z:\\1 Metal\\x.flac")
-        self.assertEqual(got, "\\\\?\\Z:\\1 Metal\\x.flac")
+        got = platform_compat.long_path("Z:\\1 Archive\\x.flac")
+        self.assertEqual(got, "\\\\?\\Z:\\1 Archive\\x.flac")
 
     @unittest.skipUnless(platform_compat.IS_WINDOWS, WINDOWS_ONLY)
     def test_a_unc_path_gets_the_unc_form_not_the_plain_one(self):
@@ -122,12 +122,12 @@ class LongPathSpelling(unittest.TestCase):
         This is the spelling the service deployment depends on, so getting it
         wrong would break exactly the case the change exists for.
         """
-        got = platform_compat.long_path("\\\\MEDIASERVER\\Music\\1 Metal\\x.flac")
-        self.assertEqual(got, "\\\\?\\UNC\\MEDIASERVER\\Music\\1 Metal\\x.flac")
+        got = platform_compat.long_path("\\\\NASBOX\\Music\\1 Archive\\x.flac")
+        self.assertEqual(got, "\\\\?\\UNC\\NASBOX\\Music\\1 Archive\\x.flac")
 
     @unittest.skipUnless(platform_compat.IS_WINDOWS, WINDOWS_ONLY)
     def test_an_already_prefixed_path_is_left_alone(self):
-        already = "\\\\?\\Z:\\1 Metal\\x.flac"
+        already = "\\\\?\\Z:\\1 Archive\\x.flac"
         self.assertEqual(platform_compat.long_path(already), already)
 
     @unittest.skipUnless(platform_compat.IS_WINDOWS, WINDOWS_ONLY)

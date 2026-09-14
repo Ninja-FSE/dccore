@@ -2,6 +2,7 @@
 # IRC.PY - THE IRC NETWORK MODULE FOR UNDERNET (PART 1 OF 3)
 # =====================================================================
 import socket
+import collections
 import functools
 import threading
 import time
@@ -22,6 +23,58 @@ import security
 
 # Tracks whether the channels have been joined
 bot_joined_channel = False
+
+# Reconnect NAMES sync fires once per channel, all within a few seconds of
+# a single JOIN command naming every channel at once - exactly the burst
+# window where the server's flood allowance is smallest. A debug line per
+# channel there turns "reconnected to 14 channels" into 14 debug lines
+# landing together, on top of whatever else send_debug() is already
+# carrying - the specific burst that let a 14-channel reconnect flood a bot
+# off (#406). Batched here into one line, sent only once the burst itself
+# has gone quiet.
+_RECONNECT_THAW_QUIET_SECONDS = 2.0
+_reconnect_thaw_lock = threading.Lock()
+_reconnect_thaw_summary = {"total": 0, "channels": set(), "timer": None}
+
+
+def _flush_reconnect_thaw_summary():
+    with _reconnect_thaw_lock:
+        total = _reconnect_thaw_summary["total"]
+        channels = len(_reconnect_thaw_summary["channels"])
+        _reconnect_thaw_summary["total"] = 0
+        _reconnect_thaw_summary["channels"] = set()
+        _reconnect_thaw_summary["timer"] = None
+
+    if not total:
+        return
+    import announce
+    plural = "" if channels == 1 else "s"
+    announce.send_debug(
+        f"Reconnect sync: thawed {config.C_BOLD}{total}{config.C_RESET} "
+        f"queue(s) across {channels} channel{plural}.", category="JOIN")
+
+
+def _note_reconnect_thaw(channel, thawed_count):
+    """Record one channel's NAMES-sync thaw, batching same-burst channels
+    into a single debug line instead of one per channel.
+
+    Debounced rather than emitted immediately: every reconnect fires one of
+    these per channel within a few seconds of each other, and a fresh call
+    cancels and restarts the timer - so the summary fires once, shortly
+    after the LAST channel in the burst settles, not a fixed time after the
+    first.
+    """
+    with _reconnect_thaw_lock:
+        _reconnect_thaw_summary["total"] += thawed_count
+        _reconnect_thaw_summary["channels"].add(channel)
+        existing_timer = _reconnect_thaw_summary["timer"]
+        if existing_timer is not None:
+            existing_timer.cancel()
+        new_timer = threading.Timer(_RECONNECT_THAW_QUIET_SECONDS,
+                                     _flush_reconnect_thaw_summary)
+        new_timer.daemon = True
+        _reconnect_thaw_summary["timer"] = new_timer
+        new_timer.start()
 
 
 def _release_socket():
@@ -52,6 +105,198 @@ def is_server_numeric(line, code):
     straight to the socket, bypassing queue_mgr's pacing entirely.
     """
     return re.match(r"^:\S+\s+" + code + r"\s+\S+", line) is not None
+
+
+def configured_channels():
+    """CHANNEL as a list, in order, with the whitespace people actually type
+    taken off.
+
+    Every consumer of CHANNEL splits on the comma; most of them then strip,
+    and the two that did not are what made this necessary.
+    """
+    raw = str(getattr(config, "CHANNEL", "") or "")
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+# HOW MANY CHANNELS GO IN ONE JOIN, and why there is a limit at all (#510).
+#
+# Reported live: an operator with fourteen configured channels was in eleven.
+# The three missing were the last three in configured order, and the debug
+# channel - sent as a separate command after them - was missing too. The
+# server takes the head of an over-long JOIN and drops the tail, and says so
+# with a numeric nothing here counted at connect time.
+#
+# Four is chosen to be uninteresting rather than clever: comfortably under any
+# per-JOIN limit a server is likely to apply, and few enough that a burst of
+# them still looks like a client connecting rather than a script. Fourteen
+# channels become four lines over about six seconds, which is nothing against
+# the five-second settle this function already waits.
+JOIN_BATCH_SIZE = 4
+
+# The gap between those lines. Long enough that a join throttle counts them
+# separately; short enough that the bot is in every channel well inside
+# ACTIVATION_TIMEOUT, which is what decides whether the advert starts without
+# them.
+JOIN_BATCH_GAP = 2.0
+
+# One IRC line is 512 bytes including the trailing CRLF.
+MAX_JOIN_LINE_BYTES = 510
+
+
+def channels_we_should_be_in():
+    """Every channel the bot belongs in: CHANNEL, in order, plus the debug
+    channel.
+
+    ONE DEFINITION, deliberately. irc.py's own connect path used to build this
+    by joining CHANNEL and then sending a second JOIN for DEBUG_CHANNEL, and
+    commands._channels_to_sync() built the same idea separately for the rehash
+    - which is a second source of truth for "where does this bot belong", and
+    the file already carries a comment about exactly that hazard for exactly
+    this setting (#193). commands delegates here now.
+
+    DEBUG_CHANNEL is a channel the daemon joins and talks in, so it is part of
+    the answer even though it is deliberately not in settings_file.REQUIRED
+    and is blank on a fresh install. Blank means no debug channel, not a
+    channel named "".
+    """
+    chans = configured_channels()
+    seen = {name.lower() for name in chans}
+    debug_chan = str(getattr(config, "DEBUG_CHANNEL", "") or "").strip()
+    if debug_chan and debug_chan.lower() not in seen:
+        chans = chans + [debug_chan]
+    return chans
+
+
+def channels_we_should_be_in_set():
+    """channels_we_should_be_in(), folded for comparison - see
+    A SET and lowercased, which is what a membership test wants - unlike
+    channels_we_should_be_in() above, which is an ordered list because the
+    connect path joins it in that order."""
+    return {name.lower() for name in channels_we_should_be_in()}
+
+
+def join_batches(channels, per_join=None, max_bytes=None):
+    """`channels` as JOIN payloads, a few at a time.
+
+    Returns the comma-separated argument for each line, without the verb -
+    the caller owns the wire format, the way it owns the CRLF.
+
+    NO SPACE EVER REACHES A JOIN, which is stricter than it looks. RFC 2812
+    is `JOIN <channel>{,<channel>} [<key>{,<key>}]` - SPACE-separated
+    parameters - so a space anywhere in the list ends it: `JOIN #one, #two`
+    joins "#one" and hands the server "#two," as a channel KEY. The rest is
+    discarded silently, because nothing about it is an error; the server did
+    exactly what it was told. config.CHANNEL was passed to JOIN verbatim once,
+    and an operator who put a space after each comma - which reads naturally,
+    and is how configure.py echoes the value back at them - joined their first
+    channel and no others.
+
+    That is inherited rather than re-done here: configured_channels() strips
+    every entry, and channels_we_should_be_in() is built from it. This joins
+    what it is given with commas and nothing else, which is why the test for
+    it asserts on the payloads rather than on the setting.
+
+    Bounded by COUNT first and by bytes second. The count is what a server's
+    join handling actually limits; the byte cap is the ordinary 510-byte line
+    budget, and only bites for channel names far longer than RFC 2812's fifty
+    characters. A single channel over the budget on its own still goes out
+    alone rather than being dropped - refusing to ask is worse than asking and
+    being refused, because only one of those leaves the operator something to
+    read.
+    """
+    size = int(per_join or JOIN_BATCH_SIZE)
+    if size < 1:
+        size = 1
+    budget = int(max_bytes or MAX_JOIN_LINE_BYTES)
+
+    batches = []
+    batch = []
+    for channel in channels:
+        too_many = len(batch) >= size
+        too_long = batch and len(
+            ",".join(batch + [channel]).encode("utf-8")) + len("JOIN ") > budget
+        if too_many or too_long:
+            batches.append(",".join(batch))
+            batch = []
+        batch.append(channel)
+    if batch:
+        batches.append(",".join(batch))
+    return batches
+
+
+def resolve_alt_nick(main_nick):
+    """The nickname to fall back to when the server refuses the main one.
+
+    Both call sites used to read
+
+        getattr(config, 'ALT_NICKNAME', f"{main_nick}`")
+
+    which looks like it defends against a missing or empty alt nick and does
+    not: getattr's default fires only when the attribute is ABSENT, and
+    defaults.py declares ALT_NICKNAME as a str with a real value, so it never
+    is. The fallback was unreachable in both places.
+
+    That mattered because the setting could be SAVED empty from the dashboard
+    (settings_file now refuses it, but files written before that still exist,
+    and admin_config.py can still set it to anything). An empty alt nick sent
+    the literal line "NICK " - a NICK command with no nickname, which the
+    server answers with 431 and no nick at all. Only reachable on a 433, which
+    is to say while reconnecting after a split, with the old session still
+    holding the name: the one moment the fallback exists for.
+    """
+    alt = str(getattr(config, "ALT_NICKNAME", "") or "").strip()
+    return alt or f"{main_nick}`"
+
+
+def numeric_target(line):
+    """The nick a server numeric is addressed to, or None.
+
+    This is the server's own statement of what it calls us, and it is the only
+    reliable one. Every numeric reply is ':<prefix> <code> <target> ...' and
+    for a registered client <target> IS its nick - that is RFC 1459/2812
+    message structure, not a courtesy, so ircu, InspIRCd, UnrealIRCd, Solanum,
+    ngIRCd and Ergo all do it because they must.
+
+    Which is why this reads the FIELD and never the sentence. RPL_WELCOME's
+    text is whatever a network wants ("Welcome to the Internet Relay Network",
+    "Welcome to the Undernet IRC Network", or anything else); the target
+    position is fixed.
+
+    "*" is returned as None: before registration completes a server addresses
+    an unknown client that way, and it is not a nick anyone has.
+    """
+    match = re.match(r"^:\S+\s+\d{3}\s+(\S+)", line)
+    if not match:
+        return None
+    target = match.group(1)
+    return None if target == "*" else target
+
+
+def isupport_nicklen(line):
+    """The NICKLEN a 005 RPL_ISUPPORT line advertises, or None.
+
+    005 is where a server states its own limits, as space-separated TOKEN or
+    TOKEN=value pairs before the trailing text. Reading it is what lets the
+    daemon say why a nickname was shortened instead of leaving the operator to
+    notice that the bot in the channel is not called what they configured.
+
+    Not every server sends NICKLEN - it is a convention rather than a
+    standard - so None is an ordinary answer and callers must treat it as
+    "unknown", never as "no limit".
+    """
+    if not is_server_numeric(line, "005"):
+        return None
+    # Stop at the trailing parameter (":are supported by this server"), which
+    # is prose and could contain anything.
+    body = line.split(" :", 1)[0]
+    match = re.search(r"\bNICKLEN=(\d+)\b", body)
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
 
 def is_user_event(line, command):
@@ -98,6 +343,109 @@ def event_source_host(line):
     return match.group(1).lower() if match else None
 
 
+# WHAT MAY BE A TARGET, which is very nearly everything.
+#
+# FOUND IN A BETA CHANNEL. The parsers below used to match a target as
+# `[#\w\-]+` - "#", letters, digits, underscore, hyphen. RFC 2812 says a
+# channel is a "#", "&", "+" or "!" prefix followed by any octet except NUL,
+# BEL, CR, LF, space and comma, and real channels use that room: an "&" or a
+# "^" in the name is ordinary. An operator joined a channel with an "&" in it
+# and the bot sat there mute - it JOINED, and it ADVERTISED, because both of
+# those are OUTBOUND and never parse a line. Every message arriving from that
+# channel simply failed to match, so @<nick>, @find, -help and the queue
+# commands were all silently dropped, in that channel only.
+#
+# The same class also cost the 366 confirmation (the channel never counted as
+# joined at startup) and the JOIN/PART tracking that dcc.py reads as proof of
+# presence before it dispatches a send.
+#
+# So the regexes take `\S+` - which is what the protocol means, since a space
+# is the field separator - and the target is validated here instead. This is
+# NOT merely widening: `\S+` alone would let a hostile server hand us a
+# "channel" containing \x01 or a bare \r, and target_chan is interpolated into
+# our own outbound lines (see the RAM-CHECK NOTICE in irc_loop, and every
+# handler that answers back into the channel it was asked in). Rejecting them
+# here means every caller of these parsers inherits the check, rather than
+# each one remembering - the same reasoning dcc_fetch.py's
+# contains_unsafe_ctcp_bytes() is applied at parse time and not at each echo.
+_UNSAFE_IRC_TARGET_RE = re.compile(r'[\x00\x07\r\n\x01,]')
+
+
+def is_valid_irc_target(value):
+    """True if `value` is safe to treat as a PRIVMSG/NOTICE target.
+
+    A target is a channel or a nick. Neither may contain NUL, BEL, CR, LF or
+    a comma (which separates a target LIST), and this codebase additionally
+    refuses \\x01 anywhere that reaches a raw outbound line, because a body
+    containing it is read as an inline CTCP by the receiving client.
+    """
+    text = str(value or "")
+    return bool(text) and not _UNSAFE_IRC_TARGET_RE.search(text)
+
+
+# How many inbound lines to keep for a disconnect report. Fifteen covers the
+# exchange around a drop - the JOINs, the NAMES burst, and the server's own
+# ERROR line - without turning a log into a transcript.
+RECENT_LINE_MEMORY = 15
+
+# HOW MUCH TO TAKE FROM THE SOCKET AT ONCE.
+#
+# 2048 for as long as this file has existed, which is one or two IRC lines: a
+# line is capped at 512 bytes by RFC 1459, and 8703 with IRCv3 tags. That is
+# fine when the server is trickling channel chatter and wrong when it is not.
+#
+# Joining channels is when it is not. Every JOIN is answered with the whole
+# NAMES list - one 353 per few hundred nicks, then a 366 - so adding several
+# channels at once produces tens of kilobytes in a burst, taken 2 KB at a
+# time. An ircd bounds what it will hold for a client that is not keeping up,
+# and closes the link when that fills: to us that arrives as ECONNRESET, with
+# nothing to say why. A beta reported exactly that shape - "[WinError 10054]
+# ... Dropping the link to reconnect" right after several channels were
+# added - and it would not reproduce.
+#
+# This is not proof that was the cause, and the disconnect report that landed
+# with it will say so directly the next time it happens. It is that reading a
+# byte stream two kilobytes at a time has no argument for it: recv() returns
+# whatever is there up to the size asked for and never waits to fill the
+# buffer, so a larger one costs an allocation and saves syscalls exactly when
+# there is a backlog to clear.
+#
+# take_complete_lines() accumulates BYTES and hands back only whole CRLF-
+# terminated lines, so the read size cannot split a line or a UTF-8 character
+# however it lands - and MAX_PENDING_LINE_BYTES still bounds a peer that never
+# sends CRLF at all.
+SOCKET_READ_BYTES = 65536
+
+
+def _report_recent_lines(recent_lines):
+    """Print what the server last sent, on the way out of a dropped link.
+
+    A disconnect used to be reported with no context at all. From a beta:
+    "[WinError 10054] ... Dropping the link to reconnect" after several
+    channels were added, and by the time it was asked about, the lines were
+    gone and it would not reproduce - so there was nothing to diagnose from
+    and no way to ask for more.
+
+    An ircd states its reason before it hangs up ("ERROR :Closing Link:
+    <nick> (Max SendQ exceeded)"), and that line was being read and dropped.
+    Printing the tail means the NEXT occurrence explains itself, whether or
+    not anyone is watching when it happens.
+
+    Never raises: this runs on the way out of a link that has already failed,
+    and a logging helper must not be what turns a reconnect into a crash.
+    """
+    try:
+        if not recent_lines:
+            print("[DISCONNECT] Nothing had been received on this link yet.")
+            return
+        print(f"[DISCONNECT] The last {len(recent_lines)} line(s) from the "
+              f"server before the drop:")
+        for line in recent_lines:
+            print(f"[DISCONNECT]   {line}")
+    except Exception:
+        pass
+
+
 def parse_privmsg(line):
     """(nick, ident_host, target, message) for a well-formed PRIVMSG line,
     or None.
@@ -122,18 +470,461 @@ def parse_privmsg(line):
     for security.check_user_status()'s hostmask-pattern matching - not the
     same as event_source_host(), which strips the ident and lowercases.
     """
-    match = re.match(r"^:([^!\s]+)!(\S*)\s+PRIVMSG\s+([#\w\-]+)\s+:(.+)$", line)
-    if not match:
+    match = re.match(r"^:([^!\s]+)!(\S*)\s+PRIVMSG\s+(\S+)\s+:(.+)$", line)
+    if not match or not is_valid_irc_target(match.group(3)):
         return None
     return match.group(1), match.group(2), match.group(3), match.group(4)
+
+
+# Numerics a server answers a JOIN with when it will not let us in. Each one
+# is a refusal that will keep being a refusal until somebody changes something
+# on their side, which is what makes a bounded retry the right shape.
+JOIN_REFUSED_NUMERICS = {
+    "405",   # ERR_TOOMANYCHANNELS - the server will not put us in another one
+    "471",   # ERR_CHANNELISFULL
+    "473",   # ERR_INVITEONLYCHAN
+    "474",   # ERR_BANNEDFROMCHAN
+    "475",   # ERR_BADCHANNELKEY
+}
+
+# 405 belongs with the four above rather than with a throttle: it keeps being
+# true until the operator serves fewer channels, which is the same shape as a
+# ban or an invite-only channel and the same reason a bounded retry is right.
+# It is called out separately because the answer is not "ask again later" -
+# it is "you are configured for more channels than this server allows", and
+# an operator reading "gave up after 3 attempts" would go looking for a fault
+# on the channel's side instead (#510).
+JOIN_REFUSED_AT_THE_LIMIT = "405"
+
+
+def parse_kick(line):
+    r"""(kicker, channel, victim) for a well-formed KICK, or None.
+
+    Anchored on the server prefix like every other parser here, and for the
+    same reason: an unanchored search matches the BODY of a PRIVMSG, so
+    anyone could type a KICK line into the channel and have the bot act on
+    it. See parse_privmsg()'s own note.
+
+    `\S+` for the channel, not a character class. A channel with an "&" or a
+    "^" in its name is legal (RFC 2812) and six parsers here used to drop it
+    silently - see is_valid_irc_target().
+    """
+    match = re.match(r"^:([^!\s]+)!\S*\s+KICK\s+(\S+)\s+(\S+)", line)
+    if not match:
+        return None
+    return match.group(1), match.group(2), match.group(3)
+
+
+def parse_join_refusal(line):
+    """(channel, numeric) when the server refuses a JOIN, or None.
+
+    The shape is `:server 474 ournick #chan :Cannot join channel (+b)`, so the
+    channel is the argument after our own nick.
+    """
+    match = re.match(r"^:\S+ (\d{3}) \S+ (\S+)", line)
+    if not match:
+        return None
+    numeric, channel = match.group(1), match.group(2)
+    if numeric not in JOIN_REFUSED_NUMERICS:
+        return None
+    return channel, numeric
+
+
+def note_nick_change(old_nick, new_nick):
+    """Carry a user's live state across a rename. Returns what moved.
+
+    THE SERVER IS TELLING US, and it is the only time it will. A NICK message
+    names the old nick and the new one, so there is nothing to infer - but it
+    arrives once, and every store still keyed on the old name keeps that name
+    until something else happens to rebuild it.
+
+    This used to move `send_queue` and nothing else, which left a renamed user
+    in a state that is worse than either name alone:
+
+      * `channel_users` still held the OLD nick, so dcc.user_is_present_in_ram()
+        answered False for the name they now use and True for one nobody has.
+        That mirror is what dcc.py treats as proof somebody is there before
+        dispatching to them or thawing a frozen queue - so their transfers
+        stopped while they were sitting in the channel.
+      * `dcc_queue` still held their files under the old name, so `!que` under
+        the new one showed nothing and the bot had nobody to send them to.
+
+    Moving the queue and nothing else (#431) then left a THIRD, worse gap:
+    dcc.handle_download_request()'s slot-admission check reads
+    `active_transfers`, `user_processing_lock` and `dcc_queue` together to
+    decide whether a nick already has something running. With only the queue
+    carried across, a user mid-transfer looked entirely idle under their new
+    name - no transfer, no lock, no queue - and the gate handed them another
+    slot immediately. Three renames bought three slots, with no flood check
+    involved at all: `user_processing_lock` and the `"user"` field on any
+    matching `active_transfers` row now move too.
+
+    NOT the sanctions. `muted_until` and `banned_users` are keyed on the nick
+    too, and carrying those across would be a change of policy rather than a
+    fix: DCCore already answers nick-hopping with hard bans, which match a
+    HOSTMASK pattern and are unaffected by any of this. Moving a mute here
+    would quietly make a soft sanction behave like a hard one, which is a
+    decision for an operator and not a side effect of a bug fix.
+
+    `whois_status` is left alone for a different reason - it is a cache of
+    what a WHO reply said, rebuilt on the next one, and asserting the new nick
+    is online because the old one was is inventing an answer the server has
+    not given.
+    """
+    old_key = str(old_nick or "").strip().lower()
+    new_key = str(new_nick or "").strip().lower()
+    if not old_key or not new_key or old_key == new_key:
+        return []
+
+    moved = []
+
+    # PRESENCE FIRST, because it is the one that silently breaks transfers.
+    # Every channel we share with them, not just the one the message arrived
+    # through - a NICK is not per-channel, and the server sends it once.
+    with runtime.channel_users_lock():
+        users_by_channel = getattr(config, "channel_users", None) or {}
+        for _chan, users in users_by_channel.items():
+            if old_key in users:
+                users.discard(old_key)
+                users.add(new_key)
+                if "presence" not in moved:
+                    moved.append("presence")
+
+    # The queues, under the same lock the rest of the queue code takes.
+    import dcc
+
+    with dcc.queue_lock:
+        for name in ("dcc_queue", "frozen_queues"):
+            store = getattr(config, name, None)
+            if isinstance(store, dict) and old_key in store:
+                # Never clobber an existing entry under the new name: somebody
+                # else may have owned that nick a moment ago and still have a
+                # queue under it. Their files are not this user's to inherit.
+                if new_key in store:
+                    print(f"[NICK] {old_nick} -> {new_nick}: leaving their "
+                          f"{name} entry alone, the new nick already has one.")
+                    continue
+                store[new_key] = store.pop(old_key)
+                moved.append(name)
+
+        # #431: dcc.handle_download_request()'s slot-admission gate is built
+        # from exactly three things - active_transfers, user_processing_lock
+        # and dcc_queue (moved above) - all keyed on the CURRENT nick. Moving
+        # the queue while leaving the other two behind meant a nick change
+        # made a busy user look entirely idle under their new name: no
+        # transfer running, no in-progress lock, no queue, so the gate handed
+        # them an immediate extra slot. Three /nick commands, three requests,
+        # one person holding every slot the bot has - no flood gate involved.
+        # A plain membership set, unlike dcc_queue/frozen_queues above: adding
+        # new_key can never destroy another holder's data the way overwriting
+        # a dict value could, so this moves unconditionally rather than only
+        # when new_key is free - leaving old_key locked whenever new_key
+        # happened to already be a member would strand it there until
+        # whatever transfer owns new_key's lock happens to release it.
+        lock = getattr(config, "user_processing_lock", None)
+        if isinstance(lock, set) and old_key in lock:
+            lock.discard(old_key)
+            lock.add(new_key)
+            moved.append("user_processing_lock")
+
+        # hasattr(..., "append"), not isinstance(transfers, list) - this
+        # module already shadows the builtin with its own `import list`
+        # (list.py, the file-list code), the same trap #376's alt-nick work
+        # hit calling the builtin list() a few functions below this one.
+        transfers = getattr(config, "active_transfers", None)
+        if hasattr(transfers, "append"):
+            for row in transfers:
+                if isinstance(row, dict) and str(row.get("user", "")).lower() == old_key:
+                    row["user"] = new_nick
+                    if "active_transfers" not in moved:
+                        moved.append("active_transfers")
+
+    # Unchanged behaviour, kept here so one function owns the whole rename.
+    send_queue = getattr(config, "send_queue", None)
+    if isinstance(send_queue, dict) and old_key in send_queue:
+        if new_key not in send_queue:
+            send_queue[new_key] = send_queue.pop(old_key)
+            moved.append("send_queue")
+
+    if moved:
+        print(f"[NICK] {old_nick} is now {new_nick}; carried over: "
+              f"{', '.join(moved)}.")
+    return moved
+
+
+# Alt-nick reconnects (#376) --------------------------------------------------
+#
+# note_nick_change() above handles a REAL NICK message - proof, not inference,
+# because the server names both the old and new nick in one line. It cannot
+# help with a 433 at CONNECT time: the client has not joined anything yet, so
+# there is no NICK event to see, only the old nick disappearing from every
+# channel we shared with it and, moments later, an unrelated-looking new one
+# joining. The functions below infer that case instead, for display only.
+#
+# A 433 retry is seconds, not minutes - long enough for registration and the
+# join burst, short enough that anything further out is a different session
+# and quite possibly a different person.
+ALT_NICK_RECONNECT_WINDOW_SECONDS = 15
+
+# The ordinary shape a client's own collision retry produces: the nick it
+# wanted, plus a trailing run of underscores and/or digits it did not choose.
+# Anchored to the END only - "bot_2" and "bot" match (strip "_2"), "2bot" and
+# "bot" do not (the digit is not trailing), which is deliberate: a LEADING
+# digit or underscore is somebody's actual nick, not a retry suffix.
+_COLLISION_SUFFIX_RE = re.compile(r"[_\d]+$")
+
+
+def _is_collision_variant(a, b):
+    """Whether `a` and `b` are the same base nick, one with an ordinary
+    collision suffix the other lacks - not merely two nicks that share a
+    prefix.
+
+    Deliberately narrow: stripping a trailing run of "_"/digits from EITHER
+    one must land exactly on the OTHER, unchanged. "somebot" and "somebot_"
+    match. "bot1" and "bot2" do not - both carry a suffix, neither is the
+    other's bare base, and they are just as likely to be two different
+    people whose nicks happen to end in a digit.
+    """
+    a = str(a or "").strip().lower()
+    b = str(b or "").strip().lower()
+    if not a or not b or a == b:
+        return False
+    stripped_a = _COLLISION_SUFFIX_RE.sub("", a)
+    stripped_b = _COLLISION_SUFFIX_RE.sub("", b)
+    return bool((stripped_a and stripped_a == b) or
+                (stripped_b and stripped_b == a))
+
+
+def note_observed_departure(nick, channel, now=None):
+    """Record that `nick` was just seen leaving `channel`, for
+    note_possible_reconnect() to match against a moment later.
+
+    OBSERVED ONLY. Call this only after actually finding and removing `nick`
+    from config.channel_users - never merely because it stopped appearing.
+    Absence alone cannot tell "just left" from "was never in a channel we
+    share", which is exactly the weakness a presence-gap heuristic would have
+    without this: a false positive here silently merges two different
+    operators' libraries into one sidebar row, which looks like a correct
+    merge rather than a visible mistake.
+    """
+    key = str(nick or "").strip().lower()
+    if not key:
+        return
+    with runtime.recent_departures_lock:
+        runtime.recent_departures[key] = {
+            # Real case kept alongside the lowercased key, because it is what
+            # ends up shown as the merged row's label if this turns into an
+            # alias - "somebot", lowercased for matching, is not what the
+            # List Browser should say the bot is called.
+            "nick": str(nick).strip(),
+            "channel": str(channel or "").strip().lower(),
+            "at": time.time() if now is None else now,
+        }
+
+
+def _prune_recent_departures(now):
+    with runtime.recent_departures_lock:
+        stale = [key for key, dep in runtime.recent_departures.items()
+                 if now - float((dep or {}).get("at") or 0)
+                 > ALT_NICK_RECONNECT_WINDOW_SECONDS]
+        for key in stale:
+            del runtime.recent_departures[key]
+
+
+def note_possible_reconnect(new_nick, now=None):
+    """Alias `new_nick` to a just-departed nick, if this JOIN looks like the
+    same connection coming back under an ordinary collision suffix.
+
+    All three have to hold, each decided on #376 rather than guessed:
+
+      * the old nick's departure was OBSERVED - note_observed_departure() is
+        the only writer of runtime.recent_departures, and only the PART/QUIT
+        handlers call it, only after actually removing the nick from
+        config.channel_users;
+      * it happened within ALT_NICK_RECONNECT_WINDOW_SECONDS;
+      * the two nicks fit _is_collision_variant()'s narrow shape.
+
+    Also clears `new_nick`'s OWN departure record when it rejoins as itself -
+    an ordinary reconnect under the same name has no alt-nick story to tell,
+    and leaving the stale record behind could otherwise let it wrongly match
+    a much later, unrelated join of a collision-shaped nick.
+
+    DISPLAY ONLY, and that is a property of what this touches, not a promise
+    made in a comment: the only thing written is runtime.nick_aliases, which
+    only webserver.build_fetched_bot_list_summaries() ever reads, to decide
+    which nick a row is grouped and labelled under. Nothing here reaches
+    config.channel_users, fetched_bot_lists, known_bots, or a download
+    counter - a wrong guess mis-groups one sidebar row and nothing else,
+    which is what makes a heuristic an acceptable answer here at all.
+
+    Returns the nick this was aliased to, or None.
+    """
+    now = time.time() if now is None else now
+    _prune_recent_departures(now)
+    key = str(new_nick or "").strip().lower()
+    if not key:
+        return None
+
+    with runtime.recent_departures_lock:
+        # Back under its own name: no alt-nick story, and popping it here
+        # keeps a stale record from matching some unrelated nick much later.
+        own_departure = runtime.recent_departures.pop(key, None)
+    if own_departure is not None:
+        return None
+
+    with runtime.recent_departures_lock:
+        # dict.copy(), not list(...) - this module already shadows the
+        # builtin with its own `import list` (list.py, the file-list code).
+        candidates = runtime.recent_departures.copy().items()
+
+    for departed_key, dep in candidates:
+        # Belt and braces with the prune above, which already removed
+        # anything this old using the same `now` - kept so this loop's own
+        # correctness does not silently depend on a prune call elsewhere
+        # continuing to run first.
+        if now - float((dep or {}).get("at") or 0) > ALT_NICK_RECONNECT_WINDOW_SECONDS:
+            continue
+        if not _is_collision_variant(key, departed_key):
+            continue
+        # Real case, not the lowercased registry key - see
+        # note_observed_departure()'s own comment on why it is kept.
+        departed_nick = str((dep or {}).get("nick") or departed_key)
+        with runtime.nick_aliases_lock:
+            runtime.nick_aliases[key] = departed_nick
+        with runtime.recent_departures_lock:
+            runtime.recent_departures.pop(departed_key, None)
+        print(f"[ALT-NICK] {new_nick} looks like {departed_nick} reconnecting "
+              f"- merging its List Browser row for display.")
+        return departed_nick
+    return None
+
+
+def note_kicked_from(channel, by=""):
+    """Record that we are no longer in `channel`, if it is one of ours.
+
+    A kick from a channel the operator does not list is not our business -
+    somebody invited the bot somewhere, or it was in a channel that has since
+    been removed from CHANNEL - and rejoining it would be the bot deciding
+    where it belongs.
+    """
+    name = str(channel or "").strip().lower()
+    if not name or name not in channels_we_should_be_in_set():
+        return False
+    with runtime.kicked_channels_lock:
+        config.kicked_channels[name] = {
+            "refusals": 0, "kicked_at": time.time(), "by": str(by or ""),
+            "reason": "kicked",
+        }
+    return True
+
+
+def note_join_unconfirmed(channel):
+    """Remember a channel that never answered its JOIN, so it is tried again.
+    Returns True if this call started tracking it.
+
+    THE RETRY MACHINERY WAS KICK-ONLY (#510). config.kicked_channels was
+    written to by exactly one thing - the KICK handler - so the daemon had a
+    bounded retry for a channel it was thrown out of and nothing at all for a
+    channel it never got into. A JOIN lost to a server limit, a throttle, or a
+    numeric nobody enumerated simply left the bot out of that channel for the
+    life of the connection.
+
+    Seeded from activation_watchdog()'s `missing` set, which already computed
+    exactly the right answer - the channels asked for, minus the ones whose
+    "End of NAMES" came back - and then only printed it.
+
+    Not an error in itself: the same entry shape a kick uses, so
+    channels_to_rejoin() and the attempt limit need no special case. The
+    reason is recorded because the operator-facing wording differs - "gave up
+    after 3 attempts" reads very differently for a channel that threw us out
+    and one that never let us in.
+
+    An existing entry is left alone. A kick is the more specific answer, and a
+    channel already being retried does not need a second reason to be.
+    """
+    name = str(channel or "").strip().lower()
+    if not name or name not in channels_we_should_be_in_set():
+        return False
+    with runtime.kicked_channels_lock:
+        if name in config.kicked_channels:
+            return False
+        config.kicked_channels[name] = {
+            "refusals": 0, "kicked_at": time.time(), "by": "",
+            "reason": "never confirmed",
+        }
+    return True
+
+
+def note_join_refused(channel):
+    """Count one refusal against `channel`. Returns the new count.
+
+    Counts only for a channel we are already trying to get back into: a
+    refusal for anything else is the ordinary business of a JOIN that was
+    never going to work, and inventing a retry schedule for it would start
+    the bot knocking on doors nobody asked it to.
+    """
+    name = str(channel or "").strip().lower()
+    with runtime.kicked_channels_lock:
+        entry = config.kicked_channels.get(name)
+        if entry is None:
+            return 0
+        entry["refusals"] = int(entry.get("refusals", 0)) + 1
+        return entry["refusals"]
+
+
+def note_joined(channel):
+    """A join succeeded, so stop tracking it. Returns what was cleared."""
+    name = str(channel or "").strip().lower()
+    with runtime.kicked_channels_lock:
+        return config.kicked_channels.pop(name, None)
+
+
+def channels_to_rejoin(limit=None):
+    """The channels worth one more JOIN, in a stable order.
+
+    A pure read, so the advert worker can ask this without holding anything
+    and without knowing the rule. `limit` is REJOIN_ATTEMPTS: a channel that
+    has refused that many times is left alone until an operator does
+    something about it, which is the whole point of counting.
+    """
+    if limit is None:
+        limit = int(getattr(config, "REJOIN_ATTEMPTS", 3))
+    # No `limit <= 0` guard here on purpose: the comparison below is already
+    # `refusals < limit`, and with a limit of 0 that is false for every entry
+    # that can exist. The guard gave_up_on() carries is NOT redundant - see
+    # there - and this asymmetry is why they are written out rather than
+    # shared.
+    # The wider set (#510): the debug channel is one the bot belongs in, and
+    # gating on CHANNEL alone meant a debug channel that failed to join could
+    # be tracked and never retried.
+    wanted = channels_we_should_be_in_set()
+    with runtime.kicked_channels_lock:
+        return sorted(name for name, entry in config.kicked_channels.items()
+                      if name in wanted
+                      and int(entry.get("refusals", 0)) < limit)
+
+
+def gave_up_on(limit=None):
+    """The channels that used up their attempts. What the operator is told."""
+    if limit is None:
+        limit = int(getattr(config, "REJOIN_ATTEMPTS", 3))
+    # LOAD-BEARING, unlike its twin in channels_to_rejoin(). The comparison
+    # below is `refusals >= limit`, which with a limit of 0 is true for every
+    # entry - so without this, an operator who turned rejoining off would be
+    # told the bot had given up on a channel it had never tried.
+    if limit <= 0:
+        return []
+    with runtime.kicked_channels_lock:
+        return sorted(name for name, entry in config.kicked_channels.items()
+                      if int(entry.get("refusals", 0)) >= limit)
 
 
 def parse_notice(line):
     """(nick, target, message) for a well-formed NOTICE line, or None. See
     parse_privmsg()'s docstring for why the anchoring matters - the same
     greedy-`.* ` and unanchored-nick problems applied here identically."""
-    match = re.match(r"^:([^!\s]+)!\S*\s+NOTICE\s+([#\w\-]+)\s+:(.+)$", line)
-    if not match:
+    match = re.match(r"^:([^!\s]+)!\S*\s+NOTICE\s+(\S+)\s+:(.+)$", line)
+    if not match or not is_valid_irc_target(match.group(2)):
         return None
     return match.group(1), match.group(2), match.group(3)
 
@@ -179,8 +970,8 @@ _FETCH_TOKEN_RE = re.compile(r'^!(\S+)\s+(.+)$')
 # When a search matches more than it will send, it says so instead of
 # listing slots:
 #
-#   Search Result 12 Matches For X   Get My List Of 94,952 Files By Typing
-#   @Beezer In The Channel Or Refine Your Search. Sending first 5 Results
+#   Search Result 12 Matches For X   Get My List Of 41,238 Files By Typing
+#   @CrateBot In The Channel Or Refine Your Search. Sending first 5 Results
 #
 # SPQR is an older, less widely used mIRC script - a minority of operators
 # still run it. Different shape, no version string, no match count, and its
@@ -203,7 +994,7 @@ _HDR_SPQR_QUEUE = re.compile(r'\(Que:\s*(\d+)\s*/\s*(\d+)\)', re.I)
 
 
 def _as_int(text):
-    """"94,952" -> 94952. Returns None for anything that is not a number."""
+    """"41,238" -> 41238. Returns None for anything that is not a number."""
     try:
         return int(str(text).replace(",", "").strip())
     except (TypeError, ValueError):
@@ -308,18 +1099,18 @@ def parse_search_header(text):
 # THREE WORDINGS, PLUS OUR OWN
 #
 #   OmenServe / OmenTweak / DCCore - 28 of the 33, the "Type: @nick" wording:
-#     Type: @Zkx For My List Of: 719,041 Files <> Slots: 10/10 <> Queued: 0
+#     Type: @PackBot For My List Of: 719,041 Files <> Slots: 10/10 <> Queued: 0
 #     <> Speed: 0cps <> Served: 3,456,016 <> List: Aug 10th <> Mode: Normal
 #
-#   SPQR - BigRig and outlook, a different sentence entirely, and the only
+#   SPQR - LoadBot and outlook, a different sentence entirely, and the only
 #   family that puts a size in the PRIVMSG advert:
-#     For My List(19527files:163812MB) and DCC Status, type @BigRig and
-#     @BigRig-stats. [(0/7) Slots (0/216) Ques Taken]
+#     For My List(19527files:163812MB) and DCC Status, type @LoadBot and
+#     @LoadBot-stats. [(0/7) Slots (0/216) Ques Taken]
 #
 #   RAR folders - a SECOND, separate list some bots serve beside their loose
 #   files, under a "^"-suffixed trigger, with its own count and its own size:
-#     Type @Zkx^ to get my list of 39,454 (5.48 TB) RAR folders
-#   Zkx publishes both: 719,041 loose files AND 39,454 RAR folders. They are
+#     Type @PackBot^ to get my list of 39,454 (5.48 TB) RAR folders
+#   PackBot publishes both: 719,041 loose files AND 39,454 RAR folders. They are
 #   two different lists and are kept apart in the registry for that reason.
 #
 # WHAT THE SAMPLE SETTLES
@@ -372,6 +1163,18 @@ KNOWN_BOTS_FLUSH_SECONDS = 30.0
 KNOWN_BOTS_TTL_SECONDS = 7 * 24 * 60 * 60
 KNOWN_BOTS_MAX = 2000
 
+# The SHORTER TTL for a bot _bot_confirmed_absent() can actually vouch for -
+# not merely quiet, but not in any channel we share right now. A day, not the
+# full week: the List Browser's own red dot already says this bot is gone,
+# and there is no reason to keep repeating "not one this bot is going to be
+# asked about" for six more days once presence has already answered that.
+#
+# A bot that has simply gone quiet - still present, just not advertising for
+# a while - is untouched by this and keeps the full KNOWN_BOTS_TTL_SECONDS:
+# presence says nothing is wrong with it, and going quiet is not the same
+# claim as being gone.
+KNOWN_BOTS_ABSENT_TTL_SECONDS = 24 * 60 * 60
+
 _ADVERT_NICK_RE = re.compile(r"Type:\s*@(\S+)", re.IGNORECASE)
 _ADVERT_COUNT_RE = re.compile(
     r"For\s+My\s+List\s+Of:?\s*([\d,]+)\s*Files", re.IGNORECASE)
@@ -380,16 +1183,33 @@ _ADVERT_DATE_RE = re.compile(
     r"(?:List:|Date:|created)\s*([A-Za-z]{3,9}\s*\d{1,2}(?:st|nd|rd|th)?)",
     re.IGNORECASE)
 
-# SPQR: "For My List(19527files:163812MB) ... type @BigRig and @BigRig-stats."
+# SPQR: "For My List(19527files:163812MB) ... type @LoadBot and @LoadBot-stats."
 _SPQR_LIST_RE = re.compile(
     r"For\s+My\s+List\s*\(\s*([\d,]+)\s*files\s*:\s*([\d,.]+\s*[KMGT]?B)\s*\)", re.IGNORECASE)
 _SPQR_NICK_RE = re.compile(r"type\s+@(\S+)", re.IGNORECASE)
 
-# The separate RAR-folder list: "Type @Zkx^ to get my list of 39,454 (5.48 TB)
+# The separate RAR-folder list: "Type @PackBot^ to get my list of 39,454 (5.48 TB)
 # RAR folders". The trigger carries a "^" the bot's own nick does not.
+# THE WHOLE TRIGGER, not "a nick and then a caret". mx.rarserver's default
+# trigger is @<nick>^, and the "^" is what the old pattern matched on - but the
+# trigger is configurable and the nick is not part of it at all. SomeBot-
+# advertises
+#
+#     Type @SomeBot^ to get my list of 39,454 (5.48 TB) RAR folders
+#
+# where the sender is "SomeBot-" and the trigger is "SomeBot^": not the nick, not the
+# nick plus a suffix, just a string that bot chose. Capturing the token and
+# asking nothing else of it is the only thing that works for every operator.
 _RAR_RE = re.compile(
-    r"Type\s+@(\S+?)\^\s+to\s+get\s+my\s+list\s+of\s+([\d,]+)\s*\(([^)]{1,20})\)\s*RAR\s+folders",
+    r"Type\s+@(\S+)\s+to\s+get\s+my\s+list\s+of\s+([\d,]+)\s*\(([^)]{1,20})\)\s*RAR\s+folders",
     re.IGNORECASE)
+
+# What a trigger may look like before we are willing to keep it. It ends up in
+# a PRIVMSG to a channel, so a space or a line ending would end the message and
+# start something else - see is_valid_irc_target() for the same reasoning about
+# a different field. Length capped because nothing legitimate is long and the
+# line budget is 512 bytes.
+_TRIGGER_RE = re.compile(r"^[^\s,\x00-\x1f]{1,64}$")
 
 # nick.lower() -> [first_seen, text_so_far] for an advert that may still be
 # continued on a following line. Module level rather than in runtime.py because
@@ -435,7 +1255,7 @@ def _parse_omenserve_advert(clean):
 
 
 def _parse_spqr_advert(clean):
-    """SPQR's wording: "For My List(19527files:163812MB) ... type @BigRig".
+    """SPQR's wording: "For My List(19527files:163812MB) ... type @LoadBot".
 
     No colon after "Type", no "Of:", and the count and size share one
     parenthesis - so none of the patterns above see it, and both bots running
@@ -459,25 +1279,51 @@ def _parse_spqr_advert(clean):
 
 
 def _parse_rar_folder_advert(clean):
-    """The separate RAR-folder list: "Type @Zkx^ to get my list of 39,454
+    """The separate RAR-folder list: "Type @PackBot^ to get my list of 39,454
     (5.48 TB) RAR folders".
 
-    A different list from the same bot, not a different bot - Zkx advertises
-    719,041 loose files in one message and 39,454 RAR folders in another. The
-    "^" belongs to the trigger, not to the nick, so it is stripped before the
-    sender check: Zkx sends this, "Zkx^" does not exist.
+    A different list from the same bot, not a different bot - PackBot advertises
+    719,041 loose files in one message and 39,454 RAR folders in another.
+
+    NO IDENTITY CLAIM, which is the difference from the other two parsers and
+    the reason this one used to throw good adverts away. It returned the text
+    inside the trigger as `nick`, and the caller compares that against the
+    sender. That works for PackBot, whose trigger happens to be its nick with a
+    "^" on the end. It fails for anyone else:
+
+        <+SomeBot-> Type @SomeBot^ to get my list of 39,454 (5.48 TB) RAR folders
+
+    Sender "SomeBot-", trigger "SomeBot^" - so `"somebot" != "somebot-"` and the whole advert
+    was discarded, with a log line saying the sender is the authority on who a
+    bot is. Which is TRUE, and is exactly why this parser should never have
+    been claiming to know. The trigger is configurable and has no relationship
+    to the nick that is safe to assume in either direction.
+
+    So: the sender is the identity, and the advert is the authority on the
+    trigger. `nick` is None, meaning "this advert makes no claim about who
+    sent it", and the caller skips the comparison rather than failing it.
+
+    A trigger that could not be sent safely is dropped rather than kept - the
+    bot is still recorded as publishing a RAR list, because rar_folders says
+    so, and only the shortcut to asking for it is lost.
     """
     found = _RAR_RE.search(clean)
     if not found:
         return None
 
-    return {
+    trigger = found.group(1)
+    advert = {
         "family": "rar",
-        "nick": found.group(1),
-        "rar_trigger": found.group(1) + "^",
+        "nick": None,
         "rar_folders": _as_int(found.group(2).replace(",", "")),
         "rar_size": re.sub(r"\s+", "", found.group(3)),
     }
+    if _TRIGGER_RE.match(trigger):
+        advert["rar_trigger"] = trigger
+    else:
+        print(f"[ADVERT] Ignoring a RAR trigger that cannot be sent safely: "
+              f"{trigger[:40]!r}")
+    return advert
 
 
 # Order matters only in that each wording is distinct enough not to overlap:
@@ -486,7 +1332,7 @@ _ADVERT_PARSERS = (_parse_omenserve_advert, _parse_spqr_advert, _parse_rar_folde
 
 # What each family is entitled to write into a registry entry. A bot's RAR
 # advert must not overwrite the count of its loose-file list, and the other way
-# round - they are two lists and Zkx publishes both.
+# round - they are two lists and PackBot publishes both.
 _ADVERT_FIELDS = {
     "omenserve": ("files", "list_date", "list_size"),
     "spqr": ("files", "list_size"),
@@ -601,7 +1447,13 @@ def _capture_channel_advert(user, target, msg, now=None):
 
     advert = parse_channel_advert(msg)
     if advert:
-        if advert["nick"].lower() != key:
+        # Only when the advert claims a name. The OmenServe and SPQR wordings
+        # put the bot's own nick in the text, so a mismatch there is somebody
+        # advertising as somebody else and is worth refusing. The RAR wording
+        # carries a TRIGGER, which is not a nick and is not required to
+        # resemble one - see _parse_rar_folder_advert(), which returns None
+        # here rather than a name it would have had to invent.
+        if advert.get("nick") and advert["nick"].lower() != key:
             print(f"[ADVERT] {user} advertised as {advert['nick']!r} - ignoring; "
                   f"the sender is the authority on who a bot is.")
             return
@@ -623,7 +1475,15 @@ def _capture_channel_advert(user, target, msg, now=None):
         return
 
     merged = parse_channel_advert(stitched)
-    if not merged or merged["nick"].lower() != key:
+    if not merged:
+        return
+    # Same "no claim, no comparison" rule as the fresh-advert branch above -
+    # the RAR wording's `nick` is None on purpose (see
+    # _parse_rar_folder_advert()'s docstring), and merged["nick"].lower()
+    # here raised AttributeError on every RAR advert that happened to arrive
+    # split across two lines, silently losing the continuation to
+    # never_breaks_the_read_loop()'s guard instead of recording it.
+    if merged.get("nick") and merged["nick"].lower() != key:
         return
 
     # Keep the ORIGINAL timestamp: a bot that talks steadily must not be able
@@ -644,10 +1504,17 @@ def _prune_known_bots(now):
     as infinitely old rather than kept for ever: the field is written on every
     single capture, so a missing one means the entry predates this and is not
     being refreshed.
+
+    TWO TTLs, not one - see KNOWN_BOTS_ABSENT_TTL_SECONDS's own comment. A bot
+    that has simply gone quiet keeps the full week; one _bot_confirmed_absent()
+    can actually vouch for is gone by the next day instead, because the List
+    Browser's red dot has already said so and there is nothing left to wait
+    for. Reported from an operator who watched a screenful of confirmed-gone
+    bots sit there for most of a week regardless.
     """
     registry = runtime.known_bots
     for key in [k for k, entry in registry.items()
-                if now - float((entry or {}).get("last_seen") or 0) > KNOWN_BOTS_TTL_SECONDS]:
+                if _known_bot_is_stale(k, entry, now)]:
         del registry[key]
 
     if len(registry) > KNOWN_BOTS_MAX:
@@ -655,6 +1522,41 @@ def _prune_known_bots(now):
                         key=lambda kv: float((kv[1] or {}).get("last_seen") or 0))
         for key, _entry in by_age[:len(registry) - KNOWN_BOTS_MAX]:
             del registry[key]
+
+
+def _known_bot_is_stale(key, entry, now):
+    """Whether _prune_known_bots() should drop this entry.
+
+    `key` is already the lower-cased registry key - see _capture_channel_
+    advert()'s own `key = user.lower()` - so it compares directly against
+    the lower-cased nicks _bot_confirmed_absent() reads from channel_users.
+    """
+    age = now - float((entry or {}).get("last_seen") or 0)
+    if age > KNOWN_BOTS_TTL_SECONDS:
+        return True
+    return age > KNOWN_BOTS_ABSENT_TTL_SECONDS and _bot_confirmed_absent(key)
+
+
+def _bot_confirmed_absent(key):
+    """True only once we actually know `key` is gone - not merely that
+    nothing has proven it is still there.
+
+    An EMPTY config.channel_users - still joining, in the settle window right
+    after a (re)connect, before the first NAMES reply has landed for any
+    channel - must never read as "confirmed absent". Reading it that way
+    would prune every known bot within KNOWN_BOTS_ABSENT_TTL_SECONDS of every
+    restart, whether or not a single one of them had actually left: nothing
+    known yet is not the same claim as nobody there. This mirrors
+    webserver.present_nicks()'s identical "empty means unknown" rule, for the
+    identical reason - that function just answers it for the whole set at
+    once, where this only ever needs one name.
+    """
+    with runtime.channel_users_lock():
+        channels = getattr(config, "channel_users", None) or {}
+        if not any(users for users in channels.values()):
+            return False
+        return not any(str(nick).lower() == key
+                       for users in channels.values() for nick in users)
 
 
 def _prune_advert_tails(now):
@@ -929,6 +1831,91 @@ def get_bot_aliases():
     return aliases
 
 
+def is_list_request(msg, msg_lower):
+    """True if this message is asking THIS bot for its list.
+
+    "@<nick>" exactly, or "@<nick>" followed by a space and anything at all.
+
+    THE SUFFIX IS THE POINT. AutoQ.mrc - the queue script this channel's users
+    actually paste list rows into - has a "Get Listfile" menu item, and what it
+    sends is:
+
+        msg $chan $+(@,$snick($chan,%i))  ::^C4,0Auto^C12,0^BQ^B^C1,0::
+
+    i.e. "@<nick>  ::AutoQ::" with the tag colour-coded. OmenServe answers
+    that; a dispatcher comparing for equality does not, so DCCore was simply
+    SILENT for every user of that menu item - no reply, no error, and nothing
+    in the log to say a request had been made and ignored.
+
+    The SPACE is what makes a suffix safe to accept. None of the names this
+    bot must stay distinct from contains one:
+
+      * "@<nick>-que", "-remove", "-help", "-stats", "-top" - this bot's own
+        commands, each still matched exactly by its own branch;
+      * "@<nick>2", "@<nick>_away" - a DIFFERENT bot whose nick merely starts
+        with ours, which must never have its list request answered by us.
+
+    @find and @locator are excluded explicitly. They are the only triggers
+    whose first word could also be a nickname, and for a bot actually named
+    "find" a search must keep meaning a search. Tested case-sensitively here
+    because the dispatcher tests them that way too: excluding more than it
+    dispatches would silently drop a request instead of answering it.
+    """
+    nick = str(getattr(config, "NICKNAME", "") or "").strip().lower()
+    if not nick:
+        return False
+    if msg_lower == f"@{nick}":
+        return True
+    if not msg_lower.startswith(f"@{nick} "):
+        return False
+    return not (msg.startswith("@find ") or msg.startswith("@locator "))
+
+
+def thaw_one_user(key):
+    """Release one user's freeze. True if THIS call is the one that released
+    it.
+
+    One pop, never `in` then `del`. Between those two statements the freeze
+    sweep in dcc.check_queue_and_send() - which runs on every dispatch thread
+    and deletes every frozen user it finds present in channel_users - can
+    remove the key, and the `del` then raises KeyError on the IRC READ
+    THREAD, where the message loop's `except Exception` answers it by closing
+    the socket.
+
+    Returning whether this caller did the removing is what keeps the log line
+    and the dispatch thread attached to a real thaw rather than to a race
+    that another thread already won.
+    """
+    frozen = getattr(config, "frozen_queues", None)
+    if not isinstance(frozen, dict):
+        return False
+    return frozen.pop(key, None) is not None
+
+
+def thaw_frozen_users(names):
+    """The users among `names` that THIS call thawed, in order.
+
+    The 353 (NAMES) handler thaws everyone still in the channel and starts a
+    dispatch thread per user. That thread's freeze sweep deletes every user
+    it finds present in channel_users - which the same handler populated with
+    all of these names moments earlier - so the first iteration's thread
+    routinely removes keys the later iterations are about to remove.
+
+    Every removal therefore has to tolerate losing the race, and the returned
+    list has to be what was actually removed: a NAMES sync after a reconnect,
+    with two or more frozen users, was dropping the very link it was sent to
+    recover.
+    """
+    return [name for name in names if thaw_one_user(name)]
+
+
+# Far above anything a real server sends: RFC 1459 caps a line at 512 bytes
+# including CRLF, and IRCv3 message tags add at most 8191 more. This bounds
+# memory against a peer that never terminates a line at all; it does not
+# police line length.
+MAX_PENDING_LINE_BYTES = 64 * 1024
+
+
 def take_complete_lines(buffer, chunk):
     """Add `chunk` to `buffer` and return (leftover_bytes, [decoded lines]).
 
@@ -960,8 +1947,28 @@ def take_complete_lines(buffer, chunk):
     """
     buffer += chunk
     raw_lines = buffer.split(b"\r\n")
-    return raw_lines.pop(), [raw.decode("utf-8", errors="replace")
-                             for raw in raw_lines]
+    leftover = raw_lines.pop()
+
+    # A LINE THAT NEVER ENDS IS NOT A LINE. Without this the leftover grows by
+    # every chunk for as long as the peer withholds CRLF - an on-path attacker,
+    # or a PORT pointed at something that is not an ircd, streaming bytes until
+    # the daemon is killed by the OOM reaper. The read loop cannot notice on
+    # its own: it sees no complete lines, so no per-line handler ever runs and
+    # nothing else in the process gets a chance to object.
+    #
+    # RFC 1459 caps a line at 512 bytes including CRLF, and IRCv3 message tags
+    # add at most 8191 more, so nothing a real server sends can reach the
+    # ceiling below. That is what makes discarding the right response rather
+    # than a risk: whatever is in the buffer at that point is not an IRC line,
+    # and keeping it can only make the problem worse.
+    if len(leftover) > MAX_PENDING_LINE_BYTES:
+        print(f"[IRC] Discarded {len(leftover)} bytes of unterminated input: "
+              f"no CRLF within {MAX_PENDING_LINE_BYTES} bytes, which is not "
+              f"an IRC line.")
+        leftover = b""
+
+    return leftover, [raw.decode("utf-8", errors="replace")
+                      for raw in raw_lines]
 
 
 def resolve_dcc_address(lookup=None, log=print):
@@ -1008,8 +2015,38 @@ def resolve_dcc_address(lookup=None, log=print):
         log(f"[WARNING] Could not reach the ipify API ({e}).")
         log("[WARNING] No public address is known, so DCC sends will be refused "
             "rather than offered to nobody. Set MY_IP_OR_DOCK in admin_config.py "
-            "or settings.conf to your public address to serve without this lookup.")
+            "to your public address to serve without this lookup. Not "
+            "settings.conf (#465): this address is detected at startup rather "
+            "than read from a file, so it is not a setting that file carries.")
         return ""
+
+
+def ctcp_version_reply(user):
+    """The NOTICE line answering one CTCP VERSION query, or None if disabled.
+
+    A standalone function so it is unit-testable without driving irc_loop(),
+    matching rehash_nick_change_line()'s own reason for existing.
+
+    NOTICE rather than PRIVMSG. That is the CTCP rule, and the reason is
+    practical: two bots that both answer CTCP with a privmsg answer each other
+    forever. It also means nothing lands in a channel - the reply goes to
+    whoever asked and nobody else sees it, which is the whole difference
+    between this and a "!version" command.
+
+    Returns None, not an empty string, when CTCP_VERSION_REPLY is off: the
+    caller must send nothing at all and stay as silent as the bot was before
+    this existed, rather than answer with something evasive.
+    """
+    if not getattr(config, "CTCP_VERSION_REPLY", True):
+        return None
+
+    version = str(getattr(config, "SCRIPT_VERSION", "") or "").strip()
+    url = str(getattr(config, "PROJECT_URL", "") or "").strip()
+
+    # Joined on what is actually present. An operator who blanks either one
+    # should get a shorter reply, never a dangling " - " or a bare separator.
+    detail = " - ".join(part for part in (version, url) if part) or "DCCore"
+    return f"NOTICE {user} :\x01VERSION {detail}\x01\r\n"
 
 
 def irc_loop():
@@ -1062,26 +2099,53 @@ def irc_loop():
             
         # Send the handshake immediately; the server decides the nick via real 433 replies
         try:
-            s.send(f"NICK {config.NICKNAME}\r\n".encode())
+            s.sendall(f"NICK {config.NICKNAME}\r\n".encode("utf-8", errors="ignore"))
             
             auth_buffer = b""
             while True:
-                auth_data = s.recv(1024)
+                auth_data = s.recv(SOCKET_READ_BYTES)
                 if not auth_data:
                     break
                 auth_buffer, auth_lines = take_complete_lines(auth_buffer, auth_data)
                 
                 for a_line in auth_lines:
                     if " 433 " in a_line or "erroneous nickname" in a_line.lower():
-                        alt_nick = getattr(config, 'ALT_NICKNAME', f"{config.ORIGINAL_NICK}`")
+                        alt_nick = resolve_alt_nick(config.ORIGINAL_NICK)
                         print(f"[SERVER 433] The nick {config.NICKNAME} was taken. Switching CURRENT_NICK to: {alt_nick}")
-                        s.send(f"NICK {alt_nick}\r\n".encode())
+                        s.sendall(f"NICK {alt_nick}\r\n".encode("utf-8", errors="ignore"))
                         config.NICKNAME = alt_nick
                     
+                    # What the server actually calls us, taken from the numeric
+                    # it addressed to us rather than assumed from config.
+                    #
+                    # A nickname longer than the server's NICKLEN is not
+                    # refused - it is silently SHORTENED. Undernet allows 12,
+                    # so "DCCore-Server" registered as "DCCore-Serve" while the
+                    # daemon went on believing the longer name: it advertised
+                    # "@DCCore-Server", a nick nobody could PM or DCC, and said
+                    # "CURRENT_NICK settled as" the name it had never had. 433
+                    # was handled; this was not, because nothing failed.
+                    #
+                    # Assigned to NICKNAME only. ORIGINAL_NICK keeps the
+                    # configured value, and get_bot_aliases() already answers to
+                    # both - it was written for the same divergence after a 433,
+                    # and the master list is stamped by a subprocess with the
+                    # configured name either way, so a pasted "!<nick> <file>"
+                    # keeps matching.
+                    if is_server_numeric(a_line, "001"):
+                        given = numeric_target(a_line)
+                        if given and given != config.NICKNAME:
+                            print(f"[SERVER] Registered as {given}, not "
+                                  f"{config.NICKNAME} - the server changed it. "
+                                  f"The advert and every reply will use "
+                                  f"{given}.")
+                            config.PREVIOUS_NICK = config.NICKNAME
+                            config.NICKNAME = given
+
                     if " 001 " in a_line or " 002 " in a_line or "PING" in a_line or "NOTICE" in a_line:
                         ident_str = getattr(config, 'IDENT', 'dccore')
                         real_str = getattr(config, 'REALNAME', 'dccore bot')
-                        s.send(f"USER {ident_str} 0 * :{real_str}\r\n".encode())
+                        s.sendall(f"USER {ident_str} 0 * :{real_str}\r\n".encode("utf-8", errors="ignore"))
                         break
                 else:
                     continue
@@ -1114,6 +2178,10 @@ def irc_loop():
         # Bytes - see take_complete_lines() for why this must not be str.
         buffer = b""
         joined = False
+        # Reset per connection, like `joined` above and for the same reason: a
+        # reconnect to a different server may well have a different NICKLEN,
+        # and the operator should be told again if it matters there too.
+        announced_nicklen = False
         bot_joined_channel = False
         announce.is_ready = False
         
@@ -1145,6 +2213,12 @@ def irc_loop():
         SILENCE_LIMIT = 180.0    # only at this point is the link considered dead
         KEEPALIVE_AFTER = 45.0   # this much silence is allowed before we PING
         last_ping_sent = 0.0
+
+        # The last few lines the server sent, for the disconnect handlers to
+        # print. Small on purpose: the point is the handful of lines around a
+        # drop, not a transcript, and this is held for the life of a
+        # connection on a bot that may never disconnect at all.
+        recent_lines = collections.deque(maxlen=RECENT_LINE_MEMORY)
 
         # HOISTED (issue #9): delayed_activate lives here now, once, instead of being
         # nested inside the 366 handler - so both the ordinary NAMES path AND
@@ -1206,7 +2280,7 @@ def irc_loop():
                     if not main_nick_active:
                         print(f"\n[NICK RECOVERY] The ghost nick {main_nick} timed out. Changing nick...")
                         try:
-                            sock_inst.send(f"NICK {main_nick}\r\n".encode())
+                            sock_inst.sendall(f"NICK {main_nick}\r\n".encode("utf-8", errors="ignore"))
                             config.NICKNAME = main_nick
                             break
                         except:
@@ -1233,14 +2307,35 @@ def irc_loop():
                 print("[WATCHDOG] Connection changed before the timeout elapsed. Standing down.")
                 return
             if joined and not getattr(config, 'activation_triggered', False):
-                missing = target_channels - channels_confirmed
+                # THE WIDER SET (#510). target_channels is CHANNEL only, and
+                # deliberately so - activation must not wait on the debug
+                # channel, or one broken debug channel silences every advert.
+                # But "what never confirmed" is a different question from
+                # "may we start advertising", and answering it with the
+                # narrow set is why a debug channel lost to a truncated JOIN
+                # was not even in the list of things that went missing.
+                missing = channels_we_should_be_in_set() - channels_confirmed
                 config.activation_triggered = True
                 if missing:
-                    print(f"[WARNING] Activating the advert despite {len(missing)} unconfirmed channel(s): {', '.join(missing)}")
+                    print(f"[WARNING] Activating the advert despite {len(missing)} unconfirmed channel(s): {', '.join(sorted(missing))}")
+                    # TRIED AGAIN, not just reported (#510). This set is
+                    # already exactly the right answer and was only ever
+                    # printed; feeding it to the retry machinery gives a
+                    # channel that never let us in the same bounded second
+                    # chance a channel that threw us out has had since #191.
+                    for unconfirmed in sorted(missing):
+                        note_join_unconfirmed(unconfirmed)
                     try:
+                        # notice="error", which send_debug() turns into a
+                        # dashboard notice (#510). Without it the ONLY
+                        # operator-facing copy of this went to the debug
+                        # channel - which, when a truncated JOIN is the cause,
+                        # is routinely one of the channels that went missing.
+                        # The message about losing channels cannot be
+                        # delivered only to one of them.
                         announce.send_debug(
-                            f"Activated after {int(ACTIVATION_TIMEOUT)}s with {config.C_BOLD}{len(missing)}{config.C_RESET} channel(s) never confirmed via NAMES: {', '.join(missing)}",
-                            category="PART")
+                            f"Activated after {int(ACTIVATION_TIMEOUT)}s with {config.C_BOLD}{len(missing)}{config.C_RESET} channel(s) never confirmed via NAMES: {', '.join(sorted(missing))}. Retrying them on the advert timer.",
+                            category="PART", notice="error")
                     except Exception as watchdog_debug_err:
                         print(f"[WARNING] Could not send the watchdog debug notice: {watchdog_debug_err}")
                 else:
@@ -1250,13 +2345,14 @@ def irc_loop():
         while True:
             try:
                 try:
-                    data = s.recv(2048)
+                    data = s.recv(SOCKET_READ_BYTES)
                 except socket.timeout:
                     now = time.time()
                     quiet_for = now - last_recv_time
 
                     if quiet_for > SILENCE_LIMIT:
                         print(f"[TIMEOUT] The server has been silent for {int(quiet_for)}s. Dropping the link to reconnect.")
+                        _report_recent_lines(recent_lines)
                         try: s.close()
                         except: pass
                         _release_socket()
@@ -1264,7 +2360,7 @@ def irc_loop():
 
                     if quiet_for > KEEPALIVE_AFTER and (now - last_ping_sent) > KEEPALIVE_AFTER:
                         try:
-                            s.send(b"PING :lagcheck\r\n")
+                            s.sendall(b"PING :lagcheck\r\n")
                             last_ping_sent = now
                         except Exception as ping_err:
                             print(f"[TIMEOUT] The keepalive PING did not get through ({ping_err}). Dropping the link to reconnect.")
@@ -1274,13 +2370,22 @@ def irc_loop():
                             break
                     continue
                 except socket.error as net_err:
-                    print(f"[DISCONNECT FIX] TCP keepalive detected a dead network ({net_err}). Dropping the link to reconnect.")
+                    # NOT NECESSARILY A DEAD NETWORK, which is what this said
+                    # for every socket error alike. ECONNRESET is the server
+                    # hanging up on US - a different thing with a different
+                    # cause, and a beta report of exactly that sent its
+                    # operator looking at their connection when the answer
+                    # was on the wire a moment earlier.
+                    print(f"[DISCONNECT] The link dropped while reading "
+                          f"({net_err}). Reconnecting.")
+                    _report_recent_lines(recent_lines)
                     try: s.close()
                     except: pass
                     _release_socket()
                     break
                 except Exception as e:
                     print(f"[IRC READ ERROR] Unexpected error while reading from the network: {e}")
+                    _report_recent_lines(recent_lines)
                     try: s.close()
                     except: pass
                     _release_socket()
@@ -1288,6 +2393,7 @@ def irc_loop():
 
                 if not data:
                     print("[DISCONNECT] Server closed connection. Breaking to reconnect motor...")
+                    _report_recent_lines(recent_lines)
                     try: s.close()
                     except: pass
                     _release_socket()
@@ -1299,6 +2405,26 @@ def irc_loop():
                 for line in lines:
                     if not line.strip():
                         continue
+                    # WHAT THE SERVER LAST SAID, kept for the disconnect
+                    # handlers above. A dropped link is reported without a
+                    # word about what preceded it, so a beta report of
+                    # "[WinError 10054] ... Dropping the link to reconnect"
+                    # after joining several channels had nothing to diagnose
+                    # from - and by the time it was asked about, the lines
+                    # were gone and it would not reproduce.
+                    #
+                    # An ircd states its reason before it hangs up: "ERROR
+                    # :Closing Link: <nick> (Max SendQ exceeded)" and the
+                    # like. That line is the answer, and it was being read,
+                    # matched by nothing, and dropped.
+                    recent_lines.append(line.strip()[:200])
+                    # Not only in DEBUG_MODE. An ERROR from the server is the
+                    # server explaining itself, and it is never chatter - the
+                    # debug filter below would have hidden this behind a
+                    # setting nobody has on when the thing they need it for
+                    # happens.
+                    if line.startswith("ERROR ") or line.startswith("ERROR:"):
+                        print(f"[SERVER ERROR] {line.strip()}")
                     if getattr(config, 'DEBUG_MODE', False):
                         is_channel_traffic = " PRIVMSG #" in line
                         is_for_me = f"PRIVMSG {config.NICKNAME}" in line or f" {config.NICKNAME} " in line or f"@{config.NICKNAME.lower()}" in line.lower()
@@ -1308,9 +2434,22 @@ def irc_loop():
                         parts = line.split()
                         if len(parts) > 1:
                             pong_code = parts[1].lstrip(':')
-                            s.send(f"PONG {pong_code}\r\n".encode())
+                            s.sendall(f"PONG {pong_code}\r\n".encode("utf-8", errors="ignore"))
                     
-                    if " PONG " in line and "OSERVE_LATENCY_CHECK" in line:
+                    # Anchored with is_server_numeric(), for the same reason
+                    # the 513 handler three lines below is: an unanchored
+                    # substring test matches the TEXT of a channel message.
+                    # A user typing "oops PONG OSERVE_LATENCY_CHECK" satisfied
+                    # both halves, so anybody could forge the operator's
+                    # latency reading - and the `continue` below meant their
+                    # own line was then never processed as a command either.
+                    #
+                    # A real PONG is a server message carrying PONG in the
+                    # command position, which is the shape is_server_numeric()
+                    # matches - its regex anchors on any command token, not
+                    # only digits, and its own docstring already cites this
+                    # very PONG line as the bug it was written for.
+                    if is_server_numeric(line, "PONG") and "OSERVE_LATENCY_CHECK" in line:
                         import commands
                         commands.handle_pong_response(category="INFO")
                         continue
@@ -1322,7 +2461,26 @@ def irc_loop():
                     if is_server_numeric(line, "513") and "PONG" in line:
                         parts = line.split()
                         pong_code = parts[-1].strip()
-                        s.send(f"PONG {pong_code}\r\n".encode())
+                        s.sendall(f"PONG {pong_code}\r\n".encode("utf-8", errors="ignore"))
+
+                    # 005 is where the server states its own limits, and it
+                    # arrives after 001 - so by now the shortened nick has
+                    # already been adopted above. This is the EXPLANATION, not
+                    # the detection: without it an operator sees their bot
+                    # under a name they did not choose and has nothing to
+                    # connect it to. Printed once, and only when the configured
+                    # name genuinely did not fit.
+                    if not announced_nicklen and is_server_numeric(line, "005"):
+                        limit = isupport_nicklen(line)
+                        configured = str(getattr(config, "ORIGINAL_NICK", "") or "")
+                        if limit and configured and len(configured) > limit:
+                            announced_nicklen = True
+                            print(f"[SERVER] This server allows {limit} "
+                                  f"characters in a nickname and NICKNAME is "
+                                  f"{len(configured)} ({configured}), so it was "
+                                  f"shortened to {config.NICKNAME}. Set NICKNAME "
+                                  f"to {limit} characters or fewer to choose the "
+                                  f"short form yourself.")
                     # Catches ONLY official server collisions; channel chatter is ignored
                     # Anchored: " 433 " matched those digits anywhere in the line, and the
                     # PRIVMSG/NOTICE exclusion under it did not cover PART or QUIT reasons
@@ -1336,9 +2494,9 @@ def irc_loop():
                     if is_server_numeric(line, "433") or is_server_numeric(line, "432"):
                         main_nick = getattr(config, 'ORIGINAL_NICK', 'DCCore')
                         if str(config.NICKNAME).lower() == main_nick.lower():
-                            alt_nick = getattr(config, 'ALT_NICKNAME', f"{main_nick}`")
+                            alt_nick = resolve_alt_nick(main_nick)
                             print(f"[LIVE NICK COLLISION] The server reported a genuine collision for {main_nick}. Fallback nick: {alt_nick}")
-                            s.send(f"NICK {alt_nick}\r\n".encode())
+                            s.sendall(f"NICK {alt_nick}\r\n".encode("utf-8", errors="ignore"))
                             config.NICKNAME = alt_nick
 
                     # Reclaim the main nick the moment the other client releases it
@@ -1353,7 +2511,7 @@ def irc_loop():
                             if event_source_nick(line) == main_nick.lower():
                                 print(f"[NICK RECOVERY] The main nick {main_nick} logged out. Reclaiming it now...")
                                 try:
-                                    s.send(f"NICK {main_nick}\r\n".encode())
+                                    s.sendall(f"NICK {main_nick}\r\n".encode("utf-8", errors="ignore"))
                                     config.NICKNAME = main_nick
                                 except Exception as recovery_err:
                                     print(f"[NICK RECOVERY ERROR] Could not reclaim the nick: {recovery_err}")
@@ -1367,25 +2525,125 @@ def irc_loop():
                         
                         def delayed_join(socket_conn, channels):
                             time.sleep(5)
+                            # ON-CONNECT COMMANDS, BEFORE THE JOIN. The order is
+                            # the point, not a preference: on Undernet, logging
+                            # in to X takes +x, and +x replaces the host every
+                            # person in the channel sees. Joining first puts the
+                            # real host in front of everybody already sitting
+                            # there, and no later mode change takes it back.
+                            #
+                            # So: auth, mode, THEN join. Anything that fails
+                            # here is logged and the join happens anyway - a bot
+                            # that will not join because one optional line was
+                            # refused is worse off than one that joined without
+                            # its usermode.
                             try:
-                                socket_conn.send(f"JOIN {channels}\r\n".encode())
-                                # An empty fallback rather than a channel name, and then an
-                                # actual check: "JOIN \r\n" is a malformed line, and joining
-                                # some channel the operator never configured is worse than
-                                # joining none at all.
+                                import on_connect
+
+                                commands, gap = on_connect.load()
+                                if commands:
+                                    # COMMAND WORDS ONLY, never the arguments.
+                                    # These lines hold an X password, and
+                                    # send_debug() writes to a CHANNEL -
+                                    # printing one there hands it to everybody
+                                    # watching.
+                                    shown = ", ".join(on_connect.redacted(commands))
+                                    print(f"[CONNECT] Sending {len(commands)} "
+                                          f"on-connect command(s): {shown}")
+                                for index, command in enumerate(commands):
+                                    if index:
+                                        time.sleep(gap)
+                                    # normalize() first: translates the one
+                                    # client shorthand (msg -> PRIVMSG) that
+                                    # does not match its own wire form, so
+                                    # the dashboard's "exactly as you would
+                                    # type it into a client" is actually
+                                    # true for the X-login/NickServ line
+                                    # nearly every operator pastes in here.
+                                    line = on_connect.expand(
+                                        on_connect.normalize(command),
+                                        config.NICKNAME)
+                                    socket_conn.sendall(
+                                        (line + "\r\n").encode(
+                                            "utf-8", errors="ignore"))
+                                if commands:
+                                    # One more gap before the JOIN, so the last
+                                    # command gets the same chance to be acted
+                                    # on as the ones before it. A login sent
+                                    # immediately before a JOIN can still be in
+                                    # flight when the channel sees us.
+                                    time.sleep(gap)
+                            except Exception as on_connect_err:
+                                print(f"[CONNECT] On-connect commands failed "
+                                      f"({on_connect_err}); joining anyway.")
+                            try:
+                                # A FEW AT A TIME, NOT ALL AT ONCE (#510).
+                                #
+                                # This was one JOIN carrying every channel,
+                                # followed by a second command for the debug
+                                # channel with no gap at all. Reported live:
+                                # fourteen configured channels, eleven joined,
+                                # the missing ones being the tail of the line -
+                                # and the debug channel, which was last of all.
+                                # The server takes what it will and drops the
+                                # rest, and nothing here noticed.
+                                #
+                                # The debug channel rides in the batching now
+                                # rather than trailing it. It was the most
+                                # exposed line in the burst and is the one
+                                # whose loss costs the operator the message
+                                # saying anything was lost.
+                                wanted = channels
+                                batches = join_batches(wanted)
+                                for index, payload in enumerate(batches):
+                                    if index:
+                                        time.sleep(JOIN_BATCH_GAP)
+                                    socket_conn.sendall(
+                                        f"JOIN {payload}\r\n".encode(
+                                            "utf-8", errors="ignore"))
                                 debug_chan = str(getattr(config, 'DEBUG_CHANNEL', '') or '').strip()
                                 if debug_chan:
-                                    socket_conn.send(f"JOIN {debug_chan}\r\n".encode())
-                                    print(f"[JOIN] Joined the main channels and the debug channel: {debug_chan}")
+                                    print(f"[JOIN] Asked for {len(wanted)} channel(s) "
+                                          f"in {len(batches)} batch(es), including the "
+                                          f"debug channel {debug_chan}.")
                                 else:
-                                    print("[JOIN] Joined the main channels. No DEBUG_CHANNEL is set, so none was joined.")
+                                    # The sentence is kept whole rather than
+                                    # wrapped mid-phrase: an operator greps
+                                    # their log for it, and so does
+                                    # tests/test_debug_channel_default.py.
+                                    print(f"[JOIN] Asked for {len(wanted)} channel(s) "
+                                          f"in {len(batches)} batch(es). "
+                                          f"No DEBUG_CHANNEL is set, so none was joined.")
                                 # NEW (issue #9): start the watchdog HERE, right after the JOIN
                                 # has actually been sent, so the timeout starts from the right moment.
                                 threading.Thread(target=activation_watchdog, daemon=True).start()
                             except Exception as join_err:
                                 print(f"[ERROR] Could not send JOIN: {join_err}")
                                 
-                        threading.Thread(target=delayed_join, args=(s, config.CHANNEL), daemon=True).start()
+                        # Normalised, not raw: a space after a comma turns the
+                        # rest of the list into a channel key and joins only the
+                        # first - see join_batches(), which inherits that from
+                        # configured_channels() stripping every entry.
+                        #
+                        # The DEBUG CHANNEL is in here too (#510). It used to be
+                        # a second JOIN command sent after this one with no gap,
+                        # which made it the most exposed line in the burst.
+                        threading.Thread(target=delayed_join,
+                                         args=(s, channels_we_should_be_in()),
+                                         daemon=True).start()
+
+                    # A JOIN that worked, whether it was the first one or
+                    # a rejoin. Clearing here rather than in the branch below
+                    # because that one only runs before activation - a channel
+                    # rejoined hours later would otherwise stay marked as
+                    # kicked for the life of the process, and be retried on
+                    # every advert until it ran out of attempts.
+                    if " 366 " in line:
+                        back = re.match(r"^:\S+ 366 \S+ (\S+)", line)
+                        if back and note_joined(back.group(1)) is not None:
+                            announce.send_debug(
+                                f"Rejoined {back.group(1)}.", category="JOIN",
+                                notice="warning")
 
                     if joined and not getattr(config, 'activation_triggered', False) and " 366 " in line:
                         # FIXED (issue #9): parses WHICH channel the 366 line refers to instead
@@ -1395,8 +2653,12 @@ def irc_loop():
                         # Anchored to the server prefix: the old unanchored search matched
                         # anywhere in the line, so a user could PRIVMSG " 366 x #chan" and
                         # forge a channel confirmation, activating the bot early.
-                        m366 = re.match(r"^:\S+ 366 \S+ ([#\w\-]+)", line)
-                        if m366:
+                        # \S+ for the channel, not [#\w\-]+ - see
+                        # is_valid_irc_target(). A channel with an "&" or a
+                        # "^" in its name never had its 366 recognised, so it
+                        # never counted as confirmed at startup.
+                        m366 = re.match(r"^:\S+ 366 \S+ (\S+)", line)
+                        if m366 and is_valid_irc_target(m366.group(1)):
                             confirmed_chan = m366.group(1).lower()
                             channels_confirmed.add(confirmed_chan)
                             print(f"[INFO] Received End of NAMES for {confirmed_chan} ({len(channels_confirmed & target_channels)}/{len(target_channels)} target channels confirmed)")
@@ -1415,11 +2677,10 @@ def irc_loop():
                     if is_user_event(line, "NICK"):
                         nick_match = re.match(r"^:([^!\s]+)!\S*\s+NICK\s+:?(\S+)", line)
                         if nick_match:
-                            old_nick = nick_match.group(1).lower()
-                            new_nick = nick_match.group(2).strip()
-                            if old_nick in config.send_queue:
-                                import queue_mgr
-                                queue_mgr.config.send_queue[new_nick.lower()] = queue_mgr.config.send_queue.pop(old_nick)
+                            # Everything this user owns, not just their
+                            # outbound messages - see note_nick_change().
+                            note_nick_change(nick_match.group(1),
+                                             nick_match.group(2).strip())
                             
                     # Anchored: this writes straight into config.whois_status.
                     if is_server_numeric(line, "352"):
@@ -1431,8 +2692,20 @@ def irc_loop():
                     # proof a user is present when deciding whether to thaw a frozen queue
                     # and dispatch to them. A forged line injected fake presence.
                     if is_server_numeric(line, "353"):
-                        name_match = re.search(r" 353 [^#]+([#\w\-]+) :(.+)$", line)
-                        if name_match:
+                        # The RFC form, rather than "skip to the first #".
+                        # A 353 is ":<server> 353 <nick> <symbol> <channel>
+                        # :<names>", where <symbol> is one of = * @. Matching
+                        # the channel as [#\w\-]+ meant a name containing "&"
+                        # or "^" never parsed, so config.channel_users never
+                        # learned who was in it - and the presence check above
+                        # then refused to dispatch to anyone there. The symbol
+                        # is optional here only because not every server sends
+                        # one; restricting it to those three keeps it from
+                        # swallowing a real channel name.
+                        name_match = re.search(
+                            r"^:\S+\s+353\s+\S+\s+(?:[=*@]\s+)?(\S+)\s+:(.+)$",
+                            line)
+                        if name_match and is_valid_irc_target(name_match.group(1)):
                             chan = name_match.group(1).lower()
                             names = [n.strip("@+~&%").lower() for n in name_match.group(2).split()]
                             with runtime.channel_users_lock():
@@ -1446,23 +2719,35 @@ def irc_loop():
                             # NAMES (353) and NOT via JOIN. Without this, their queues stayed
                             # frozen and were deleted by the 5-minute timer despite never leaving.
                             # -------------------------------------------------
-                            thawed_users = [n for n in names if n in getattr(config, 'frozen_queues', {})]
+                            # pop(), not del, and the list is rebuilt from what
+                            # was actually removed. The thread started for each
+                            # thawed user runs check_queue_and_send(), whose own
+                            # freeze sweep deletes EVERY user it finds present in
+                            # channel_users - which the 353 handler above has just
+                            # populated with all of these names. So the first
+                            # iteration's thread routinely deletes the keys later
+                            # iterations are about to delete, and `del` raised
+                            # KeyError on the IRC READ THREAD. That is caught far
+                            # below by the message loop's `except Exception`, which
+                            # closes the socket - a NAMES sync after a reconnect,
+                            # with two or more frozen users, dropping the link it
+                            # was sent to recover.
+                            thawed_users = thaw_frozen_users(names)
                             for frozen_user in thawed_users:
-                                del config.frozen_queues[frozen_user]
                                 files_in_q = len(config.dcc_queue.get(frozen_user, []))
                                 print(f"[DCC RECONNECT THAW] {frozen_user} was still in {chan} at the NAMES sync. Thawing {files_in_q} file(s).")
                                 threading.Thread(target=dcc.check_queue_and_send, args=(s, frozen_user), daemon=True).start()
 
                             if thawed_users:
-                                announce.send_debug(f"Reconnect sync in {chan}: thawed {config.C_BOLD}{len(thawed_users)}{config.C_RESET} queue(s) for users who never left.", category="JOIN")
+                                _note_reconnect_thaw(chan, len(thawed_users))
 
                     # Anchored: " JOIN " matched the word anywhere, so a PRIVMSG containing
                     # it thawed the speaker's own frozen queue on demand, and let them insert
                     # themselves into config.channel_users for a channel they are not in -
                     # which dcc.py reads as proof of presence before it dispatches.
                     elif is_user_event(line, "JOIN") and event_source_nick(line) != config.NICKNAME.lower():
-                        join_match = re.search(r"^:([^!]+)!.* JOIN :?([#\w\-]+)", line)
-                        if join_match:
+                        join_match = re.search(r"^:([^!]+)!.* JOIN :?(\S+)", line)
+                        if join_match and is_valid_irc_target(join_match.group(2)):
                             joined_user = join_match.group(1)
                             joined_chan = join_match.group(2)
                             j_key = joined_user.lower()
@@ -1471,9 +2756,22 @@ def irc_loop():
                                 if joined_chan.lower() not in config.channel_users:
                                     config.channel_users[joined_chan.lower()] = set()
                                 config.channel_users[joined_chan.lower()].add(j_key)
-                            
-                            if hasattr(config, 'frozen_queues') and j_key in config.frozen_queues:
-                                del config.frozen_queues[j_key]
+
+                            # #376: does this look like a nick we just saw leave,
+                            # reconnecting under the ordinary collision suffix?
+                            # Display only - see note_possible_reconnect()'s own
+                            # docstring for the three things this checks.
+                            note_possible_reconnect(joined_user)
+
+                            # One pop, not `in` then `del`. Between the two, the
+                            # freeze sweep in check_queue_and_send() - which runs
+                            # on every dispatch thread and deletes every user it
+                            # finds present in channel_users, set three lines
+                            # above - can remove this key, and the `del` then
+                            # raised KeyError on the IRC READ THREAD. Same class
+                            # as the 353 thaw above, same consequence: the message
+                            # loop's `except Exception` closes the socket.
+                            if thaw_one_user(j_key):
                                 print(f"[DCC REALTIME THAW] {joined_user} rejoined {joined_chan}. Thawing their queue.")
                                 files_in_q = len(config.dcc_queue.get(j_key, [])) if hasattr(config, 'dcc_queue') else 0
                                 announce.send_debug(f"User {config.C_BOLD}{joined_user}{config.C_RESET} returned to {joined_chan}, continuing queue of {config.C_BOLD}{files_in_q}{config.C_RESET} file(s)", category="JOIN")
@@ -1482,13 +2780,16 @@ def irc_loop():
                     # Anchored: as JOIN. This one removes people from channel_users, which
                     # freezes their queue and starts the five-minute delete timer.
                     elif is_user_event(line, "PART"):
-                        part_match = re.search(r"^:([^!]+)!.* PART ([#\w\-]+)", line)
-                        if part_match:
+                        part_match = re.search(r"^:([^!]+)!.* PART (\S+)", line)
+                        if part_match and is_valid_irc_target(part_match.group(2)):
                             p_user = part_match.group(1).lower()
                             p_chan = part_match.group(2).lower()
                             with runtime.channel_users_lock():
                                 if p_chan in config.channel_users and p_user in config.channel_users[p_chan]:
                                     config.channel_users[p_chan].remove(p_user)
+                                    # #376: OBSERVED, not inferred - we just
+                                    # found and removed them ourselves.
+                                    note_observed_departure(p_user, p_chan)
 
                     # Anchored: the worst of the three, because it removes the user from
                     # EVERY channel at once. "@find QUIT PLAYING GAMES" is an ordinary
@@ -1499,9 +2800,16 @@ def irc_loop():
                         if quit_match:
                             q_user = quit_match.group(1).lower()
                             with runtime.channel_users_lock():
+                                quit_chan = None
                                 for chan in config.channel_users:
                                     if q_user in config.channel_users[chan]:
                                         config.channel_users[chan].remove(q_user)
+                                        quit_chan = chan
+                            # #376: OBSERVED, not inferred - outside the lock
+                            # above like note_nick_change()'s own pattern, and
+                            # only when we actually found them somewhere.
+                            if quit_chan is not None:
+                                note_observed_departure(q_user, quit_chan)
 
                     # Cross-bot search broadcast capture, NOTICE half. NOTICE
                     # lines are not parsed anywhere else in this loop - many
@@ -1514,6 +2822,70 @@ def irc_loop():
                     #
                     # See parse_notice()'s own docstring (top of this file)
                     # for why the anchoring matters.
+                    # BEING THROWN OUT IS A THING THAT HAPPENS TO US, and
+                    # nothing here used to notice. Without this the bot keeps
+                    # advertising into a channel it is not in - the server
+                    # drops those with 404 and says nothing anyone reads - and
+                    # never asks to come back.
+                    #
+                    # Reported from a live channel: "dccore doesn't appear to
+                    # rejoin a chan if kicked or banned, maybe add an option
+                    # that it can try to rejoin when the advert timer
+                    # triggers". The retry rides on that timer; see
+                    # channels_to_rejoin().
+                    #
+                    # Read-only in this loop: the JOIN itself is sent from the
+                    # advert worker, so a kick cannot make this thread block
+                    # on a socket write.
+                    kick_parsed = parse_kick(line)
+                    if kick_parsed:
+                        kicker, kicked_chan, victim = kick_parsed
+                        if victim.lower() == str(getattr(config, "CURRENT_NICK",
+                                                         config.NICKNAME)).lower():
+                            if note_kicked_from(kicked_chan, kicker):
+                                announce.send_debug(
+                                    f"Kicked from {kicked_chan} by {kicker}. "
+                                    f"Will try to rejoin on the next advert.",
+                                    category="PART", notice="warning")
+                            else:
+                                print(f"[KICK] Removed from {kicked_chan}, which is "
+                                      f"not in CHANNEL - not rejoining.")
+
+                    # And the answer when it will not have us back. Counted
+                    # only for a channel we are already trying to return to -
+                    # see note_join_refused().
+                    refusal = parse_join_refusal(line)
+                    if refusal:
+                        refused_chan, numeric = refusal
+                        count = note_join_refused(refused_chan)
+                        if count:
+                            limit = int(getattr(config, "REJOIN_ATTEMPTS", 3))
+                            if numeric == JOIN_REFUSED_AT_THE_LIMIT:
+                                announce.send_debug(
+                                    f"{refused_chan}: this server will not put "
+                                    f"the bot in any more channels ({numeric}). "
+                                    f"It is configured for more than the server "
+                                    f"allows - remove some from CHANNEL rather "
+                                    f"than waiting for this to clear.",
+                                    category="PART", notice="error")
+                            elif count >= limit:
+                                announce.send_debug(
+                                    f"Cannot rejoin {refused_chan} ({numeric}) - "
+                                    f"gave up after {count} attempt(s). It will not "
+                                    f"be tried again until you rehash.",
+                                    category="PART", notice="error")
+                            else:
+                                print(f"[REJOIN] {refused_chan} refused us "
+                                      f"({numeric}), attempt {count}/{limit}.")
+                        else:
+                            # Not counted - note_join_refused() only counts for
+                            # a channel already being retried, deliberately.
+                            # Said out loud anyway (#510): a refusal at CONNECT
+                            # time was discarded in silence, which is most of
+                            # why serving eleven of fourteen channels looked
+                            # like nothing had happened.
+                            print(f"[JOIN] {refused_chan} refused us ({numeric}).")
+
                     notice_parsed = parse_notice(line)
                     if notice_parsed:
                         notice_user, notice_target, notice_text = notice_parsed
@@ -1584,7 +2956,7 @@ def irc_loop():
                         # `ctcp_upper = ...` line before this block, tried first) is invisible
                         # to that harness and breaks it with a NameError.
                         is_bot_command = (
-                            msg_lower == f"@{config.NICKNAME.lower()}"
+                            is_list_request(msg, msg_lower)
                             or msg_lower == f"@{config.NICKNAME.lower()}-help"
                             or msg_lower == f"@{config.NICKNAME.lower()}-stats"
                             or msg_lower == f"@{config.NICKNAME.lower()}-top"
@@ -1594,12 +2966,49 @@ def irc_loop():
                             or msg.startswith("@locator ")
                             or any(msg_lower.startswith(f"!{alias} ") for alias in bot_aliases)
                             or msg_lower in ("!list", "!debugnames", "!ping")
-                            or (msg.startswith("\x01") and msg.strip("\x01").strip().upper() in ("QUE", "REMOVE"))
+                            or (msg.startswith("\x01") and msg.strip("\x01").strip().upper() in ("QUE", "REMOVE", "VERSION"))
                             or (msg.startswith("\x01")
                                 and msg.strip("\x01").strip().upper().startswith("DCC SEND ")
                                 and target_chan.lower() == config.NICKNAME.lower())
+                            # DCC RESUME, for the same reason #219 gives just
+                            # above. It is cheaper than an offer - a dict
+                            # lookup, no thread, no disk - but it answers with
+                            # an outbound PRIVMSG, and an unthrottled
+                            # responder is a standard way to make a bot flood
+                            # ITSELF off the network. Being unmatched costs
+                            # nothing, so being unthrottled costs everything.
+                            or (msg.startswith("\x01")
+                                and msg.strip("\x01").strip().upper().startswith("DCC RESUME ")
+                                and target_chan.lower() == config.NICKNAME.lower())
                         )
                         if is_bot_command and security.is_flooding(user):
+                            continue
+
+                        # SOMEBODY SPOKE TO THE BOT AND IT WILL SAY NOTHING
+                        # BACK. Recorded here and nowhere else, because this
+                        # is the one point where everything is known: the
+                        # message is private (a channel line is one the
+                        # operator can already see), it is not a command, it
+                        # is not a CTCP - which is a client talking to a
+                        # client, not a person typing - and the sender has
+                        # already passed the ban check above.
+                        #
+                        # Deliberately AFTER is_flooding() so a flood cannot
+                        # fill the panel, and it still does not answer: see
+                        # announce.record_private_message() for why silence
+                        # stays the behaviour and only the record changes.
+                        if (not is_bot_command
+                                and target_chan.lower() == config.NICKNAME.lower()
+                                and not msg.startswith("\x01")):
+                            # ONE OR THE OTHER, never both. Recording it and
+                            # replying are two different contracts with the
+                            # person who messaged: one keeps it for the
+                            # operator and says nothing, the other keeps
+                            # nothing and says where to go instead.
+                            if getattr(config, "PRIVATE_MESSAGES_ENABLED", True):
+                                announce.record_private_message(user, msg)
+                            else:
+                                announce.decline_private_message(user)
                             continue 
                             
                         try:
@@ -1637,13 +3046,66 @@ def irc_loop():
                                         args=(s, user, msg.strip("\x01").strip()),
                                         daemon=True).start()
                                     continue
+                                # A receiver telling us it already holds part
+                                # of the file we just offered, and asking us
+                                # to send from there. It will not connect
+                                # until we answer with a DCC ACCEPT - which
+                                # is what "Requesting resume" sitting still
+                                # in mIRC forever meant: the client keeping
+                                # its side of a bargain we had never been
+                                # able to answer.
+                                #
+                                # Private only, like the two branches above.
+                                # Answered INLINE rather than on a thread: the
+                                # receiver is blocked waiting for this, it is
+                                # one dict lookup and one send, and it touches
+                                # no disk. Admission control is entirely
+                                # inside handle_resume_request() - it matches
+                                # on a port WE are listening on for this exact
+                                # nick, so a stray or forged line finds
+                                # nothing and is dropped there.
+                                if (ctcp_cmd.startswith("DCC RESUME ")
+                                        and target_chan.lower() == config.NICKNAME.lower()):
+                                    dcc.handle_resume_request(
+                                        s, user, msg.strip("\x01").strip())
+                                    continue
+                                if ctcp_cmd == "VERSION":
+                                    # Answered inline rather than on a thread:
+                                    # one send, nothing read from disk. Not
+                                    # answered DIRECTLY to the socket any more
+                                    # though (see the RAM-CHECK reply below
+                                    # for why that changed) - queued VIP so it
+                                    # still jumps ahead of an ordinary
+                                    # per-user backlog, and paced through
+                                    # runtime.outbound_pacer like every other
+                                    # outbound line (#406).
+                                    #
+                                    # VERSION is in the is_bot_command list
+                                    # above, so a flooding user's own query is
+                                    # dropped before reaching here - but many
+                                    # ordinary clients send exactly one CTCP
+                                    # VERSION unasked, on sight, the moment
+                                    # they see a new nick. A bot that just
+                                    # joined 14 channels can collect a dozen
+                                    # of those within a second or two, and an
+                                    # unpaced responder answering each the
+                                    # instant it arrived was a second way to
+                                    # flood the bot off - ordinary politeness
+                                    # from a dozen strangers, nobody
+                                    # misbehaving, and no per-user gate to
+                                    # catch it because it is a dozen different
+                                    # users asking once each.
+                                    version_reply = ctcp_version_reply(user)
+                                    if version_reply and oserve:
+                                        oserve.queue_message(user, version_reply, is_vip=True)
+                                    continue
                                 if ctcp_cmd == "QUE":
                                     threading.Thread(target=commands.handle_queue_check, args=(s, user, target_chan), daemon=True).start()
                                     continue
                                 elif ctcp_cmd == "REMOVE":
                                     threading.Thread(target=commands.handle_queue_remove, args=(s, user, target_chan), daemon=True).start()
                                     continue
-                            elif msg_lower == f"@{config.NICKNAME.lower()}":
+                            elif is_list_request(msg, msg_lower):
                                 threading.Thread(target=list.send_file_list, args=(s, user, target_chan),
                                                  daemon=True).start()
                             elif msg_lower == f"@{config.NICKNAME.lower()}-help":
@@ -1674,25 +3136,43 @@ def irc_loop():
                                     have_count = hasattr(config, 'channel_users') and target_chan.lower() in config.channel_users
                                     if have_count:
                                         current_qty = len(config.channel_users[target_chan.lower()])
+                                # Queued VIP and paced, not sent straight to the
+                                # socket - same reasoning as the CTCP VERSION
+                                # reply above (#406): a direct send here shares
+                                # nothing with queue_mgr.py's or announce.py's
+                                # own pacing, so however unlikely a flood of
+                                # !debugnames is, this is one more line that
+                                # could add to one without the shared clock
+                                # knowing it happened.
                                 if have_count:
-                                    s.send(f"NOTICE {user} :[RAM-CHECK] Currently tracking {current_qty} user(s) live via 353-numeric in {target_chan}.\r\n".encode())
+                                    ram_check = f"NOTICE {user} :[RAM-CHECK] Currently tracking {current_qty} user(s) live via 353-numeric in {target_chan}.\r\n"
                                 else:
-                                    s.send(f"NOTICE {user} :[RAM-CHECK] Critical: No 353 names loaded yet for {target_chan} in config structure.\r\n".encode())
+                                    ram_check = f"NOTICE {user} :[RAM-CHECK] Critical: No 353 names loaded yet for {target_chan} in config structure.\r\n"
+                                if oserve:
+                                    oserve.queue_message(user, ram_check, is_vip=True)
                             elif msg.lower() == "!ping":
                                 threading.Thread(target=commands.handle_ping_request, args=(s, user, target_chan), daemon=True).start()
                             # Admin commands in channel. ADMIN_CHANNEL_COMMANDS retires these
                             # once the DCC console is trusted; the console reaches the same
                             # handlers with authorised=True. User commands are unaffected.
+                            #
+                            # #437: !ban/!unban used to be matched on the raw, case-sensitive
+                            # `msg` while !rehash/!update/!clearqueue beside them already used
+                            # msg_lower - so "!Ban" or "!BAN" failed this gate entirely. Admin
+                            # commands are deliberately excluded from is_bot_command's metering,
+                            # so a mistyped ban was not just refused: nothing ran, nothing was
+                            # written to hard_bans.txt, and nothing was logged either - in
+                            # channel it looked identical to an applied ban.
                             elif (getattr(config, 'ADMIN_CHANNEL_COMMANDS', True)
                                   and (msg.lower() in ('!rehash', '!update')
-                                       or msg.startswith('!ban ') or msg.startswith('!unban ')
+                                       or msg_lower.startswith('!ban ') or msg_lower.startswith('!unban ')
                                        or msg_lower == '!clearqueue'
                                        or msg_lower.startswith('!clearqueue '))):
                                 if msg.lower() == "!rehash":
                                     threading.Thread(target=commands.handle_rehash_request, args=(user, target_chan), daemon=True).start()
-                                elif msg.startswith("!ban "):
+                                elif msg_lower.startswith("!ban "):
                                     threading.Thread(target=commands.handle_hard_ban_request, args=(user, target_chan, msg), daemon=True).start()
-                                elif msg.startswith("!unban "):
+                                elif msg_lower.startswith("!unban "):
                                     threading.Thread(target=commands.handle_hard_unban_request, args=(user, target_chan, msg), daemon=True).start()
                                 elif msg.lower() == "!update":
                                     threading.Thread(target=commands.handle_list_update_request, args=(user, target_chan), daemon=True).start()

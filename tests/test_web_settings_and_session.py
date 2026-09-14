@@ -100,19 +100,29 @@ class TheSettingsFormAssignsValuesAsProperties(unittest.TestCase):
         map is for, and moving where the value is applied is exactly the kind
         of change that could quietly drop it.
 
-        Asserts the assignment READS the dirty map, not merely that the name
-        appears somewhere in the function: the hasOwnProperty check on the
-        line above mentions it too, so the looser version of this passed with
-        the dirty branch deleted.
+        Asserts the VALUE BEING ASSIGNED is chosen from the dirty map, not
+        merely that the name appears somewhere in the function: the
+        hasOwnProperty check mentions it too, so a looser version of this
+        passed with the dirty branch deleted.
+
+        Anchored on `var stored =` rather than on `input.value`, because a
+        size setting is now converted from bytes into MB or KB between the
+        two - the value is chosen, then displayed - and slicing forward from
+        the assignment stopped covering the choice. The property is the same
+        one: both branches present, and the assignment uses what they
+        produced.
         """
         window = self.render_pass()
-        start = window.index("input.value")
-        assignment = window[start:start + 200]
+        start = window.index("var stored =")
+        choice = window[start:window.index("input.value", start) + 200]
 
-        self.assertIn("state.settingsDirty[field.name]", assignment,
-                      "the assignment ignores an in-progress edit")
-        self.assertIn("settingsValueToString(field.value)", assignment,
-                      "the assignment ignores the saved value")
+        self.assertIn("state.settingsDirty[field.name]", choice,
+                      "the assigned value ignores an in-progress edit")
+        self.assertIn("settingsValueToString(field.value)", choice,
+                      "the assigned value ignores the saved value")
+        self.assertIn("input.value = ", choice)
+        self.assertIn("stored", choice.split("input.value = ", 1)[1],
+                      "the assignment does not use the value just chosen")
 
     def test_checkboxes_are_left_alone(self):
         """A checkbox carries its state in .checked, not .value; assigning

@@ -172,9 +172,26 @@ class TheLookDidNotChange(ThemedPathCase):
     def test_the_fixture_covers_every_path_that_reads_the_palette(self):
         """Control. A golden file that quietly lost an entry would let a change
         to that path through, and the pass would read the same either way."""
-        source = "".join(io.open(os.path.join(REPO_ROOT, name), encoding="utf-8").read()
-                         for name in ("announce.py", "list.py"))
-        readers = source.count("theme.blocks()") + source.count("theme.palette()")
+        # COUNTED FROM THE SYNTAX TREE, for two reasons found the hard way.
+        # It matched the literal "theme.blocks()" until a caller passed an
+        # argument - theme.blocks(settings), which the dashboard's preview
+        # uses to render colours typed and not yet saved - and then
+        # under-counted. Widening it to "theme.blocks(" then over-counted,
+        # because the same text appears in a DOCSTRING explaining what that
+        # argument is for. A call is a call; prose about one is not.
+        import ast
+
+        readers = 0
+        for name in ("announce.py", "list.py"):
+            tree = ast.parse(io.open(os.path.join(REPO_ROOT, name),
+                                     encoding="utf-8").read())
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and node.func.attr in ("blocks", "palette")
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "theme"):
+                    readers += 1
 
         # announce_worker is the one reader with no fixture: it is a while-loop
         # thread, and the source scan below is what covers it instead.
@@ -431,6 +448,50 @@ class OverridingOneRole(ThemedPathCase):
         self.set_config(CUSTOM_THEME_BORDER=6)
 
         self.assertEqual(theme.palette()["border"], theme.CLASSIC["border"])
+
+
+class ThemeIsAChoiceNotFreeText(unittest.TestCase):
+    """Before this, the dashboard offered THEME as a plain text box: an
+    operator had to already know and correctly spell one of the five preset
+    names, with nothing on the page to discover them. LIST_FORMAT solved the
+    identical problem for "txt"/"zip"/"rar" via settings_file.CHOICES, which
+    the settings page renders as a <select> instead of an <input type=text>
+    (see webserver.py's _settings_field()). THEME was simply never added to
+    it.
+    """
+
+    def test_settings_file_and_theme_agree_on_the_preset_names(self):
+        """The two cannot be the same object - see settings_file.CHOICES'
+        own comment on why theme.THEMES is not imported to build this tuple
+        - so nothing stops them drifting apart except a test that checks."""
+        import settings_file
+
+        self.assertEqual(set(settings_file.CHOICES["THEME"]), set(theme.THEMES))
+
+    def test_the_settings_page_offers_every_theme(self):
+        """End to end, the same shape as ListFormatCase's own
+        test_the_settings_page_offers_all_three: the page must actually
+        expose the choices, not just declare them somewhere unread."""
+        import webserver
+        fields = [f for category in webserver.build_settings_payload()["categories"]
+                  for f in category["fields"]]
+        field = [f for f in fields if f["name"] == "THEME"]
+
+        self.assertEqual(len(field), 1, "THEME is not on the settings page")
+        self.assertEqual(sorted(field[0]["choices"]), sorted(theme.THEMES))
+
+    def test_an_unrecognised_theme_is_refused_at_save_not_at_read(self):
+        """Before this, a typo in THEME saved successfully and only
+        surfaced later as a console print from theme.theme_name()'s own
+        fallback (a warning and "classic", never an error) - the same
+        quiet-wrongness LIST_FORMAT's own CHOICES entry exists to avoid for
+        "ZIP" or "tar". Reusing coerce() directly rather than going through
+        the HTTP route: this is a property of settings_file, not of the web
+        layer built on top of it."""
+        import settings_file
+
+        with self.assertRaises(ValueError):
+            settings_file.coerce("THEME", "not-a-real-theme", "classic")
 
 
 if __name__ == "__main__":

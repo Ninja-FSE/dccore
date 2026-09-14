@@ -261,15 +261,29 @@ class NoDebugChannelMeansNoneIsJoined(unittest.TestCase):
         with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
             return handle.read()
 
-    def test_the_join_is_guarded_by_the_value_being_present(self):
-        body = self.source()
-        start = body.index("debug_chan = str(getattr(config, 'DEBUG_CHANNEL'")
-        window = body[start:start + 400]
+    def test_a_blank_value_puts_nothing_in_the_join(self):
+        """Driven now rather than read (#510).
 
-        self.assertIn("if debug_chan:", window,
-                      "the JOIN is sent whatever the value is")
-        self.assertLess(window.index("if debug_chan:"), window.index("JOIN {debug_chan}"),
-                        "the check comes after the send")
+        The guard used to be an `if debug_chan:` around a JOIN of its own, and
+        this asserted that shape. The debug channel rides in the ordinary
+        batching since the connect path stopped sending it as a lone trailing
+        command the server was dropping - so the property is unchanged and the
+        place to ask it moved. A bare `JOIN` with no channel is a malformed
+        line, not a no-op, which is why blank has to be dropped rather than
+        passed through.
+        """
+        import irc
+
+        config.CHANNEL = "#alpha,#beta"
+        config.DEBUG_CHANNEL = ""
+
+        wanted = irc.channels_we_should_be_in()
+
+        self.assertEqual(wanted, ["#alpha", "#beta"],
+                         "a blank debug channel became a channel named nothing")
+        for payload in irc.join_batches(wanted):
+            with self.subTest(payload=payload):
+                self.assertTrue(all(part for part in payload.split(",")), payload)
 
     def test_the_operator_is_told_when_none_was_joined(self):
         """Silently not joining looks identical to joining and being refused."""
