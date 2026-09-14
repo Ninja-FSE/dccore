@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.12.1 — The Setup Check Catches Up
+
+- **Fixed: the setup check warned that no music folder was configured when your folders were set up from the dashboard.** If you added your library folders on the dashboard's Library page and never filled in `FILE_DIRECTORY`, `start-dccore check` said the bot "cannot search or serve anything until it is set" — while the bot, once started, served from every one of them. The check only ever looked at `FILE_DIRECTORY`, which is just the fallback for an install with no folder list. It now asks the same question the bot itself asks at startup, and answers the same way: a multi-folder install sees each folder listed with whether it can be reached right now, one unreachable drive is a warning rather than a refusal (the bot starts and skips it, as before), and only a library with **no** reachable folder at all stops the start. A leftover `FILE_DIRECTORY` pointing at a drive you no longer have also no longer blocks the check, since the bot does not read it when folders are configured.
+
 ## v1.12.0 — The Several Lists Release
 
 - **The reply that lets somebody resume a half-finished download ignored the bot's own rate limit.** It wrote straight to the server instead of waiting its turn like everything else the bot says, so a peer that reconnected and resumed repeatedly could make the bot send as fast as it was asked to - the kind of burst that gets a bot disconnected for flooding. It now waits its turn. Resuming is not slowed down in normal use: the wait only happens when the bot has just sent something else.

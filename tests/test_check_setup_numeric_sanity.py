@@ -130,7 +130,10 @@ class FileDirectorySanityTests(unittest.TestCase):
 
     def test_unset_is_a_warning_not_a_failure(self):
         result = _run_with_admin_config("ADMIN_NICK = 'X'\n")
-        self.assertIn("WARN   FILE_DIRECTORY is not set yet", result.stdout)
+        # The wording changed with the check itself: it now asks the library,
+        # and "FILE_DIRECTORY is not set" was the half-truth it used to tell
+        # an install whose folders were configured on the dashboard.
+        self.assertIn("WARN   no music folders configured yet", result.stdout)
         self.assertNotIn("FAIL   FILE_DIRECTORY", result.stdout)
 
     def test_a_set_but_missing_directory_is_still_a_failure(self):
