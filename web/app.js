@@ -44,23 +44,29 @@
   // a fast typist should not queue one per character.
   var FILELISTS_FILTER_DEBOUNCE_MS = 120;
 
+  // Titles and subs are translation KEYS, not English text - see the
+  // Language section near the bottom of this file. t() resolves them.
   var views = {
-    search:    { title: "Search",     sub: "Find a file across the current master list." },
-    download:  { title: "Downloads",  sub: "What you have asked other bots for, and how it is going." },
-    filelists: { title: "List Browser", sub: "Every file this bot - or a fetched bot's list - is currently offering." },
-    tools:     { title: "Tools",      sub: "Checks you run on demand against the current master list." },
+    search:    { title: "view.search.title",     sub: "view.search.sub" },
+    download:  { title: "view.download.title",   sub: "view.download.sub" },
+    filelists: { title: "view.filelists.title",  sub: "view.filelists.sub" },
+    tools:     { title: "view.tools.title",      sub: "view.tools.sub" },
     // Reached from the badge in the status panel, not from the nav rail:
     // it is somewhere you are SENT when something happened, not somewhere
     // you go looking. A permanent nav entry for a page that is empty almost
     // always is a permanent reminder of nothing.
-    notices:   { title: "What happened", sub: "Kicks, bans and rebuilds that need looking at." },
-    messages:  { title: "Messages",   sub: "People who spoke to the bot privately and got no answer." },
-    settings:  { title: "Settings",   sub: "Every editable setting, grouped. Saving writes settings.conf and starts a rehash." },
-    stats:     { title: "Stats",      sub: "Everything this bot knows about itself, including who is waiting." },
-    console:   { title: "Console",    sub: "The DCC CHAT admin console's commands and live log, in the browser." }
+    notices:   { title: "view.notices.title",    sub: "view.notices.sub" },
+    messages:  { title: "view.messages.title",   sub: "view.messages.sub" },
+    settings:  { title: "view.settings.title",   sub: "view.settings.sub" },
+    stats:     { title: "view.stats.title",      sub: "view.stats.sub" },
+    console:   { title: "view.console.title",    sub: "view.console.sub" }
   };
 
   var state = {
+    // The dashboard's own dictionary (empty for English, since English is
+    // also langFallback) and the English dictionary every language falls
+    // back to for a key it does not have yet. See the Language section.
+    lang: {}, langFallback: {},
     // What the previewed OmenServe import would write, held between the
     // preview and the confirm so the button sends exactly what was shown -
     // not a second parse that could have moved on from it.
@@ -176,6 +182,11 @@
     filelistsBotList: document.getElementById("filelists-bot-list"),
     filelistsPurgeBtn:    document.getElementById("filelists-purge-offline-btn"),
     filelistsPurgeStatus: document.getElementById("filelists-purge-status"),
+    filelistsAddSourceForm:  document.getElementById("filelists-add-source-form"),
+    filelistsAddSourceInput: document.getElementById("filelists-add-source-input"),
+    filelistsAddSourceBtn:   document.getElementById("filelists-add-source-btn"),
+    filelistsForgetSourceBtn: document.getElementById("filelists-forget-source-btn"),
+    filelistsSourceStatus:   document.getElementById("filelists-source-status"),
     filelistsPrevBtn:     document.getElementById("filelists-prev-btn"),
     filelistsNextBtn:     document.getElementById("filelists-next-btn"),
     filelistsPageInfo:    document.getElementById("filelists-page-info"),
@@ -219,6 +230,7 @@
     stTopAlbumsOff:        document.getElementById("st-top-albums-off"),
     themeDark:    document.getElementById("theme-dark"),
     themeLight:   document.getElementById("theme-light"),
+    langSelect:   document.getElementById("lang-select"),
     updateListRunBtn:     document.getElementById("update-list-run-btn"),
     updateListStatus:     document.getElementById("update-list-status"),
     updateListBar:        document.getElementById("update-list-bar"),
@@ -318,8 +330,8 @@
     el.navItems.forEach(function (btn) {
       btn.classList.toggle("is-active", btn.dataset.view === name);
     });
-    el.pageTitle.textContent = views[name].title;
-    el.pageSub.textContent = views[name].sub;
+    el.pageTitle.textContent = t(views[name].title);
+    el.pageSub.textContent = t(views[name].sub);
 
     if (name === "download") { loadDownloads(); }
     if (name === "filelists") {
@@ -348,15 +360,15 @@
   function runSearch() {
     var query = el.searchInput.value.trim();
     if (!query) {
-      el.searchBody.innerHTML = emptyRow(4, "Type something and press Search.");
+      el.searchBody.innerHTML = emptyRow(4, t("search.typeSomething"));
       return;
     }
-    el.searchBody.innerHTML = emptyRow(4, "Searching…");
+    el.searchBody.innerHTML = emptyRow(4, t("search.searching"));
     fetchJson("/api/search?q=" + encodeURIComponent(query))
       .then(function (rows) {
         markConnection(true);
         if (!rows.length) {
-          el.searchBody.innerHTML = emptyRow(4, "No matches for “" + query + "”.");
+          el.searchBody.innerHTML = emptyRow(4, t("search.noMatchesFor").replace("{query}", query));
           return;
         }
         el.searchBody.innerHTML = rows.map(function (row) {
@@ -370,7 +382,7 @@
       })
       .catch(function (err) {
         markConnection(false);
-        el.searchBody.innerHTML = emptyRow(4, "Search failed: " + err.message);
+        el.searchBody.innerHTML = emptyRow(4, t("search.searchFailed").replace("{error}", err.message));
       });
   }
 
@@ -381,7 +393,7 @@
   el.broadcastBtn.addEventListener("click", function () {
     var term = el.searchInput.value.trim();
     if (term.length < 3) {
-      showBroadcastStatus("Type at least 3 characters first.", true);
+      showBroadcastStatus(t("search.typeThreeChars"), true);
       return;
     }
     el.broadcastBtn.disabled = true;
@@ -393,11 +405,11 @@
       }
       broadcast.deadline = res.data.deadline * 1000;
       el.broadcastWrap.style.display = "";
-      el.broadcastBody.innerHTML = emptyRow(3, "Listening…");
+      el.broadcastBody.innerHTML = emptyRow(3, t("search.listening"));
       startBroadcastPolling();
     }).catch(function (err) {
       el.broadcastBtn.disabled = false;
-      showBroadcastStatus("Request failed: " + err.message, true);
+      showBroadcastStatus(t("common.requestFailed").replace("{error}", err.message), true);
     });
   });
 
@@ -418,12 +430,13 @@
       renderBroadcastResults(payload.results);
       if (payload.listening) {
         var remaining = Math.max(0, Math.ceil((payload.deadline * 1000 - Date.now()) / 1000));
-        showBroadcastStatus("Listening… " + remaining + "s remaining, " +
-          payload.results.length + " repl" + (payload.results.length === 1 ? "y" : "ies") + " so far.");
+        var soFarKey = payload.results.length === 1 ? "search.oneReplySoFar" : "search.manyRepliesSoFar";
+        showBroadcastStatus(t("search.listeningRemaining").replace("{seconds}", remaining) +
+          " " + t(soFarKey).replace("{count}", payload.results.length));
       } else {
-        showBroadcastStatus(payload.results.length
-          ? "Done. " + payload.results.length + " repl" + (payload.results.length === 1 ? "y" : "ies") + " received."
-          : "Done. No replies received.");
+        var doneKey = !payload.results.length ? "search.doneNoReplies"
+          : payload.results.length === 1 ? "search.doneOneReply" : "search.doneManyReplies";
+        showBroadcastStatus(t(doneKey).replace("{count}", payload.results.length));
         if (broadcast.pollTimer) {
           clearInterval(broadcast.pollTimer);
           broadcast.pollTimer = null;
@@ -528,7 +541,7 @@
   function renderBroadcastResults(results) {
     el.broadcastBody.innerHTML = "";
     if (!results.length) {
-      el.broadcastBody.innerHTML = emptyRow(3, "No replies yet.");
+      el.broadcastBody.innerHTML = emptyRow(3, t("search.noReplies"));
       updateDownloadSelectedState();
       return;
     }
@@ -614,16 +627,16 @@
     el.downloadSelectedBtn.disabled = true;
     postJson("/api/fetch/enqueue", items).then(function (res) {
       if (!res.ok && !(res.data && res.data.created && res.data.created.length)) {
-        showBroadcastStatus("Could not queue the download: " +
-          (res.data.error || (res.data.errors && res.data.errors[0] && res.data.errors[0].error) || ("HTTP " + res.status)), true);
+        showBroadcastStatus(t("download.couldNotQueue").replace("{error}",
+          (res.data.error || (res.data.errors && res.data.errors[0] && res.data.errors[0].error) || ("HTTP " + res.status))), true);
       } else {
-        showBroadcastStatus("Queued " + res.data.created.length + " file(s) for fetch - see Queue → Downloads.");
+        showBroadcastStatus(t("download.queuedForFetch").replace("{count}", res.data.created.length));
         Array.prototype.forEach.call(checked, function (box) { box.checked = false; });
       }
       updateDownloadSelectedState();
       loadDownloads();
     }).catch(function (err) {
-      showBroadcastStatus("Request failed: " + err.message, true);
+      showBroadcastStatus(t("common.requestFailed").replace("{error}", err.message), true);
       el.downloadSelectedBtn.disabled = false;
     });
   });
@@ -652,8 +665,8 @@
       var match = BULK_FETCH_LINE_RE.exec(line);
       if (!match) {
         messages.push({
-          text: "Line " + (idx + 1) + ": could not parse “" + line +
-                "” - expected \"!<bot> <filename>\".",
+          text: t("download.lineCouldNotParse")
+            .replace("{n}", idx + 1).replace("{line}", line),
           isError: true
         });
         return;
@@ -663,7 +676,7 @@
 
     if (!items.length) {
       if (!messages.length) {
-        messages.push({ text: "Nothing to queue - paste at least one \"!<bot> <filename>\" line.", isError: true });
+        messages.push({ text: t("download.nothingToQueue"), isError: true });
       }
       renderBulkFetchMessages(messages);
       return;
@@ -680,15 +693,15 @@
         });
       });
       if (createdCount) {
-        messages.unshift({ text: "Queued " + createdCount + " request(s) - see the Downloads table below.", isError: false });
+        messages.unshift({ text: t("download.queuedRequests").replace("{count}", createdCount), isError: false });
         el.bulkFetchTextarea.value = "";
         loadDownloads();
       } else if (!messages.length) {
-        messages.push({ text: res.data.error || "Nothing was queued.", isError: true });
+        messages.push({ text: res.data.error || t("download.nothingWasQueued"), isError: true });
       }
       renderBulkFetchMessages(messages);
     }).catch(function (err) {
-      messages.push({ text: "Request failed: " + err.message, isError: true });
+      messages.push({ text: t("common.requestFailed").replace("{error}", err.message), isError: true });
       renderBulkFetchMessages(messages);
     });
   }
@@ -737,10 +750,13 @@
   // state === "complete", because the transfer really did succeed - the
   // reason it was refused is carried separately, in list_processing_error.
   // This is the display-side name for that combination.
+  // Values are translation keys, not literal text - same convention as
+  // views{} above.
   var DOWNLOAD_STATE_LABELS = {
-    pending: "Pending", offered: "Requested", listening: "Listening",
-    receiving: "Receiving", complete: "Complete", failed: "Failed",
-    rejected: "Rejected"
+    pending: "download.state.pending", offered: "download.state.requested",
+    listening: "download.state.listening", receiving: "download.state.receiving",
+    complete: "download.state.complete", failed: "download.state.failed",
+    rejected: "download.state.rejected"
   };
 
   function loadDownloads() {
@@ -814,26 +830,26 @@
     // A queued row has no file yet and can simply be re-queued, so the
     // finished-row warning would be both wrong and needlessly alarming.
     var prompt = btn.dataset.pending
-      ? "Remove this queued request? Nothing has been downloaded yet."
-      : "Delete this fetched file? This cannot be undone.";
+      ? t("download.confirmRemoveQueued")
+      : t("download.confirmDeleteFile");
     if (!window.confirm(prompt)) { return; }
     btn.disabled = true;
     postJson("/api/fetch/" + encodeURIComponent(requestId) + "/delete", {}).then(function (res) {
       if (!res.ok) {
-        window.alert("Could not delete: " + (res.data && res.data.error || ("HTTP " + res.status)));
+        window.alert(t("download.couldNotDelete").replace("{error}", (res.data && res.data.error) || ("HTTP " + res.status)));
         btn.disabled = false;
         return;
       }
       loadDownloads();
     }).catch(function (err) {
-      window.alert("Could not delete: " + err.message);
+      window.alert(t("download.couldNotDelete").replace("{error}", err.message));
       btn.disabled = false;
     });
   });
 
   function renderDownloads(rows) {
     if (!rows.length) {
-      el.downloadsBody.innerHTML = emptyRow(5, "Nothing queued yet.");
+      el.downloadsBody.innerHTML = emptyRow(5, t("download.nothingQueued"));
       return;
     }
     el.downloadsBody.innerHTML = rows.map(function (row) {
@@ -846,7 +862,7 @@
       // perfectly, and the only record of the attempt was one stdout line.
       var rejected = !!row.list_processing_error;
       var displayState = rejected ? "rejected" : state;
-      var label = DOWNLOAD_STATE_LABELS[displayState] || displayState;
+      var label = t(DOWNLOAD_STATE_LABELS[displayState] || displayState);
       var progress = row.total_size
         ? Math.round(100 * (row.bytes_received || 0) / row.total_size) + "%"
         : (row.bytes_received ? row.bytes_received + " B" : "—");
@@ -865,7 +881,7 @@
       var deleteBtn = deletable
         ? "<button type=\"button\" class=\"btn btn-small btn-danger fetch-delete-btn\" data-request-id=\"" +
           encodeURIComponent(row.id) + "\" data-pending=\"" + (state === "pending" ? "1" : "") + "\">" +
-          (state === "pending" ? "Cancel" : "Delete") + "</button>"
+          (state === "pending" ? t("common.cancel") : t("common.delete")) + "</button>"
         : "";
       // ASK AGAIN, for a row that did not arrive. Requested: a failed or rejected
       // fetch is the one an operator most wants to retry, and the only way to
@@ -881,7 +897,7 @@
       // (it is ours, and hex) and the handler looks the rest up from state.
       var retryBtn = (rejected || state === "failed")
         ? "<button type=\"button\" class=\"btn btn-small fetch-retry-btn\" data-request-id=\"" +
-          encodeURIComponent(row.id) + "\">Redownload</button> "
+          encodeURIComponent(row.id) + "\">" + t("download.redownload") + "</button> "
         : "";
       var action;
       if (rejected) {
@@ -890,7 +906,7 @@
         action = "<a class=\"btn btn-small\" href=\"/api/fetch/" + encodeURIComponent(row.id) + "/download\">Download</a> " + deleteBtn;
       } else if (state === "complete") {
         // A fetched list, extracted - dcc_fetch.py already removed its zip.
-        action = "<span class=\"col-dim\">Browse it in List Browser</span> " + deleteBtn;
+        action = "<span class=\"col-dim\">" + t("download.browseInListBrowser") + "</span> " + deleteBtn;
       } else if (state === "failed") {
         action = "<span class=\"col-dim\">" + escapeHtml(row.reason || "") + "</span> " + retryBtn + deleteBtn;
       } else if (state === "pending") {
@@ -926,7 +942,12 @@
 
   // ---------------------------------------------------------------- Queue
 
-  var STATUS_LABELS = { sending: "Sending", frozen: "Frozen", queued: "Queued", empty: "Empty" };
+  // Values are translation keys, not literal text - same convention as
+  // views{} above.
+  var STATUS_LABELS = {
+    sending: "queue.status.sending", frozen: "queue.status.frozen",
+    queued: "sidebar.queued", empty: "queue.status.empty"
+  };
 
   function loadQueue() {
     fetchJson("/api/queue")
@@ -973,17 +994,18 @@
 
   function renderQueueTable(rows) {
     if (!rows.length) {
-      el.queueBody.innerHTML = emptyRow(4, "The queue is empty.");
+      el.queueBody.innerHTML = emptyRow(4, t("queue.empty"));
       return;
     }
     el.queueBody.innerHTML = rows.map(function (row) {
       var status = row.status || "queued";
-      var label = STATUS_LABELS[status] || status;
+      var label = t(STATUS_LABELS[status] || status);
 
       var sendingPart = "";
       if (status === "sending" && row.current_file) {
-        sendingPart = "<div class=\"queue-current\">Sending: " +
-          escapeHtml(row.current_file) + "</div>" + queueProgressBar(row);
+        sendingPart = "<div class=\"queue-current\">" +
+          t("queue.sendingFile").replace("{file}", escapeHtml(row.current_file)) +
+          "</div>" + queueProgressBar(row);
       }
       // With nothing queued behind an in-flight send, "preview" already
       // equals current_file - showing it a second time would be a
@@ -1019,7 +1041,7 @@
     if (!unread) { return; }
 
     el.noticeBadge.textContent =
-      unread + (unread === 1 ? " thing to see" : " things to see");
+      t(unread === 1 ? "notices.unreadOne" : "notices.unreadMany").replace("{count}", unread);
     el.noticeBadge.className = "notice-badge is-" +
       (payload.severity === "error" ? "error" : "warning");
   }
@@ -1041,7 +1063,7 @@
     var rows = (payload && payload.notices) || [];
     if (!rows.length) {
       el.noticeList.innerHTML =
-        '<p class="notice-empty">Nothing has needed your attention.</p>';
+        '<p class="notice-empty">' + t("notices.empty") + '</p>';
       return;
     }
     var seen = (payload && payload.seen_id) || 0;
@@ -1124,8 +1146,7 @@
       // something might be broken; nobody having needed to ask is the
       // ordinary, good state.
       el.messageList.innerHTML =
-        '<p class="message-empty">Nobody has messaged the bot. Requests that ' +
-        'use the right command are answered normally and do not appear here.</p>';
+        '<p class="message-empty">' + t("messages.empty") + '</p>';
       return;
     }
     var seen = (payload && payload.seen_id) || 0;
@@ -1159,7 +1180,7 @@
   function markConnection(ok) {
     el.connDot.classList.toggle("is-live", ok);
     el.connDot.classList.toggle("is-down", !ok);
-    el.connText.textContent = ok ? "live" : "unreachable";
+    el.connText.textContent = ok ? t("conn.live") : t("conn.unreachable");
   }
 
   // ------------------------------------------------------------ File Lists
@@ -1175,13 +1196,11 @@
         showFilelistsFetchStatus(res.data.error || ("HTTP " + res.status), true);
         return;
       }
-      showFilelistsFetchStatus(
-        "Requested " + bot + "’s list - track its progress on the Download tab; " +
-        "it will appear in the switcher below once fetched.");
+      showFilelistsFetchStatus(t("filelists.fetchRequested").replace("{bot}", bot));
       el.filelistsFetchInput.value = "";
       pollFilelistsBots();
     }).catch(function (err) {
-      showFilelistsFetchStatus("Request failed: " + err.message, true);
+      showFilelistsFetchStatus(t("common.requestFailed").replace("{error}", err.message), true);
     });
   });
 
@@ -1193,33 +1212,30 @@
   // Purging offline bots' held lists (#385) ---------------------------------
 
   el.filelistsPurgeBtn.addEventListener("click", function () {
-    if (!window.confirm(
-        "Forget every held list whose bot is not in a channel with you " +
-        "right now? A bot that is here, or one still joining, is left " +
-        "alone - this only removes the red-dot rows.")) {
+    if (!window.confirm(t("filelists.confirmPurgeOffline"))) {
       return;
     }
     el.filelistsPurgeBtn.disabled = true;
     postJson("/api/filelists/purge-offline", {}).then(function (res) {
       if (!res.ok) {
         showFilelistsPurgeStatus(
-          "Could not purge: " + (res.data && res.data.error || ("HTTP " + res.status)), true);
+          t("filelists.couldNotPurge").replace("{error}", (res.data && res.data.error) || ("HTTP " + res.status)), true);
         return;
       }
       var count = res.data.count || 0;
       var skipped = (res.data.skipped_in_flight || []).length;
       var text = count === 0
-        ? "Nothing to purge - no held list is currently showing the red dot."
-        : "Forgot " + count + " list" + (count === 1 ? "" : "s") + ": " +
-          res.data.purged.join(", ") + ".";
+        ? t("filelists.nothingToPurge")
+        : t(count === 1 ? "filelists.forgotOneList" : "filelists.forgotManyLists")
+            .replace("{count}", count).replace("{names}", res.data.purged.join(", "));
       if (skipped > 0) {
-        text += " Left " + skipped + " alone - a fetch is still in flight for " +
-          (skipped === 1 ? "it" : "them") + ".";
+        text += " " + t(skipped === 1 ? "filelists.leftAloneOne" : "filelists.leftAloneMany")
+          .replace("{skipped}", skipped);
       }
       showFilelistsPurgeStatus(text, false);
       pollFilelistsBots();
     }).catch(function (err) {
-      showFilelistsPurgeStatus("Request failed: " + err.message, true);
+      showFilelistsPurgeStatus(t("common.requestFailed").replace("{error}", err.message), true);
     }).then(function () {
       el.filelistsPurgeBtn.disabled = false;
     });
@@ -1230,6 +1246,63 @@
     el.filelistsPurgeStatus.classList.toggle("is-error", !!isError);
     el.filelistsPurgeStatus.hidden = false;
   }
+
+  // A BOT NAMED BY HAND (#376). The sidebar is built from adverts we have
+  // seen, so a bot that answers "@nick" but never advertises on a channel we
+  // are in had no row and no way to be fetched from here. The nick goes to
+  // POST /api/filelists/sources and comes back as an ordinary not-held row,
+  // tagged "by hand"; Forget sends the same nick to .../remove. Both refresh
+  // the list straight away rather than waiting for the next poll.
+  function showFilelistsSourceStatus(text, isError) {
+    el.filelistsSourceStatus.textContent = text;
+    el.filelistsSourceStatus.classList.toggle("is-error", !!isError);
+    el.filelistsSourceStatus.hidden = false;
+  }
+
+  function sourceNickTyped() {
+    return String(el.filelistsAddSourceInput.value || "").trim();
+  }
+
+  el.filelistsAddSourceForm.addEventListener("submit", function (evt) {
+    evt.preventDefault();
+    var nick = sourceNickTyped();
+    if (!nick) { return; }
+    el.filelistsAddSourceBtn.disabled = true;
+    postJson("/api/filelists/sources", { bot: nick }).then(function (res) {
+      if (!res.ok) {
+        showFilelistsSourceStatus(
+          t("filelists.couldNotAddSource").replace("{error}", (res.data && res.data.error) || ("HTTP " + res.status)), true);
+        return;
+      }
+      var key = res.data.already_known ? "filelists.sourceAlreadyKnown" : "filelists.sourceAdded";
+      showFilelistsSourceStatus(t(key).replace("{nick}", res.data.added), false);
+      el.filelistsAddSourceInput.value = "";
+      pollFilelistsBots();
+    }).finally(function () {
+      el.filelistsAddSourceBtn.disabled = false;
+    });
+  });
+
+  el.filelistsForgetSourceBtn.addEventListener("click", function () {
+    var nick = sourceNickTyped();
+    if (!nick) {
+      showFilelistsSourceStatus(t("filelists.typeANickToForget"), true);
+      return;
+    }
+    el.filelistsForgetSourceBtn.disabled = true;
+    postJson("/api/filelists/sources/" + encodeURIComponent(nick) + "/remove", {}).then(function (res) {
+      if (!res.ok) {
+        showFilelistsSourceStatus(
+          t("filelists.couldNotForgetSource").replace("{error}", (res.data && res.data.error) || ("HTTP " + res.status)), true);
+        return;
+      }
+      showFilelistsSourceStatus(t("filelists.sourceForgotten").replace("{nick}", res.data.removed), false);
+      el.filelistsAddSourceInput.value = "";
+      pollFilelistsBots();
+    }).finally(function () {
+      el.filelistsForgetSourceBtn.disabled = false;
+    });
+  });
 
   // Switching which bot's list is shown ------------------------------------
 
@@ -1246,8 +1319,7 @@
     if (row.dataset.held === "no") {
       el.filelistsFetchInput.value = row.dataset.nick || row.dataset.bot;
       el.filelistsFetchInput.focus();
-      showFilelistsFetchStatus("No list held for " + row.dataset.bot
-        + " yet. Press Fetch to ask for it.");
+      showFilelistsFetchStatus(t("filelists.noListHeldFor").replace("{bot}", row.dataset.bot));
       return;
     }
 
@@ -1549,11 +1621,22 @@
     name.textContent = grouped ? group.nick : (primary.label || primary.bot);
     button.appendChild(name);
 
+    // Named by the operator rather than seen advertising (#376): say so on
+    // the row, since the grey "cannot tell" it shows until an advert or a
+    // fetch arrives would otherwise look like a bot we know nothing about.
+    if (primary.hand_entered && !primary.held) {
+      var hand = document.createElement("span");
+      hand.className = "bot-row-hand";
+      hand.textContent = t("filelists.handEnteredTag");
+      hand.title = t("filelists.handEnteredTitle");
+      button.appendChild(hand);
+    }
+
     if (grouped) {
       var badge = document.createElement("span");
       badge.className = "bot-row-lists-badge";
       badge.textContent = String(group.entries.length);
-      badge.title = group.entries.length + " lists - open this bot to switch between them.";
+      badge.title = t("filelists.listsBadgeTitle").replace("{count}", group.entries.length);
       button.appendChild(badge);
     }
 
@@ -1568,8 +1651,7 @@
     button.appendChild(count);
 
     if (!primary.held && !isOwnSource(primary.bot)) {
-      button.title = "You have not downloaded this bot's list. " +
-        "Click to put its nick in the fetch box.";
+      button.title = t("filelists.notDownloadedClickToFetch");
     }
     return button;
   }
@@ -1640,11 +1722,11 @@
   }
 
   function presenceTitle(online) {
-    if (online === true) { return "In a channel with this bot now"; }
+    if (online === true) { return t("filelists.presenceHere"); }
     if (online === false) {
-      return "Not in any channel this bot is in - a request would go nowhere";
+      return t("filelists.presenceNotInChannel");
     }
-    return "Cannot tell yet - still joining";
+    return t("filelists.presenceUnknown");
   }
 
   // WHAT WE HOLD FROM THEM, on the name rather than the dot.
@@ -1678,22 +1760,20 @@
   function ledTitle(row) {
     var freshness = row.freshness;
     if (freshness === "changed") {
-      return "Their list has changed since you downloaded it. " +
-             "They advertised " + describeAdvert(row.advert_then || {}) +
-             " when you downloaded it, and now advertise " +
-             describeAdvert(row.advert_now || {}) + ".";
+      return t("filelists.freshnessChanged")
+        .replace("{then}", describeAdvert(row.advert_then || {}))
+        .replace("{now}", describeAdvert(row.advert_now || {}));
     }
     if (freshness === "not_held") {
-      return "Not downloaded. They advertise " +
-             describeAdvert(row.advert_now || {}) + ".";
+      return t("filelists.freshnessNotHeld")
+        .replace("{now}", describeAdvert(row.advert_now || {}));
     }
     if (freshness === "unknown") {
-      return "Cannot tell - we have not seen what they advertise, " +
-             "or they publish no date or count";
+      return t("filelists.freshnessUnknownDetail");
     }
-    if (freshness === "own") { return "Your own list"; }
-    return "Current - they still advertise " +
-           describeAdvert(row.advert_now || {}) + ".";
+    if (freshness === "own") { return t("filelists.freshnessOwn"); }
+    return t("filelists.freshnessCurrent")
+      .replace("{now}", describeAdvert(row.advert_now || {}));
   }
 
   function markFilelistsActiveBot() {
@@ -1759,7 +1839,7 @@
       tab.dataset.bot = entry.bot;
       // "Main" for the bare list, never the raw empty string - a tab with no
       // text is not a tab an operator can click on purpose.
-      tab.textContent = entry.list ? entry.list : "Main";
+      tab.textContent = entry.list ? entry.list : t("filelists.mainListTab");
       var active = entry.bot === state.filelistsSource;
       tab.classList.toggle("is-active", active);
       if (active) {
@@ -1792,11 +1872,15 @@
       // "Folders 1-1 of 1 (11,232 files)" is true and says nothing: a flat
       // list has one group because everything is in it, not because the page
       // is showing one folder out of several.
+      var fileCountText = t(files === 1 ? "filelists.oneFile" : "filelists.manyFiles")
+        .replace("{count}", files.toLocaleString());
       var caption = (total === 1 && state.filelistsFlat)
-        ? files.toLocaleString() + (files === 1 ? " file" : " files")
-        : "Folders " + start.toLocaleString() + "–" + end.toLocaleString() +
-          " of " + total.toLocaleString() +
-          " (" + files.toLocaleString() + (files === 1 ? " file)" : " files)");
+        ? fileCountText
+        : t("filelists.foldersRange")
+            .replace("{start}", start.toLocaleString())
+            .replace("{end}", end.toLocaleString())
+            .replace("{total}", total.toLocaleString())
+            .replace("{files}", fileCountText);
       // WHY THIS PAGE IS SHORT (#477).
       //
       // Reported live, with screenshots: pages of 31 folders, then 1, then
@@ -1812,9 +1896,7 @@
       // cannot explain itself costs more than one that is simply missing,
       // because the operator goes looking for the fault.
       if (state.filelistsRowCapped) {
-        caption += " — fewer folders on this page: one or more of them holds " +
-          "enough files to reach the per-page limit on its own. " +
-          "Next shows the rest.";
+        caption += " " + t("filelists.rowCappedNote");
       }
       el.filelistsPageInfo.textContent = caption;
       el.filelistsPrevBtn.disabled = offset <= 0;
@@ -1824,7 +1906,7 @@
     // A file that reached us with no folder heading above it still has to be
     // shown under something.
     function folderLabel(name) {
-      return name ? name : "(no folder)";
+      return name ? name : t("filelists.noFolder");
     }
 
     // A LIST WITH NO FOLDERS IN IT AT ALL. A bot that publishes its albums as
@@ -1871,11 +1953,13 @@
     // holds only the rows that matched - so a nine-track album whose title
     // matched twice read as an album with two tracks in it, which is what it
     // was reported as.
-    function folderCountNoun(count) {
+    function folderCountText(count) {
       if ((state.filelistsFilter || "").trim()) {
-        return count === 1 ? " match" : " matches";
+        return t(count === 1 ? "filelists.oneMatch" : "filelists.manyMatches")
+          .replace("{count}", count.toLocaleString());
       }
-      return count === 1 ? " file" : " files";
+      return t(count === 1 ? "filelists.oneFile" : "filelists.manyFiles")
+        .replace("{count}", count.toLocaleString());
     }
 
     // WHERE THE MATCH IS, in a title that is often a hundred characters of
@@ -1955,8 +2039,8 @@
       var checkCell = rowsAreFetchable()
         ? "<td class=\"col-check\"><input type=\"checkbox\"" +
           " class=\"filelists-folder-check\" data-folder-index=\"" + index +
-          "\" title=\"Select every file in this folder\"" +
-          " aria-label=\"Select every file in this folder\"></td>"
+          "\" title=\"" + escapeHtml(t("filelists.selectFolderTitle")) + "\"" +
+          " aria-label=\"" + escapeHtml(t("filelists.selectFolderTitle")) + "\"></td>"
         : "<td class=\"col-check\"></td>";
       return "<tr class=\"folder-row\">" +
         checkCell +
@@ -1966,8 +2050,7 @@
             "<span class=\"folder-caret\" aria-hidden=\"true\"></span>" +
             "<span class=\"folder-name\">" +
               escapeHtml(folderLabel(group.folder)) + "</span>" +
-            "<span class=\"folder-count\">" + count.toLocaleString() +
-              folderCountNoun(count) + "</span>" +
+            "<span class=\"folder-count\">" + folderCountText(count) + "</span>" +
           "</button>" +
         "</td></tr>";
     }
@@ -2007,7 +2090,7 @@
         // fixed set: the day it does not, this line should already be safe.
         var mark = row.mark === "received" || row.mark === "requested"
           ? " <span class=\"file-mark is-" + row.mark + "\">" +
-            escapeHtml(row.mark === "received" ? "have it" : "asked") +
+            escapeHtml(t(row.mark === "received" ? "filelists.markReceived" : "filelists.markRequested")) +
             "</span>"
           : "";
         // A ROW THAT ASKS FOR A FOLDER, not a file. A bot that packs albums
@@ -2024,7 +2107,7 @@
         var rarCell = (row.rar_folder && fetchable)
           ? "<button type=\"button\" class=\"btn btn-small folder-rar-btn\"" +
             " data-folder-index=\"" + index + "\" data-entry-index=\"" + position +
-            "\">Get folder as .rar</button>"
+            "\">" + t("filelists.getFolderAsRar") + "</button>"
           : "";
         // Hidden and indented only when there is a heading to hide them
         // under. In a flat list they ARE the table.
@@ -2046,9 +2129,9 @@
         rows.push(
           "<tr class=\"file-row folder-truncated" + (flat ? "" : " is-hidden") +
           "\" data-folder-index=\"" + index + "\"><td colspan=\"5\">" +
-          "Showing the first " + entries.length.toLocaleString() + " of " +
-          (group.count || 0).toLocaleString() +
-          (flat ? " files in this list." : " files in this folder.") +
+          t(flat ? "filelists.truncatedInList" : "filelists.truncatedInFolder")
+            .replace("{shown}", entries.length.toLocaleString())
+            .replace("{total}", (group.count || 0).toLocaleString()) +
           "</td></tr>");
       }
       return rows.join("");
@@ -2317,11 +2400,10 @@
           button.disabled = false;
           return;
         }
-        showFilelistsFetchStatus(
-          "Requested " + bot + "’s folder as .rar - track its progress on the Download tab.");
+        showFilelistsFetchStatus(t("filelists.requestedFolderRar").replace("{bot}", bot));
         loadDownloads();
       }).catch(function (err) {
-        showFilelistsFetchStatus("Request failed: " + err.message, true);
+        showFilelistsFetchStatus(t("common.requestFailed").replace("{error}", err.message), true);
         button.disabled = false;
       });
     }
@@ -2339,11 +2421,10 @@
       el.filelistsDownloadSelectedBtn.disabled = true;
       postJson("/api/fetch/enqueue", items).then(function (res) {
         if (!res.ok && !(res.data && res.data.created && res.data.created.length)) {
-          showFilelistsFetchStatus("Could not queue the download: " +
-            (res.data.error || (res.data.errors && res.data.errors[0] && res.data.errors[0].error) || ("HTTP " + res.status)), true);
+          showFilelistsFetchStatus(t("download.couldNotQueue").replace("{error}",
+            (res.data.error || (res.data.errors && res.data.errors[0] && res.data.errors[0].error) || ("HTTP " + res.status))), true);
         } else {
-          showFilelistsFetchStatus(
-            "Queued " + res.data.created.length + " file(s) for fetch - see Queue → Downloads.", false);
+          showFilelistsFetchStatus(t("download.queuedForFetch").replace("{count}", res.data.created.length), false);
           Array.prototype.forEach.call(checked, function (box) { box.checked = false; });
           // Re-read the page so the rows just queued say so. The marks are
           // stamped server-side when a page is built, so without this they
@@ -2355,7 +2436,7 @@
         updateFilelistsDownloadSelectedState();
         loadDownloads();
       }).catch(function (err) {
-        showFilelistsFetchStatus("Could not queue the download: " + err.message, true);
+        showFilelistsFetchStatus(t("download.couldNotQueue").replace("{error}", err.message), true);
         updateFilelistsDownloadSelectedState();
       });
     });
@@ -2457,13 +2538,20 @@
     }
     var files = (payload && payload.total_files) || 0;
     var matched = (payload && payload.matched && payload.matched.length) || 0;
-    var text = files
-      ? files.toLocaleString() + (payload && payload.truncated ? "+" : "") +
-        " match" + (files === 1 ? "" : "es") + " in " + matched +
-        " list" + (matched === 1 ? "" : "s")
-      : "No matches in any list you hold";
+    var text;
+    if (files) {
+      var countStr = files.toLocaleString() + (payload && payload.truncated ? "+" : "");
+      var matchesPart = t(files === 1 ? "filelists.oneMatch" : "filelists.manyMatches")
+        .replace("{count}", countStr);
+      var listsPart = t(matched === 1 ? "filelists.oneList" : "filelists.manyLists")
+        .replace("{count}", matched);
+      text = t("filelists.matchesInLists")
+        .replace("{matches}", matchesPart).replace("{lists}", listsPart);
+    } else {
+      text = t("filelists.noMatchesInAnyList");
+    }
     if (payload && payload.truncated) {
-      text += " \u2014 showing the first " + files + ", narrow the term to see the rest";
+      text += " " + t("filelists.showingFirstNarrow").replace("{files}", files);
     }
     el.filelistsFilterStatus.hidden = false;
     el.filelistsFilterStatus.textContent = text;
@@ -2481,8 +2569,8 @@
     }
     button.hidden = false;
     button.textContent = state.filelistsRevealEmpty
-      ? "Hide lists with no match"
-      : "Show " + hidden + " with no match";
+      ? t("filelists.hideListsNoMatch")
+      : t("filelists.showHiddenNoMatch").replace("{count}", hidden);
   }
 
   // Every group the current answer holds, minus the bots switched off.
@@ -2503,10 +2591,10 @@
     var groups = visibleFilterGroups(allGroups);
     if (!groups.length) {
       el.filelistsBody.innerHTML = emptyRow(5, filtering
-        ? (allGroups.length
-            ? "Every list with a match is switched off."
-            : "Nothing in any list you hold matches that.")
-        : "No files published yet.");
+        ? t(allGroups.length
+            ? "filelists.everyMatchSwitchedOff"
+            : "filelists.nothingMatchesFilter")
+        : t("filelists.noFilesPublished"));
       updateFilelistsDownloadSelectedState();
       return;
     }
@@ -2540,8 +2628,8 @@
     if (!head) { return; }
     head.innerHTML = (flat && rowsAreFetchable())
       ? '<input type="checkbox" class="filelists-folder-check"' +
-        ' data-folder-index="0" title="Select every file shown"' +
-        ' aria-label="Select every file shown">'
+        ' data-folder-index="0" title="' + escapeHtml(t("filelists.selectAllShownTitle")) + '"' +
+        ' aria-label="' + escapeHtml(t("filelists.selectAllShownTitle")) + '">'
       : "";
   }
 
@@ -2645,10 +2733,8 @@
     var then = row.advert_then || {};
     var now = row.advert_now || {};
     banner.hidden = false;
-    banner.textContent =
-      "Their list has changed since you downloaded it \u2014 they advertised " +
-      describeAdvert(then) + ", and now advertise " + describeAdvert(now) +
-      ". Fetch it again to see what they are offering now.";
+    banner.textContent = t("filelists.freshnessBanner")
+      .replace("{then}", describeAdvert(then)).replace("{now}", describeAdvert(now));
   }
 
   // OFFERED ONLY WHERE IT MEANS SOMETHING. Your own list is the library and
@@ -2681,11 +2767,9 @@
     // getting the list back means downloading it from that bot again, which
     // needs the bot to still be around.
     if (!window.confirm(
-        "Remove everything downloaded from " + name + "?" +
+        t("filelists.confirmPurgeListHeading").replace("{name}", name) +
         String.fromCharCode(10, 10) +
-        "Every list this bot has, its extracted files and its rows in the " +
-        "cross-list search index are all deleted. Fetching from it again " +
-        "is the only way back.")) {
+        t("filelists.confirmPurgeListDetail"))) {
       return;
     }
 
@@ -2695,10 +2779,10 @@
         if (!res.ok) {
           el.filelistsPurgeListBtn.disabled = false;
           showFilelistsFetchStatus((res.data && res.data.error)
-                                  || "Could not purge that list.", true);
+                                  || t("filelists.couldNotPurgeList"), true);
           return;
         }
-        showFilelistsFetchStatus((res.data && res.data.detail) || "Purged.",
+        showFilelistsFetchStatus((res.data && res.data.detail) || t("filelists.purged"),
                                 false);
         // Back to our own list, because the one that was open no longer
         // exists - leaving it selected would leave the table showing rows
@@ -2714,9 +2798,11 @@
 
   function describeAdvert(advert) {
     var parts = [];
-    if (advert.files) { parts.push(Number(advert.files).toLocaleString() + " files"); }
-    if (advert.list_date) { parts.push("built " + advert.list_date); }
-    return parts.length ? parts.join(", ") : "nothing we could read";
+    if (advert.files) {
+      parts.push(t("filelists.advertFiles").replace("{count}", Number(advert.files).toLocaleString()));
+    }
+    if (advert.list_date) { parts.push(t("filelists.advertBuilt").replace("{date}", advert.list_date)); }
+    return parts.length ? parts.join(", ") : t("filelists.advertNothing");
   }
 
   function loadFilelists() {
@@ -2735,7 +2821,7 @@
       state.filelistsLoadToken += 1;
       var loadToken = state.filelistsLoadToken;
 
-      el.filelistsBody.innerHTML = emptyRow(5, "Loading…");
+      el.filelistsBody.innerHTML = emptyRow(5, t("common.loading"));
       var source = state.filelistsSource || "__own__";
       var offset = state.filelistsOffset || 0;
       var filter = (state.filelistsFilter || "").trim();
@@ -2802,7 +2888,7 @@
           // error over its results would be the same staleness bug wearing
           // an error message.
           if (loadToken !== state.filelistsLoadToken) { return; }
-          el.filelistsBody.innerHTML = emptyRow(5, "Could not load file lists: " + err.message);
+          el.filelistsBody.innerHTML = emptyRow(5, t("filelists.couldNotLoad").replace("{error}", err.message));
           updateFilelistsDownloadSelectedState();
         });
     }
@@ -2866,6 +2952,16 @@
       "Bytes sent": "total_bytes",
       "Speed record": "speed_record"
     };
+    // The label the server sent is what byTarget above matches on, so it
+    // stays untranslated there; this only decides what to SHOW for the ones
+    // this page recognises, and falls back to the server's own text for any
+    // other counter it lists.
+    var labelKeys = {
+      "Files sent (packed)": "stats.filesSentPacked",
+      "Files sent (plain)": "stats.filesSentPlain",
+      "Bytes sent": "stats.bytesSentImport",
+      "Speed record": "stats.speedRecordImport"
+    };
 
     var body = "";
     (payload.rows || []).forEach(function (row) {
@@ -2873,9 +2969,10 @@
       var target = byTarget[row.label];
       var now = target ? (current[target] || 0) : null;
       var after = target && values[target] !== undefined ? values[target] : null;
+      var labelKey = labelKeys[row.label];
       body += "<tr>" +
-        "<td>" + escapeHtml(row.label) +
-          (target ? "" : " <span class=\"import-skipped\">not imported</span>") +
+        "<td>" + escapeHtml(labelKey ? t(labelKey) : row.label) +
+          (target ? "" : " <span class=\"import-skipped\">" + t("stats.notImported") + "</span>") +
         "</td>" +
         "<td class=\"col-num col-mono\">" +
           (now === null ? "&mdash;" : Number(now).toLocaleString()) + "</td>" +
@@ -2887,7 +2984,7 @@
     if (!body) {
       resetImportPreview();
       showImportStatus((payload.notes || []).join(" ") ||
-        "Nothing recognisable was found in that file.", true);
+        t("stats.nothingRecognisable"), true);
       return;
     }
 
@@ -2902,7 +2999,7 @@
     var replacing = Object.keys(payload.replaces || {});
     var notes = (payload.notes || []).slice();
     if (replacing.length) {
-      notes.unshift("Your current figures will be REPLACED, not added to.");
+      notes.unshift(t("stats.figuresWillBeReplaced"));
     }
     el.importWarning.hidden = !notes.length;
     el.importWarning.textContent = notes.join(" ");
@@ -2913,16 +3010,14 @@
   function previewImportText(text) {
     if (!String(text || "").trim()) {
       resetImportPreview();
-      showImportStatus("That file was empty.", true);
+      showImportStatus(t("stats.importFileEmpty"), true);
       return;
     }
     importVariables().then(function (names) {
       var kept = keepOnlyCounterLines(text, names);
       if (!kept.trim()) {
         resetImportPreview();
-        showImportStatus("No OmenServe counters were found in that file. The " +
-          "totals come from the add-ons (mxrarserver, OS-Limits), so an " +
-          "install without them has nothing to bring across.", true);
+        showImportStatus(t("stats.noCountersFound"), true);
         return;
       }
       return postJson("/api/stats/import/preview", { text: kept })
@@ -2936,7 +3031,7 @@
         });
     }).catch(function (err) {
       resetImportPreview();
-      showImportStatus("Could not read that: " + err.message, true);
+      showImportStatus(t("stats.couldNotReadFile").replace("{error}", err.message), true);
     });
   }
 
@@ -2946,7 +3041,7 @@
     var reader = new FileReader();
     reader.onload = function () { previewImportText(reader.result); };
     reader.onerror = function () {
-      showImportStatus("Could not read that file.", true);
+      showImportStatus(t("stats.couldNotReadThatFile"), true);
     };
     reader.readAsText(file);
     // Cleared so choosing the SAME file again still fires a change event -
@@ -2983,13 +3078,13 @@
       // What ACTUALLY happened, from the server's own before/after, rather
       // than what the page asked for.
       var after = res.data.after || {};
-      showImportStatus("Imported. Files sent is now " +
-        Number(after.total_files || 0).toLocaleString() + ", and the speed " +
-        "record " + Number(after.speed_record || 0).toLocaleString() + " B/s.");
+      showImportStatus(t("stats.importedSummary")
+        .replace("{files}", Number(after.total_files || 0).toLocaleString())
+        .replace("{speed}", Number(after.speed_record || 0).toLocaleString()));
       loadStats();
     }).catch(function (err) {
       el.importApply.disabled = false;
-      showImportStatus("Import failed: " + err.message, true);
+      showImportStatus(t("stats.importFailed").replace("{error}", err.message), true);
     });
   });
 
@@ -3007,7 +3102,7 @@
 
   el.updateListRunBtn.addEventListener("click", function () {
     el.updateListRunBtn.disabled = true;
-    showUpdateListStatus("Starting…", false);
+    showUpdateListStatus(t("tools.starting"), false);
     postJson("/api/tools/update-list", {}).then(function (res) {
       if (!res.ok) {
         el.updateListRunBtn.disabled = false;
@@ -3017,7 +3112,7 @@
       startUpdateListPolling();
     }).catch(function (err) {
       el.updateListRunBtn.disabled = false;
-      showUpdateListStatus("Request failed: " + err.message, true);
+      showUpdateListStatus(t("common.requestFailed").replace("{error}", err.message), true);
     });
   });
 
@@ -3047,22 +3142,22 @@
 
   function showUpdateListProgress(progress) {
     if (!progress) {
-      showUpdateListStatus("Rebuilding the master list…", false);
+      showUpdateListStatus(t("tools.rebuildingMasterList"), false);
       return;
     }
 
     var parts = [];
     if (progress.phase === "writing") {
-      parts.push("Writing the list…");
+      parts.push(t("tools.writingList"));
     } else if (progress.folder_count) {
-      parts.push("Scanning folder " + progress.folder_index +
-                 " of " + progress.folder_count);
+      parts.push(t("tools.scanningFolder")
+        .replace("{index}", progress.folder_index).replace("{total}", progress.folder_count));
       if (progress.folder) { parts.push(progress.folder); }
     } else {
-      parts.push("Scanning the library…");
+      parts.push(t("tools.scanningLibrary"));
     }
     if (progress.files) {
-      parts.push(progress.files.toLocaleString() + " files so far");
+      parts.push(t("tools.filesSoFar").replace("{count}", progress.files.toLocaleString()));
     }
     // LAST, because it is the part that changes on every tick. Reading down
     // the line, what the rebuild is DOING should not move about under the eye
@@ -3114,20 +3209,20 @@
       // did - and that is the difference between a typo in a path and a
       // mount that went away mid-walk.
       var took = (payload.seconds === null || payload.seconds === undefined)
-        ? "" : " in " + describeDuration(payload.seconds);
+        ? "" : t("tools.inDuration").replace("{duration}", describeDuration(payload.seconds));
       if (payload.ok === false) {
         showUpdateListStatus(
-          "Failed" + took + ": " + (payload.error || "unknown error"), true);
+          t("tools.updateFailed").replace("{took}", took)
+            .replace("{error}", payload.error || t("tools.unknownError")), true);
       } else {
-        showUpdateListStatus(
-          "Done" + took + ". Check Stats for the new file count.", false);
+        showUpdateListStatus(t("tools.updateDone").replace("{took}", took), false);
       }
     }).catch(function (err) {
       markConnection(false);
       clearInterval(updateList.pollTimer);
       updateList.pollTimer = null;
       el.updateListRunBtn.disabled = false;
-      showUpdateListStatus("Lost track of the update: " + err.message, true);
+      showUpdateListStatus(t("tools.lostTrackOfUpdate").replace("{error}", err.message), true);
     });
   }
 
@@ -3141,8 +3236,7 @@
 
     if (!duplicates.length) {
       el.verifyStatus.textContent =
-        "No duplicates. All " + checked.toLocaleString() +
-        " filenames in the list are unique.";
+        t("tools.noDuplicates").replace("{checked}", checked.toLocaleString());
       el.verifyStatus.classList.remove("is-error");
       el.verifyResults.innerHTML = "";
       return;
@@ -3153,13 +3247,13 @@
     // copy its size names; it is the bare-name request that only ever gets the
     // first one listed.
     var shadowed = payload.shadowed || 0;
-    el.verifyStatus.textContent =
-      duplicates.length.toLocaleString() +
-      (duplicates.length === 1 ? " filename appears" : " filenames appear") +
-      " under more than one folder, out of " + checked.toLocaleString() +
-      " checked. " + shadowed.toLocaleString() +
-      (shadowed === 1 ? " copy is" : " copies are") +
-      " reachable only by pasting a search result's whole line.";
+    var filenamesPhrase = t(duplicates.length === 1 ? "tools.oneFilenameAppears" : "tools.manyFilenamesAppear")
+      .replace("{count}", duplicates.length.toLocaleString());
+    var copiesPhrase = t(shadowed === 1 ? "tools.oneCopyIs" : "tools.manyCopiesAre")
+      .replace("{count}", shadowed.toLocaleString());
+    el.verifyStatus.textContent = t("tools.duplicatesSummary")
+      .replace("{filenames}", filenamesPhrase).replace("{checked}", checked.toLocaleString())
+      .replace("{copies}", copiesPhrase);
     el.verifyStatus.classList.remove("is-error");
 
     el.verifyResults.innerHTML = duplicates.map(function (item) {
@@ -3170,15 +3264,15 @@
       var folders = (item.folders || []).map(function (folder, index) {
         return "<li class=\"verify-folder" + (index === 0 ? " is-served" : "") + "\">" +
           "<span class=\"verify-path\">" +
-            escapeHtml(folder || "(library root)") + "</span>" +
-          (index === 0 ? "<span class=\"verify-tag\">served</span>"
-                       : "<span class=\"verify-tag is-dim\">shadowed</span>") +
+            escapeHtml(folder || t("tools.libraryRoot")) + "</span>" +
+          (index === 0 ? "<span class=\"verify-tag\">" + t("tools.tagServed") + "</span>"
+                       : "<span class=\"verify-tag is-dim\">" + t("tools.tagShadowed") + "</span>") +
           "</li>";
       }).join("");
       return "<div class=\"verify-group\">" +
         "<div class=\"verify-name\">" +
           "<span class=\"verify-file\">" + escapeHtml(item.filename) + "</span>" +
-          "<span class=\"verify-count\">" + (item.count || 0) + " folders</span>" +
+          "<span class=\"verify-count\">" + t("tools.folderCountLabel").replace("{count}", item.count || 0) + "</span>" +
         "</div>" +
         "<ul class=\"verify-folders\">" + folders + "</ul>" +
       "</div>";
@@ -3188,7 +3282,7 @@
   el.verifyRunBtn.addEventListener("click", function () {
     el.verifyRunBtn.disabled = true;
     el.verifyStatus.classList.remove("is-error");
-    el.verifyStatus.textContent = "Reading the master list…";
+    el.verifyStatus.textContent = t("tools.readingMasterList");
     el.verifyResults.innerHTML = "";
 
     fetchJson("/api/tools/verify-list")
@@ -3198,7 +3292,7 @@
       })
       .catch(function (err) {
         markConnection(false);
-        el.verifyStatus.textContent = "Could not verify the list: " + err.message;
+        el.verifyStatus.textContent = t("tools.couldNotVerifyList").replace("{error}", err.message);
         el.verifyStatus.classList.add("is-error");
       })
       .then(function () {
@@ -3286,11 +3380,15 @@
 
   // The same sixteen, named. theme.py's own comments are the vocabulary -
   // "solid green", "royal blue", "light cyan" - so the menu and the presets
-  // it is competing with call a colour the same thing.
-  var IRC_COLOUR_NAMES = [
-    "white", "black", "blue", "green", "red", "maroon", "purple", "orange",
-    "yellow", "light green", "cyan", "light cyan", "royal blue", "pink",
-    "grey", "light grey"
+  // it is competing with call a colour the same thing. Translation keys,
+  // not literal text - same convention as views{} above.
+  var IRC_COLOUR_NAME_KEYS = [
+    "settings.colourWhite", "settings.colourBlack", "settings.colourBlue",
+    "settings.colourGreen", "settings.colourRed", "settings.colourMaroon",
+    "settings.colourPurple", "settings.colourOrange", "settings.colourYellow",
+    "settings.colourLightGreen", "settings.colourCyan", "settings.colourLightCyan",
+    "settings.colourRoyalBlue", "settings.colourPink", "settings.colourGrey",
+    "settings.colourLightGrey"
   ];
 
   // A ROLE IS A COLOUR CODE, and only some codes are a colour the menus can
@@ -3426,23 +3524,23 @@
   // not a colour, and offering it would be offering a value that cannot be
   // saved.
   function ircColourPickerHtml(name, picked) {
-    function options(selected, none) {
+    function options(selected, noneKey) {
       var out = '<option value=""' + (selected === "" ? " selected" : "") +
-        ">" + escapeHtml(none) + "</option>";
-      for (var i = 0; i < IRC_COLOUR_NAMES.length; i++) {
+        ">" + escapeHtml(t(noneKey)) + "</option>";
+      for (var i = 0; i < IRC_COLOUR_NAME_KEYS.length; i++) {
         out += '<option value="' + i + '"' +
           (selected === String(i) ? " selected" : "") + ">" +
-          escapeHtml(pad2(i) + " " + IRC_COLOUR_NAMES[i]) + "</option>";
+          escapeHtml(pad2(i) + " " + t(IRC_COLOUR_NAME_KEYS[i])) + "</option>";
       }
       return out;
     }
 
     return '<span class="irc-colour" data-irc-colour="' + escapeHtml(name) + '">' +
       '<span class="irc-colour-swatch" data-irc-swatch></span>' +
-      '<select data-irc-part="fg" aria-label="Foreground colour">' +
-        options(picked.fg, "Theme default") +
+      '<select data-irc-part="fg" aria-label="' + escapeHtml(t("settings.foregroundColour")) + '">' +
+        options(picked.fg, "settings.themeDefault") +
       "</select>" +
-      '<select data-irc-part="bg" aria-label="Background colour"' +
+      '<select data-irc-part="bg" aria-label="' + escapeHtml(t("settings.backgroundColour")) + '"' +
         (picked.fg === "" ? " disabled" : "") + ">" +
         // NOT "No background", which is what this said and is not what it
         // does. A colour code carrying only a foreground leaves the
@@ -3451,7 +3549,7 @@
         // is what actually happens. Reported from the beta: a border of blue
         // on red with the text box left "No background" painted every field
         // after it red, and the preview was right.
-        options(picked.bg, "Keep previous") +
+        options(picked.bg, "settings.keepPrevious") +
       "</select>" +
       surfaceWarningHtml(name, picked) +
     "</span>";
@@ -3463,7 +3561,7 @@
     if (!isSurfaceRole(settingName)) { return ""; }
     if (picked.fg === "" || picked.bg !== "") { return ""; }
     return '<span class="irc-colour-warning">' +
-      "keeps the previous background \u2014 this one is drawn as a block" +
+      t("settings.keepsPreviousBackgroundWarning") +
       "</span>";
   }
 
@@ -3530,6 +3628,211 @@
   var SERVED_FOLDERS_CATEGORY = "your-list";   // where Music directory lives
   var ON_CONNECT_CATEGORY = "identity";        // registration, before the JOIN
 
+  // CLIENT-SIDE OVERRIDES FOR SERVER-SUPPLIED TEXT. category.label and
+  // field.label arrive from the server (SETTINGS_CATEGORIES/SETTINGS_LABELS
+  // in webserver.py) because the setting SCHEMA lives there, not in this
+  // page - so unlike everything else this dashboard translates, there is no
+  // data-i18n attribute or t() call already sitting on this text at its
+  // source. These two lookups translate it anyway, keyed on the exact
+  // category id or setting NAME the server uses (never on the English text
+  // itself, which the server is still free to reword): a category or
+  // setting this page does not recognise - one just added to config.py,
+  // before a translator has caught up - simply keeps showing the server's
+  // own English, the same silent-fallback shape every other lookup table on
+  // this page already uses.
+  var SETTINGS_CATEGORY_LABEL_KEYS = {
+    "identity": "settings.category.identity",
+    "sharing": "settings.category.sharing",
+    "transfers": "settings.category.transfers",
+    "your-list": "settings.category.yourList",
+    "fetching": "settings.category.fetching",
+    "advertising": "settings.category.advertising",
+    "appearance": "settings.category.appearance",
+    "anti-flood": "settings.category.antiFlood",
+    "private-messages": "settings.category.privateMessages",
+    "admin-console": "settings.category.adminConsole",
+    "web-dashboard": "settings.category.webDashboard",
+    "console-feed": "settings.category.consoleFeed",
+    "debug": "settings.category.debug",
+    "advanced": "settings.category.advanced"
+  };
+
+  var SETTINGS_FIELD_LABEL_KEYS = {
+    SERVER: "settings.field.SERVER",
+    PORT: "settings.field.PORT",
+    NICKNAME: "settings.field.NICKNAME",
+    ALT_NICKNAME: "settings.field.ALT_NICKNAME",
+    ADMIN_NICK: "settings.field.ADMIN_NICK",
+    CHANNEL: "settings.field.CHANNEL",
+    DEBUG_CHANNEL: "settings.field.DEBUG_CHANNEL",
+    MAX_DCC_SLOTS: "settings.field.MAX_DCC_SLOTS",
+    MAX_USER_QUEUE: "settings.field.MAX_USER_QUEUE",
+    MAX_GLOBAL_QUEUE: "settings.field.MAX_GLOBAL_QUEUE",
+    MAX_SEARCH_RESULTS: "settings.field.MAX_SEARCH_RESULTS",
+    MSG_DELAY: "settings.field.MSG_DELAY",
+    DEBUG_MSG_DELAY: "settings.field.DEBUG_MSG_DELAY",
+    DCC_PORT_START: "settings.field.DCC_PORT_START",
+    DCC_PORT_END: "settings.field.DCC_PORT_END",
+    MAX_FETCH_SLOTS: "settings.field.MAX_FETCH_SLOTS",
+    FETCH_HISTORY_DAYS: "settings.field.FETCH_HISTORY_DAYS",
+    FETCH_HISTORY_MAX_ROWS: "settings.field.FETCH_HISTORY_MAX_ROWS",
+    MAX_FETCH_FILE_SIZE: "settings.field.MAX_FETCH_FILE_SIZE",
+    MAX_LIST_TEXT_SIZE: "settings.field.MAX_LIST_TEXT_SIZE",
+    DCC_BLOCK_SIZE: "settings.field.DCC_BLOCK_SIZE",
+    DCC_SEND_BUFFER: "settings.field.DCC_SEND_BUFFER",
+    REHASH_TRANSFER_WAIT: "settings.field.REHASH_TRANSFER_WAIT",
+    AUTO_REFETCH_LISTS: "settings.field.AUTO_REFETCH_LISTS",
+    AUTO_REFETCH_INTERVAL_HOURS: "settings.field.AUTO_REFETCH_INTERVAL_HOURS",
+    AUTO_REFETCH_MAX_PER_RUN: "settings.field.AUTO_REFETCH_MAX_PER_RUN",
+    FETCH_TRANSFER_TIMEOUT: "settings.field.FETCH_TRANSFER_TIMEOUT",
+    FETCH_OFFER_TIMEOUT: "settings.field.FETCH_OFFER_TIMEOUT",
+    FETCH_FOLDER_OFFER_TIMEOUT: "settings.field.FETCH_FOLDER_OFFER_TIMEOUT",
+    FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED: "settings.field.FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED",
+    MAX_FETCH_FOLDER_FILE_SIZE: "settings.field.MAX_FETCH_FOLDER_FILE_SIZE",
+    MAX_FETCH_LIST_FILE_SIZE: "settings.field.MAX_FETCH_LIST_FILE_SIZE",
+    FETCH_FOLDER_TRANSFER_TIMEOUT: "settings.field.FETCH_FOLDER_TRANSFER_TIMEOUT",
+    LIST_BASE_NAME: "settings.field.LIST_BASE_NAME",
+    PAUSE_ON_UPDATE: "settings.field.PAUSE_ON_UPDATE",
+    FILE_DIRECTORY: "settings.field.FILE_DIRECTORY",
+    LIST_FORMAT: "settings.field.LIST_FORMAT",
+    LIST_IGNORED_EXTENSIONS: "settings.field.LIST_IGNORED_EXTENSIONS",
+    SEPARATE_VIDEO_LIST: "settings.field.SEPARATE_VIDEO_LIST",
+    LIST_VIDEO_EXTENSIONS: "settings.field.LIST_VIDEO_EXTENSIONS",
+    LIST_VIDEO_COMPANION_EXTENSIONS: "settings.field.LIST_VIDEO_COMPANION_EXTENSIONS",
+    RAR_EXTENSIONS: "settings.field.RAR_EXTENSIONS",
+    RAR_ENABLED: "settings.field.RAR_ENABLED",
+    RAR_BINARY: "settings.field.RAR_BINARY",
+    TMP_ZIP_DIR: "settings.field.TMP_ZIP_DIR",
+    MAX_RAR_FOLDER_SIZE: "settings.field.MAX_RAR_FOLDER_SIZE",
+    LOCAL_LIST_DIR: "settings.field.LOCAL_LIST_DIR",
+    FETCHED_FILES_DIR: "settings.field.FETCHED_FILES_DIR",
+    BANS_FILE: "settings.field.BANS_FILE",
+    STATS_FILE: "settings.field.STATS_FILE",
+    HARD_BANS_FILE: "settings.field.HARD_BANS_FILE",
+    KNOWN_BOTS_FILE: "settings.field.KNOWN_BOTS_FILE",
+    LIST_INDEX_FILE: "settings.field.LIST_INDEX_FILE",
+    DOWNLOAD_COUNTS_FILE: "settings.field.DOWNLOAD_COUNTS_FILE",
+    FETCHED_BOT_LISTS_FILE: "settings.field.FETCHED_BOT_LISTS_FILE",
+    FETCH_HISTORY_FILE: "settings.field.FETCH_HISTORY_FILE",
+    NOTICES_FILE: "settings.field.NOTICES_FILE",
+    PRIVATE_MESSAGES_FILE: "settings.field.PRIVATE_MESSAGES_FILE",
+    PRIVATE_MESSAGE_COOLDOWN_SECONDS: "settings.field.PRIVATE_MESSAGE_COOLDOWN_SECONDS",
+    PRIVATE_MESSAGES_ENABLED: "settings.field.PRIVATE_MESSAGES_ENABLED",
+    PRIVATE_MESSAGE_DECLINE_TEXT: "settings.field.PRIVATE_MESSAGE_DECLINE_TEXT",
+    PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS: "settings.field.PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS",
+    PRIVATE_MESSAGE_DECLINE_BURST: "settings.field.PRIVATE_MESSAGE_DECLINE_BURST",
+    PRIVATE_MESSAGE_DECLINE_BURST_SECONDS: "settings.field.PRIVATE_MESSAGE_DECLINE_BURST_SECONDS",
+    LIST_SIZE_FILE: "settings.field.LIST_SIZE_FILE",
+    LIST_PROGRESS_FILE: "settings.field.LIST_PROGRESS_FILE",
+    LIST_RAWBYTES_FILE: "settings.field.LIST_RAWBYTES_FILE",
+    LIST_HEADER_FILE: "settings.field.LIST_HEADER_FILE",
+    LIST_HEADER_MAX_BYTES: "settings.field.LIST_HEADER_MAX_BYTES",
+    LIBRARY_FOLDERS_FILE: "settings.field.LIBRARY_FOLDERS_FILE",
+    LISTS_FILE: "settings.field.LISTS_FILE",
+    ON_CONNECT_FILE: "settings.field.ON_CONNECT_FILE",
+    THEME: "settings.field.THEME",
+    CUSTOM_THEME_BORDER: "settings.field.CUSTOM_THEME_BORDER",
+    CUSTOM_THEME_SEPARATOR: "settings.field.CUSTOM_THEME_SEPARATOR",
+    CUSTOM_THEME_TEXTBOX: "settings.field.CUSTOM_THEME_TEXTBOX",
+    CUSTOM_THEME_VALUE: "settings.field.CUSTOM_THEME_VALUE",
+    CUSTOM_THEME_ALERT: "settings.field.CUSTOM_THEME_ALERT",
+    CUSTOM_THEME_ACCENT: "settings.field.CUSTOM_THEME_ACCENT",
+    ANNOUNCE_TRANSFERS: "settings.field.ANNOUNCE_TRANSFERS",
+    REJOIN_ATTEMPTS: "settings.field.REJOIN_ATTEMPTS",
+    ANNOUNCE_INTERVAL: "settings.field.ANNOUNCE_INTERVAL",
+    BROADCAST_SEARCH_CHANNEL: "settings.field.BROADCAST_SEARCH_CHANNEL",
+    BROADCAST_SEARCH_COOLDOWN: "settings.field.BROADCAST_SEARCH_COOLDOWN",
+    CTCP_VERSION_REPLY: "settings.field.CTCP_VERSION_REPLY",
+    MAX_REQUESTS: "settings.field.MAX_REQUESTS",
+    REQUEST_WINDOW: "settings.field.REQUEST_WINDOW",
+    MUTE_TIME: "settings.field.MUTE_TIME",
+    FLOOD_BAN_SECONDS: "settings.field.FLOOD_BAN_SECONDS",
+    MAX_SEND_FAILS: "settings.field.MAX_SEND_FAILS",
+    RAR_TIMEOUT: "settings.field.RAR_TIMEOUT",
+    LIST_UPDATE_TIMEOUT: "settings.field.LIST_UPDATE_TIMEOUT",
+    LIST_UPDATE_STALL_SECONDS: "settings.field.LIST_UPDATE_STALL_SECONDS",
+    ADMIN_HOSTMASKS: "settings.field.ADMIN_HOSTMASKS",
+    ADMIN_CHAT_MODE: "settings.field.ADMIN_CHAT_MODE",
+    ADMIN_CHANNEL_COMMANDS: "settings.field.ADMIN_CHANNEL_COMMANDS",
+    WEBUI_ENABLED: "settings.field.WEBUI_ENABLED",
+    WEBUI_HOST: "settings.field.WEBUI_HOST",
+    WEBUI_PORT: "settings.field.WEBUI_PORT",
+    WEBUI_FOLDER_BROWSER_ENABLED: "settings.field.WEBUI_FOLDER_BROWSER_ENABLED",
+    WEBUI_CONSOLE_ENABLED: "settings.field.WEBUI_CONSOLE_ENABLED",
+    WEBUI_OPEN_BROWSER: "settings.field.WEBUI_OPEN_BROWSER",
+    DEBUG_MODE: "settings.field.DEBUG_MODE",
+    DEBUG_TO_CHANNEL: "settings.field.DEBUG_TO_CHANNEL",
+    DEBUG_TO_CONSOLE: "settings.field.DEBUG_TO_CONSOLE",
+    CONSOLE_SHOW_REQUESTS: "settings.field.CONSOLE_SHOW_REQUESTS",
+    CONSOLE_SHOW_QUEUE: "settings.field.CONSOLE_SHOW_QUEUE",
+    CONSOLE_SHOW_SENDS: "settings.field.CONSOLE_SHOW_SENDS",
+    CONSOLE_SHOW_FAILURES: "settings.field.CONSOLE_SHOW_FAILURES",
+    CONSOLE_SHOW_SEARCHES: "settings.field.CONSOLE_SHOW_SEARCHES",
+    DEBUG_CHANNEL_FEED: "settings.field.DEBUG_CHANNEL_FEED",
+    CONSOLE_TIMESTAMP_FORMAT: "settings.field.CONSOLE_TIMESTAMP_FORMAT",
+    PROJECT_URL: "settings.field.PROJECT_URL"
+  };
+
+  function categoryLabel(category) {
+    var key = SETTINGS_CATEGORY_LABEL_KEYS[category.id];
+    return key ? t(key) : category.label;
+  }
+
+  function fieldLabel(field) {
+    var key = SETTINGS_FIELD_LABEL_KEYS[field.name];
+    return key ? t(key) : (field.label || field.name);
+  }
+
+  // The one field whose note is built at request time rather than fixed
+  // (WEBUI_CONSOLE_ENABLED's "unset" state - see _settings_field() in
+  // webserver.py): the server appends "Currently ON." or "Currently OFF."
+  // to its own English sentence. Recognised by that exact suffix and
+  // rebuilt from a template so the whole note can be in the chosen
+  // language; a note that does not end that way (a future server change,
+  // say) is shown exactly as the server sent it rather than guessed at.
+  function fieldNote(field) {
+    if (field.name === "WEBUI_CONSOLE_ENABLED" && field.note) {
+      if (/ON\.$/.test(field.note)) {
+        return t("settings.field.WEBUI_CONSOLE_ENABLED.note").replace("{state}", t("settings.onWord"));
+      }
+      if (/OFF\.$/.test(field.note)) {
+        return t("settings.field.WEBUI_CONSOLE_ENABLED.note").replace("{state}", t("settings.offWord"));
+      }
+    }
+    return field.note;
+  }
+
+  // WHAT A SETTING MEANS, for the "?" beside its label (#528). The text is
+  // the comment block beside the setting in defaults.py, sent by the server
+  // as field.help - the same source settings.conf.sample is generated from.
+  // A dictionary may carry a translation under the label key + ".help"
+  // (settings.field.MAX_DCC_SLOTS.help, say); looked up directly rather
+  // than through t(), because t() answers a missing key with the key
+  // itself, and here a missing translation means "show the server's own
+  // English", exactly as fieldLabel() falls back to field.label.
+  function fieldHelp(field) {
+    var key = SETTINGS_FIELD_LABEL_KEYS[field.name];
+    if (key) {
+      var translated = state.lang[key + ".help"];
+      if (translated !== undefined) { return translated; }
+    }
+    return field.help || "";
+  }
+
+  // Rendered as real text inside the row, shown on hover or keyboard focus
+  // by CSS, rather than as a title= attribute: escapeHtml() encodes text
+  // content, not attributes, and the help is a paragraph or two that a
+  // native tooltip would truncate and delay anyway.
+  function settingsHelpHtml(field) {
+    var help = fieldHelp(field);
+    if (!help) { return ""; }
+    return '<span class="settings-help" tabindex="0">' +
+      '<span class="settings-help-mark" aria-hidden="true">?</span>' +
+      '<span class="visually-hidden">' + escapeHtml(t("settings.whatThisDoes")) + "</span>" +
+      '<span class="settings-help-text" role="tooltip">' + escapeHtml(help) + "</span>" +
+      "</span>";
+  }
+
   function settingsFieldHtml(field) {
     var isDirty = Object.prototype.hasOwnProperty.call(state.settingsDirty, field.name);
     var nameClass = "settings-field-name" + (isDirty ? " is-dirty" : "");
@@ -3547,8 +3850,7 @@
         // would be losing the operator's work to make the page tidier.
         control = '<input type="text" autocomplete="off" data-setting="' +
           escapeHtml(field.name) + '">' +
-          '<span class="settings-field-note">Set by hand to something the ' +
-          "menus cannot offer, so it is left as text.</span>";
+          '<span class="settings-field-note">' + t("settings.setByHandNote") + "</span>";
       }
     } else if (field.choices) {
 
@@ -3619,12 +3921,12 @@
     // escapeHtml() into TEXT content, which is what it encodes correctly. It
     // does not encode quotes, so this must never become an attribute.
     var note = field.note
-      ? '<span class="settings-field-note">' + escapeHtml(field.note) + "</span>"
+      ? '<span class="settings-field-note">' + escapeHtml(fieldNote(field)) + "</span>"
       : "";
 
     return '<div class="settings-field-row">' +
-      '<span class="' + nameClass + '">' + escapeHtml(field.label || field.name) +
-      note + '</span>' +
+      '<span class="' + nameClass + '">' + escapeHtml(fieldLabel(field)) +
+      settingsHelpHtml(field) + note + '</span>' +
       '<span class="settings-field-control">' + control + '</span>' +
       "</div>";
   }
@@ -3638,16 +3940,17 @@
   // fresh listeners after every re-render would leak the old ones. Same
   // pattern el.filelistsBody's folder-toggle delegation already uses.
   function settingsPasswordSectionHtml() {
-    var statusText = "Admin password: " + (state.settingsAdminPasswordSet ? "set" : "not set");
+    var statusText = t("settings.adminPasswordStatus")
+      .replace("{state}", t(state.settingsAdminPasswordSet ? "settings.stateSet" : "settings.stateNotSet"));
     return (
       '<div class="settings-password-row">' +
         '<span class="settings-password-status">' + escapeHtml(statusText) + "</span>" +
-        '<button type="button" class="btn btn-small settings-password-toggle">Change password</button>' +
+        '<button type="button" class="btn btn-small settings-password-toggle">' + t("settings.changePassword") + '</button>' +
       "</div>" +
       '<form class="settings-password-form" style="display:none;">' +
-        '<input type="password" class="settings-new-password" placeholder="New password" autocomplete="new-password">' +
-        '<input type="password" class="settings-confirm-password" placeholder="Confirm new password" autocomplete="new-password">' +
-        '<button type="submit" class="btn btn-accent btn-small">Set password</button>' +
+        '<input type="password" class="settings-new-password" placeholder="' + escapeHtml(t("settings.newPasswordPlaceholder")) + '" autocomplete="new-password">' +
+        '<input type="password" class="settings-confirm-password" placeholder="' + escapeHtml(t("settings.confirmNewPasswordPlaceholder")) + '" autocomplete="new-password">' +
+        '<button type="submit" class="btn btn-accent btn-small">' + t("settings.setPasswordButton") + '</button>' +
       "</form>" +
       '<p class="settings-note settings-password-note" style="display:none;"></p>'
     );
@@ -3707,8 +4010,8 @@
     el.settingsSaveBtn.disabled = count === 0;
     el.settingsSavebarText.classList.toggle("is-dirty", count > 0);
     el.settingsSavebarText.textContent = count === 0
-      ? "All changes saved"
-      : (count + (count === 1 ? " unsaved change" : " unsaved changes"));
+      ? t("settings.allChangesSaved")
+      : t(count === 1 ? "settings.oneUnsavedChange" : "settings.manyUnsavedChanges").replace("{count}", count);
   }
 
   // The served-folder editor. Markup only - NO VALUES - for the reason the
@@ -3740,27 +4043,20 @@
     // assigned as a property in attachOnConnectRows(), like every other value
     // on this page.
     return '<div class="served-folders">' +
-      "<h3>On connect</h3>" +
-      '<p class="served-folder-summary">' +
-        "Sent once the server has registered you and <strong>before</strong> " +
-        "joining - one command per line, exactly as you would type it into a " +
-        "client. On Undernet that ordering matters: logging in to X takes " +
-        "<code>+x</code>, and joining first shows your real host to everyone " +
-        "already in the channel. Use <code>%nick%</code> for the nickname the " +
-        "server actually gave you." +
-      "</p>" +
+      "<h3>" + t("settings.onConnectHeading") + "</h3>" +
+      '<p class="served-folder-summary">' + t("settings.onConnectSummary") + "</p>" +
       '<textarea class="on-connect-commands" rows="5" spellcheck="false" ' +
         'placeholder="PRIVMSG X@channels.undernet.org :LOGIN yourname yourpass' +
-        '&#10;MODE %nick% +x" aria-label="Commands to send on connect"></textarea>' +
+        '&#10;MODE %nick% +x" aria-label="' + escapeHtml(t("settings.onConnectCommandsAriaLabel")) + '"></textarea>' +
       '<div class="on-connect-delay">' +
-        '<label for="on-connect-delay-input">Seconds between commands</label>' +
+        '<label for="on-connect-delay-input">' + t("settings.secondsBetweenCommands") + '</label>' +
         '<input type="number" id="on-connect-delay-input" ' +
           'class="on-connect-delay-input" min="0" max="' +
           escapeHtml(String(data.max_delay_seconds || 60)) + '" step="1">' +
       "</div>" +
       '<div class="served-folder-actions">' +
         '<button type="button" class="btn btn-accent on-connect-save">' +
-        "Save on-connect commands</button>" +
+        t("settings.saveOnConnectCommands") + "</button>" +
       "</div>" + note + "</div>";
   }
 
@@ -3801,15 +4097,15 @@
           delay_seconds: res.data.delay_seconds,
           max_delay_seconds: (state.onConnect || {}).max_delay_seconds
         };
-        state.onConnectNote = { ok: true, text: res.data.message || "Saved." };
+        state.onConnectNote = { ok: true, text: res.data.message || t("settings.saved") };
       } else {
         // Every fault at once, newline separated, the same way the folder and
         // list endpoints answer.
-        var message = (res.data && res.data.error) || "Could not save.";
+        var message = (res.data && res.data.error) || t("settings.couldNotSave");
         var parts = message.split("\n");
         state.onConnectNote = {
           ok: false,
-          text: parts.length > 1 ? "Could not save:" : message,
+          text: parts.length > 1 ? t("settings.couldNotSaveColon") : message,
           problems: parts.length > 1 ? parts : []
         };
       }
@@ -3824,23 +4120,23 @@
       var folderRows = (entry.folders || []).map(function (_f, fIndex) {
         return '<div class="list-folder-row" data-list-index="' + index +
           '" data-folder-index="' + fIndex + '">' +
-          '<input type="text" class="list-folder-name" placeholder="Label" aria-label="Folder label">' +
-          '<input type="text" class="list-folder-path" placeholder="Full path to the folder" aria-label="Folder path">' +
-          '<button type="button" class="served-folder-btn list-folder-remove" title="Remove folder" aria-label="Remove folder">\u00d7</button>' +
+          '<input type="text" class="list-folder-name" placeholder="' + escapeHtml(t("common.label")) + '" aria-label="' + escapeHtml(t("settings.folderLabelAriaLabel")) + '">' +
+          '<input type="text" class="list-folder-path" placeholder="' + escapeHtml(t("settings.fullPathToFolder")) + '" aria-label="' + escapeHtml(t("settings.folderPathAriaLabel")) + '">' +
+          '<button type="button" class="served-folder-btn list-folder-remove" title="' + escapeHtml(t("settings.removeFolder")) + '" aria-label="' + escapeHtml(t("settings.removeFolder")) + '">\u00d7</button>' +
           "</div>";
       }).join("");
 
       return '<div class="served-list-block" data-list-index="' + index + '">' +
         '<div class="served-list-head">' +
-          '<input type="text" class="served-list-name" placeholder="List name" aria-label="List name">' +
+          '<input type="text" class="served-list-name" placeholder="' + escapeHtml(t("settings.listNamePlaceholder")) + '" aria-label="' + escapeHtml(t("settings.listNamePlaceholder")) + '">' +
           '<label class="served-list-primary-label">' +
             '<input type="radio" name="served-list-primary" class="served-list-primary">' +
-            " Primary</label>" +
-          '<button type="button" class="served-folder-btn served-list-remove" title="Remove list" aria-label="Remove list">\u00d7</button>' +
+            " " + t("settings.primary") + "</label>" +
+          '<button type="button" class="served-folder-btn served-list-remove" title="' + escapeHtml(t("settings.removeList")) + '" aria-label="' + escapeHtml(t("settings.removeList")) + '">\u00d7</button>' +
         "</div>" +
         servedListChannelsHtml(entry, index) +
         '<div class="served-list-folders">' + folderRows + "</div>" +
-        '<button type="button" class="btn btn-small list-folder-add">Add folder</button>' +
+        '<button type="button" class="btn btn-small list-folder-add">' + t("settings.addFolder") + '</button>' +
         "</div>";
     }).join("");
 
@@ -3854,17 +4150,12 @@
     }
 
     return '<div class="served-folders">' +
-      "<h3>Served lists</h3>" +
-      '<p class="served-folder-summary">' +
-        "Each list is built from its own folders and answered in its own " +
-        "channels. A channel named by no list is not served at all; a list " +
-        "naming no channels answers everywhere, which only makes sense for " +
-        "one of them. The primary is what a private message means." +
-      "</p>" +
+      "<h3>" + t("settings.servedListsHeading") + "</h3>" +
+      '<p class="served-folder-summary">' + t("settings.servedListsSummary") + "</p>" +
       blocks +
       '<div class="served-folder-actions">' +
-        '<button type="button" class="btn served-list-add">Add list</button>' +
-        '<button type="button" class="btn btn-accent served-list-save">Save lists</button>' +
+        '<button type="button" class="btn served-list-add">' + t("settings.addList") + '</button>' +
+        '<button type="button" class="btn btn-accent served-list-save">' + t("settings.saveLists") + '</button>' +
       "</div>" + note + "</div>";
   }
 
@@ -3904,11 +4195,7 @@
     });
 
     if (!offered.length && !extra.length) {
-      return '<p class="served-list-channels-empty">' +
-        "No channels are configured yet. Add them under Identity &amp; " +
-        "network, then come back to bind this list to one. Until then this " +
-        "list serves every channel." +
-        "</p>";
+      return '<p class="served-list-channels-empty">' + t("settings.noChannelsConfiguredYet") + "</p>";
     }
 
     var boxes = offered.map(function (name) {
@@ -3919,16 +4206,13 @@
 
     var warning = extra.length
       ? '<p class="served-list-channels-warning">' +
-        (extra.length === 1
-          ? "One channel bound here is not in your join list, so nothing "
-          : extra.length + " channels bound here are not in your join list, so nothing ") +
-        "arrives from it. Untick it, or add it under Identity &amp; network." +
+        t(extra.length === 1 ? "settings.oneChannelNotInJoinList" : "settings.manyChannelsNotInJoinList")
+          .replace("{count}", extra.length) +
         "</p>"
       : "";
 
     return '<div class="served-list-channels" data-list-index="' + index + '">' +
-      '<p class="served-list-channels-label">Serves' +
-        (bound.length ? "" : " every channel") + "</p>" +
+      '<p class="served-list-channels-label">' + t(bound.length ? "settings.servesBound" : "settings.servesEveryChannel") + "</p>" +
       '<div class="served-list-channel-boxes">' + boxes + "</div>" +
       warning +
       "</div>";
@@ -4054,8 +4338,7 @@
       state.listsSource = "file";
       state.listsNote = {
         ok: true,
-        text: "Add a second list, name the channels each one serves, then " +
-              "save. Nothing changes until you do."
+        text: t("settings.addSecondListNote")
       };
       renderSettingsCategory();
       return;
@@ -4129,7 +4412,7 @@
         if (res.ok) {
           state.listsNote = {
             ok: true,
-            text: res.data.message || "Saved."
+            text: res.data.message || t("settings.saved")
           };
           // Dropped so the reload seeds it from what the server actually
           // wrote, rather than from what was typed - a name the server
@@ -4140,11 +4423,11 @@
         }
         // The server returns every fault at once, newline separated, so an
         // operator fixing three things is told about three things.
-        var message = (res.data && res.data.error) || "Could not save.";
+        var message = (res.data && res.data.error) || t("settings.couldNotSave");
         var parts = message.split("\n");
         state.listsNote = {
           ok: false,
-          text: parts.length > 1 ? "Could not save:" : message,
+          text: parts.length > 1 ? t("settings.couldNotSaveColon") : message,
           problems: parts.length > 1 ? parts : []
         };
         renderSettingsCategory();
@@ -4155,14 +4438,14 @@
     var draft = state.foldersDraft || [];
     var rows = draft.map(function (_row, index) {
       return '<div class="served-folder-row" data-served-folder-index="' + index + '">' +
-        '<input type="text" class="served-folder-name" placeholder="Label" aria-label="Folder label">' +
-        '<input type="text" class="served-folder-path" placeholder="Full path to the folder" aria-label="Folder path">' +
+        '<input type="text" class="served-folder-name" placeholder="' + escapeHtml(t("common.label")) + '" aria-label="' + escapeHtml(t("settings.folderLabelAriaLabel")) + '">' +
+        '<input type="text" class="served-folder-path" placeholder="' + escapeHtml(t("settings.fullPathToFolder")) + '" aria-label="' + escapeHtml(t("settings.folderPathAriaLabel")) + '">' +
         (state.foldersBrowserEnabled
-          ? '<button type="button" class="served-folder-btn served-folder-browse" title="Browse for a folder">Browse</button>'
+          ? '<button type="button" class="served-folder-btn served-folder-browse" title="' + escapeHtml(t("settings.browseForFolder")) + '">' + t("settings.browse") + '</button>'
           : "") +
-        '<button type="button" class="served-folder-btn served-folder-up" title="Move up" aria-label="Move up">\u2191</button>' +
-        '<button type="button" class="served-folder-btn served-folder-down" title="Move down" aria-label="Move down">\u2193</button>' +
-        '<button type="button" class="served-folder-btn served-folder-remove" title="Remove" aria-label="Remove">\u00d7</button>' +
+        '<button type="button" class="served-folder-btn served-folder-up" title="' + escapeHtml(t("settings.moveUp")) + '" aria-label="' + escapeHtml(t("settings.moveUp")) + '">\u2191</button>' +
+        '<button type="button" class="served-folder-btn served-folder-down" title="' + escapeHtml(t("settings.moveDown")) + '" aria-label="' + escapeHtml(t("settings.moveDown")) + '">\u2193</button>' +
+        '<button type="button" class="served-folder-btn served-folder-remove" title="' + escapeHtml(t("common.remove")) + '" aria-label="' + escapeHtml(t("common.remove")) + '">\u00d7</button>' +
         "</div>";
     }).join("");
 
@@ -4177,13 +4460,12 @@
 
     var summary;
     if (state.foldersSource === "file") {
-      summary = "Serving " + draft.length + " folder" + (draft.length === 1 ? "" : "s") +
-        ", in this order. The label is what users see as the first part of every path.";
+      summary = t(draft.length === 1 ? "settings.servingOneFolder" : "settings.servingManyFolders")
+        .replace("{count}", draft.length);
     } else if (state.foldersSource === "file_directory") {
-      summary = "No folder list yet \u2014 serving the single Music directory below. " +
-        "Add a folder here to serve more than one.";
+      summary = t("settings.noFolderListYet");
     } else {
-      summary = "Nothing is being served yet. Add a folder here, or set Music directory below.";
+      summary = t("settings.nothingServedYet");
     }
 
     // NO PATH IN ANY ATTRIBUTE. An entry is addressed by its INDEX into
@@ -4199,7 +4481,7 @@
       if (b.error) {
         list = '<p class="served-folder-note is-error">' + escapeHtml(b.error) + "</p>";
       } else if (!b.entries.length) {
-        list = '<p class="browse-empty">No folders in here.</p>';
+        list = '<p class="browse-empty">' + t("settings.noFoldersInHere") + '</p>';
       } else {
         list = '<ul class="browse-list">' + b.entries.map(function (entry, index) {
           return '<li><button type="button" class="browse-entry" data-browse-index="' +
@@ -4210,39 +4492,36 @@
       browsePanel = '<div class="browse-panel">' +
         '<div class="browse-head">' +
           '<span class="browse-where">' +
-            escapeHtml(b.at_root ? "This machine" : b.path) + "</span>" +
-          '<button type="button" class="btn btn-small browse-close">Close</button>' +
+            escapeHtml(b.at_root ? t("settings.thisMachine") : b.path) + "</span>" +
+          '<button type="button" class="btn btn-small browse-close">' + t("common.close") + '</button>' +
         "</div>" +
         (b.at_root ? "" :
-          '<button type="button" class="btn btn-small browse-up">\u2191 Up</button>') +
+          '<button type="button" class="btn btn-small browse-up">\u2191 ' + t("settings.up") + '</button>') +
         list +
         (b.truncated
-          ? '<p class="browse-empty">Only the first ' + b.entries.length +
-            " folders are shown.</p>"
+          ? '<p class="browse-empty">' + t("settings.onlyFirstNFoldersShown").replace("{count}", b.entries.length) + '</p>'
           : "") +
         (b.at_root ? "" :
           '<div class="browse-actions">' +
-            '<button type="button" class="btn btn-accent browse-use">Use this folder</button>' +
+            '<button type="button" class="btn btn-accent browse-use">' + t("settings.useThisFolder") + '</button>' +
           "</div>") +
         "</div>";
     }
 
     var offNote = "";
     if (!state.foldersBrowserEnabled) {
-      offNote = '<p class="served-folder-summary">Type the full path to each folder. ' +
-        "A folder picker is available if you turn on \u201cFolder picker on the " +
-        "Settings page\u201d under Web dashboard.</p>";
+      offNote = '<p class="served-folder-summary">' + t("settings.typeFullPathNote") + '</p>';
     }
 
     return '<div class="served-folder-section">' +
-      '<h2 class="settings-category-title">Served folders</h2>' +
+      '<h2 class="settings-category-title">' + t("settings.servedFoldersHeading") + '</h2>' +
       '<p class="served-folder-summary">' + escapeHtml(summary) + "</p>" +
       offNote +
       '<div class="served-folder-rows">' + rows + "</div>" +
       browsePanel +
       '<div class="served-folder-actions">' +
-        '<button type="button" class="btn served-folder-add">Add folder</button>' +
-        '<button type="button" class="btn btn-accent served-folder-save">Save folders</button>' +
+        '<button type="button" class="btn served-folder-add">' + t("settings.addFolder") + '</button>' +
+        '<button type="button" class="btn btn-accent served-folder-save">' + t("settings.saveFolders") + '</button>' +
       "</div>" + note + "</div>";
   }
 
@@ -4335,15 +4614,14 @@
         state.foldersNote = {
           ok: true,
           text: res.data.written
-            ? "Saved " + res.data.written + " folder" +
-              (res.data.written === 1 ? "" : "s") +
-              ". Rebuild the list from Tools before they appear in it."
-            : "Folder list cleared \u2014 back to the single Music directory."
+            ? t(res.data.written === 1 ? "settings.savedOneFolder" : "settings.savedManyFolders")
+                .replace("{count}", res.data.written)
+            : t("settings.folderListCleared")
         };
       } else {
         state.foldersNote = {
           ok: false,
-          text: (res.data && res.data.error) || "Could not save the folders.",
+          text: (res.data && res.data.error) || t("settings.couldNotSaveFolders"),
           problems: (res.data && res.data.problems) || []
         };
       }
@@ -4354,18 +4632,15 @@
   function themePreviewHtml() {
     return (
       '<div class="theme-preview">' +
-        '<p class="theme-preview-label">What the channel sees</p>' +
+        '<p class="theme-preview-label">' + t("settings.whatChannelSees") + '</p>' +
         // Classes, not ids. This panel lives inside a container that is
         // rebuilt whenever the category changes, so an id would be a global
         // name for something that comes and goes - and the page's own guard
         // refuses a lookup by an id the markup does not contain.
         '<div class="theme-preview-line theme-preview-advert">' +
-          "Loading&hellip;</div>" +
+          escapeHtml(t("common.loading")) + "</div>" +
         '<div class="theme-preview-line theme-preview-notice"></div>' +
-        '<p class="theme-preview-note">The periodic advert, and the notice ' +
-          "posted when a send finishes. Between them they use all six " +
-          "colours - the advert never uses the accent, so both are shown." +
-        "</p>" +
+        '<p class="theme-preview-note">' + t("settings.themePreviewNote") + "</p>" +
       "</div>");
   }
 
@@ -4396,7 +4671,7 @@
       advert.innerHTML = renderIrcLine(res.data.advert);
       notice.innerHTML = renderIrcLine(res.data.notice);
     }).catch(function () {
-      advert.textContent = "The preview could not be loaded.";
+      advert.textContent = t("settings.previewCouldNotLoad");
       notice.textContent = "";
     });
   }
@@ -4407,11 +4682,11 @@
     })[0];
 
     if (!category) {
-      el.settingsFields.innerHTML = '<p class="tool-status">No settings to show.</p>';
+      el.settingsFields.innerHTML = '<p class="tool-status">' + t("settings.noSettingsToShow") + '</p>';
       return;
     }
 
-    var html = '<h2 class="settings-category-title">' + escapeHtml(category.label) + "</h2>" +
+    var html = '<h2 class="settings-category-title">' + escapeHtml(categoryLabel(category)) + "</h2>" +
       category.fields.map(settingsFieldHtml).join("");
     if (category.id === "admin-console") {
       html += settingsPasswordSectionHtml();
@@ -4438,7 +4713,7 @@
         html = foldersSectionHtml() +
           '<div class="served-folder-actions">' +
             '<button type="button" class="btn served-list-start">' +
-            "Serve more than one list\u2026</button>" +
+            t("settings.serveMoreThanOneList") + "</button>" +
           "</div>" + html;
       }
     }
@@ -4508,13 +4783,13 @@
   function renderSettingsRail() {
     var categories = state.settingsCategories || [];
     if (!categories.length) {
-      el.settingsRail.innerHTML = '<div class="settings-rail-empty">No settings available.</div>';
+      el.settingsRail.innerHTML = '<div class="settings-rail-empty">' + t("settings.noSettingsAvailable") + '</div>';
       return;
     }
     el.settingsRail.innerHTML = categories.map(function (category) {
       var active = category.id === state.settingsActiveCategory;
       return '<button type="button" class="settings-rail-item' + (active ? " is-active" : "") +
-        '" data-category="' + escapeHtml(category.id) + '">' + escapeHtml(category.label) + "</button>";
+        '" data-category="' + escapeHtml(category.id) + '">' + escapeHtml(categoryLabel(category)) + "</button>";
     }).join("");
 
     el.settingsRail.querySelectorAll("[data-category]").forEach(function (btn) {
@@ -4710,19 +4985,19 @@
         // confirm it. Carried across the repaint instead, and applied by
         // renderSettings() once the new panel exists.
         state.settingsFlash = {
-          text: "Password changed. Rehashing…",
+          text: t("settings.passwordChangedRehashing"),
           className: "settings-note settings-password-note is-success"
         };
         loadSettings(true);
       } else {
-        note.textContent = (res.data && res.data.error) || "Could not change the password.";
+        note.textContent = (res.data && res.data.error) || t("settings.couldNotChangePassword");
         note.className = "settings-note settings-password-note is-error";
       }
     }).catch(function () {
       newPasswordInput.value = "";
       confirmPasswordInput.value = "";
       note.style.display = "block";
-      note.textContent = "Could not reach the dashboard.";
+      note.textContent = t("settings.couldNotReachDashboard");
       note.className = "settings-note settings-password-note is-error";
     });
   });
@@ -4734,28 +5009,29 @@
     el.settingsSaveBtn.disabled = true;
     el.settingsSaveStatus.style.display = "none";
     el.settingsRestartNote.style.display = "none";
-    el.settingsSavebarText.textContent = "Saving…";
+    el.settingsSavebarText.textContent = t("settings.saving");
 
     postJson("/api/settings", dirty)
       .then(function (res) {
         if (res.ok) {
           state.settingsDirty = {};
+          var count = Object.keys(dirty).length;
           showSettingsStatus(el.settingsSaveStatus,
-            "Saved " + Object.keys(dirty).length +
-            (Object.keys(dirty).length === 1 ? " setting" : " settings") + ". Rehash started.", false);
+            t(count === 1 ? "settings.savedSettingsOne" : "settings.savedSettingsMany")
+              .replace("{count}", count), false);
           if (res.data.restart_required && res.data.restart_required.length) {
             showSettingsStatus(el.settingsRestartNote,
-              "Restart required to apply: " + res.data.restart_required.join(", ") + ".", true);
+              t("settings.restartRequiredToApply").replace("{list}", res.data.restart_required.join(", ")), true);
           }
           loadSettings(true);
         } else {
           showSettingsStatus(el.settingsSaveStatus,
-            (res.data && res.data.error) || "Could not save settings.", true);
+            (res.data && res.data.error) || t("settings.couldNotSaveSettings"), true);
           updateSettingsSaveBar();
         }
       })
       .catch(function () {
-        showSettingsStatus(el.settingsSaveStatus, "Could not reach the dashboard.", true);
+        showSettingsStatus(el.settingsSaveStatus, t("settings.couldNotReachDashboard"), true);
         updateSettingsSaveBar();
       });
   });
@@ -4843,7 +5119,7 @@
 
   function renderTopDownloads(top) {
     top = top || {};
-    renderTopTable(el.stTopFiles, top.files, "Nothing sent yet.");
+    renderTopTable(el.stTopFiles, top.files, t("stats.nothingSentYet"));
 
     // With folder packing off no album can ever be sent, so an empty table
     // would sit there for ever explaining nothing. Counts from before it was
@@ -4854,12 +5130,12 @@
     if (el.stTopAlbumsLabel) { el.stTopAlbumsLabel.style.display = show ? "" : "none"; }
     if (el.stTopAlbumsOff) { el.stTopAlbumsOff.style.display = show ? "none" : ""; }
     if (show) {
-      renderTopTable(el.stTopAlbums, top.albums, "No album sent yet.");
+      renderTopTable(el.stTopAlbums, top.albums, t("stats.noAlbumSentYet"));
     }
   }
 
   function renderStats(data) {
-    var t = data.transfer || {};
+    var tr = data.transfer || {};
     var s = data.sent || {};
     var lib = data.library || {};
 
@@ -4867,22 +5143,26 @@
     // advert and the admin console use, so the page cannot disagree with the
     // advert about how the same number reads. The raw values are in the
     // payload too, for anything that is not this page.
-    setStat(el.stSpeed, t.speed_now_text || "0k/s");
-    setStat(el.stRecord, t.record_text || "0k/s");
-    setStat(el.stSending, (t.sending || 0) + " / " + (t.slots || 0));
-    setStat(el.stQueued, (t.queued_files || 0).toLocaleString());
+    setStat(el.stSpeed, tr.speed_now_text || "0k/s");
+    setStat(el.stRecord, tr.record_text || "0k/s");
+    setStat(el.stSending, (tr.sending || 0) + " / " + (tr.slots || 0));
+    setStat(el.stQueued, (tr.queued_files || 0).toLocaleString());
     setStat(el.stQueuedLabel,
-            "Queued" + (t.queued_users ? " · " + t.queued_users + " user" +
-                        (t.queued_users === 1 ? "" : "s") : ""));
-    setStat(el.stUptime, t.uptime_text || "0 Min");
+            t("sidebar.queued") + (tr.queued_users
+              ? " · " + t(tr.queued_users === 1 ? "stats.queuedUsersOne" : "stats.queuedUsersMany")
+                  .replace("{count}", tr.queued_users)
+              : ""));
+    setStat(el.stUptime, tr.uptime_text || "0 Min");
 
     setStat(el.stSentTotal, s.total_text || "0B");
     setStat(el.stSentToday, s.today_text || "0B");
     setStat(el.stSentYesterday, s.yesterday_text || "0B");
-    setStat(el.stSentTotalFiles, "Total · " + (s.total_files || 0).toLocaleString() + " files");
-    setStat(el.stSentTodayFiles, "Today · " + (s.today_files || 0).toLocaleString() + " files");
-    setStat(el.stSentYesterdayFiles,
-            "Yesterday · " + (s.yesterday_files || 0).toLocaleString() + " files");
+    setStat(el.stSentTotalFiles, t("stats.labelledFileCount")
+      .replace("{label}", t("common.total")).replace("{count}", (s.total_files || 0).toLocaleString()));
+    setStat(el.stSentTodayFiles, t("stats.labelledFileCount")
+      .replace("{label}", t("common.today")).replace("{count}", (s.today_files || 0).toLocaleString()));
+    setStat(el.stSentYesterdayFiles, t("stats.labelledFileCount")
+      .replace("{label}", t("common.yesterday")).replace("{count}", (s.yesterday_files || 0).toLocaleString()));
 
     setStat(el.stFiles, (lib.files || 0).toLocaleString());
     setStat(el.stSize, lib.size || "0B");
@@ -5134,5 +5414,157 @@
 
   markThemeButtons();
 
-  activateView("search");
+  // ------------------------------------------------------------ Language
+  //
+  // Client-only, the same way the dark/light theme is: which language suits
+  // an operator is a fact about the person looking at the dashboard, not
+  // about the bot, so nothing about it goes to the server or into
+  // settings.conf.
+  //
+  // Deliberately NOT covering the Console or the debug channel: both show
+  // the same lines the daemon's own log does, and translating those means
+  // touching every print() call site across the daemon rather than this
+  // one static page - a separate, later piece of work.
+  //
+  // English is fetched alongside every language, not only for itself: it is
+  // the dictionary every other language falls back to for a key it does not
+  // have yet, so t() always has somewhere to land. A key in neither
+  // dictionary renders as the literal key, which is loud on purpose - a
+  // silently blank label would be a harder miss to notice than an ugly one.
+
+  var LANG_KEY = "dccore-language";
+  var SUPPORTED_LANGUAGES = ["en", "fr", "es"];
+
+  function storedLanguage() {
+    try {
+      var saved = localStorage.getItem(LANG_KEY);
+      return SUPPORTED_LANGUAGES.indexOf(saved) !== -1 ? saved : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function browserLanguage() {
+    // navigator.language is a full tag ("fr-CA", "es-419") - only the
+    // primary subtag decides which dictionary to offer, since none of the
+    // three ship a regional variant of their own.
+    var raw = navigator.language || navigator.userLanguage || "";
+    var tag = raw.split("-")[0].toLowerCase();
+    return SUPPORTED_LANGUAGES.indexOf(tag) !== -1 ? tag : "en";
+  }
+
+  function currentLanguage() {
+    return storedLanguage() || browserLanguage();
+  }
+
+  function t(key) {
+    var here = state.lang[key];
+    if (here !== undefined) { return here; }
+    var fallback = state.langFallback[key];
+    return fallback !== undefined ? fallback : key;
+  }
+
+  function applyTranslations() {
+    document.querySelectorAll("[data-i18n]").forEach(function (node) {
+      node.textContent = t(node.getAttribute("data-i18n"));
+    });
+    // innerHTML rather than textContent, for the handful of paragraphs that
+    // carry an inline <code> or <strong> around one word - the dictionary
+    // value is developer-authored HTML, from the same source as the page
+    // itself, never viewer input, so this is not the XSS hazard innerHTML
+    // usually is.
+    document.querySelectorAll("[data-i18n-html]").forEach(function (node) {
+      node.innerHTML = t(node.getAttribute("data-i18n-html"));
+    });
+    document.querySelectorAll("[data-i18n-placeholder]").forEach(function (node) {
+      node.placeholder = t(node.getAttribute("data-i18n-placeholder"));
+    });
+    document.querySelectorAll("[data-i18n-title]").forEach(function (node) {
+      node.title = t(node.getAttribute("data-i18n-title"));
+    });
+    // The active view's header is set as text in activateView() rather
+    // than through data-i18n, since which view is current decides it -
+    // redone here so a language change updates it without a re-navigation.
+    if (state.active && views[state.active]) {
+      el.pageTitle.textContent = t(views[state.active].title);
+      el.pageSub.textContent = t(views[state.active].sub);
+    }
+    // Same reasoning, for the one view whose body is built once from data
+    // already in hand rather than redrawn by a poll: Settings loads its
+    // categories and fields a single time (state.settingsLoaded) and never
+    // refreshes itself in the background, unlike Downloads, Stats and the
+    // notice/message lists, which all repaint from the next scheduled poll
+    // regardless of language - so without this, an operator sitting on the
+    // Settings page during a language change would see the sidebar switch
+    // and the panel underneath stay in the old language until they clicked
+    // a category or reloaded the page. Both calls re-read from
+    // state.settingsCategories - no request, no risk to an edit in
+    // progress: renderSettingsCategory() already restores a dirty field's
+    // typed value from state.settingsDirty rather than field.value, the
+    // same way it does on every ordinary category switch.
+    if (state.active === "settings" && state.settingsLoaded) {
+      renderSettingsRail();
+      renderSettingsCategory();
+    }
+    document.documentElement.lang = currentLanguage();
+    if (el.langSelect) { el.langSelect.value = currentLanguage(); }
+  }
+
+  // A GENERATION COUNTER, not a boolean "in flight" flag - two overlapping
+  // calls (picking French, then Spanish, before French's fetch lands; or
+  // French then back to English, whose "en" branch below clears state.lang
+  // synchronously and would otherwise let the still-pending French fetch
+  // overwrite it moments later) must let only the LAST call's results ever
+  // land, whichever order their network replies arrive in. Bumped once per
+  // call and captured immediately, so every callback below can tell whether
+  // it is still the newest request or a superseded one that should touch
+  // nothing.
+  var langGeneration = 0;
+
+  function loadLanguage(code) {
+    langGeneration += 1;
+    var generation = langGeneration;
+    var fetches = [fetchJson("/lang/en.json").then(function (dict) {
+      if (generation !== langGeneration) { return; }
+      state.langFallback = dict;
+    }).catch(function () {
+      if (generation !== langGeneration) { return; }
+      state.langFallback = {};
+    })];
+    if (code === "en") {
+      state.lang = {};
+    } else {
+      fetches.push(fetchJson("/lang/" + code + ".json").then(function (dict) {
+        if (generation !== langGeneration) { return; }
+        state.lang = dict;
+      }).catch(function () {
+        if (generation !== langGeneration) { return; }
+        state.lang = {};
+      }));
+    }
+    return Promise.all(fetches).then(function () {
+      if (generation !== langGeneration) { return; }
+      applyTranslations();
+    });
+  }
+
+  function chooseLanguage(code) {
+    if (SUPPORTED_LANGUAGES.indexOf(code) === -1) { return; }
+    try {
+      localStorage.setItem(LANG_KEY, code);
+    } catch (err) {
+      // A private window cannot remember it - the page still changes now.
+    }
+    loadLanguage(code);
+  }
+
+  if (el.langSelect) {
+    el.langSelect.addEventListener("change", function () {
+      chooseLanguage(el.langSelect.value);
+    });
+  }
+
+  loadLanguage(currentLanguage()).then(function () {
+    activateView("search");
+  });
 })();

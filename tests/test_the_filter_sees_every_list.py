@@ -185,20 +185,24 @@ class TheFolderHeadingSaysWhichNumberItIs(unittest.TestCase):
             return handle.read()
 
     def noun(self):
-        body = self.source().split("function folderCountNoun(", 1)[1]
+        body = self.source().split("function folderCountText(", 1)[1]
         return body.split("\n    }", 1)[0]
 
     def test_filtering_counts_matches(self):
+        """The words are translation keys, not literal text - see
+        web/lang/en.json's filelists.oneMatch/manyMatches."""
         body = self.noun()
 
-        self.assertIn('" match"', body)
-        self.assertIn('" matches"', body)
+        self.assertIn('"filelists.oneMatch"', body)
+        self.assertIn('"filelists.manyMatches"', body)
 
     def test_browsing_still_counts_files(self):
+        """The words are translation keys, not literal text - see
+        web/lang/en.json's filelists.oneFile/manyFiles."""
         body = self.noun()
 
-        self.assertIn('" file"', body)
-        self.assertIn('" files"', body)
+        self.assertIn('"filelists.oneFile"', body)
+        self.assertIn('"filelists.manyFiles"', body)
 
     def test_it_is_the_filter_that_decides(self):
         self.assertIn("state.filelistsFilter", self.noun())
@@ -207,7 +211,7 @@ class TheFolderHeadingSaysWhichNumberItIs(unittest.TestCase):
         heading = self.source().split("function folderHeadingHtml(", 1)[1]
         heading = heading.split("\n    }", 1)[0]
 
-        self.assertIn("folderCountNoun(count)", heading)
+        self.assertIn("folderCountText(count)", heading)
 
 
 if __name__ == "__main__":

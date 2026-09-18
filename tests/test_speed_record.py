@@ -246,20 +246,30 @@ class TheClockStopsWhenTheBytesDo(DCCoreTestCase):
 
     def test_the_settling_pause_is_not_counted(self):
         """Read out of the source: driving a real transfer needs a peer on a
-        socket. Asserted as an ORDER, because a timestamp taken in the right
-        place and then not used would pass a check for either half alone."""
+        socket.
+
+        This used to assert an ORDER - stamp, then the 1.5 s settling sleep,
+        then the stamp's use - so the pause sat outside the measured time.
+        #526 removed the pause altogether: the clock now stops at the
+        receiver's final acknowledgement, which IS the moment the transfer
+        ended, and the sleep that followed it only held a slot. So the
+        property becomes: the stamp is the final ack, nothing sleeps between
+        the stamp and its use, and the wall clock is not consulted again.
+        """
         with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
             code = handle.read()
+        body = code[code.index("def start_dcc_send("):]
 
-        stamped = code.index("transfer_finished_at = time.time()")
-        first_pause = code.index("time.sleep(1.5)", stamped)
-        used = code.index("_ended = (transfer_finished_at", stamped)
+        stamped = body.index("transfer_finished_at = final_ack_at if transfer_completed else time.time()")
+        used = body.index("_ended = (transfer_finished_at", stamped)
+        between = body[stamped:used]
 
-        self.assertLess(stamped, first_pause,
-                        "the clock is stopped after the settling pause")
-        self.assertLess(first_pause, used,
-                        "fixture invariant: the pause should sit between the "
-                        "stamp and its use, or this proves nothing")
+        self.assertNotIn("time.sleep(", between,
+                         "a pause between stopping the clock and reading it is "
+                         "harmless to the figure but holds a DCC slot for nothing")
+        self.assertNotIn("time.sleep(1.5)", body,
+                         "the settling sleep is back; the final ack already says "
+                         "the receiver has closed its file")
 
     def test_the_duration_no_longer_reads_the_wall_clock_at_the_end(self):
         with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:

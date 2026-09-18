@@ -93,8 +93,9 @@ class WhatCountsAsHavingNoFolders(unittest.TestCase):
 
     def test_the_placeholder_it_replaces_still_exists_for_the_other_case(self):
         """A file with no folder heading inside a list that HAS folders still
-        has to be shown under something."""
-        self.assertIn('"(no folder)"', function("folderLabel"))
+        has to be shown under something. The text is a translation key - see
+        web/lang/en.json's filelists.noFolder."""
+        self.assertIn('t("filelists.noFolder")', function("folderLabel"))
 
 
 class TheTableWhenThereAreNoFolders(unittest.TestCase):
@@ -122,10 +123,12 @@ class TheTableWhenThereAreNoFolders(unittest.TestCase):
 
     def test_the_truncation_notice_says_list_rather_than_folder(self):
         """It is the only line left that would name a folder, and in a flat
-        list there is not one to name."""
+        list there is not one to name. The wording is a translation key, not
+        literal text - see web/lang/en.json's
+        filelists.truncatedInList/truncatedInFolder."""
         body = function("folderFilesHtml")
 
-        self.assertIn('flat ? " files in this list." : " files in this folder."',
+        self.assertIn('flat ? "filelists.truncatedInList" : "filelists.truncatedInFolder"',
                       body)
 
 
@@ -216,7 +219,7 @@ class ThePagerStopsCountingFolders(unittest.TestCase):
         body = function("renderFilelistsPager")
 
         self.assertIn("state.filelistsFlat", body)
-        self.assertIn('" file" : " files"', body)
+        self.assertIn('"filelists.oneFile" : "filelists.manyFiles"', body)
 
     def test_the_shape_is_recorded_where_the_pager_can_see_it(self):
         """The pager runs from its own path, so it cannot call listIsFlat()
@@ -230,10 +233,11 @@ class ThePagerStopsCountingFolders(unittest.TestCase):
         self.assertEqual(declared.strip(), "false")
 
     def test_a_list_with_folders_still_counts_them(self):
-        """Windowed on the function - see the note above."""
+        """Windowed on the function - see the note above. The caption is a
+        translation key - see web/lang/en.json's filelists.foldersRange."""
         body = function("renderFilelistsPager")
 
-        self.assertIn('"Folders "', body)
+        self.assertIn('t("filelists.foldersRange")', body)
 
 
 if __name__ == "__main__":

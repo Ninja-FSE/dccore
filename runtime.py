@@ -186,6 +186,14 @@ rehash_lock = threading.Lock()
 # two callers both believe they hold it.
 list_index_lock = threading.Lock()
 
+# list.count_request_lines()'s cache. Same reason as every other lock here:
+# list.py is reloaded by !rehash, and a lock constructed there would be a new
+# object after every reload while a counter mid-read still held the old one -
+# two threads walking a 460 MB list at once, which is the exact cost the cache
+# exists to remove. The cache dict itself stays in list.py: rebinding it on
+# reload costs one recount, which is harmless, where rebinding the lock is not.
+list_count_lock = threading.Lock()
+
 # Other bots advertising in our channels ------------------------------------
 # nick.lower() -> {"nick", "channel", "files", "list_date", "list_size",
 #                  "last_seen"}, built from the periodic advert every

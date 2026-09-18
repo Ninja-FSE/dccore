@@ -101,12 +101,22 @@ class TheTabsAreNamedForWhatTheyDo(unittest.TestCase):
 
     def test_the_titles_match_the_labels(self):
         """The nav button and the page heading are written in two different
-        files; a rename applied to one reads as a bug in the other."""
+        files. Both now carry a translation KEY rather than literal English
+        (see web/lang/*.json) - the nav button's data-i18n and the views{}
+        entry's title use the SAME key for a given page, so the two cannot
+        drift the way two copies of literal text once could. This checks
+        that identifier match rather than a literal string."""
+        html = read("index.html")
         js = read("app.js")
         block = js.split("var views = {", 1)[1].split("};", 1)[0]
 
-        self.assertIn('title: "List Browser"', block)
-        self.assertIn('title: "Downloads"', block)
+        filelists_key = re.search(r'filelists:\s*\{\s*title:\s*"([^"]+)"', block)
+        download_key = re.search(r'download:\s*\{\s*title:\s*"([^"]+)"', block)
+        self.assertIsNotNone(filelists_key, "the filelists view entry moved or was renamed")
+        self.assertIsNotNone(download_key, "the download view entry moved or was renamed")
+
+        self.assertIn(f'data-i18n="{filelists_key.group(1)}"', html)
+        self.assertIn(f'data-i18n="{download_key.group(1)}"', html)
 
     def test_the_order_is_by_how_often_a_view_is_used(self):
         html = read("index.html")

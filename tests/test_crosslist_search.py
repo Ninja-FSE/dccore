@@ -594,11 +594,13 @@ class SwitchingOneListOffWhileFiltering(unittest.TestCase):
 
     def test_all_of_them_switched_off_says_so(self):
         """Distinct from "nothing matches". One is an answer about the
-        library, the other is a thing the operator did and can undo."""
+        library, the other is a thing the operator did and can undo. The
+        wording is a translation key, not literal text - see
+        web/lang/en.json's filelists.everyMatchSwitchedOff/nothingMatchesFilter."""
         body = self.block("renderFilelistGroups")
 
-        self.assertIn("Every list with a match is switched off.", body)
-        self.assertIn("Nothing in any list you hold matches that.", body)
+        self.assertIn("filelists.everyMatchSwitchedOff", body)
+        self.assertIn("filelists.nothingMatchesFilter", body)
 
 
 class MarkingWhatYouAlreadyAskedFor(IndexCase):

@@ -292,8 +292,10 @@ class ThePageRendersIt(unittest.TestCase):
         self.assertNotIn("function pollUpdateListStatus", body)
 
     def test_it_falls_back_when_there_is_no_progress_yet(self):
-        """The first poll can land before the child has written anything."""
-        self.assertIn("Rebuilding the master list", self.progress_body())
+        """The first poll can land before the child has written anything. The
+        wording is a translation key, not literal text - see
+        web/lang/en.json's tools.rebuildingMasterList."""
+        self.assertIn('t("tools.rebuildingMasterList")', self.progress_body())
 
     def test_the_writing_phase_is_indeterminate(self):
         self.assertIn("is-indeterminate", self.progress_body())

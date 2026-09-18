@@ -14,6 +14,7 @@ import os
 import shutil
 import socket
 import sys
+import threading
 import time
 
 IS_WINDOWS = os.name == "nt"
@@ -186,6 +187,160 @@ def install_console_encoding_guard(streams=None):
             continue
         changed.append(name)
 
+    return changed
+
+
+# ---------------------------------------------------------------------
+# Console timestamps
+# ---------------------------------------------------------------------
+# Lives beside install_console_encoding_guard() because it is installed at the
+# same moment, on the same two streams, and the two have to agree about what a
+# stream is: the guard reconfigure()s the real TextIOWrapper in place and this
+# wraps it, so a later reconfigure() must still reach the real one. Not a
+# platform difference - a console-hygiene one, kept with its sibling.
+
+class _TimestampedStream:
+    """A stream proxy that prefixes every LINE with the time it was written.
+
+    Prefixes lines, not writes. print() hands the stream its text and its
+    newline in separate calls, and a multi-line message - a traceback, a
+    folder listing - arrives as one write holding several lines. So the proxy
+    tracks whether the last character it saw ended a line, and stamps the
+    start of every line that begins on this stream, however the text was
+    split up to reach it.
+
+    Everything else - encoding, isatty(), fileno(), reconfigure(), flush() -
+    is delegated to the real stream untouched, so code that inspects
+    sys.stdout finds what it always found. In particular the encoding guard's
+    reconfigure() lands on the real wrapper, and a later reconfigure() by
+    anyone else does too.
+
+    The format is read on every line rather than captured at install, so the
+    setting can change after the wrapper is in place - the daemon installs
+    this before config has loaded (so the config-loading lines are stamped
+    too) and applies the operator's format a moment later.
+    """
+
+    def __init__(self, stream, formatter):
+        self._stream = stream
+        self._formatter = formatter
+        self._at_line_start = True
+        self._lock = threading.Lock()
+
+    def write(self, text):
+        if not isinstance(text, str):
+            # A real text-mode stream raises here too - even for b"", which
+            # is exactly the input click.utils._is_binary_writer() probes
+            # with to decide whether a stream takes bytes or str. Returning
+            # 0 for b"" (its old behaviour under `if not text: return 0`,
+            # true for b"" as much as for "") answered that probe wrong:
+            # click concluded this proxy was a binary stream, wrapped it in
+            # its own encoder, and fed every real write here as encoded
+            # bytes instead of text - which is what took the dashboard down
+            # the moment Flask's CLI banner used click.echo() to print it.
+            raise TypeError(
+                f"write() argument must be str, not {type(text).__name__}")
+        if not text:
+            return 0
+        fmt = self._formatter()
+        if not fmt:
+            return self._stream.write(text)
+        with self._lock:
+            out = []
+            stamp = None
+            for piece in text.splitlines(keepends=True):
+                if self._at_line_start:
+                    if stamp is None:
+                        stamp = "[" + time.strftime(fmt) + "] "
+                    out.append(stamp)
+                out.append(piece)
+                self._at_line_start = piece.endswith(("\n", "\r"))
+            written = self._stream.write("".join(out))
+        # Report what the CALLER wrote, not what reached the stream. A caller
+        # comparing the return value to len(text) must not be told its write
+        # was longer than the text it gave.
+        return len(text) if written else 0
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+    # Cooperate with anyone who unwraps: the real stream is one attribute
+    # away, and the guard's own tests look at it.
+    @property
+    def wrapped(self):
+        return self._stream
+
+
+_console_timestamp_format = ""
+
+
+def console_timestamp_format():
+    """The strftime format currently stamped on every console line, or ""."""
+    return _console_timestamp_format
+
+
+def set_console_timestamp_format(fmt):
+    """Change the format for every already-installed wrapper. "" turns it off.
+
+    Validated by formatting once: a typo like "%Q" would otherwise surface as a
+    ValueError from inside every print() for the life of the process, which is
+    exactly the kind of failure the encoding guard exists to prevent. An
+    invalid format is refused and the previous one kept.
+
+    "Invalid" means whatever THIS platform's strftime raises on, because that
+    is where the hazard is. Windows' C runtime raises ValueError on an unknown
+    directive; glibc passes it through as literal text, which is harmless and
+    nothing to refuse. Refusing by a directive whitelist instead would reject
+    locale and platform directives that work perfectly well.
+    """
+    global _console_timestamp_format
+    fmt = str(fmt or "")
+    if fmt:
+        try:
+            time.strftime(fmt)
+        except (ValueError, TypeError) as err:
+            print(f"[CONSOLE] CONSOLE_TIMESTAMP_FORMAT {fmt!r} is not a valid "
+                  f"strftime format ({err}); keeping "
+                  f"{_console_timestamp_format!r}.")
+            return _console_timestamp_format
+    _console_timestamp_format = fmt
+    return fmt
+
+
+def install_console_timestamps(fmt="%H:%M:%S"):
+    """Prefix every line printed to stdout and stderr with the time.
+
+    A log line with no time on it answers "what" and never "when", and the
+    daemon's console is a log: when it rejoined a channel, how long a rebuild
+    took, whether the disconnect came before or after the transfer. An
+    operator reading the window during a live problem was working that out
+    from their own memory of when they looked.
+
+    Idempotent - a stream already wrapped is left alone, so installing twice
+    does not double-stamp. Returns the names of the streams wrapped now, the
+    same contract as install_console_encoding_guard(), so startup can say so
+    and the tests can assert on it.
+
+    Only the DAEMON installs this. scripts/setup_check.py and configure.py
+    print reports for a person to read once, not logs, and a stamp on every
+    line of a report is noise.
+    """
+    set_console_timestamp_format(fmt)
+    changed = []
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name)
+        # pythonw.exe gives None for both; a stream already wrapped is left
+        # alone; anything without write() is not a stream we can prefix.
+        if stream is None or isinstance(stream, _TimestampedStream):
+            continue
+        if not hasattr(stream, "write"):
+            continue
+        setattr(sys, name, _TimestampedStream(stream, console_timestamp_format))
+        changed.append(name)
     return changed
 
 

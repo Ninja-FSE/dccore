@@ -359,11 +359,13 @@ class TheControlOnThePage(unittest.TestCase):
                              .split("\n  }", 1)[0]
 
     def test_there_are_sixteen_names_for_the_sixteen_colours(self):
+        """The names are translation keys, not literal text - see
+        web/lang/en.json's settings.colour*."""
         source = read("app.js")
-        names = source.split("var IRC_COLOUR_NAMES = [", 1)[1].split("]", 1)[0]
+        names = source.split("var IRC_COLOUR_NAME_KEYS = [", 1)[1].split("]", 1)[0]
         hexes = source.split("var IRC_COLOURS = [", 1)[1].split("]", 1)[0]
 
-        self.assertEqual(len(re.findall(r'"[^"]+"', names)), 16)
+        self.assertEqual(len(re.findall(r'"settings\.colour[^"]+"', names)), 16)
         self.assertEqual(len(re.findall(r"#[0-9a-fA-F]{6}", hexes)), 16)
 
     def test_a_code_is_written_with_both_digits(self):
@@ -407,10 +409,12 @@ class TheControlOnThePage(unittest.TestCase):
                          "the fallback draws the picker it exists to avoid")
 
     def test_and_says_so_rather_than_looking_like_an_ordinary_field(self):
+        """The wording is a translation key, not literal text - see
+        web/lang/en.json's settings.setByHandNote."""
         branch = read("app.js").split("if (field.irc_colour) {", 1)[1] \
                                .split("} else if", 1)[0]
 
-        self.assertIn("menus cannot offer", branch)
+        self.assertIn('t("settings.setByHandNote")', branch)
 
     def test_the_two_menus_are_invisible_to_the_ordinary_listener_pass(self):
         """They carry data-irc-part, not data-setting: two selects mean one

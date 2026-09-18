@@ -269,6 +269,37 @@ journal always have it. That case, something going wrong while nobody is
 watching, is the one worth protecting. It is a floor, not a third destination:
 when the channel or a console did take the line, nothing extra is printed.
 
+### The transfer feed
+
+The console tells the whole story of a transfer, one line per event, the way
+an OmenServe operator sees it inside mIRC:
+
+```
+[REQUEST] dave asked for "Song.flac"
+[QUEUED]  Queued "Song.flac" for dave at #2 (3/3 slots busy)
+[SENDING] Sending "Song.flac" to dave (slot 2/3)
+[RESUMED] Resumed "Song.flac" for dave at 1.0GB of 1.5GB
+[SENT]    Sent: "Song.flac" to dave [1.5 MB/s]
+[FAIL]    Failed: "Song.flac" to dave - the receiver stopped acknowledging at 1,200,000 of 2,700,000 bytes ...
+[SEARCH]  dave searched "metal" - 12 results
+```
+
+**Settings → Console feed** has a tickbox per kind — requests, queue positions,
+sends (starting, resuming, completing), failures, searches — all on by default.
+An unticked kind is dropped, not diverted: it does not fall through to the
+stdout floor, because the floor is for a line nobody was there to take, not one
+you asked not to see. The tickboxes govern the console and the dashboard's
+Console page only. Everything that is not one of those kinds — joins, parts,
+bans, config warnings — is never affected by them.
+
+The IRC debug channel is deliberately separate. `Sent:` and `Failed:` go there
+under `DEBUG_TO_CHANNEL` as they always have; the feed's other events
+(requests, queue positions, starts, resumes, searches) go there only with
+`DEBUG_CHANNEL_FEED` on, which ships **off**: every channel line takes a
+`MSG_DELAY` slot on the same pacer as the adverts, the resume replies and the
+queue notices, so on a busy bot a chatty feed there delays the things people
+are waiting for. The console has no such cost.
+
 A console that has been switched on but is *not connected* counts as nobody
 listening, and so does a console whose sink raised. Both fall through to stdout.
 
@@ -397,7 +428,7 @@ no longer on a nick. The user commands — `!list`, `!ping`, `!debugnames`,
 | Time to enter the password | 60 seconds, then the socket closes |
 | Password attempts | 3, then the socket closes and your IP is blocked |
 | IP block after failed attempts | 15 minutes |
-| Idle timeout once logged in | 30 minutes |
+| Idle timeout once logged in | none — the console stays open until you close it, log in again from elsewhere, or the connection drops |
 | Sessions at once | 1 |
 
 **A second login replaces the first.** If you left a session open on another

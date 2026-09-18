@@ -98,8 +98,19 @@ class ASendIsOnlyCompleteWhenItIsAllThere(DCCoreTestCase):
 
         source = inspect.getsource(dcc.start_dcc_send)
 
-        self.assertIn("transfer_completed = bytes_sent >= file_size", source)
+        # #526 moved the comparison. It was `bytes_sent >= file_size` - the
+        # sender's own count against the advertised size, which turned out to
+        # measure the kernel buffer, not delivery. It is now the RECEIVER's
+        # acknowledged count against that same advertised size, inside
+        # _wait_for_final_ack(); start_dcc_send assigns transfer_completed from
+        # whether that wait produced a final ack. The property this test
+        # exists for is unchanged: the size the handshake promised is what
+        # completion is judged against, and nothing assigns True outright.
+        self.assertIn("transfer_completed = final_ack_at is not None", source)
+        self.assertIn("_wait_for_final_ack(conn, acks, file_size)", source)
         self.assertNotIn("transfer_completed = True", source)
+        waiter = inspect.getsource(dcc._wait_for_final_ack)
+        self.assertIn("tracker.acked < file_size", waiter)
 
     def test_a_short_send_is_reported(self):
         """Silence is what made this survivable: the operator saw a normal

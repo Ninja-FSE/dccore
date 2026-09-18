@@ -10,9 +10,45 @@ import stats_mgr
 # The ordinary flood-protection queue
 config.send_queue = {}
 
+
+def next_standard_line(send_queue, last_served):
+    """Pop ONE line from the standard lane: the first user after `last_served`
+    (in queue order, wrapping round) who has something waiting. Returns
+    (user, line), or None when nobody does.
+
+    The cursor is the caller's: it passes the user it served last time and
+    remembers the one returned here. A cursor rather than "every user, every
+    pass" is what #527 is about - see queue_worker() - and it keeps the
+    per-user fairness #426 introduced, spread over passes instead of packed
+    into one.
+
+    A user whose LAST line goes out is left in the dict, empty, rather than
+    deleted on the spot: the cursor is their name, and deleting them would
+    lose its place - the next call would start from the top and the first
+    users in the dict would be served twice before the last was served once.
+    The empty entry is tidied away when the cursor next passes it, one
+    rotation later. A user who has gone entirely (a rehash reset, say) means
+    "start from the top", which is the only place left to start.
+    """
+    users = builtins.list(send_queue.keys())
+    if not users:
+        return None
+    start = users.index(last_served) + 1 if last_served in users else 0
+    for user in users[start:] + users[:start]:
+        lines = send_queue.get(user)
+        if lines:
+            return user, lines.pop(0)
+        send_queue.pop(user, None)
+    return None
+
 def queue_worker():
     """Flood-protection worker, with a separate express lane for searches and adverts."""
     print("[QUEUE] Isolate-Priority flood protection worker started.")
+
+    # The standard lane's cursor (#527): who was served last pass, so the next
+    # pass starts with the user after them. A local, on purpose - it is the
+    # worker's own bookkeeping and has no meaning outside this loop.
+    last_served = None
 
     while True:
         try:
@@ -108,30 +144,38 @@ def queue_worker():
                     continue
             # ---------------------------------------------------------------------
 
-            # STANDARD LANE: one round-robin pass over every user with something
-            # queued, every iteration - not only when the express lane is empty.
-            if config.send_queue:
-                active_users = builtins.list(config.send_queue.keys())
-
-                for user in active_users:
-                    if user in config.send_queue and config.send_queue[user]:
-                        msg = config.send_queue[user].pop(0)
-                        # See the VIP lane above: same shared clock.
-                        runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)
-
-                        try:
-                           if current_sock:
-                               current_sock.sendall(msg.encode("utf-8", errors="ignore"))
-                               if getattr(config, 'DEBUG_MODE', False):
-                                   print(f"[RAW OUT] {msg.strip()}")
-                        except socket.error as net_err:
-                           print(f"[QUEUE NET ERROR] Connection is broken ({net_err}).")
-                           break
-                        except Exception as e:
-                           print(f"[ERROR] Failed to send queued message: {e}")
-
-                    if user in config.send_queue and not config.send_queue[user]:
-                        del config.send_queue[user]
+            # STANDARD LANE: ONE line per pass, rotating through the users (#527).
+            #
+            # #426 replaced VIP's `continue` with "one VIP line, then one line
+            # for EVERY user with a backlog" - and under load that turns the
+            # starvation round the other way. Each line costs a MSG_DELAY slot
+            # on the shared pacer (5 s by default), so with N users spamming a
+            # pass was 1 VIP line + N standard lines and the VIP lane - where
+            # "Sent:", the advert and "Sending:" live - got one slot in N+1.
+            # Seen live: "Sent: doesn't send to the channels before the queue
+            # is empty", while the debug drain, on its own thread, kept up.
+            #
+            # Strict alternation instead: one VIP line, one standard line. VIP
+            # is then never more than two slots away whatever the load, and the
+            # standard lane keeps its per-user fairness across passes through
+            # the cursor rather than within one pass. Total throughput is the
+            # pacer's either way; only the SHARE changes, and only while VIP
+            # has a backlog, which it normally does not.
+            picked = next_standard_line(config.send_queue, last_served)
+            if picked is not None:
+                user, msg = picked
+                last_served = user
+                # See the VIP lane above: same shared clock.
+                runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)
+                try:
+                    if current_sock:
+                        current_sock.sendall(msg.encode("utf-8", errors="ignore"))
+                        if getattr(config, 'DEBUG_MODE', False):
+                            print(f"[RAW OUT] {msg.strip()}")
+                except socket.error as net_err:
+                    print(f"[QUEUE NET ERROR] Connection is broken ({net_err}).")
+                except Exception as e:
+                    print(f"[ERROR] Failed to send queued message: {e}")
 
         except Exception as queue_err:
             print(f"[ERROR] Error inside queue worker loop: {queue_err}")

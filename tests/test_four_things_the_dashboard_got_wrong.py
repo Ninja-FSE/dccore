@@ -93,14 +93,16 @@ class TheConfirmationSurvivesTheReload(unittest.TestCase):
     """#462. Written, then painted over by the reload on the next line."""
 
     def test_the_note_is_carried_rather_than_written_before_the_reload(self):
+        """The wording is a translation key, not literal text - see
+        web/lang/en.json's settings.passwordChangedRehashing."""
         js = read("web", "app.js")
-        at = js.index("Password changed")
+        at = js.index("settings.passwordChangedRehashing")
         window = js[at - 400:at + 400]
 
         self.assertIn("state.settingsFlash", window,
                       "the confirmation is set directly again, so the reload "
                       "below repaints over it")
-        self.assertNotIn("note.textContent = \"Password changed", window,
+        self.assertNotIn("note.textContent = t(\"settings.passwordChangedRehashing", window,
                          "written straight onto the note again, which the "
                          "reload on the following line paints over")
 

@@ -47,7 +47,7 @@ What DCCore does today, and what it does not do yet.
 
 ### Quality
 
-- **4762 tests**, on Linux and Windows, Python 3.10, 3.12 and 3.14, in CI on every push and pull request.
+- **4994 tests**, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14, in CI on every push and pull request.
 - **Stdlib-only** — the daemon and its test suite need no third-party packages; Flask is required only for the optional dashboard.
 - **No reloaded module owns a lock** — `!rehash` re-executes a module body, so a module-level `threading.Lock()` is rebound while a thread is still inside it. Every lock in a reloaded module is allocated in `runtime.py` and bound by name, and `tests/test_no_reloaded_module_owns_a_lock.py` fails if a new one appears — the class, not the four instances that prompted it.
 - **A cross-list search index** — SQLite FTS5, built as each bot list is fetched, so the dashboard can filter every held list live rather than re-reading them at 2-11 seconds a keystroke.
@@ -140,23 +140,21 @@ Open: what is the stable identity — the services account, the host, an operato
 mapping in settings? And is the fix to normalise at fetch time, to rewrite the
 request lines on the way out, or only to merge the two rows in the sidebar?
 
-**Some bots we want are not advertising, and some advertising bots are not
-reachable.** Three cases, none of which the registry covers today:
-
-- A bot that answers CTCP but never advertises in the channel. It never
-  reaches `known_bots`, so it does not appear at all — even though `@botnick`
-  and `!botnick <track>` would both work.
-- The opposite: a bot that advertises but does not answer. It appears, and
-  clicking it starts a fetch that goes nowhere.
-- A bot that does neither, where the operator simply knows that `@botname`
-  gets the list and `!botname <track>` gets files, and wants to add it by
-  hand.
-
-So the source list probably needs a manual entry — an operator-added bot,
-persisted separately from the advert-built registry so a prune cannot remove
-it, and marked in the sidebar as added rather than seen. Open: whether a
-manual entry should be probed to confirm it answers, and what the sidebar
-should say about one that has never replied.
+**A bot that never advertises can now be added by hand.** A bot that answers
+`@nick` and `!nick <track>` perfectly well but never advertises in a shared
+channel used to have no row at all — `known_bots` is built only from
+adverts, so there was no way to fetch its list from the dashboard. The List
+Browser's sidebar now has an **Add a bot that does not advertise** box: the
+nick goes into the same registry, flagged `hand_entered`, so every reader of
+the sidebar treats it exactly like an advert-built row — presence and
+freshness both read "cannot tell" until a NAMES sync or an advert says
+otherwise (no WHOIS probe, on purpose, the same rule everywhere else in the
+sidebar follows), a prune never ages it out, and if the bot ever does start
+advertising the two rows merge into one rather than staying doubled.
+Deliberately not probed for reachability at add time — the opposite case
+this used to also name, a bot that advertises but does not answer, is left
+exactly as unaddressed as it was: adding a nick by hand does not claim it
+works, only that the operator says it exists.
 
 ### Smaller things worth having
 

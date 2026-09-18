@@ -1,9 +1,10 @@
 name: tests
 
-# Runs on both platforms deliberately. The daemon lives on Linux today, but the
-# suite is stdlib-only precisely so it also runs on Windows - which is where a
-# future port is headed, and which is the only thing that can prove a change has
-# not quietly broken the other side.
+# Runs on all three platforms deliberately. The daemon lives on Linux today, but
+# the suite is stdlib-only precisely so it also runs on Windows - which is where
+# a future port is headed - and macOS, added cheaply (#69) as the fastest way to
+# turn "probably fine, it's POSIX" into an actual answer: CI proving a change has
+# not quietly broken another platform is the whole reason the other two are here.
 on:
   # Long-lived branches only, so a feature branch does not get a push run AND a
   # pull_request run for the same commit.
@@ -29,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         # 3.10 is what production runs; 3.12 catches anything the newer
         # interpreter tightens before it becomes a surprise.
         python: ["3.10", "3.12", "3.14"]

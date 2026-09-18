@@ -391,7 +391,16 @@ def send_transfer_complete(channel, user, file_name, file_size, start_time, actu
 def send_dcc_sending_notice(user, file_name):
     """Send the user a matching private NOTICE when a transfer starts or is queued."""
     import sys
+    import defaults as config
     oserve = sys.modules.get('oserve')
+
+    # The console feed (#528): every dispatch path calls this the moment a
+    # slot is taken, so it is the one place a "transfer started" line can
+    # come from without a copy per path. The slot figure is what the
+    # dispatcher just made it - this transfer is already counted.
+    busy = len(getattr(config, "active_transfers", []) or [])
+    slots = getattr(config, "MAX_DCC_SLOTS", 0)
+    send_debug(f'Sending "{file_name}" to {user} (slot {busy}/{slots})', category="SENDING")
     
     # ---------------------------------------------------------------------
     # Private notice block, framed exactly like the channel one
@@ -703,7 +712,14 @@ def send_dcc_error(user, error_type):
 def send_dcc_queue_notice(user, file_name, position):
     """Send the user their queue position privately, in the same colour theme."""
     import sys
+    import defaults as config
     oserve = sys.modules.get('oserve')
+
+    # The console feed (#528): both request paths (a file, a !rar folder)
+    # come through here when the request queues rather than sends.
+    busy = len(getattr(config, "active_transfers", []) or [])
+    slots = getattr(config, "MAX_DCC_SLOTS", 0)
+    send_debug(f'Queued "{file_name}" for {user} at #{position} ({busy}/{slots} slots busy)', category="QUEUED")
     if oserve:
         # The mIRC colour blocks and separators
         BG_RED_BLOCK, BG_CYAN_BLOCK, BG_TEXT_BOX, R, B, V, A, X = theme.blocks()
@@ -994,6 +1010,48 @@ def mark_notices_read():
     return highest
 
 
+# THE CONSOLE FEED (#528). Which Settings switch governs each event category
+# on the console side, and which categories are the feed's own - new with
+# #528, and kept off the IRC channel unless DEBUG_CHANNEL_FEED says otherwise.
+#
+# Only categories that name one KIND of event are here. PART, JOIN and QUIT
+# are not: dcc.py and irc.py use them as "bad news" / "good news" tags for
+# config errors, pack failures and rejoins as much as for presence, so a
+# "presence" tickbox over them would silence errors. A category not in this
+# table is never muted.
+FEED_SWITCHES = {
+    "REQUEST": "CONSOLE_SHOW_REQUESTS",
+    "QUEUED":  "CONSOLE_SHOW_QUEUE",
+    "SENDING": "CONSOLE_SHOW_SENDS",
+    "RESUMED": "CONSOLE_SHOW_SENDS",
+    "SENT":    "CONSOLE_SHOW_SENDS",
+    "FAIL":    "CONSOLE_SHOW_FAILURES",
+    "SEARCH":  "CONSOLE_SHOW_SEARCHES",
+}
+FEED_ONLY_CATEGORIES = frozenset({"REQUEST", "QUEUED", "SENDING", "RESUMED", "SEARCH"})
+
+
+def console_wants(category, config=None):
+    """Does the operator want this category on the console? True for any
+    category the Settings switches do not cover."""
+    if config is None:
+        import defaults as config
+    switch = FEED_SWITCHES.get(str(category).upper())
+    if switch is None:
+        return True
+    return bool(getattr(config, switch, True))
+
+
+def channel_wants(category, config=None):
+    """Does this category go to the IRC debug channel at all? The feed's own
+    events only under DEBUG_CHANNEL_FEED; everything else as before."""
+    if config is None:
+        import defaults as config
+    if str(category).upper() in FEED_ONLY_CATEGORIES:
+        return bool(getattr(config, "DEBUG_CHANNEL_FEED", False))
+    return True
+
+
 def send_debug(msg_text, category="INFO", notice=None):
     """Send a colour-block log line to the debug channel over a raw socket, undelayed.
 
@@ -1027,6 +1085,20 @@ def send_debug(msg_text, category="INFO", notice=None):
     # 2. The tag block, colour-coded by event
     if category.upper() == "SENT":
         tag_str = f"{V}[SENT]{R}{BG_TEXT_BOX}"
+    elif category.upper() in ("REQUEST", "QUEUED", "SENDING", "RESUMED", "SEARCH"):
+        # The console feed's own events (#528). Same block as [SENT] - they
+        # are the same story told from the start rather than the end - and
+        # only ever on the channel under DEBUG_CHANNEL_FEED.
+        tag_str = f"{V}[{category.upper()}]{R}{BG_TEXT_BOX}"
+    elif category.upper() == "FAIL":
+        # A transfer that did NOT complete. Until #526 every one of these was
+        # a plain print() to the console window and nothing else, while a
+        # completed one went to the debug channel and the admin console as
+        # [SENT] - so an operator watching either saw successes and never
+        # failures, and a cut-off transfer that the old code miscounted as a
+        # success was reported as one. The alert colour, like [PART]: it is
+        # the line an operator needs to see.
+        tag_str = f"{A}[FAIL]{R}{BG_TEXT_BOX}"
     elif category.upper() == "PART":
         tag_str = f"{A}[PART]{R}{BG_TEXT_BOX}"
     elif category.upper() == "QUIT":
@@ -1102,15 +1174,23 @@ def send_debug(msg_text, category="INFO", notice=None):
     # it is used rather than needing to be re-learned at each call site.
     debug_chan = str(getattr(config, "DEBUG_CHANNEL", "") or "").strip()
 
-    if debug_chan and getattr(config, "DEBUG_TO_CHANNEL", True):
+    # THE FEED SWITCHES (#528) sit on top of the two routing switches. A
+    # category the operator has unticked in Settings is not "undelivered" -
+    # it is declined, so it must not fall through to the stdout floor either;
+    # the floor is for a line nobody was there to take, not one nobody asked
+    # for. The feed's own categories additionally stay off the channel unless
+    # DEBUG_CHANNEL_FEED is on (see defaults.py for why that is the default).
+    wanted_on_console = console_wants(category, config)
+
+    if debug_chan and getattr(config, "DEBUG_TO_CHANNEL", True) and channel_wants(category, config):
         _debug_queue.append(msg)
         _ensure_debug_drain()
         delivered += 1
 
-    if getattr(config, "DEBUG_TO_CONSOLE", True):
+    if getattr(config, "DEBUG_TO_CONSOLE", True) and wanted_on_console:
         delivered += _fan_out_to_sinks(msg_text, category)
 
-    if not delivered:
+    if not delivered and wanted_on_console:
         print(f"[DEBUG {str(category).upper()}] {msg_text}")
 
 # ---------------------------------------------------------------------

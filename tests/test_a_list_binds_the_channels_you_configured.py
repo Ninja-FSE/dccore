@@ -172,16 +172,19 @@ class TheControlOffersWhatIsConfigured(unittest.TestCase):
         self.assertIn('label.querySelector("span").textContent = name;', attach)
 
     def test_with_no_channels_configured_it_says_where_to_add_them(self):
-        """Rather than an empty box that looks broken."""
+        """Rather than an empty box that looks broken. The wording is a
+        translation key, not literal text - see web/lang/en.json's
+        settings.noChannelsConfiguredYet."""
         body = self.markup()
 
-        self.assertIn("No channels are configured yet", body)
-        self.assertIn("Identity &amp; network", body)
+        self.assertIn('t("settings.noChannelsConfiguredYet")', body)
 
     def test_and_says_what_happens_meanwhile(self):
         """Nothing ticked means everywhere, and an operator who cannot tick
-        anything should be told that is not the same as being switched off."""
-        self.assertIn("serves every channel", self.markup())
+        anything should be told that is not the same as being switched off.
+        The wording is a translation key - see web/lang/en.json's
+        settings.servesEveryChannel."""
+        self.assertIn('"settings.servesEveryChannel"', self.markup())
 
 
 class ABindingThePickerCannotOfferIsKept(unittest.TestCase):
@@ -202,10 +205,12 @@ class ABindingThePickerCannotOfferIsKept(unittest.TestCase):
         self.assertIn("channelBoxHtml(index, name, true, true)", body)
 
     def test_and_marked_so_it_can_be_seen(self):
+        """The wording is a translation key, not literal text - see
+        web/lang/en.json's settings.oneChannelNotInJoinList/manyChannelsNotInJoinList."""
         body = self.markup()
 
         self.assertIn("is-unconfigured", function("channelBoxHtml"))
-        self.assertIn("not in your join list", body)
+        self.assertIn("NotInJoinList", body)
 
     def test_the_warning_appears_only_when_there_is_one_to_give(self):
         """The GUARD, not the text under it. Asserting the words alone was
@@ -217,10 +222,11 @@ class ABindingThePickerCannotOfferIsKept(unittest.TestCase):
         self.assertIn('      : ""', body)
 
     def test_the_warning_says_what_to_do_about_it(self):
+        """The wording is a translation key, not literal text - see
+        web/lang/en.json's settings.oneChannelNotInJoinList/manyChannelsNotInJoinList."""
         body = self.markup()
 
-        self.assertIn("Untick it", body)
-        self.assertIn("Identity &amp; network", body)
+        self.assertIn("NotInJoinList", body)
 
     def test_the_mark_is_visible_in_the_stylesheet(self):
         css = read("style.css")

@@ -135,8 +135,10 @@ class TheTooltipShowsThem(unittest.TestCase):
         self.assertIn("advert_now", changed)
 
     def test_it_still_names_the_verdict(self):
-        """The evidence is added to the verdict, not swapped for it."""
-        self.assertIn("changed since you downloaded it", self.body())
+        """The evidence is added to the verdict, not swapped for it. The
+        wording is a translation key, not literal text - see
+        web/lang/en.json's filelists.freshnessChanged."""
+        self.assertIn('t("filelists.freshnessChanged")', self.body())
 
     def test_a_green_led_says_what_it_matched(self):
         """"Current" on its own leaves you unable to tell a genuinely fresh

@@ -40,47 +40,52 @@
          glance, and Settings and Console are admin surfaces reached
          occasionally. Queue is gone as a tab - it lives in Stats now. -->
     <nav class="nav">
+      <!-- Each data-i18n key here is the SAME key views{} in app.js uses for
+           that page's heading - one identifier, not two coincidentally-equal
+           strings, so the two can never drift the way plain text once could
+           (see TheTabsAreNamedForWhatTheyDo in
+           tests/test_dashboard_nav_and_multiselect.py). -->
       <button class="nav-item is-active" data-view="search">
-        <span class="nav-icon">&#9906;</span> Search
+        <span class="nav-icon">&#9906;</span> <span data-i18n="view.search.title">Search</span>
       </button>
       <button class="nav-item" data-view="download">
-        <span class="nav-icon">&#8595;</span> Downloads
+        <span class="nav-icon">&#8595;</span> <span data-i18n="view.download.title">Downloads</span>
       </button>
       <button class="nav-item" data-view="filelists">
-        <span class="nav-icon">&#9776;</span> List Browser
+        <span class="nav-icon">&#9776;</span> <span data-i18n="view.filelists.title">List Browser</span>
       </button>
       <button class="nav-item" data-view="tools">
-        <span class="nav-icon">&#9881;</span> Tools
+        <span class="nav-icon">&#9881;</span> <span data-i18n="view.tools.title">Tools</span>
       </button>
       <button class="nav-item" data-view="stats">
-        <span class="nav-icon">&#9673;</span> Stats
+        <span class="nav-icon">&#9673;</span> <span data-i18n="view.stats.title">Stats</span>
       </button>
       <button class="nav-item" data-view="messages">
-        <span class="nav-icon">&#9993;</span> Messages
+        <span class="nav-icon">&#9993;</span> <span data-i18n="view.messages.title">Messages</span>
         <span class="nav-count" id="messages-nav-count" hidden></span>
       </button>
       <button class="nav-item" data-view="settings">
-        <span class="nav-icon">&#9998;</span> Settings
+        <span class="nav-icon">&#9998;</span> <span data-i18n="view.settings.title">Settings</span>
       </button>
       <button class="nav-item" data-view="console">
-        <span class="nav-icon">&#10095;</span> Console
+        <span class="nav-icon">&#10095;</span> <span data-i18n="view.console.title">Console</span>
       </button>
     </nav>
 
     <div class="status-card">
       <div class="status-row">
-        <span class="status-label">Status</span>
+        <span class="status-label" data-i18n="sidebar.status">Status</span>
         <span class="status-value">
           <span class="status-dot" id="conn-dot"></span>
-          <span id="conn-text">connecting&hellip;</span>
+          <span id="conn-text" data-i18n="conn.connecting">connecting&hellip;</span>
         </span>
       </div>
       <div class="status-row">
-        <span class="status-label">Slots</span>
+        <span class="status-label" data-i18n="sidebar.slots">Slots</span>
         <span class="status-value" id="status-slots">&mdash;</span>
       </div>
       <div class="status-row">
-        <span class="status-label">Queued</span>
+        <span class="status-label" data-i18n="sidebar.queued">Queued</span>
         <span class="status-value" id="status-queued">&mdash;</span>
       </div>
       <!-- Nothing at all when there is nothing unread, so it means something
@@ -91,17 +96,25 @@
     </div>
 
     <div class="sidebar-foot">
-      Logged in &middot; LAN only
+      <span data-i18n="sidebar.loggedIn">Logged in &middot; LAN only</span>
       <div class="theme-switch" role="group" aria-label="Colour theme">
         <button type="button" class="theme-btn" id="theme-dark" data-theme-choice="dark">
-          &#9790; Dark
+          &#9790; <span data-i18n="theme.dark">Dark</span>
         </button>
         <button type="button" class="theme-btn" id="theme-light" data-theme-choice="light">
-          &#9788; Light
+          &#9788; <span data-i18n="theme.light">Light</span>
         </button>
       </div>
+      <div class="lang-switch">
+        <label for="lang-select" data-i18n="language.label">Language</label>
+        <select id="lang-select" aria-label="Language">
+          <option value="en">English</option>
+          <option value="fr">Fran&ccedil;ais</option>
+          <option value="es">Espa&ntilde;ol</option>
+        </select>
+      </div>
       <form method="post" action="/logout">
-        <button type="submit" class="logout-btn">Log out</button>
+        <button type="submit" class="logout-btn" data-i18n="sidebar.logout">Log out</button>
       </form>
     </div>
   </aside>
@@ -116,12 +129,13 @@
     <section class="view is-active" id="view-search">
       <form class="search-bar" id="search-form">
         <input type="text" id="search-input" class="search-input"
+               data-i18n-placeholder="search.placeholder"
                placeholder="Search by filename&hellip; (min 1 word)" autocomplete="off">
-        <button type="submit" class="btn btn-accent">Search</button>
-        <button type="button" id="broadcast-btn" class="btn">Search all bots</button>
+        <button type="submit" class="btn btn-accent" data-i18n="search.button">Search</button>
+        <button type="button" id="broadcast-btn" class="btn" data-i18n="search.broadcastButton">Search all bots</button>
       </form>
 
-      <p class="broadcast-note">
+      <p class="broadcast-note" data-i18n-html="search.broadcastNote">
         "Search all bots" sends <code>@find</code> into the configured broadcast channel and
         listens for 30 seconds. Anyone logged into this dashboard can trigger it - there is no
         separate confirmation beyond the login you already used to see this page.
@@ -130,19 +144,19 @@
 
       <div class="table-wrap broadcast-wrap" id="broadcast-wrap" style="display:none;">
         <div class="panel-bar">
-          <span class="panel-bar-label">Replies from other bots</span>
-          <button type="button" id="download-selected-btn" class="btn btn-accent" disabled>Download selected</button>
+          <span class="panel-bar-label" data-i18n="search.repliesFrom">Replies from other bots</span>
+          <button type="button" id="download-selected-btn" class="btn btn-accent" disabled data-i18n="common.downloadSelected">Download selected</button>
         </div>
         <table class="data-table" id="broadcast-table">
           <thead>
             <tr>
               <th class="col-check"></th>
-              <th>From</th>
-              <th>Reply</th>
+              <th data-i18n="common.from">From</th>
+              <th data-i18n="search.reply">Reply</th>
             </tr>
           </thead>
           <tbody id="broadcast-body">
-            <tr class="empty-row"><td colspan="3">No replies yet.</td></tr>
+            <tr class="empty-row"><td colspan="3" data-i18n="search.noReplies">No replies yet.</td></tr>
           </tbody>
         </table>
       </div>
@@ -151,14 +165,14 @@
         <table class="data-table" id="search-table">
           <thead>
             <tr>
-              <th>Title</th>
-              <th>Path</th>
-              <th>Size</th>
-              <th>Channel</th>
+              <th data-i18n="common.title">Title</th>
+              <th data-i18n="common.path">Path</th>
+              <th data-i18n="common.size">Size</th>
+              <th data-i18n="common.channel">Channel</th>
             </tr>
           </thead>
           <tbody id="search-body">
-            <tr class="empty-row"><td colspan="4">Type something and press Search.</td></tr>
+            <tr class="empty-row"><td colspan="4" data-i18n="search.typeSomething">Type something and press Search.</td></tr>
           </tbody>
         </table>
       </div>
@@ -168,7 +182,7 @@
     <section class="view" id="view-download">
       <div class="table-wrap bulk-fetch-wrap">
         <form id="bulk-fetch-form" class="bulk-fetch-form">
-          <p class="broadcast-note">
+          <p class="broadcast-note" data-i18n-html="download.bulkFetchNote">
             One request per line, in the exact shape a real IRC channel command uses -
             <code>!&lt;bot&gt; &lt;filename&gt;</code> - the same shape the Search view's
             broadcast-result "Download" buttons produce under the hood. Example:
@@ -181,26 +195,26 @@
                     placeholder="!goodbot Song One.mp3&#10;!otherbot Some Album Track.flac"
                     autocomplete="off"></textarea>
           <div class="bulk-fetch-actions">
-            <button type="submit" class="btn btn-accent">Queue requests</button>
+            <button type="submit" class="btn btn-accent" data-i18n="download.queueRequests">Queue requests</button>
           </div>
           <div id="bulk-fetch-errors" class="bulk-fetch-errors"></div>
         </form>
       </div>
 
-      <h2 class="panel-title">Downloads (fetched from other bots)</h2>
+      <h2 class="panel-title" data-i18n="download.panelTitle">Downloads (fetched from other bots)</h2>
       <div class="table-wrap">
         <table class="data-table" id="downloads-table">
           <thead>
             <tr>
-              <th>Bot</th>
-              <th>File</th>
-              <th>State</th>
-              <th>Progress</th>
+              <th data-i18n="common.bot">Bot</th>
+              <th data-i18n="common.file">File</th>
+              <th data-i18n="common.state">State</th>
+              <th data-i18n="common.progress">Progress</th>
               <th></th>
             </tr>
           </thead>
           <tbody id="downloads-body">
-            <tr class="empty-row"><td colspan="5">Nothing queued yet.</td></tr>
+            <tr class="empty-row"><td colspan="5" data-i18n="download.nothingQueued">Nothing queued yet.</td></tr>
           </tbody>
         </table>
       </div>
@@ -218,8 +232,9 @@
           <div class="filelists-toolbar">
             <form id="filelists-fetch-form" class="filelists-fetch-form">
               <input type="text" id="filelists-fetch-input" class="search-input"
+                     data-i18n-placeholder="filelists.fetchPlaceholder"
                      placeholder="Fetch a bot's list&hellip; (nick)" autocomplete="off">
-              <button type="submit" class="btn btn-accent">Fetch</button>
+              <button type="submit" class="btn btn-accent" data-i18n="filelists.fetch">Fetch</button>
             </form>
           </div>
           <p class="broadcast-status" id="filelists-fetch-status"></p>
@@ -230,17 +245,18 @@
                rows, which is what this bar needs to exist at all. -->
           <div class="filelists-filter">
             <input type="search" id="filelists-filter-input" class="search-input"
+                   data-i18n-placeholder="filelists.filterPlaceholder"
                    placeholder="Filter every list you hold&hellip;"
                    autocomplete="off" aria-describedby="filelists-filter-status">
             <button type="button" class="btn btn-small" id="filelists-filter-clear"
-                    hidden>Clear</button>
+                    data-i18n="common.clear" hidden>Clear</button>
           </div>
           <p class="filelists-filter-status" id="filelists-filter-status" hidden></p>
           <div class="filelists-filter-actions" id="filelists-filter-actions" hidden>
             <button type="button" class="btn btn-small"
-                    id="filelists-filter-all">Show all lists</button>
+                    id="filelists-filter-all" data-i18n="filelists.showAllLists">Show all lists</button>
             <button type="button" class="btn btn-small"
-                    id="filelists-filter-none">Show none</button>
+                    id="filelists-filter-none" data-i18n="filelists.showNone">Show none</button>
             <!-- The way back to a row the filter has taken off the screen.
                  Hiding without saying so would make the sidebar answer a
                  different question every keystroke with no way to check it. -->
@@ -259,15 +275,15 @@
                hold from them. One dot carrying both was what hid presence
                entirely. -->
           <p class="bot-legend">
-            <span><span class="led is-online"></span> here now</span>
-            <span><span class="led is-offline"></span> not in a channel</span>
-            <span><span class="led is-presence-unknown"></span> still joining</span>
+            <span><span class="led is-online"></span> <span data-i18n="filelists.legendHereNow">here now</span></span>
+            <span><span class="led is-offline"></span> <span data-i18n="filelists.legendNotInChannel">not in a channel</span></span>
+            <span><span class="led is-presence-unknown"></span> <span data-i18n="filelists.legendStillJoining">still joining</span></span>
           </p>
           <p class="bot-legend">
-            <span><span class="legend-name is-current">name</span> list current</span>
-            <span><span class="legend-name is-changed">name</span> theirs changed</span>
-            <span><span class="legend-name is-not-held">name</span> not downloaded</span>
-            <span><span class="legend-name is-unknown">name</span> cannot tell</span>
+            <span><span class="legend-name is-current">name</span> <span data-i18n="filelists.legendListCurrent">list current</span></span>
+            <span><span class="legend-name is-changed">name</span> <span data-i18n="filelists.legendTheirsChanged">theirs changed</span></span>
+            <span><span class="legend-name is-not-held">name</span> <span data-i18n="filelists.legendNotDownloaded">not downloaded</span></span>
+            <span><span class="legend-name is-unknown">name</span> <span data-i18n="filelists.legendCannotTell">cannot tell</span></span>
           </p>
 
           <!-- Forgets every held list whose dot is red (#385): a fetch stays
@@ -275,10 +291,35 @@
                Never touches a bot that is here now, or the grey "still
                joining" dot - only a confirmed "not in a channel" counts. -->
           <button type="button" class="btn btn-small" id="filelists-purge-offline-btn"
+                  data-i18n-title="filelists.purgeOfflineTitle"
                   title="Forget every held list whose bot is not in a channel with you right now (the red dot above). A bot that is here, or one we have not finished checking, is left alone.">
-            Purge offline bots' lists
+            <span data-i18n="filelists.purgeOfflineLists">Purge offline bots' lists</span>
           </button>
           <p class="broadcast-status" id="filelists-purge-status" hidden></p>
+
+          <!-- A bot that never advertises has no row (#376): the sidebar is
+               built from adverts seen. Name one here and it becomes a row
+               like any other - fetchable, marked "by hand", kept until you
+               forget it. Forget takes the same nick back out; a bot that
+               advertises cannot be forgotten this way, it would be back at
+               its next advert. -->
+          <form class="filelists-add-source" id="filelists-add-source-form">
+            <label class="filelists-add-source-label" for="filelists-add-source-input"
+                   data-i18n="filelists.addSourceLabel">Add a bot that does not advertise</label>
+            <div class="filelists-add-source-row">
+              <input type="text" id="filelists-add-source-input" autocomplete="off"
+                     maxlength="64" spellcheck="false"
+                     data-i18n-placeholder="filelists.addSourcePlaceholder"
+                     placeholder="Nick">
+              <button type="submit" class="btn btn-small" id="filelists-add-source-btn"
+                      data-i18n="filelists.addSource">Add</button>
+              <button type="button" class="btn btn-small" id="filelists-forget-source-btn"
+                      data-i18n-title="filelists.forgetSourceTitle"
+                      title="Forget a bot you added by hand. One that advertises cannot be forgotten - it would be back at its next advert."
+                      data-i18n="filelists.forgetSource">Forget</button>
+            </div>
+          </form>
+          <p class="broadcast-status" id="filelists-source-status" hidden></p>
         </div>
 
         <div class="filelists-files">
@@ -302,14 +343,18 @@
                so a phrase means the same thing everywhere it is typed. -->
           <div class="filelists-list-search">
             <input type="search" id="filelists-list-search-input" class="search-input"
+                   data-i18n-placeholder="filelists.searchThisList"
                    placeholder="Search this list…" autocomplete="off">
           </div>
 
           <p class="filelists-freshness" id="filelists-freshness" hidden></p>
           <div class="folder-controls">
-            <button type="button" class="btn btn-small" id="filelists-expand-all">Expand all</button>
-            <button type="button" class="btn btn-small" id="filelists-collapse-all">Collapse all</button>
-            <button type="button" class="btn btn-accent btn-small" id="filelists-download-selected-btn" disabled title="Tick the files you want. Shift-click a second box to take everything between it and the last one you touched.">Download selected</button>
+            <button type="button" class="btn btn-small" id="filelists-expand-all" data-i18n="filelists.expandAll">Expand all</button>
+            <button type="button" class="btn btn-small" id="filelists-collapse-all" data-i18n="filelists.collapseAll">Collapse all</button>
+            <button type="button" class="btn btn-accent btn-small" id="filelists-download-selected-btn" disabled
+                    data-i18n-title="filelists.downloadSelectedTitle"
+                    data-i18n="common.downloadSelected"
+                    title="Tick the files you want. Shift-click a second box to take everything between it and the last one you touched.">Download selected</button>
             <!-- Shown only for a list fetched from another bot: your own is
                  the library itself, and a bot you have only seen advertising
                  has nothing to remove. renderFilelistsPurge() decides.
@@ -317,6 +362,8 @@
                  wording says so since the sidebar stopped showing a row per
                  list (#399). -->
             <button type="button" class="btn btn-small btn-danger" id="filelists-purge-btn" hidden
+                    data-i18n-title="filelists.purgeThisBotTitle"
+                    data-i18n="filelists.purgeThisBotsLists"
                     title="Remove everything downloaded from this bot: every list, its files and its search index rows.">Purge this bot's lists</button>
           </div>
 
@@ -328,51 +375,51 @@
                        select-all that normally rides on a folder heading has
                        nowhere else to be. See renderFlatListControls(). -->
                   <th class="col-check" id="filelists-head-check"></th>
-                  <th>Title</th>
-                  <th>Size</th>
-                  <th>Format</th>
-                  <th>Source</th>
+                  <th data-i18n="common.title">Title</th>
+                  <th data-i18n="common.size">Size</th>
+                  <th data-i18n="common.format">Format</th>
+                  <th data-i18n="common.source">Source</th>
                 </tr>
               </thead>
               <tbody id="filelists-body">
-                <tr class="empty-row"><td colspan="5">Loading&hellip;</td></tr>
+                <tr class="empty-row"><td colspan="5" data-i18n="common.loading">Loading&hellip;</td></tr>
               </tbody>
             </table>
           </div>
           <div class="filelists-pager">
-            <button type="button" class="btn btn-small" id="filelists-prev-btn">Prev</button>
+            <button type="button" class="btn btn-small" id="filelists-prev-btn" data-i18n="common.prev">Prev</button>
             <span class="filelists-pager-info" id="filelists-page-info"></span>
-            <button type="button" class="btn btn-small" id="filelists-next-btn">Next</button>
+            <button type="button" class="btn btn-small" id="filelists-next-btn" data-i18n="common.next">Next</button>
           </div>
         </div>
       </div>
     </section>
 
     <section class="view" id="view-messages">
-      <h1>Messages</h1>
+      <h1 data-i18n="view.messages.title">Messages</h1>
       <!-- SAYING THE BOT DOES NOT REPLY, right at the top and before the
            list. Everything here looks like a conversation and is not one:
            there is no reply box, and there never will be, because a bot that
            answers unrecognised messages is one that can be made to flood
            itself off the network. Somebody would otherwise type an answer
            into the first field they found. -->
-      <p class="view-subtitle">People who messaged the bot privately and got
+      <p class="view-subtitle" data-i18n-html="messages.subtitle">People who messaged the bot privately and got
         no answer, because what they sent was not a command. <strong>The bot
         never replies to these</strong> - if you want to answer, message them
         yourself from your own client.</p>
       <div class="messages-actions">
-        <button type="button" class="btn btn-small" id="messages-mark-read">Mark all read</button>
+        <button type="button" class="btn btn-small" id="messages-mark-read" data-i18n="common.markAllRead">Mark all read</button>
       </div>
       <div class="message-list" id="message-list"></div>
     </section>
 
     <section class="view" id="view-notices">
-      <h1>What happened</h1>
-      <p class="view-subtitle">Kicks, bans and rebuilds that need looking at.
+      <h1 data-i18n="view.notices.title">What happened</h1>
+      <p class="view-subtitle" data-i18n="view.notices.sub">Kicks, bans and rebuilds that need looking at.
         The Console has everything; this has only what somebody should act
         on.</p>
       <div class="notice-actions">
-        <button type="button" class="btn btn-small" id="notices-mark-read">Mark all read</button>
+        <button type="button" class="btn btn-small" id="notices-mark-read" data-i18n="common.markAllRead">Mark all read</button>
       </div>
       <div class="notice-list" id="notice-list"></div>
     </section>
@@ -380,10 +427,10 @@
     <section class="view" id="view-tools">
       <div class="tool-card">
         <div class="tool-head">
-          <h2 class="tool-name">Update list</h2>
-          <button type="button" class="btn btn-accent" id="update-list-run-btn">Run</button>
+          <h2 class="tool-name" data-i18n="tools.updateList">Update list</h2>
+          <button type="button" class="btn btn-accent" id="update-list-run-btn" data-i18n="common.run">Run</button>
         </div>
-        <p class="tool-what">
+        <p class="tool-what" data-i18n-html="tools.updateListWhat">
           Rebuilds the master list by walking the whole music directory again
           &mdash; the same rebuild <code>!update</code> triggers over IRC.
           Worth running here right after setting or changing the music
@@ -397,10 +444,10 @@
       </div>
       <div class="tool-card">
         <div class="tool-head">
-          <h2 class="tool-name">Verify list</h2>
-          <button type="button" class="btn btn-accent" id="verify-run-btn">Run</button>
+          <h2 class="tool-name" data-i18n="tools.verifyList">Verify list</h2>
+          <button type="button" class="btn btn-accent" id="verify-run-btn" data-i18n="common.run">Run</button>
         </div>
-        <p class="tool-what">
+        <p class="tool-what" data-i18n="tools.verifyListWhat">
           Reads the master list and reports any filename that appears under more
           than one folder. A request that names a file alone reaches only the
           first copy listed under that name &mdash; the rest are shadowed by it.
@@ -415,14 +462,14 @@
     <section class="view" id="view-settings">
       <div class="settings-layout">
         <nav class="settings-rail" id="settings-rail">
-          <div class="settings-rail-empty">Loading&hellip;</div>
+          <div class="settings-rail-empty" data-i18n="common.loading">Loading&hellip;</div>
         </nav>
         <div class="settings-panel">
           <div class="settings-fields" id="settings-fields"></div>
 
           <div class="settings-savebar">
-            <span class="settings-savebar-text" id="settings-savebar-text">All changes saved</span>
-            <button type="button" class="btn btn-accent" id="settings-save-btn" disabled>Save &amp; rehash</button>
+            <span class="settings-savebar-text" id="settings-savebar-text" data-i18n="settings.allChangesSaved">All changes saved</span>
+            <button type="button" class="btn btn-accent" id="settings-save-btn" disabled data-i18n="settings.saveAndRehash">Save &amp; rehash</button>
           </div>
           <p class="settings-note" id="settings-restart-note" style="display:none;"></p>
           <p class="settings-note" id="settings-save-error" style="display:none;"></p>
@@ -431,28 +478,28 @@
     </section>
 
     <section class="view" id="view-stats">
-      <div class="stat-group-label">Transfer</div>
+      <div class="stat-group-label" data-i18n="stats.transfer">Transfer</div>
       <div class="stat-row is-wide">
-        <div class="stat-card"><div class="stat-value" id="st-speed">&mdash;</div><div class="stat-label">Speed now</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-record">&mdash;</div><div class="stat-label">Record</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-sending">&mdash;</div><div class="stat-label">Sending</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-queued">&mdash;</div><div class="stat-label" id="st-queued-label">Queued</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-uptime">&mdash;</div><div class="stat-label">Uptime</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-speed">&mdash;</div><div class="stat-label" data-i18n="stats.speedNow">Speed now</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-record">&mdash;</div><div class="stat-label" data-i18n="common.record">Record</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-sending">&mdash;</div><div class="stat-label" data-i18n="stats.sending">Sending</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-queued">&mdash;</div><div class="stat-label" id="st-queued-label" data-i18n="sidebar.queued">Queued</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-uptime">&mdash;</div><div class="stat-label" data-i18n="stats.uptime">Uptime</div></div>
       </div>
 
-      <div class="stat-group-label">Sent</div>
+      <div class="stat-group-label" data-i18n="stats.sent">Sent</div>
       <div class="stat-row is-wide">
-        <div class="stat-card"><div class="stat-value" id="st-sent-total">&mdash;</div><div class="stat-label" id="st-sent-total-files">Total</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-sent-today">&mdash;</div><div class="stat-label" id="st-sent-today-files">Today</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-sent-yesterday">&mdash;</div><div class="stat-label" id="st-sent-yesterday-files">Yesterday</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-sent-total">&mdash;</div><div class="stat-label" id="st-sent-total-files" data-i18n="common.total">Total</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-sent-today">&mdash;</div><div class="stat-label" id="st-sent-today-files" data-i18n="common.today">Today</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-sent-yesterday">&mdash;</div><div class="stat-label" id="st-sent-yesterday-files" data-i18n="common.yesterday">Yesterday</div></div>
       </div>
 
-      <div class="stat-group-label">Library</div>
+      <div class="stat-group-label" data-i18n="stats.library">Library</div>
       <div class="stat-row is-wide">
-        <div class="stat-card"><div class="stat-value" id="st-files">&mdash;</div><div class="stat-label">Files shared</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-size">&mdash;</div><div class="stat-label">Size</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-albums">&mdash;</div><div class="stat-label">Album folders (!rar)</div></div>
-        <div class="stat-card"><div class="stat-value stat-value-sm" id="st-built">&mdash;</div><div class="stat-label">List built</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-files">&mdash;</div><div class="stat-label" data-i18n="stats.filesShared">Files shared</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-size">&mdash;</div><div class="stat-label" data-i18n="common.size">Size</div></div>
+        <div class="stat-card"><div class="stat-value" id="st-albums">&mdash;</div><div class="stat-label" data-i18n="stats.albumFolders">Album folders (!rar)</div></div>
+        <div class="stat-card"><div class="stat-value stat-value-sm" id="st-built">&mdash;</div><div class="stat-label" data-i18n="stats.listBuilt">List built</div></div>
       </div>
 
 
@@ -466,24 +513,24 @@
            row. -->
       <div class="stat-top-grid">
         <div>
-          <div class="stat-group-label">Most downloaded &mdash; files</div>
+          <div class="stat-group-label" data-i18n="stats.mostDownloadedFiles">Most downloaded &mdash; files</div>
           <div class="table-wrap">
             <table class="stat-top-table">
-              <thead><tr><th>File</th><th class="col-num">Times sent</th></tr></thead>
+              <thead><tr><th data-i18n="common.file">File</th><th class="col-num" data-i18n="stats.timesSent">Times sent</th></tr></thead>
               <tbody id="st-top-files"></tbody>
             </table>
           </div>
         </div>
 
         <div>
-          <div class="stat-group-label" id="st-top-albums-label">Most downloaded &mdash; album folders</div>
+          <div class="stat-group-label" id="st-top-albums-label" data-i18n="stats.mostDownloadedAlbums">Most downloaded &mdash; album folders</div>
           <div class="table-wrap" id="st-top-albums-wrap">
             <table class="stat-top-table">
-              <thead><tr><th>Album</th><th class="col-num">Times sent</th></tr></thead>
+              <thead><tr><th data-i18n="stats.album">Album</th><th class="col-num" data-i18n="stats.timesSent">Times sent</th></tr></thead>
               <tbody id="st-top-albums"></tbody>
             </table>
           </div>
-          <p class="stat-foot" id="st-top-albums-off" style="display:none;">
+          <p class="stat-foot" id="st-top-albums-off" style="display:none;" data-i18n-html="stats.folderPackingOff">
             Folder packing is off (<code>RAR_ENABLED</code>), so no album can be sent.
           </p>
         </div>
@@ -495,19 +542,19 @@
            knows about itself, with the queue table keeping its place in
            the lower half of the view". The ids are unchanged, so
            renderQueueStats()/renderQueueTable() go on finding them. -->
-      <div class="stat-group-label">Queue</div>
+      <div class="stat-group-label" data-i18n="stats.queue">Queue</div>
       <div class="stat-row">
         <div class="stat-card">
           <div class="stat-value" id="stat-slots">&mdash;</div>
-          <div class="stat-label">Active slots</div>
+          <div class="stat-label" data-i18n="stats.activeSlots">Active slots</div>
         </div>
         <div class="stat-card">
           <div class="stat-value" id="stat-files">&mdash;</div>
-          <div class="stat-label">Files queued</div>
+          <div class="stat-label" data-i18n="stats.filesQueued">Files queued</div>
         </div>
         <div class="stat-card">
           <div class="stat-value" id="stat-users">&mdash;</div>
-          <div class="stat-label">Users waiting</div>
+          <div class="stat-label" data-i18n="stats.usersWaiting">Users waiting</div>
         </div>
       </div>
 
@@ -515,14 +562,14 @@
         <table class="data-table" id="queue-table">
           <thead>
             <tr>
-              <th>User</th>
-              <th>Next file</th>
-              <th>Count</th>
-              <th>Status</th>
+              <th data-i18n="common.user">User</th>
+              <th data-i18n="stats.nextFile">Next file</th>
+              <th data-i18n="common.count">Count</th>
+              <th data-i18n="sidebar.status">Status</th>
             </tr>
           </thead>
           <tbody id="queue-body">
-            <tr class="empty-row"><td colspan="4">Loading&hellip;</td></tr>
+            <tr class="empty-row"><td colspan="4" data-i18n="common.loading">Loading&hellip;</td></tr>
           </tbody>
         </table>
       </div>
@@ -534,9 +581,9 @@
            The file is read IN THE PAGE and only the recognised lines are
            sent, so an operator's other ~268 variables - their nicks,
            channels, paths and passwords - never cross the network. -->
-      <div class="stat-group-label">Coming from OmenServe</div>
+      <div class="stat-group-label" data-i18n="stats.comingFromOmenServe">Coming from OmenServe</div>
       <div class="import-panel">
-        <p class="import-intro">
+        <p class="import-intro" data-i18n-html="stats.importIntro">
           Bring your totals across from OmenServe. Your counters live in
           mIRC's <code>scripts/vars.ini</code> &mdash; choose it below and you
           will see exactly what would change before anything is written.
@@ -544,14 +591,15 @@
           machine.
         </p>
         <div class="import-actions">
-          <label class="btn btn-small" for="import-file">Choose vars.ini&hellip;</label>
+          <label class="btn btn-small" for="import-file" data-i18n="stats.chooseVarsIni">Choose vars.ini&hellip;</label>
           <input type="file" id="import-file" accept=".ini,.txt,text/plain" hidden>
-          <button type="button" class="btn btn-small" id="import-paste-toggle">Paste it instead</button>
+          <button type="button" class="btn btn-small" id="import-paste-toggle" data-i18n="stats.pasteItInstead">Paste it instead</button>
         </div>
         <textarea id="import-paste" class="import-paste" rows="6" hidden
+                  data-i18n-placeholder="stats.pasteVarsIniPlaceholder"
                   placeholder="Paste the contents of vars.ini here&hellip;"></textarea>
         <div class="import-paste-actions" id="import-paste-actions" hidden>
-          <button type="button" class="btn btn-small" id="import-paste-read">Read it</button>
+          <button type="button" class="btn btn-small" id="import-paste-read" data-i18n="stats.readIt">Read it</button>
         </div>
 
         <p class="import-status" id="import-status" hidden></p>
@@ -559,22 +607,22 @@
         <div class="table-wrap" id="import-preview-wrap" hidden>
           <table class="data-table">
             <thead>
-              <tr><th>Figure</th><th class="col-num">Now</th><th class="col-num">After import</th></tr>
+              <tr><th data-i18n="stats.figure">Figure</th><th class="col-num" data-i18n="common.now">Now</th><th class="col-num" data-i18n="stats.afterImport">After import</th></tr>
             </thead>
             <tbody id="import-preview"></tbody>
           </table>
         </div>
         <p class="import-warning" id="import-warning" hidden></p>
         <div class="import-confirm" id="import-confirm" hidden>
-          <button type="button" class="btn btn-accent btn-small" id="import-apply">Import these figures</button>
-          <button type="button" class="btn btn-small" id="import-cancel">Cancel</button>
+          <button type="button" class="btn btn-accent btn-small" id="import-apply" data-i18n="stats.importTheseFigures">Import these figures</button>
+          <button type="button" class="btn btn-small" id="import-cancel" data-i18n="common.cancel">Cancel</button>
         </div>
       </div>
     </section>
 
     <section class="view" id="view-console">
       <div class="tool-card console-card">
-        <p class="tool-what">
+        <p class="tool-what" data-i18n-html="console.intro">
           The same commands and the same live log as the DCC CHAT admin
           console (<code>/dcc chat &lt;botnick&gt;</code>), for an operator
           who would rather not keep a second IRC client open, or run without
@@ -587,9 +635,9 @@
           <input type="text" class="console-input" id="console-input"
                 autocomplete="off" spellcheck="false"
                 placeholder="status, queue, help ...">
-          <button type="submit" class="btn btn-accent" id="console-run-btn">Run</button>
+          <button type="submit" class="btn btn-accent" id="console-run-btn" data-i18n="common.run">Run</button>
         </form>
-        <p class="console-note">
+        <p class="console-note" data-i18n-html="console.note">
           <code>ban</code>, <code>unban</code>, <code>clearqueue</code>,
           <code>rehash</code> and <code>update</code> reply immediately with
           just an acknowledgement &mdash; their result appears a moment
