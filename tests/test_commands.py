@@ -498,6 +498,9 @@ class RehashPreservesEveryRuntimeContainer(unittest.TestCase):
         "LIST_VIDEO_EXTENSIONS":
             "the same again: which file types go in the film list rather "
             "than the music one is a setting, re-read on a rehash",
+        "LIST_VIDEO_COMPANION_EXTENSIONS":
+            "its sibling (#411): which file types follow a film into its "
+            "list when they share its folder - a setting, re-read on a rehash",
         "RAR_EXTENSIONS":
             "and again: which file types make a folder packable with !rar. "
             "An operator narrowing this after finding something packable "

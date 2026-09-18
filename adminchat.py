@@ -86,7 +86,12 @@ import platform_compat
 CONNECT_TIMEOUT = 10.0        # dialling the operator's client
 LISTEN_TIMEOUT = 60.0         # waiting for the operator to accept our offer back
 AUTH_TIMEOUT = 60.0           # seconds to supply a password before the socket closes
-IDLE_TIMEOUT = 1800.0         # authenticated session, so a forgotten window expires
+# There is deliberately NO idle timeout once authenticated. Earlier versions
+# closed a quiet console after 30 minutes, and an operator who leaves the
+# window open to watch the feed found it gone when they looked. A console is
+# a window the operator opened; it stays open until they close it, a second
+# login takes it over (_promote), or the connection itself dies - which TCP
+# keepalive on the socket notices within a couple of minutes.
 MAX_PASSWORD_ATTEMPTS = 3
 WRONG_PASSWORD_DELAY = 1.0    # slows scripted guessing without tying up the reader
 BAD_IP_BLOCK_SECONDS = 900.0
@@ -407,11 +412,16 @@ class Session:
             pass
 
     def expired(self, now=None):
-        """True when this session has outstayed its allowance."""
+        """True when this session has outstayed its allowance.
+
+        Only an UNAUTHENTICATED session has one: sixty seconds to supply a
+        password. An authenticated console is never closed by a clock - see
+        the note beside AUTH_TIMEOUT.
+        """
+        if self.authenticated:
+            return False
         now = now if now is not None else time.time()
-        if not self.authenticated:
-            return (now - self.opened_at) > AUTH_TIMEOUT
-        return (now - self.last_activity) > IDLE_TIMEOUT
+        return (now - self.opened_at) > AUTH_TIMEOUT
 
 
 # ==========================================================================
@@ -546,7 +556,7 @@ def _cmd_status(session, args):
 #
 # Each one runs on its own thread. rehash reloads eight modules and update walks
 # the whole NFS library, which takes minutes - doing either on the reader thread
-# would freeze this session for the duration and let its idle timeout fire.
+# would freeze this session for the duration, unable to read a command.
 #
 # They report through announce.send_debug, which reaches this console via the
 # sink registered at authentication, so their output arrives here as well as in
@@ -783,10 +793,7 @@ def _reader_loop(session):
     try:
         while not session.closed:
             if session.expired():
-                reason = ("No password within %ds." % int(AUTH_TIMEOUT)
-                          if not session.authenticated
-                          else "Idle for %d minutes." % int(IDLE_TIMEOUT / 60))
-                session.close(announce_text=reason)
+                session.close(announce_text="No password within %ds." % int(AUTH_TIMEOUT))
                 break
             try:
                 data = session.sock.recv(1024)
@@ -1204,7 +1211,7 @@ def _listen_and_serve_locked(irc_sock, nick, host, token=None):
         # #423: released HERE, not left to the wrapper in _listen_and_serve.
         # That wrapper's own finally only fires once THIS function returns -
         # and it used to return only after _serve() did, which blocks for the
-        # whole session's life (up to IDLE_TIMEOUT, 1800s). For that entire
+        # whole session's life - for as long as the operator keeps it open. For that
         # window every other passive DCC CHAT offer was refused outright, so
         # an operator whose own client could not be dialled had no way to
         # take over an existing console session at all - the one thing

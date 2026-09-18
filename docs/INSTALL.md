@@ -41,7 +41,7 @@ Safe to run again later: every prompt shows what is already configured as its de
 
 `configure.py` is a convenience, not a requirement. There are two mechanisms and you can use either or both.
 
-**`settings.conf`** — plain text, no Python syntax. Copy `settings.conf.sample` and edit. This is what the dashboard's Settings page and the admin console both write to.
+**`settings.conf`** — plain text, no Python syntax. Copy `settings.conf.sample` and edit. This is what the dashboard's Settings page and the admin console both write to. The explanation above each setting in the sample is the same text the Settings page shows when you hover the **?** beside a setting; below it, the sample also carries the developer's longer note from `defaults.py` for anyone who wants the reasoning.
 
 **`admin_config.py`** — Python. Copy `admin_config.py.sample` and edit. Better for values you would rather keep out of a file other tools rewrite, such as `ADMIN_HOSTMASKS` and `ADMIN_PASSWORD_HASH`.
 
@@ -58,7 +58,7 @@ Three things are deliberately *not* required:
 
 ### Disk the dashboard uses
 
-The List Browser's filter searches every bot list you have downloaded at once, which needs a search index at `data/list_index.db`. It is built as each list is fetched and is roughly the size of the lists again — ten large lists can mean several hundred megabytes. `LIST_INDEX_FILE` moves it. Deleting it is safe: the filter stops working until the next fetch rebuilds it, and nothing else uses it.
+The List Browser lists the bots it has seen advertising in your channels; a bot that never advertises can be added by nick in the sidebar (**Add a bot that does not advertise**), and stays until you use **Forget**. The List Browser's filter searches every bot list you have downloaded at once, which needs a search index at `data/list_index.db`. It is built as each list is fetched and is roughly the size of the lists again — ten large lists can mean several hundred megabytes. `LIST_INDEX_FILE` moves it. Deleting it is safe: the filter stops working until the next fetch rebuilds it, and nothing else uses it.
 
 ## Check before you start
 
@@ -110,7 +110,7 @@ Because everything is listed, **anything you leave in that directory is offered 
 
 Two settings decide how the result is split up:
 
-- **`SEPARATE_VIDEO_LIST`** — publishes film and series as their own list rather than mixing them in with the music. Both travel in the same archive people get by typing your bot's name, so there is no second command to learn. `LIST_VIDEO_EXTENSIONS` says which formats count. Turn it off if your films and music are already in separate folders and you would rather split by folder.
+- **`SEPARATE_VIDEO_LIST`** — publishes film and series as their own list rather than mixing them in with the music. Both travel in the same archive people get by typing your bot's name, so there is no second command to learn. `LIST_VIDEO_EXTENSIONS` says which formats count, and `LIST_VIDEO_COMPANION_EXTENSIONS` (subtitles, `.nfo`, `.sfv`) says which files follow a film into its list when they sit in the same folder - so a release travels whole, while an album's `.nfo` stays with the album. Turn it off if your films and music are already in separate folders and you would rather split by folder.
 - **`RAR_EXTENSIONS`** — which formats make a folder packable with `!rar`. A folder needs one of these to get a row in the album list. Everything else stays listed and directly requestable; this only decides what can be packed. **`MAX_RAR_FOLDER_SIZE`** bounds how large a folder `!rar` will pack — 10 GB by default, which passes a large box set and refuses the folder somebody names hoping it is a library. Set it to 0 for no limit.
 
 ### If your users queue with AutoQ

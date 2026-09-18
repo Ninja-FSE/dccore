@@ -26,14 +26,25 @@
 #     raw protocol bytes rather than preferences.
 
 [system and global engine settings]
+# Print every raw line the bot sends to the server in its own window. Very
+# noisy - only for tracking down a connection problem.
+#
+# Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
 #DEBUG_MODE = false
 
+# Where DCCore comes from. Shown at the top of your list and in the reply to a
+# version request.
+#
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
 # no project URL anywhere in the tree, so anyone who received a list had no way
 # to find out what produced it.
 #PROJECT_URL = https://github.com/Ninja-FSE/dccore
 
+# Answer when somebody asks the bot what software it runs (a CTCP VERSION
+# request). The answer goes only to the person who asked. Turn off to stay
+# quiet about it.
+#
 # Answer CTCP VERSION with SCRIPT_VERSION and PROJECT_URL. Operators who would
 # rather not advertise a version can turn this off; the bot then ignores the
 # query exactly as it did before, rather than answering with something evasive.
@@ -44,6 +55,10 @@
 # straight back to whoever asked, and no one else sees it.
 #CTCP_VERSION_REPLY = true
 
+# The name your list files start with (for example DCCore-2026-09-18.txt).
+# Normally the same as the bot's nickname, which is what happens if you leave
+# it alone.
+#
 # Names every generated list file ("<LIST_BASE_NAME>-<date>.txt" and its
 # .zip/.rar counterparts). Automatically takes NICKNAME's own value once
 # NICKNAME is set, unless this is given an explicit value of its own first -
@@ -51,14 +66,25 @@
 # list should be named differently from the bot's own nickname.
 #LIST_BASE_NAME = DCCore
 
+# The IRC server the bot connects to. For Undernet leave it as
+# irc.undernet.org.
+#
 # SERVER keeps a real, working default on purpose - "irc.undernet.org" is
 # correct for essentially every operator of an Undernet file server, not one
 # operator's identity to avoid. It is NOT in settings_file.REQUIRED for
 # exactly that reason - see REQUIRED's own comment.
 #SERVER = irc.undernet.org
 
+# The port on that server. 6667 is the normal one for plain IRC; the bot does
+# not use SSL.
+#
+# The server's port; 6667 is plain IRC, and this bot speaks no TLS
 #PORT = 6667
 
+# The bot's name on IRC. People request files with it (for example @YourBot
+# for the list), so pick something short and easy to type. Required - the bot
+# will not start without it.
+#
 # NICKNAME, ADMIN_NICK and CHANNEL are None - not a real value - because
 # they ARE in settings_file.REQUIRED: oserve.startup() refuses to boot while
 # any of them is still blank, so there is no shipped value here for a
@@ -69,14 +95,30 @@
 # REQUIRED - the daemon refuses to start until this is set.
 #NICKNAME = 
 
+# A backup name used if the main one is already taken when the bot connects.
+# The bot switches back to the main name as soon as it is free.
+#
+# Used when NICKNAME is taken; the bot keeps trying to reclaim the main nick afterwards
 #ALT_NICKNAME = DCCore_
 
+# Your own nick(s) - the people allowed to use the admin commands such as
+# !ban, !rehash and !update. Separate several with commas. Required.
+#
+# Who may use the admin commands (!ban, !rehash, !update...), comma-separated for more than one; the DCC console checks ADMIN_HOSTMASKS as well
 # REQUIRED - the daemon refuses to start until this is set.
 #ADMIN_NICK = 
 
+# The channel(s) the bot serves in, separated by commas. The first one is
+# where announcements go unless a request came from another channel. Required.
+#
+# The channel(s) to serve in, comma-separated; the first one is where announcements go by default
 # REQUIRED - the daemon refuses to start until this is set.
 #CHANNEL = 
 
+# A channel of your own where the bot reports what it is doing - transfers,
+# joins, bans, problems. Leave blank for none. Do not use a channel other
+# people sit in: everything the bot reports goes there.
+#
 # Ships BLANK, and that is a deliberate reversal of #171's "#dccore-debug".
 # 
 # That default was fine while this project was two operators who knew each
@@ -95,6 +137,9 @@
 # good state to run in, unlike having no NICKNAME.
 #DEBUG_CHANNEL = 
 
+# The one channel used when you search all bots at once from the dashboard.
+# Leave empty to use your first channel.
+#
 # The single channel a "search all bots" broadcast (@find) goes into - see
 # webserver.py's POST /api/search/broadcast. Deliberately ONE channel, never
 # all of them: broadcasting into every channel this bot has joined multiplies
@@ -109,9 +154,16 @@
 
 
 [filesystem, paths and text stores]
+# While the list is being rebuilt (!update), stop serving and searching until
+# it is done. Keeps the bot from handing out a half-built list.
+#
 # MAINTENANCE SWITCH: when True the bot pauses ALL sharing and searching during !update
 #PAUSE_ON_UPDATE = true
 
+# The folder with the files you share. Used only if you have not added folders
+# on the Library page - if you have, those are used instead and this is
+# ignored.
+#
 # None, not a real path - a shipped literal path would let a copy-paste
 # install silently inherit somebody else's actual music folder path. Unlike
 # NICKNAME/CHANNEL/ADMIN_NICK, FILE_DIRECTORY is NOT in settings_file.
@@ -122,16 +174,34 @@
 # value that IS set but does not exist - only "not chosen yet" is fine.
 #FILE_DIRECTORY = 
 
+# Let people request a whole folder packed as one .rar file (with !rar). Turn
+# off if you do not have the rar program or do not want the bot packing
+# folders. Single-file downloads work either way.
+#
 # Off refuses every !rar request with a notice; ordinary single-file transfers are unaffected
 #RAR_ENABLED = true
 
+# Where the rar program is on this machine. Leave empty and the bot finds it
+# by itself (on the PATH, or in WinRAR's folder on Windows).
+#
 # None = look for rar/rar.exe on PATH (and WinRAR's install dir)
 #RAR_BINARY = 
 
+# Where packed folders and list archives are built before sending. Cleaned up
+# after each transfer.
+#
+# Where !rar archives and list zips are built before sending; cleaned up after each transfer
 #TMP_ZIP_DIR = ./data/tmp_zips
 
+# Where your published list files are kept.
+#
+# Where the bot's own published list files live; extra lists get a subfolder each
 #LOCAL_LIST_DIR = ./lists
 
+# How the list is sent to somebody who asks for it: as a plain .txt, packed as
+# .zip, or packed as .rar. Zip is what most people can open. Rar needs the rar
+# program installed.
+#
 # How the master list is handed to somebody who types "@<nick>": as the plain
 # text file, packed into a .zip, or packed into a .rar. OmenServe has offered
 # the same three for years and people's clients differ in what they open
@@ -147,6 +217,10 @@
 # "txt", "zip" or "rar"
 #LIST_FORMAT = zip
 
+# File types to leave out of your list, separated by commas (for example .db,
+# .ini). Everything else under your shared folders is listed and can be
+# downloaded, so keep private files out of those folders.
+#
 # EVERY file under FILE_DIRECTORY goes into the list, except the extensions
 # named here. Comma-separated, with or without the leading dot, matched
 # case-insensitively - ".DB", "db" and ".db" are the same thing. Blank means
@@ -188,6 +262,10 @@
 # update_list.py's note at the row write for the script's own code.
 #LIST_IGNORED_EXTENSIONS = .db, .ini, .lnk, .url, .tmp, .part, .crdownload, .!ut
 
+# Put films and series in their own list file, separate from the music,
+# instead of one list with everything mixed. Both files are sent together when
+# somebody asks for your list.
+#
 # Publish film and series as a SEPARATE list from the music, instead of one
 # list carrying both.
 # 
@@ -205,6 +283,9 @@
 # Turning this off gives the single combined list again.
 #SEPARATE_VIDEO_LIST = true
 
+# Which file types count as video and go in the film list (when the separate
+# film list is on). Separated by commas.
+#
 # WHICH LIST a file goes into, when SEPARATE_VIDEO_LIST is on. One scan
 # publishes two: the music list, and a separate one for film and series.
 # Same comma-separated form as the setting above - dots optional, spacing
@@ -222,15 +303,32 @@
 # 
 # Anything that is NOT one of these goes into the music list, including a
 # file with no extension at all. That is the rule for artwork, cue sheets and
-# notes, which sit beside the tracks they belong to; a film's subtitles land
-# there too, which is the one rough edge of deciding per file rather than per
-# folder. Per file is deliberate: a folder holding both an album and a video
-# should not have to pick.
+# notes, which sit beside the tracks they belong to. Per file is deliberate:
+# a folder holding both an album and a video should not have to pick.
 # 
 # The video list is only published when there is video to put in it, so a
 # music-only library never gains an empty file it has no use for.
 #LIST_VIDEO_EXTENSIONS = .mkv, .mp4, .avi, .m4v, .mov, .wmv, .mpg, .mpeg, .flv, .webm, .ts, .m2ts, .vob, .divx, .ogv, .3gp
 
+# File types that belong to a film and should go in the film list with it -
+# subtitles, .nfo, .sfv - when they are in the same folder as a video. In a
+# folder with no video (an album) they stay with the music.
+#
+# A release's COMPANION files follow its video (#411). Deciding per file has
+# one rough edge: a scene release is a video plus its subtitles, its .nfo and
+# its .sfv, and by extension alone only the video is video - the rest fell
+# into the music list, where a video-only library ended up publishing a
+# "master" list that was 99.97% .srt files. These extensions are routed to
+# the video list WHEN THEIR FOLDER HOLDS A VIDEO, and stay with the music
+# otherwise - an album's .nfo and .sfv sit beside its tracks exactly as
+# before. Only a folder's own files count, not its subfolders', so a
+# release folder decides for itself.
+#LIST_VIDEO_COMPANION_EXTENSIONS = .srt, .sub, .idx, .ass, .ssa, .vtt, .smi, .nfo, .sfv
+
+# A folder can be requested as a .rar only if it contains one of these file
+# types. The default is music formats, so albums can be packed but a folder
+# with one big film cannot.
+#
 # WHICH FOLDERS may be packed on demand with "!rar <folder>".
 # 
 # A folder earns a !rar row only if it holds one of these. Everything else is
@@ -255,6 +353,9 @@
 # simply be requested by name.
 #RAR_EXTENSIONS = .mp3, .flac, .m4a, .ogg, .opus, .wav, .aac, .wma, .ape, .wv, .alac, .aiff, .aif
 
+# Where files you download from other bots are saved. Kept separate from your
+# shared folders so they are not offered to others.
+#
 # Where files fetched FROM other bots (dcc_fetch.py) land. Deliberately
 # separate from FILE_DIRECTORY: that directory is the served library, scanned
 # by update_list.py and offered to everyone via @find/!<nick> - fetched files
@@ -262,13 +363,23 @@
 # (GET /api/fetch/<id>/download in webserver.py).
 #FETCHED_FILES_DIR = ./data/fetched
 
+# Where timed bans are saved.
+#
 # Safe, normalised paths into the data/ subdirectory
 #BANS_FILE = ./data/bans.txt
 
+# Where the lifetime totals, the speed record and the daily figures are saved.
+#
+# Lifetime totals, the speed record and the daily figures the advert and Stats page show
 #STATS_FILE = ./data/stats.txt
 
+# Where permanent bans (from !ban) are saved.
+#
+# Permanent hostmask patterns added with !ban; timed bans live in BANS_FILE
 #HARD_BANS_FILE = ./data/hard_bans.txt
 
+# Where the folders you added on the Library page are saved.
+#
 # The ordered set of folders served, once there is more than one of them
 # (#164). JSON rather than a settings.conf list for the reason KNOWN_BOTS_FILE
 # gives - the record has more than one field - and because settings_file.py
@@ -281,16 +392,24 @@
 # saves a folder set from the dashboard.
 #LIBRARY_FOLDERS_FILE = ./data/library_folders.json
 
+# Where your list definitions are saved, if you serve more than one list.
+#
 # Where the served LISTS are defined (#26). Absent on every install today,
 # which resolves to one implicit list over LIBRARY_FOLDERS_FILE/FILE_DIRECTORY
 # - so nothing changes until an operator defines more than one.
 #LISTS_FILE = ./data/lists.json
 
+# Where the commands sent on connect (such as your X login) are saved.
+#
 # Commands sent to the server once registered and BEFORE joining - X
 # login, usermodes, whatever the network wants. See on_connect.py for why
 # the ordering matters and why the file is never logged.
 #ON_CONNECT_FILE = ./data/on_connect.json
 
+# A text file whose contents are printed at the top of your list - a greeting,
+# your channel name, some ASCII art. If the file does not exist, nothing is
+# added.
+#
 # The operator's own banner, printed at the top of every generated list above
 # the bot's identity line. Free-form: several lines, ASCII art, a channel name,
 # whatever should greet whoever opens the file. Missing or empty means no
@@ -300,18 +419,26 @@
 # not survive "key = value", and editing it there would be miserable.
 #LIST_HEADER_FILE = ./data/list_header.txt
 
+# The most of that file that will be used, in bytes, so a wrong file cannot
+# bloat every list.
+#
 # Ceiling on the above. Someone will eventually point LIST_HEADER_FILE at the
 # wrong file, and without a cap that staples an arbitrary number of megabytes
 # onto every list request. Past this the banner is truncated and the run says
 # so, rather than shipping it silently.
 #LIST_HEADER_MAX_BYTES = 8192
 
+# Where the bot remembers the other bots it has seen advertising.
+#
 # Other bots seen advertising in our channels, and what each last published
 # about its own list. JSON rather than the column format the files above use:
 # the record has several fields and will grow, and stats.txt's fixed seven
 # columns is exactly the shape that turns "add a field" into a migration.
 #KNOWN_BOTS_FILE = ./data/known_bots.json
 
+# The search index over every list you have fetched from other bots. Can be
+# large; safe to delete, it is rebuilt at the next fetch.
+#
 # The cross-list search index: every fetched bot list in one SQLite database,
 # so the List Browser's filter can search all of them at once.
 # 
@@ -327,12 +454,17 @@
 # reads it.
 #LIST_INDEX_FILE = ./data/list_index.db
 
+# Where the count of how often each file was sent is kept, for the Most
+# downloaded table.
+#
 # One row per thing this bot has ever sent, {relative path or archive name ->
 # {name, kind, count}}. Feeds the Stats page's "Most downloaded" table. Not
 # bounded on purpose: a bot can only send what it shares, so the row count is
 # capped by the library itself.
 #DOWNLOAD_COUNTS_FILE = ./data/download_counts.json
 
+# Where the bot remembers which other bots' lists it holds.
+#
 # Which bots we hold a fetched list for, and where it lives on disk - one
 # small entry per bot ("bot", "fetched_at", "list_path", "entry_count",
 # "source_zip"), not the parsed list itself. Without this, the extracted
@@ -342,6 +474,9 @@
 # treatment as KNOWN_BOTS_FILE, for the same reason.
 #FETCHED_BOT_LISTS_FILE = ./data/fetched_bot_lists.json
 
+# Where finished downloads from other bots are recorded for the Downloads
+# page.
+#
 # Every 'complete'/'failed' cross-bot fetch row - the dashboard Downloads
 # table's only record of a finished fetch, and what its Delete button acts
 # on. Without this, config.fetch_queue was in-memory only: a file finished
@@ -353,16 +488,24 @@
 # once the process that was driving them is gone.
 #FETCH_HISTORY_FILE = ./data/fetch_history.json
 
+# Where the notices shown on the dashboard - kicks, failed rebuilds,
+# disconnects - are saved.
+#
 # Where the operator-facing notices live - the kicks, the give-ups, the
 # rebuilds that failed. Persisted because the events worth telling somebody
 # about are the ones that happen while nobody is looking.
 #NOTICES_FILE = ./data/notices.json
 
+# Where private messages to the bot are saved.
+#
 # Where unanswered private messages are kept. Persisted for the same reason
 # the notices are: the ones worth telling somebody about arrive while nobody
 # is looking.
 #PRIVATE_MESSAGES_FILE = ./data/private_messages.json
 
+# After recording a message from somebody, ignore further messages from them
+# for this many seconds, so one person cannot fill the page.
+#
 # How long one sender is ignored for after their message has been recorded.
 # 
 # The rate limiter upstream already stops a flood reaching the bot at all;
@@ -371,6 +514,10 @@
 # something, and four rows of it buries the next person who tries.
 #PRIVATE_MESSAGE_COOLDOWN_SECONDS = 300
 
+# Keep private messages people send to the bot so you can read them on the
+# Messages page. The bot does not answer them. Turn off to keep none and
+# instead reply once telling the sender where to go.
+#
 # WHETHER THE BOT KEEPS PRIVATE MESSAGES AT ALL.
 # 
 # True: an unrecognised private message is recorded and the Messages page
@@ -387,6 +534,9 @@
 # because somebody upgraded it is a surprise nobody asked for.
 #PRIVATE_MESSAGES_ENABLED = true
 
+# The one reply sent when private messages are turned off. %admin is replaced
+# by your admin nick. Leave blank to send nothing at all.
+#
 # What that one reply says.
 # 
 # "%admin" becomes ADMIN_NICK, or "the bot's owner" when no admin nick is
@@ -399,11 +549,19 @@
 # without editing code.
 #PRIVATE_MESSAGE_DECLINE_TEXT = This bot does not accept private messages. Please message %admin instead.
 
+# How many seconds before the same person can get that reply again. One day by
+# default - the reply is there so they learn where to go, not to repeat
+# itself.
+#
 # One reply per sender per day. Long on purpose: the reply exists so somebody
 # learns where to go, and telling the same person twice teaches them nothing
 # while costing another line on the wire.
 #PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS = 86400
 
+# The most of those replies to send in one burst window, across everybody.
+# Stops a wave of messages from turning into a wave of replies that delays the
+# transfers people are waiting on.
+#
 # A ceiling across EVERY sender, which the per-sender interval above cannot
 # provide on its own: two hundred nicks messaging within a minute are two
 # hundred first messages, each one individually owed a reply. That would sit
@@ -415,8 +573,15 @@
 # moves on. Nobody is owed an explanation of why they did not get one.
 #PRIVATE_MESSAGE_DECLINE_BURST = 20
 
+# The length of that burst window, in seconds.
+#
+# The window the burst ceiling above is counted over
 #PRIVATE_MESSAGE_DECLINE_BURST_SECONDS = 600
 
+# How many times the bot tries to get back into a channel after being kicked
+# before giving up on it. It waits until the next advert is due before each
+# try, so it never looks like it is fighting the kick. 0 means never rejoin.
+#
 # How many times to try rejoining a channel that has thrown us out, before
 # giving up on it.
 # 
@@ -433,6 +598,10 @@
 # 0 never rejoins at all.
 #REJOIN_ATTEMPTS = 3
 
+# Post a line in the channel each time a file has been sent. Everything else
+# about a transfer is private to the person who asked; this is the only public
+# part.
+#
 # Announce a finished transfer in the channel it was requested from.
 # 
 # This is the ONLY public message a transfer produces. The queue position, the
@@ -445,29 +614,55 @@
 
 
 [channel advertising (the advert clock)]
+# How often the bot posts its advert in the channel, in seconds. 300 is every
+# five minutes. Do not go much lower - channels do not like a bot that
+# advertises constantly.
+#
 # Time between each channel advert, in seconds
 #ANNOUNCE_INTERVAL = 300
 
 
 [limits, slots and queue control]
+# How many files the bot sends at the same time. Everyone else waits in the
+# queue. 3 is a good number for a home connection; raise it only if your
+# upload speed can take it.
+#
 # Maximum simultaneous live downloads
 #MAX_DCC_SLOTS = 3
 
+# The most files one person can have waiting in their queue at once.
+#
 # Most files a single user may queue
 #MAX_USER_QUEUE = 100
 
+# The most files that can be waiting across everybody's queues put together.
+#
 # Most files across every queue combined
 #MAX_GLOBAL_QUEUE = 1000
 
+# How many matching files are sent back to somebody who searches with @find.
+# Each result is one line to that person.
+#
 # Maximum result lines sent in reply to an @find
 #MAX_SEARCH_RESULTS = 5
 
+# How many seconds the bot waits between the lines it sends to the server.
+# Protects you from being disconnected for flooding. 5 is safe on Undernet;
+# lower is faster but riskier.
+#
 # Delay in seconds for the ordinary message queue
 #MSG_DELAY = 5.0
 
+# The same wait, for lines going to your debug channel.
+#
 # Pause between each line sent to the debug channel
 #DEBUG_MSG_DELAY = 0.5
 
+# Who may open the admin console over DCC chat, by host. On Undernet, log in
+# to X with mode +x and use your yourname.users.undernet.org host - only you
+# can have it. Empty means the console is off. Keep this in admin_config.py
+# rather than here.
+#
 # Empty list = console disabled, and every DCC CHAT request is ignored.
 # 
 # Each entry is a HOST pattern. It may be written bare ("operator.users.undernet.org")
@@ -486,6 +681,10 @@
 # Generated with:  python adminchat.py
 #ADMIN_PASSWORD_HASH = 
 
+# How the admin console's DCC chat is connected. Auto is right for most
+# people. Choose Listen if you are behind a VPN or a router that does not
+# forward ports, so the bot waits for you instead of trying to reach you.
+#
 # How the DCC CHAT connection gets made:
 # 
 # "auto"     dial the client, and listen instead if that fails.  (default)
@@ -499,6 +698,10 @@
 # own listener is already proven reachable by every DCC SEND it does.
 #ADMIN_CHAT_MODE = auto
 
+# Let the admin commands (!ban, !rehash, !update...) also work when you type
+# them in the channel or a private message, not only in the console. Turn off
+# once you use the console, so a stolen nick cannot run them.
+#
 # Whether !ban, !unban, !rehash, !update and !clearqueue still work when typed in
 # a channel or a private message.
 # 
@@ -512,6 +715,9 @@
 # not affected by this.
 #ADMIN_CHANNEL_COMMANDS = true
 
+# Send the bot's running report (transfers, joins, bans, problems) to your
+# debug channel.
+#
 # announce.send_debug() is the daemon's running commentary - transfers, joins,
 # bans, pack failures. Both destinations are on by default.
 # 
@@ -527,8 +733,80 @@
 # watching - is the one worth protecting.
 #DEBUG_TO_CHANNEL = true
 
+# Send that same report to the admin console and the dashboard's Console page.
+#
+# Debug lines also reach the admin DCC console and the dashboard's Console page
 #DEBUG_TO_CONSOLE = true
 
+# The time shown at the start of every line in the bot's window. %H:%M:%S is
+# hours:minutes:seconds; use %Y-%m-%d %H:%M:%S to include the date; leave
+# blank for no time.
+#
+# Every line the daemon prints to its console window - or to the file its
+# output is redirected to - is prefixed with the time it was written, in this
+# strftime format. Empty string = no prefix.
+# 
+# A log line with no time on it answers "what" and never "when": whether the
+# bot rejoined a channel on its own, how long a rebuild took, whether the
+# disconnect came before or after that transfer. Reported live - an operator
+# watching four channels fail to join could not tell from the window whether
+# the retry had fired yet, because nothing in it said when anything happened.
+# 
+# %H:%M:%S is the mIRC convention and enough for a window watched live. A log
+# kept for days wants the date: "%Y-%m-%d %H:%M:%S". The dashboard's Console
+# page keeps its own times and is unaffected either way.
+#CONSOLE_TIMESTAMP_FORMAT = %H:%M:%S
+
+# Show in the console who asked for which file.
+#
+# THE CONSOLE FEED (#528). An OmenServe operator sees every request, send and
+# served search live inside mIRC; a DCCore operator saw completions and
+# failures in the admin console and nothing else - "it sends but I can't
+# know until I look at the stats in the browser". The console now carries
+# one line per event, and these switches say which kinds it shows. They
+# govern the admin DCC console and the dashboard's Console page only; the
+# IRC debug channel has its own switch below.
+# REQUEST - somebody asked for a file or a folder
+#CONSOLE_SHOW_REQUESTS = true
+
+# Show in the console when a request goes into somebody's queue, and at which
+# position.
+#
+# QUEUED - a request went into somebody's queue, and at what position
+#CONSOLE_SHOW_QUEUE = true
+
+# Show in the console when a transfer starts, resumes and completes.
+#
+# SENDING, RESUMED and SENT - a transfer starting, resuming and completing
+#CONSOLE_SHOW_SENDS = true
+
+# Show in the console when a transfer fails, and why.
+#
+# FAILED - a transfer that did not complete, and why
+#CONSOLE_SHOW_FAILURES = true
+
+# Show in the console who searched for what, and how many results they got.
+#
+# SEARCH - somebody searched, and how many results they got
+#CONSOLE_SHOW_SEARCHES = true
+
+# Also send requests, queue positions, transfer starts and searches to your
+# IRC debug channel. Off by default: every line to a channel takes a turn in
+# the same queue as the adverts and replies people are waiting for. Finished
+# and failed transfers go there regardless.
+#
+# The feed's new events - requests, queue positions, transfer starts, resumes
+# and searches - go to the IRC debug channel only if this is on. Off by
+# default on purpose: every line to a channel takes a MSG_DELAY slot on the
+# same pacer as the adverts, the resume replies and the queue notices, so on a
+# busy bot a chatty feed there delays the things people are waiting for. The
+# console has no such cost. Completed and failed transfers still reach the
+# channel under DEBUG_TO_CHANNEL, as they always have.
+#DEBUG_CHANNEL_FEED = false
+
+# The name of the small file written beside your list holding the library's
+# total size, as shown in the advert.
+#
 # The two side files update_list.py publishes alongside the master list, holding
 # the human-readable total size and the raw byte count that the channel advert and
 # @<nick>-que read back. Named here rather than as a literal in both list.py and
@@ -550,8 +828,13 @@
 # tests/test_long_paths.py, which read "15.59KB" where a track should have been.
 #LIST_SIZE_FILE = dccore.size.txt
 
+# The name of the small file beside your list holding the exact byte total.
+#
+# The exact byte total of the shared files, written beside the list at each rebuild
 #LIST_RAWBYTES_FILE = dccore.rawbytes.txt
 
+# Where a running list rebuild reports its progress for the dashboard.
+#
 # Where a running rebuild reports what it is doing, for the dashboard to read.
 # 
 # A FILE, because update_list.py runs as a SUBPROCESS (see
@@ -565,6 +848,10 @@
 # never be mistaken for part of a published list.
 #LIST_PROGRESS_FILE = ./data/list_progress.json
 
+# How much data the bot hands to the network at a time during a send, in
+# bytes. 65536 (64 KB) is already sixteen times mIRC's default and fine for
+# almost everyone; making it bigger rarely speeds anything up.
+#
 # How many bytes are read and written per pass of a DCC send, in bytes.
 # 
 # mIRC calls this the packet size and defaults it to 4 KB, which is why raising
@@ -587,6 +874,11 @@
 # 64 KB - one of 4096/8192/16384/32768/65536/131072
 #DCC_BLOCK_SIZE = 65536
 
+# How much data the operating system may hold in flight for one send, in
+# bytes. Leave at 0 to let Windows or Linux decide - that is right for nearly
+# every connection. Only worth experimenting with on a very fast link to a
+# distant downloader.
+#
 # The socket send buffer for a DCC transfer, in bytes. 0 leaves it to the OS.
 # 
 # THIS IS THE ONE THAT MATTERS ON A FAST, DISTANT LINK, and it is not the
@@ -603,10 +895,23 @@
 # 0 = per-platform default (4MB on Windows, OS auto-tuning on Linux)
 #DCC_SEND_BUFFER = 0
 
+# The first port the bot listens on when sending a file. If you are behind a
+# router, forward this whole range (start to end) to the machine running the
+# bot, or nobody can download from you.
+#
+# First port the bot listens on for outgoing DCC sends; forward this range if you are behind NAT
 #DCC_PORT_START = 55000
 
+# The last port of that range. Each transfer running at the same time needs
+# its own port, so keep at least as many ports as you have send slots.
+#
+# Last port of that range; each simultaneous transfer needs one free port, so keep at least MAX_DCC_SLOTS
 #DCC_PORT_END = 55010
 
+# How many downloads FROM other bots you run at the same time. Separate from
+# your own send slots, so your downloading never takes slots away from people
+# downloading from you.
+#
 # Deliberately separate from MAX_DCC_SLOTS above: that governs OUR outbound
 # SENDs to people requesting from us. Conflating the two directions would let
 # outbound leech traffic (us fetching from others) starve our own serving
@@ -614,6 +919,10 @@
 # Max simultaneous in-flight/offered fetches
 #MAX_FETCH_SLOTS = 3
 
+# When another bot advertises that its list has changed, fetch the new list
+# automatically. Off by default because it uses the other bot's bandwidth
+# without you asking each time.
+#
 # How long a finished (complete/failed) cross-bot fetch stays in the Downloads
 # table. Age is the primary rule because that table is a recent record of what
 # happened, not an archive; the row cap below is only a backstop for a burst of
@@ -628,16 +937,26 @@
 # means. A timer alone would re-ask every bot for a list we already have.
 #AUTO_REFETCH_LISTS = false
 
+# The least time between two automatic fetches of the same bot's list, in
+# hours, so a bot that rebuilds hourly is not fetched hourly.
+#
 # How stale a held list may get before it is re-asked for, in hours. Not how
 # often the check runs (that is hourly); this is the floor on how often any one
 # bot is asked, so a bot rebuilding hourly is not re-fetched hourly.
 #AUTO_REFETCH_INTERVAL_HOURS = 24
 
+# The most lists to re-fetch in one go. If many are out of date at once, the
+# rest are picked up on later rounds, oldest first.
+#
 # Most lists to ask for in one sweep. A bot back after a month offline has a
 # lot of stale lists, and asking for all of them at once is a burst of
 # outbound requests nobody asked for. The rest go next sweep, oldest first.
 #AUTO_REFETCH_MAX_PER_RUN = 3
 
+# When you rehash (reload settings), how many seconds the bot waits for
+# running transfers to finish first before reloading anyway. 0 reloads
+# straight away.
+#
 # How long a rehash waits for transfers in flight to finish before reloading
 # anyway, in seconds (#310). A transfer can sit idle for as long as the far
 # end keeps its socket open, so this cannot be unbounded: a bot that cannot
@@ -645,12 +964,20 @@
 # occasionally interrupts a transfer. 0 reloads immediately, as before.
 #REHASH_TRANSFER_WAIT = 120
 
+# How many days a finished download from another bot stays in the Downloads
+# table. The downloaded file itself is kept regardless.
+#
 # Days a finished fetch stays in the history
 #FETCH_HISTORY_DAYS = 30
 
+# The most finished downloads kept in that table, whatever their age.
+#
 # Hard cap on finished rows, whatever their age
 #FETCH_HISTORY_MAX_ROWS = 500
 
+# The biggest single file you will accept from another bot, in bytes. Anything
+# larger is refused before the download starts. 0 means no limit.
+#
 # Interacts with flood protection: a bot's DCC SEND offers are metered like any
 # other command, so this must stay well below MAX_REQUESTS (per REQUEST_WINDOW)
 # or a bot answering your own fetch requests can trip the flood gate and be muted.
@@ -662,6 +989,9 @@
 # 200 MB - reject the offer before we even connect; 0 = no limit
 #MAX_FETCH_FILE_SIZE = 209715200
 
+# The biggest unpacked list you will read from another bot, in bytes. Every
+# line of it is kept in memory, so this is a memory limit. 0 uses the default.
+#
 # The largest EXTRACTED list text this bot will parse from a peer, in bytes.
 # Every "!" line in it becomes a retained row, so this bounds memory rather
 # than disk. It was a fixed 20 MB, set from this operator's own 4 MB list -
@@ -671,6 +1001,10 @@
 # 128 MB - 4x the largest list actually seen
 #MAX_LIST_TEXT_SIZE = 134217728
 
+# The biggest folder the bot will pack as a .rar, in bytes. Stops somebody
+# asking for a folder of hundreds of gigabytes. 10 GB fits any album or box
+# set; 0 means no limit.
+#
 # The largest folder !rar will pack, in bytes. 0 means no limit.
 # 
 # NOTHING BOUNDED THIS BEFORE. A request packs whatever the folder holds, and
@@ -689,6 +1023,10 @@
 # 10 GB - refuse to pack more than this
 #MAX_RAR_FOLDER_SIZE = 10737418240
 
+# The biggest list archive you will accept from another bot, in bytes. A real
+# list is a few megabytes; this stops a bad offer sending you something huge.
+# 0 means no limit.
+#
 # A "list" request_type row (a fetched master-list zip, see list_fetch.py) is a
 # text index, never a real download - a whole 1.21TB/47,420-file library
 # compresses to a few MB. MAX_FETCH_FILE_SIZE's 200MB let a hostile "list" offer
@@ -706,12 +1044,22 @@
 # 64 MB - the archive, not the text inside it; 0 = no limit
 #MAX_FETCH_LIST_FILE_SIZE = 67108864
 
+# The longest a file download from another bot may take in total, in seconds,
+# before it is abandoned.
+#
 # Seconds - total wall-clock per transfer (against a slow "drip" that keeps resetting the idle timeout)
 #FETCH_TRANSFER_TIMEOUT = 600
 
+# When you request a file from another bot, how many seconds to wait for it to
+# offer the file before giving up.
+#
 # Seconds an "offered" row waits for a DCC SEND before it's marked failed
 #FETCH_OFFER_TIMEOUT = 60
 
+# When you request a whole folder (.rar) from another bot, how many seconds to
+# wait for its offer. Much longer than for a single file, because the other
+# bot has to pack the folder first.
+#
 # A "folder" request_type row (dcc_fetch.py) asks another bot to pack a whole
 # folder/album as .rar via its own "!rar" convention and shares the same
 # MAX_FETCH_SLOTS pool as every other fetch - it gets its own, separate
@@ -725,6 +1073,10 @@
 # offered/listening row - just for longer.
 #FETCH_FOLDER_OFFER_TIMEOUT = 1800
 
+# The same wait, but for a bot that does not publish a folder list and
+# probably cannot pack at all - shorter, so a slot is not held for half an
+# hour waiting for nothing.
+#
 # ...AND HOW LONG TO WAIT FROM A BOT WITH NO SIGN OF PACKING ANYTHING.
 # 
 # The long timeout above is for a bot that really is packing an album, which
@@ -739,10 +1091,17 @@
 # API, or a bot that has stopped packing since its list was fetched.
 #FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED = 120
 
+# The biggest packed folder (.rar) you will accept from another bot, in bytes.
+# 0 means no limit.
+#
 # MAX_FETCH_FOLDER_FILE_SIZE: 2GB - separate, larger cap than
 # MAX_FETCH_FILE_SIZE for a whole packed album/discography archive.
 #MAX_FETCH_FOLDER_FILE_SIZE = 2147483648
 
+# The longest a folder (.rar) download from another bot may take in total, in
+# seconds. Larger than the single-file limit because a packed discography is
+# much bigger.
+#
 # FETCH_FOLDER_TRANSFER_TIMEOUT: a "folder" row's own wall-clock ceiling for
 # _run_transfer(), separate from FETCH_TRANSFER_TIMEOUT. That value is sized for
 # the 200MB MAX_FETCH_FILE_SIZE cap; a folder row's 2GB cap is 10x larger but
@@ -760,6 +1119,9 @@
 # the same 10.24x the size cap was: 600 * (2147483648 / MAX_FETCH_FILE_SIZE).
 #FETCH_FOLDER_TRANSFER_TIMEOUT = 6144
 
+# How many seconds must pass between two of those search-all-bots searches, to
+# be polite to the other bots in the channel.
+#
 # How often a new @find broadcast (POST /api/search/broadcast) is allowed to
 # start. Independent of the UI - courtesy to other bots/operators on a shared
 # public channel, not just a UI detail.
@@ -768,15 +1130,25 @@
 
 
 [anti-flood and automatic protection]
+# How many commands (searches or file requests) one person may send within the
+# time window below before they are muted.
+#
 # Most commands (search or file) per time window
 #MAX_REQUESTS = 10
 
+# The length of that time window, in seconds.
+#
 # Size of the rolling time window, in seconds
 #REQUEST_WINDOW = 5
 
+# How many seconds somebody is ignored after their first flood.
+#
 # Mute in seconds on the first flood violation
 #MUTE_TIME = 30
 
+# How many seconds somebody is banned if they keep flooding while already
+# muted.
+#
 # Escalation ban, in seconds, for someone who keeps flooding while already
 # muted. This used to expire at local midnight, which made the punishment
 # depend on the clock rather than the offence: trip it at 00:01 and you were
@@ -787,12 +1159,23 @@
 # Ban in seconds when someone floods while muted
 #FLOOD_BAN_SECONDS = 3600
 
+# How many times the bot retries sending one queued file if the download does
+# not connect or fails, before dropping it from the queue and telling the
+# person.
+#
 # Attempts per queued file before it is dropped (see dcc.release_queue_entry)
 #MAX_SEND_FAILS = 3
 
+# How many seconds a folder may take to pack before the bot gives up on it.
+#
 # Longest a rar packing run may take, in seconds, before it is abandoned
 #RAR_TIMEOUT = 1800
 
+# A hard limit in seconds on how long a list rebuild may run. 0 means no
+# limit, which is the right choice: a huge library can genuinely take hours,
+# and the setting below already catches a rebuild that has stopped doing
+# anything.
+#
 # A REBUILD THAT IS STILL WORKING IS NOT HUNG, and a wall clock cannot tell
 # the two apart. This used to be a flat 1800s, which is a bet that no library
 # takes longer than half an hour to walk - and an 80 TB library on a mapped
@@ -811,6 +1194,10 @@
 # Absolute cap on a !update run, in seconds. 0 = no cap; the stall check below is the real guard.
 #LIST_UPDATE_TIMEOUT = 0
 
+# If a list rebuild reports no progress for this many seconds, it is treated
+# as stuck and stopped. 15 minutes is generous on purpose so a slow network
+# drive is not cut off.
+#
 # How long the rebuild may report NOTHING before it is treated as wedged.
 # 
 # Generous on purpose. The scan writes on every directory it enters, but the
@@ -825,6 +1212,10 @@
 # commands.handle_list_update_request().
 #LIST_UPDATE_STALL_SECONDS = 900
 
+# The colour scheme for everything the bot says in the channel - the advert,
+# the notices, the search results. Pick one you like; it is how people tell
+# your bot apart from the others.
+#
 # How everything this bot says in a channel or a notice is coloured. One name
 # selects a palette that all eight outbound message paths read - see theme.py
 # for the roles and the presets.
@@ -837,6 +1228,9 @@
 # classic, midnight, forest, orchid, plain
 #THEME = classic
 
+# Override one colour of the chosen theme: the block that frames each message.
+# Leave unset to keep the theme's own colour.
+#
 # Override individual roles on top of the chosen preset, for an operator who
 # would rather be unique than pick from a list - each is a raw mIRC code
 # string like "\x0306,06", or None (the default) to leave that role at
@@ -851,18 +1245,39 @@
 # still needs a new key here, a generator update and a theme.py change - the
 # old dict form could have accepted an unknown role name for free. That loss
 # is accepted; concrete uniformity now outweighs a hypothetical future role.
+# The outer block that frames a section
 #CUSTOM_THEME_BORDER = 
 
+# Override one colour of the chosen theme: the block between the parts of a
+# message.
+#
+# The block between fields
 #CUSTOM_THEME_SEPARATOR = 
 
+# Override one colour of the chosen theme: the background the text sits on.
+#
+# The plate the text sits on
 #CUSTOM_THEME_TEXTBOX = 
 
+# Override one colour of the chosen theme: the numbers and names in a message,
+# like a file count or a speed.
+#
+# A live figure - a count, a speed, a nickname
 #CUSTOM_THEME_VALUE = 
 
+# Override one colour of the chosen theme: the parts meant to stand out.
+#
+# A figure meant to catch the eye
 #CUSTOM_THEME_ALERT = 
 
+# Override one colour of the chosen theme: timestamps and secondary text.
+#
+# Timestamps and secondary text
 #CUSTOM_THEME_ACCENT = 
 
+# Turn the web dashboard on. Off by default so nothing opens a web page just
+# because the bot was updated. Needs the Flask package installed.
+#
 # OFF by default, same pattern as ADMIN_HOSTMASKS below: a feature that opens
 # a network-facing surface should never be on just because someone pulled and
 # restarted. Opt in from admin_config.py, not here.
@@ -874,6 +1289,11 @@
 # dashboard.
 #WEBUI_ENABLED = false
 
+# Show the Console page in the dashboard, which can run admin commands. Unset
+# means on while the dashboard is reachable only from this computer, off
+# otherwise - because on a network the dashboard is protected by the password
+# alone.
+#
 # The Console page - the admin console in a browser tab - is OFF unless this
 # says otherwise, separately from WEBUI_ENABLED above.
 # 
@@ -915,6 +1335,9 @@
 # already made this choice has it made again for them.
 #WEBUI_CONSOLE_ENABLED = 
 
+# Open the dashboard in your browser automatically when the bot starts. Only
+# happens when the dashboard is limited to this computer.
+#
 # Open the dashboard in the default browser when the daemon starts.
 # 
 # Only ever when the dashboard is on AND bound to loopback: a browser on a
@@ -924,6 +1347,10 @@
 # is not a reason to stop the bot starting.
 #WEBUI_OPEN_BROWSER = true
 
+# Show a folder picker on the Library page instead of typing paths. Off by
+# default because it lets a logged-in dashboard user see the names of folders
+# on this machine.
+#
 # The Settings page's folder picker (#164 step 5). Off, and its own switch
 # rather than riding along with WEBUI_CONSOLE_ENABLED, for the rule three
 # lines above: an admin surface reachable from a weaker path gets its own
@@ -949,6 +1376,10 @@
 # folder rows on the Settings page work either way.
 #WEBUI_FOLDER_BROWSER_ENABLED = false
 
+# Which addresses the dashboard listens on. 127.0.0.1 means only this computer
+# can open it. 0.0.0.0 makes it reachable from other devices on your home
+# network - never forward it to the internet, the connection is not encrypted.
+#
 # LOGIN REQUIRED, shared with the DCC CHAT admin console: every route,
 # including static assets, needs a session started by POSTing the password
 # for ADMIN_PASSWORD_HASH to /login (see webserver.py's module docstring).
@@ -965,4 +1396,8 @@
 # on any network you do not trust.
 #WEBUI_HOST = 127.0.0.1
 
+# The dashboard's port. Open http://127.0.0.1:8420 (or whatever you set) in
+# your browser.
+#
+# The dashboard's port; open http://WEBUI_HOST:WEBUI_PORT in a browser
 #WEBUI_PORT = 8420

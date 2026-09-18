@@ -20,6 +20,7 @@ looked wrong.
 import io
 import os
 import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -150,7 +151,17 @@ class TheWholeExchange(DCCoreTestCase):
                     irc, USER, f"DCC RESUME {offered} {port} {resume_at}"),
                 "the resume request was not accepted")
 
+        # A REAL DCC receiver acknowledges what it holds - a 4-byte big-endian
+        # running total after every packet, absolute from the start of the
+        # file even after a resume. This fixture used to read until EOF and
+        # never ack, which is the same blind spot #526 found in the sender:
+        # the bot called a transfer complete the moment sendall() returned,
+        # and a receiver that never spoke could not have told it otherwise.
+        # Now the bot waits for the final ack, so a silent receiver is - as it
+        # should be - a failed transfer (pinned in
+        # tests/test_complete_means_the_receiver_acked_it.py).
         received = bytearray()
+        held = resume_at or 0
         client = socket.create_connection(("127.0.0.1", port), timeout=20)
         try:
             client.settimeout(20)
@@ -159,6 +170,8 @@ class TheWholeExchange(DCCoreTestCase):
                 if not chunk:
                     break
                 received.extend(chunk)
+                held += len(chunk)
+                client.sendall(struct.pack("!I", held & 0xFFFFFFFF))
         finally:
             client.close()
         sender.join(30)

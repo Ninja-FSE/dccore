@@ -247,10 +247,12 @@ class TheDashboardOffersTheButton(unittest.TestCase):
 
     def test_the_label_says_cancel_not_delete(self):
         """Nothing has been downloaded for a pending row, so "Delete" would
-        describe throwing away a file that does not exist."""
+        describe throwing away a file that does not exist. The label is a
+        translation key (t("common.cancel") / t("common.delete")), not
+        literal text - see web/lang/en.json."""
         window = self.render_downloads()
 
-        self.assertIn('"Cancel" : "Delete"', window)
+        self.assertIn('t("common.cancel") : t("common.delete")', window)
 
 
 class TheConfirmPromptMatchesWhatIsBeingRemoved(unittest.TestCase):
@@ -264,15 +266,18 @@ class TheConfirmPromptMatchesWhatIsBeingRemoved(unittest.TestCase):
 
     def test_a_queued_row_does_not_warn_about_an_irreversible_delete(self):
         """A cancelled request can simply be queued again, so the finished-row
-        warning is both wrong and needlessly alarming."""
+        warning is both wrong and needlessly alarming. The prompt text is a
+        translation key - see web/lang/en.json's download.confirmRemoveQueued."""
         window = self.click_handler()
 
         self.assertIn("btn.dataset.pending", window)
-        self.assertIn("Nothing has been downloaded yet", window)
+        self.assertIn('t("download.confirmRemoveQueued")', window)
 
     def test_the_finished_row_warning_is_still_there(self):
-        """Deleting a completed fetch DOES remove a file from disk."""
-        self.assertIn("This cannot be undone", self.click_handler())
+        """Deleting a completed fetch DOES remove a file from disk. The
+        prompt text is a translation key - see web/lang/en.json's
+        download.confirmDeleteFile."""
+        self.assertIn('t("download.confirmDeleteFile")', self.click_handler())
 
 
 # The two HTTP-layer assertions for this finding (413 really reaches the wire,

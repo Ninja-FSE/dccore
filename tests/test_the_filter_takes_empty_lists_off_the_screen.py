@@ -130,13 +130,16 @@ class TheCountIsTheAnswerTheRowsUsedToGive(unittest.TestCase):
         self.assertIn("renderRevealButton(filtering, hidden)", body)
 
     def test_the_button_says_how_many(self):
-        self.assertIn('"Show " + hidden + " with no match"',
+        """The wording is a translation key, not literal text - see
+        web/lang/en.json's filelists.showHiddenNoMatch."""
+        self.assertIn('t("filelists.showHiddenNoMatch").replace("{count}", hidden)',
                       function("renderRevealButton"))
 
     def test_and_offers_the_way_back_out_again(self):
         """A toggle, not a one-way door: somebody who looked at what was
-        hidden wants it back without retyping the term."""
-        self.assertIn('"Hide lists with no match"', function("renderRevealButton"))
+        hidden wants it back without retyping the term. The wording is a
+        translation key - see web/lang/en.json's filelists.hideListsNoMatch."""
+        self.assertIn('t("filelists.hideListsNoMatch")', function("renderRevealButton"))
 
     def test_nothing_hidden_means_no_button(self):
         """It would otherwise sit there offering to reveal nothing, which

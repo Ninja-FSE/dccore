@@ -97,12 +97,19 @@ class TheConsoleFieldSaysWhatIsActuallyHappening(DCCoreTestCase):
         """escapeHtml() encodes & < > but NOT quotes, so a value that reaches
         an ATTRIBUTE is an injection risk. This one is text content, which is
         what escapeHtml is correct for - pinned because the distinction is the
-        whole reason app.js has that comment."""
+        whole reason app.js has that comment.
+
+        fieldNote(field) wraps field.note - it returns the same server text
+        unchanged for every field except WEBUI_CONSOLE_ENABLED, whose note it
+        rebuilds from a translation template so it can be read in the chosen
+        language (see fieldNote's own comment) - but the result still reaches
+        the page through this same escapeHtml() call into text content, never
+        into an attribute."""
         with io.open(os.path.join(REPO_ROOT, "web", "app.js"),
                      encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertIn('escapeHtml(field.note)', source)
+        self.assertIn('escapeHtml(fieldNote(field))', source)
         self.assertNotIn('data-note="' , source)
 
 

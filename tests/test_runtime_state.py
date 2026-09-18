@@ -299,7 +299,8 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
         # types to skip is the whole reason an operator runs !rehash after
         # editing it.
         allowed = {"ADMIN_HOSTMASKS", "LIST_IGNORED_EXTENSIONS",
-                   "LIST_VIDEO_EXTENSIONS", "RAR_EXTENSIONS"}
+                   "LIST_VIDEO_EXTENSIONS", "LIST_VIDEO_COMPANION_EXTENSIONS",
+                   "RAR_EXTENSIONS"}
 
         with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())

@@ -23,6 +23,7 @@ someone deletes the guard, these tests fail instead of quietly passing.
 """
 import io
 import os
+import re
 import subprocess
 import tempfile
 import sys
@@ -219,7 +220,12 @@ class TheDaemonInstallsItAtStartup(unittest.TestCase):
             f"import oserve, sys; sys.stderr.write({SWEDISH!r})", "cp1253")
         self.assertEqual(result.returncode, 0,
                          result.stderr.decode("utf-8", "replace"))
-        self.assertEqual(result.stderr.decode("utf-8"), SWEDISH)
+        # Importing oserve now also installs the console timestamp on stderr,
+        # so the line arrives as "[HH:MM:SS] <text>". This test is about the
+        # characters, not the clock: strip the stamp and compare the rest
+        # exactly, rather than weakening to assertIn.
+        written = re.sub(r"^\[\d\d:\d\d:\d\d\] ", "", result.stderr.decode("utf-8"))
+        self.assertEqual(written, SWEDISH)
         self.assertNotIn(BACKSLASH, result.stderr)
 
 

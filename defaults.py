@@ -20,8 +20,8 @@ import runtime
 # ---------------------------------------------------------------------
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
-DEBUG_MODE: bool    = False
-SCRIPT_VERSION: str = "DCCore v1.12.1"
+DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
+SCRIPT_VERSION: str = "DCCore v1.12.2"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
@@ -53,7 +53,7 @@ LIST_BASE_NAME: str = "DCCore"
 # operator's identity to avoid. It is NOT in settings_file.REQUIRED for
 # exactly that reason - see REQUIRED's own comment.
 SERVER: str        = "irc.undernet.org"
-PORT: int          = 6667
+PORT: int          = 6667          # The server's port; 6667 is plain IRC, and this bot speaks no TLS
 # NICKNAME, ADMIN_NICK and CHANNEL are None - not a real value - because
 # they ARE in settings_file.REQUIRED: oserve.startup() refuses to boot while
 # any of them is still blank, so there is no shipped value here for a
@@ -62,9 +62,9 @@ PORT: int          = 6667
 # reasoning, and RAR_BINARY above for the same "None means unset" convention
 # this already used before REQUIRED existed.
 NICKNAME: str      = None
-ALT_NICKNAME: str  = "DCCore_"
-ADMIN_NICK: str    = None
-CHANNEL: str       = None
+ALT_NICKNAME: str  = "DCCore_"     # Used when NICKNAME is taken; the bot keeps trying to reclaim the main nick afterwards
+ADMIN_NICK: str    = None          # Who may use the admin commands (!ban, !rehash, !update...), comma-separated for more than one; the DCC console checks ADMIN_HOSTMASKS as well
+CHANNEL: str       = None          # The channel(s) to serve in, comma-separated; the first one is where announcements go by default
 # Ships BLANK, and that is a deliberate reversal of #171's "#dccore-debug".
 #
 # That default was fine while this project was two operators who knew each
@@ -110,8 +110,8 @@ PAUSE_ON_UPDATE: bool = True  # MAINTENANCE SWITCH: when True the bot pauses ALL
 FILE_DIRECTORY: str   = None
 RAR_ENABLED: bool     = True        # Off refuses every !rar request with a notice; ordinary single-file transfers are unaffected
 RAR_BINARY: str       = None       # None = look for rar/rar.exe on PATH (and WinRAR's install dir)
-TMP_ZIP_DIR: str      = "./data/tmp_zips"
-LOCAL_LIST_DIR: str   = "./lists"
+TMP_ZIP_DIR: str      = "./data/tmp_zips"   # Where !rar archives and list zips are built before sending; cleaned up after each transfer
+LOCAL_LIST_DIR: str   = "./lists"           # Where the bot's own published list files live; extra lists get a subfolder each
 
 # How the master list is handed to somebody who types "@<nick>": as the plain
 # text file, packed into a .zip, or packed into a .rar. OmenServe has offered
@@ -205,16 +205,28 @@ SEPARATE_VIDEO_LIST: bool = True
 #
 # Anything that is NOT one of these goes into the music list, including a
 # file with no extension at all. That is the rule for artwork, cue sheets and
-# notes, which sit beside the tracks they belong to; a film's subtitles land
-# there too, which is the one rough edge of deciding per file rather than per
-# folder. Per file is deliberate: a folder holding both an album and a video
-# should not have to pick.
+# notes, which sit beside the tracks they belong to. Per file is deliberate:
+# a folder holding both an album and a video should not have to pick.
 #
 # The video list is only published when there is video to put in it, so a
 # music-only library never gains an empty file it has no use for.
 LIST_VIDEO_EXTENSIONS: list = [
     ".mkv", ".mp4", ".avi", ".m4v", ".mov", ".wmv", ".mpg", ".mpeg",
     ".flv", ".webm", ".ts", ".m2ts", ".vob", ".divx", ".ogv", ".3gp",
+]
+
+# A release's COMPANION files follow its video (#411). Deciding per file has
+# one rough edge: a scene release is a video plus its subtitles, its .nfo and
+# its .sfv, and by extension alone only the video is video - the rest fell
+# into the music list, where a video-only library ended up publishing a
+# "master" list that was 99.97% .srt files. These extensions are routed to
+# the video list WHEN THEIR FOLDER HOLDS A VIDEO, and stay with the music
+# otherwise - an album's .nfo and .sfv sit beside its tracks exactly as
+# before. Only a folder's own files count, not its subfolders', so a
+# release folder decides for itself.
+LIST_VIDEO_COMPANION_EXTENSIONS: list = [
+    ".srt", ".sub", ".idx", ".ass", ".ssa", ".vtt", ".smi",
+    ".nfo", ".sfv",
 ]
 
 # WHICH FOLDERS may be packed on demand with "!rar <folder>".
@@ -253,8 +265,8 @@ FETCHED_FILES_DIR: str = "./data/fetched"
 
 # Safe, normalised paths into the data/ subdirectory
 BANS_FILE: str      = "./data/bans.txt"
-STATS_FILE: str     = "./data/stats.txt"
-HARD_BANS_FILE: str = "./data/hard_bans.txt"
+STATS_FILE: str     = "./data/stats.txt"       # Lifetime totals, the speed record and the daily figures the advert and Stats page show
+HARD_BANS_FILE: str = "./data/hard_bans.txt"   # Permanent hostmask patterns added with !ban; timed bans live in BANS_FILE
 
 # The ordered set of folders served, once there is more than one of them
 # (#164). JSON rather than a settings.conf list for the reason KNOWN_BOTS_FILE
@@ -400,7 +412,7 @@ PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS: int = 86400
 # than more, so past this the replies are dropped silently until the window
 # moves on. Nobody is owed an explanation of why they did not get one.
 PRIVATE_MESSAGE_DECLINE_BURST: int = 20
-PRIVATE_MESSAGE_DECLINE_BURST_SECONDS: int = 600
+PRIVATE_MESSAGE_DECLINE_BURST_SECONDS: int = 600   # The window the burst ceiling above is counted over
 # How many times to try rejoining a channel that has thrown us out, before
 # giving up on it.
 #
@@ -507,7 +519,44 @@ ADMIN_CHANNEL_COMMANDS: bool = True
 # journal always have it. That case - something going wrong while nobody is
 # watching - is the one worth protecting.
 DEBUG_TO_CHANNEL: bool = True
-DEBUG_TO_CONSOLE: bool = True
+DEBUG_TO_CONSOLE: bool = True    # Debug lines also reach the admin DCC console and the dashboard's Console page
+
+# Every line the daemon prints to its console window - or to the file its
+# output is redirected to - is prefixed with the time it was written, in this
+# strftime format. Empty string = no prefix.
+#
+# A log line with no time on it answers "what" and never "when": whether the
+# bot rejoined a channel on its own, how long a rebuild took, whether the
+# disconnect came before or after that transfer. Reported live - an operator
+# watching four channels fail to join could not tell from the window whether
+# the retry had fired yet, because nothing in it said when anything happened.
+#
+# %H:%M:%S is the mIRC convention and enough for a window watched live. A log
+# kept for days wants the date: "%Y-%m-%d %H:%M:%S". The dashboard's Console
+# page keeps its own times and is unaffected either way.
+CONSOLE_TIMESTAMP_FORMAT: str = "%H:%M:%S"
+
+# THE CONSOLE FEED (#528). An OmenServe operator sees every request, send and
+# served search live inside mIRC; a DCCore operator saw completions and
+# failures in the admin console and nothing else - "it sends but I can't
+# know until I look at the stats in the browser". The console now carries
+# one line per event, and these switches say which kinds it shows. They
+# govern the admin DCC console and the dashboard's Console page only; the
+# IRC debug channel has its own switch below.
+CONSOLE_SHOW_REQUESTS: bool = True    # REQUEST - somebody asked for a file or a folder
+CONSOLE_SHOW_QUEUE: bool = True       # QUEUED - a request went into somebody's queue, and at what position
+CONSOLE_SHOW_SENDS: bool = True       # SENDING, RESUMED and SENT - a transfer starting, resuming and completing
+CONSOLE_SHOW_FAILURES: bool = True    # FAILED - a transfer that did not complete, and why
+CONSOLE_SHOW_SEARCHES: bool = True    # SEARCH - somebody searched, and how many results they got
+
+# The feed's new events - requests, queue positions, transfer starts, resumes
+# and searches - go to the IRC debug channel only if this is on. Off by
+# default on purpose: every line to a channel takes a MSG_DELAY slot on the
+# same pacer as the adverts, the resume replies and the queue notices, so on a
+# busy bot a chatty feed there delays the things people are waiting for. The
+# console has no such cost. Completed and failed transfers still reach the
+# channel under DEBUG_TO_CHANNEL, as they always have.
+DEBUG_CHANNEL_FEED: bool = False
 
 # The two side files update_list.py publishes alongside the master list, holding
 # the human-readable total size and the raw byte count that the channel advert and
@@ -529,7 +578,7 @@ DEBUG_TO_CONSOLE: bool = True
 # the daemon would have picked its own size file as the master list. Caught by
 # tests/test_long_paths.py, which read "15.59KB" where a track should have been.
 LIST_SIZE_FILE: str     = "dccore.size.txt"
-LIST_RAWBYTES_FILE: str = "dccore.rawbytes.txt"
+LIST_RAWBYTES_FILE: str = "dccore.rawbytes.txt"   # The exact byte total of the shared files, written beside the list at each rebuild
 
 # Where a running rebuild reports what it is doing, for the dashboard to read.
 #
@@ -579,8 +628,8 @@ DCC_BLOCK_SIZE: int = 65536      # 64 KB - one of 4096/8192/16384/32768/65536/13
 # link can be worse than the default on every other. It is here to be
 # experimented with on a link the operator knows, not to be set hopefully.
 DCC_SEND_BUFFER: int = 0         # 0 = per-platform default (4MB on Windows, OS auto-tuning on Linux)
-DCC_PORT_START: int = 55000
-DCC_PORT_END: int   = 55010
+DCC_PORT_START: int = 55000      # First port the bot listens on for outgoing DCC sends; forward this range if you are behind NAT
+DCC_PORT_END: int   = 55010      # Last port of that range; each simultaneous transfer needs one free port, so keep at least MAX_DCC_SLOTS
 
 # ---------------------------------------------------------------------
 # CROSS-BOT FILE FETCH (dcc_fetch.py - receiving files FROM other bots)
@@ -796,12 +845,12 @@ THEME: str = "classic"        # classic, midnight, forest, orchid, plain
 # still needs a new key here, a generator update and a theme.py change - the
 # old dict form could have accepted an unknown role name for free. That loss
 # is accepted; concrete uniformity now outweighs a hypothetical future role.
-CUSTOM_THEME_BORDER: str    = None
-CUSTOM_THEME_SEPARATOR: str = None
-CUSTOM_THEME_TEXTBOX: str   = None
-CUSTOM_THEME_VALUE: str     = None
-CUSTOM_THEME_ALERT: str     = None
-CUSTOM_THEME_ACCENT: str    = None
+CUSTOM_THEME_BORDER: str    = None   # The outer block that frames a section
+CUSTOM_THEME_SEPARATOR: str = None   # The block between fields
+CUSTOM_THEME_TEXTBOX: str   = None   # The plate the text sits on
+CUSTOM_THEME_VALUE: str     = None   # A live figure - a count, a speed, a nickname
+CUSTOM_THEME_ALERT: str     = None   # A figure meant to catch the eye
+CUSTOM_THEME_ACCENT: str    = None   # Timestamps and secondary text
 
 C_WHITE        = "\x0300"
 C_BLACK        = "\x0301"
@@ -1040,7 +1089,7 @@ WEBUI_FOLDER_BROWSER_ENABLED: bool = False
 #   session cookie off the wire - there is no TLS here. DO NOT put this host
 #   on any network you do not trust.
 WEBUI_HOST: str = "127.0.0.1"
-WEBUI_PORT: int = 8420
+WEBUI_PORT: int = 8420    # The dashboard's port; open http://WEBUI_HOST:WEBUI_PORT in a browser
 
 # ---------------------------------------------------------------------
 # 9. LOCAL OVERRIDES (not in git)

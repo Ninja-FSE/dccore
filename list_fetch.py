@@ -797,7 +797,23 @@ def refetch_due_lists(log=print, now=None):
     Goes through the SAME enqueue the dashboard's own Refresh uses, so the
     slot limits, the duplicate guard and the queue ceiling all apply exactly
     as they do to a fetch an operator started by hand.
+
+    Refuses outright while the bot has not settled into its channels yet
+    (config.bot_joined_channel) - same gate dcc.py's own presence decisions
+    already use, and the same reason: channel_users is empty or half-synced
+    before that, so nothing here can tell a bot that is actually gone from
+    one we simply have not heard from yet. Without this, the very first
+    sweep - started from oserve.startup() before the IRC socket has even
+    finished registering, let alone joined anything - queued PRIVMSGs that
+    went out (via the same outbound queue every other message uses) while
+    still mid-handshake, landing in whatever channel happened to be first in
+    config.CHANNEL rather than one the bot was actually in. The target bot
+    never saw them, and the request just timed out as "no response" -
+    indistinguishable from the target genuinely being unreachable.
     """
+    if not getattr(config, "bot_joined_channel", False):
+        return []
+
     import webserver
 
     due = lists_worth_refetching(now=now)
@@ -813,7 +829,14 @@ def refetch_due_lists(log=print, now=None):
 
     started = []
     for bot in due:
-        status, result = webserver.build_list_fetch_enqueue_result({"bot": bot})
+        # build_list_fetch_enqueue_result(bot_raw) wants the nick ITSELF -
+        # see its own docstring and the real HTTP route's call
+        # (build_list_fetch_enqueue_result(body.get("bot", ""))) - not a
+        # dict wrapping it. A dict here failed reject_if_unsafe_for_irc_line()'s
+        # isinstance(value, str) check on every single call, so this feature
+        # rejected every bot with "'bot' must be a string." and never
+        # actually re-fetched a list (#535).
+        status, result = webserver.build_list_fetch_enqueue_result(bot)
         if status == 200:
             started.append(bot)
             log(f"[LIST-FETCH] {bot}'s list has changed since we took our copy "

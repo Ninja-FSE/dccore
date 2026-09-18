@@ -259,7 +259,16 @@ class EverythingElseThePageNamesByString(unittest.TestCase):
 
     def test_every_api_path_called_by_name_has_a_route(self):
         """Literal calls only. A URL built by concatenation is invisible here -
-        /api/filelists/bot/<nick> is one - so this is a floor, not a ceiling."""
+        /api/filelists/bot/<nick> is one - so this is a floor, not a ceiling.
+
+        A called path also counts as served if it names a real file OR
+        directory under web/: create_app() registers that whole directory
+        as Flask's static folder (static_folder="web", static_url_path="")
+        with no route decorator of its own, which is how web/lang/en.json
+        is fetched (see the Language section of app.js) without an
+        @app.route for it. The directory case is for a call built by
+        concatenation - fetchJson("/lang/" + code + ".json") - where only
+        the literal "/lang/" prefix is visible to the regex below."""
         import webserver as _webserver
 
         with io.open(os.path.join(REPO_ROOT, "webserver.py"),
@@ -280,10 +289,15 @@ class EverythingElseThePageNamesByString(unittest.TestCase):
         self.assertTrue(routes, "no routes found")
         for path in sorted(called):
             with self.subTest(path=path):
+                served_by_route = any(
+                    path == r or path.startswith(r + "/") or r.startswith(path + "/")
+                    for r in routes)
+                static_target = os.path.join(REPO_ROOT, "web", path.lstrip("/"))
+                served_as_static = (os.path.isfile(static_target)
+                                    or os.path.isdir(static_target))
                 self.assertTrue(
-                    any(path == r or path.startswith(r + "/")
-                        or r.startswith(path + "/") for r in routes),
-                    "%s is called and no route serves it" % path)
+                    served_by_route or served_as_static,
+                    "%s is called and no route or static file serves it" % path)
 
 
 if __name__ == "__main__":

@@ -91,7 +91,11 @@ class AShortSendIsNotACompletedTransfer(unittest.TestCase):
     def completion_block():
         with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
-        block = source.split("transfer_completed = bytes_sent >= file_size", 1)[1]
+        # The anchor moved with #526: completion is the receiver's final
+        # acknowledgement now, not the sender's local EOF. Everything this
+        # class checks - that the success line, the totals and the counter
+        # are all conditional on it - holds exactly as before.
+        block = source.split("transfer_completed = final_ack_at is not None", 1)[1]
         return block.split("except socket.timeout", 1)[0]
 
     def test_the_success_line_is_conditional(self):

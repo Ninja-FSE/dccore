@@ -258,7 +258,10 @@ class TheDotNeverClaimsMoreThanWeKnow(unittest.TestCase):
         for state in ("changed", "not_held", "unknown"):
             self.assertIn('"' + state + '"', titles)
 
-        self.assertIn("channel", self.block("presenceTitle"))
+        # The wording is a translation key, not literal text - see
+        # web/lang/en.json's filelists.presenceHere/presenceNotInChannel.
+        self.assertIn("filelists.presenceHere", self.block("presenceTitle"))
+        self.assertIn("filelists.presenceNotInChannel", self.block("presenceTitle"))
 
 
 class ClickingARowYouCannotBrowse(unittest.TestCase):

@@ -1518,7 +1518,10 @@ def _prune_known_bots(now):
         del registry[key]
 
     if len(registry) > KNOWN_BOTS_MAX:
-        by_age = sorted(registry.items(),
+        # Hand-entered entries are not candidates: with last_seen 0 they
+        # would sort as the oldest of all and be the first to go.
+        by_age = sorted(((k, e) for k, e in registry.items()
+                         if not (e or {}).get("hand_entered")),
                         key=lambda kv: float((kv[1] or {}).get("last_seen") or 0))
         for key, _entry in by_age[:len(registry) - KNOWN_BOTS_MAX]:
             del registry[key]
@@ -1531,6 +1534,11 @@ def _known_bot_is_stale(key, entry, now):
     advert()'s own `key = user.lower()` - so it compares directly against
     the lower-cased nicks _bot_confirmed_absent() reads from channel_users.
     """
+    # Named by the operator, not seen advertising (#376): it has no adverts
+    # to age on, so age says nothing about it. It stays until the operator
+    # forgets it (webserver.build_remove_source_result).
+    if (entry or {}).get("hand_entered"):
+        return False
     age = now - float((entry or {}).get("last_seen") or 0)
     if age > KNOWN_BOTS_TTL_SECONDS:
         return True
@@ -2249,6 +2257,24 @@ def irc_loop():
             # with it empty, every frozen user looks absent and their queue gets reaped.
             if getattr(config, 'channel_users', None):
                 config.bot_joined_channel = True
+                # #530: queues restored from disk have no trigger of their
+                # own - a JOIN wakes only FROZEN users, and the global sweep
+                # otherwise runs when some other transfer completes. Look
+                # once, now that channel_users can be trusted.
+                threading.Thread(target=dcc.wake_restored_queues, args=(sock,), daemon=True).start()
+                # Same reasoning, for the auto-refetch sweep: it refuses
+                # outright until this same flag is set (see
+                # list_fetch.refetch_due_lists()'s own comment), and its
+                # background worker would otherwise wait up to an hour for
+                # its next scheduled pass before trying again - on a fresh
+                # start, exactly when a stale list is most likely to be
+                # sitting there due. Cheap to call on every reconnect too:
+                # lists_worth_refetching() already respects
+                # AUTO_REFETCH_INTERVAL_HOURS, so this is a no-op whenever
+                # nothing is actually due.
+                if getattr(config, 'AUTO_REFETCH_LISTS', False):
+                    import list_fetch
+                    threading.Thread(target=list_fetch.refetch_due_lists, daemon=True).start()
             else:
                 print("[ACTIVATE] No channel members known yet; advertising without claiming channel sync.")
 

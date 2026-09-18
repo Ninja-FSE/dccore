@@ -804,8 +804,8 @@ class TheListenerFlagReleasesBeforeTheSessionBlocks(unittest.TestCase):
 
     _listen_and_serve()'s own finally only fires once _listen_and_serve_locked
     returns - and that function used to return only after _serve() did, which
-    blocks in _reader_loop() for as long as the session lasts (up to
-    IDLE_TIMEOUT). So the moment one operator authenticated over a passive DCC
+    blocks in _reader_loop() for as long as the session lasts (which is as
+    long as the operator keeps it open). So the moment one operator authenticated over a passive DCC
     CHAT offer, every OTHER passive offer was refused outright until that
     session ended - the takeover _promote() exists to guarantee could never
     reach a second console, because the second session never got a socket to
@@ -871,7 +871,7 @@ class TheListenerFlagReleasesBeforeTheSessionBlocks(unittest.TestCase):
         self.authenticate(first_port)
 
         # The session above is now blocking in _serve()'s _reader_loop, same
-        # as it would for up to IDLE_TIMEOUT (1800s) in production. The whole
+        # as it would for the operator's whole session in production. The whole
         # bug was this flag staying True for exactly that stretch.
         self.assertFalse(adminchat._listening,
                          "the one-listener flag must release once the "
@@ -1071,14 +1071,22 @@ class SessionExpiry(unittest.TestCase):
         s.opened_at = time.time() - adminchat.AUTH_TIMEOUT - 1
         self.assertTrue(s.expired())
 
-    def test_an_authenticated_session_uses_the_idle_clock(self):
+    def test_an_authenticated_session_never_expires_by_clock(self):
+        """Earlier versions closed a quiet console after thirty minutes. An
+        operator leaves the window open to WATCH - the feed of sends and
+        failures is the point of it - and came back to a closed one."""
         s = self.session()
         s.authenticated = True
         s.opened_at = time.time() - adminchat.AUTH_TIMEOUT - 1
-        s.last_activity = time.time()
-        self.assertFalse(s.expired(), "activity, not age, keeps a live session open")
-        s.last_activity = time.time() - adminchat.IDLE_TIMEOUT - 1
-        self.assertTrue(s.expired())
+        for quiet_for in (0, 1800 + 1, 7 * 24 * 3600):
+            with self.subTest(quiet_for=quiet_for):
+                s.last_activity = time.time() - quiet_for
+                self.assertFalse(s.expired(),
+                                 "an authenticated console was closed for being quiet")
+
+    def test_there_is_no_idle_timeout_to_configure(self):
+        """Removed, not raised: a constant that exists gets tuned back in."""
+        self.assertFalse(hasattr(adminchat, "IDLE_TIMEOUT"))
 
 
 @unittest.skipUnless(LOOPBACK_OK, NEEDS_LOOPBACK)

@@ -1,7 +1,9 @@
 # =====================================================================
 # DCC.PY - THE TRANSFER ENGINE
 # =====================================================================
+import select
 import socket
+import struct
 import threading
 import time
 import os
@@ -118,9 +120,24 @@ def announce_channel_for(next_file):
         # straight through. A queue entry whose channel is a list is malformed
         # either way; falling back to the configured channel is predictable,
         # where picking one of its entries would be a guess.
-        if isinstance(named, str) and named.strip():
+        if isinstance(named, str) and named.strip() and is_channel_name(named):
             return named.strip()
     return default_announce_channel()
+
+
+def is_channel_name(target):
+    """Does this PRIVMSG target name a channel rather than a nick?
+
+    RFC 2812 gives channels four prefixes; a nick can start with none of them.
+    A request made by PRIVATE MESSAGE records the bot's OWN NICK as the row's
+    channel (it is the wire target of that message - see
+    handle_download_request), and until #530 announce_channel_for() handed it
+    straight back, so the "Sent:" line for a PM request went out as
+    `PRIVMSG <our nick> :Sent ...` - the bot telling itself. A nick is not a
+    place to announce; the default channel is.
+    """
+    text = str(target or "").strip()
+    return bool(text) and text[0] in "#&+!"
 
 
 def download_count_identity(file_path, file_name):
@@ -420,6 +437,39 @@ def discard_orphaned_temp_archives(user_key):
     return removed
 
 
+def _report_transfer_failure(user, file_name, reason):
+    """Say a transfer failed everywhere a completed one is said to succeed.
+
+    The console log line, AND the debug channel / admin console through
+    send_debug() with the FAIL category - the same route
+    announce.send_transfer_complete() takes for "Sent:". Before #526 the
+    failures were print() only, so the two places an operator actually
+    watches showed every success and no failure.
+    """
+    print(f"[DCC-FAIL] {file_name} for {user}: {reason}")
+    try:
+        announce.send_debug(f"Failed: \"{file_name}\" to {user} - {reason}",
+                            category="FAIL")
+    except Exception as debug_err:
+        print(f"[DEBUG-FAIL ERROR] Could not report the failed transfer: {debug_err}")
+
+
+class _ReceiverGone(Exception):
+    """The peer closed the data connection with bytes still unacknowledged."""
+
+    def __init__(self, acked):
+        super().__init__(acked)
+        self.acked = acked
+
+
+class _ReceiverStalled(Exception):
+    """No ack progress for ACK_STALL_SECONDS with bytes still outstanding."""
+
+    def __init__(self, acked):
+        super().__init__(acked)
+        self.acked = acked
+
+
 class _ShortSend(Exception):
     """Raised to skip the completion bookkeeping when a send ended early.
 
@@ -695,6 +745,106 @@ def redispatch_waiting_pack(irc_sock, just_finished=None):
     threading.Thread(target=check_queue_and_send, args=(irc_sock, owner),
                      daemon=True).start()
     return owner
+
+def freeze_absent_user(irc_sock, user, target_chan):
+    """Start the five-minute countdown for a queued user who is not in any
+    of our channels. Idempotent: a user already counting down is left alone,
+    and nothing is frozen while the bot itself is not channel-synced.
+
+    Lifted out of check_queue_and_send()'s specific-user branch so the global
+    sweep (section B) can apply the SAME policy. Until #530 the sweep could
+    not: it `continue`d past an absent user without a word, so a queue that
+    only the sweep ever looked at was never frozen, never expired, and was
+    never retried - 65 rows sat QUEUED for days on a live bot while other
+    users were served around them.
+    """
+    import announce as announce_mod
+    import threading
+    import time
+    import defaults as config
+    import db
+
+    user_key = str(user).lower()
+
+    # NEVER freeze a queue while the bot itself is off the network.
+    # On a netsplit or reconnect channel_users is empty or half-synced, so we do
+    # not KNOW whether the user left. Leave the queue alone until NAMES has synced.
+    if not getattr(config, 'bot_joined_channel', False) or not getattr(config, 'channel_users', None):
+        print(f"[DCC FREEZE-SKIP] The bot is not channel-synced yet. Leaving {user}'s queue untouched.")
+        return
+
+    # A user may have exactly ONE countdown running at a time.
+    with queue_lock:
+        if user_key in getattr(config, 'frozen_queues', {}):
+            print(f"[DCC FREEZE-HOLD] {user} already has a countdown running. Not starting another.")
+            return
+        config.frozen_queues[user_key] = time.time()
+    print(f"[DCC REACTIVE FREEZE] {user} really has left {target_chan}. Starting the timer...")
+    announce_mod.send_debug(f"DCC reactive freeze triggered for {user} in {target_chan}. Initiating 5-minute cooldown timer.", category="QUIT")
+
+    def user_queue_timer(sock, target_user, original_chan):
+        """A verifying countdown, replacing the old blind 300-second sleep.
+        The clock pauses entirely while the bot is disconnected - the bot's own
+        downtime must NEVER count against a user's queue - and the countdown
+        aborts as soon as the user reappears via JOIN or a NAMES sync."""
+        t_key = target_user.lower()
+        elapsed = 0
+
+        while elapsed < 300:
+            time.sleep(10)
+
+            # A) Something else already thawed the queue (JOIN / NAMES / !rehash)
+            if t_key not in getattr(config, 'frozen_queues', {}):
+                print(f"[DCC FREEZE-ABORT] {target_user} is already thawed. The countdown stops; the queue is safe.")
+                return
+
+            # B) The bot itself is offline - freeze the clock, do NOT advance elapsed
+            if not getattr(config, 'bot_joined_channel', False):
+                print(f"[DCC FREEZE-PAUSE] The bot is off the network. Pausing {target_user}'s countdown at {elapsed}s.")
+                continue
+
+            # C) The bot is back online - check against the fresh channel list
+            if user_is_present_in_ram(t_key):
+                with queue_lock:
+                    config.frozen_queues.pop(t_key, None)
+                print(f"[DCC FREEZE-ABORT] {target_user} was found in the channel list. The queue is kept and woken.")
+                announce_mod.send_debug(f"Queue for {config.C_BOLD}{target_user}{config.C_RESET} preserved - user verified back in channel before timeout.", category="JOIN")
+                threading.Thread(target=check_queue_and_send, args=(sock, target_user), daemon=True).start()
+                return
+
+            elapsed += 10
+
+        if hasattr(config, 'frozen_queues') and t_key in config.frozen_queues:
+            with queue_lock:
+                if t_key in config.dcc_queue:
+                    for f_obj in config.dcc_queue[t_key]:
+                        if isinstance(f_obj, dict) and f_obj.get('is_temporary_zip') is True and os.path.exists(f_obj['path']) and not f_obj.get('is_unpacked_rar_folder'):
+                            try: os.remove(f_obj['path'])
+                            except: pass
+                    del config.dcc_queue[t_key]
+                    db.save_dcc_queue()
+                del config.frozen_queues[t_key]
+            announce_mod.send_debug(f"Timer expired for {target_user} in {original_chan}. Personal queue has been erased.", category="PART")
+
+    threading.Thread(target=user_queue_timer, args=(irc_sock, user, target_chan), daemon=True).start()
+
+
+def wake_restored_queues(irc_sock):
+    """One look at every queue once the bot is channel-synced.
+
+    A queue restored from dcc_queue.txt at start-up has no trigger of its own:
+    the request that created it fired years ago in process terms, a JOIN only
+    wakes users who are FROZEN (frozen_queues is in-memory and empty after a
+    restart), and the global sweep otherwise runs only when some OTHER
+    transfer completes. On a quiet bot that is never. So the sweep is run
+    once here, on activation - once per slot, because a single pass dispatches
+    at most one user and then breaks.
+    """
+    import defaults as config
+    slots = max(1, int(config.MAX_DCC_SLOTS or 1))
+    for _ in range(slots):
+        check_queue_and_send(irc_sock, "system_next_trigger_fallback")
+
 
 def check_queue_and_send(irc_sock, completed_user):
     """Check the queues and run RAR packing one at a time, without flooding the server."""
@@ -1115,70 +1265,10 @@ def check_queue_and_send(irc_sock, completed_user):
                 threading.Thread(target=start_dcc_send, args=(irc_sock, completed_user, f_path, f_name, target_chan, next_file), daemon=True).start()
                 return
         else:
-            # -----------------------------------------------------------------
-            # NEVER freeze a queue while the bot itself is off the network.
-            # On a netsplit or reconnect channel_users is empty or half-synced, so we do
-            # not KNOW whether the user left. Leave the queue alone until NAMES has synced.
-            # -----------------------------------------------------------------
-            if not getattr(config, 'bot_joined_channel', False) or not getattr(config, 'channel_users', None):
-                print(f"[DCC FREEZE-SKIP] The bot is not channel-synced yet. Leaving {completed_user}'s queue untouched.")
-                return
-
-            # A user may have exactly ONE countdown running at a time.
-            if user_key in getattr(config, 'frozen_queues', {}):
-                print(f"[DCC FREEZE-HOLD] {completed_user} already has a countdown running. Not starting another.")
-                return
-
-            with queue_lock:
-                config.frozen_queues[user_key] = time.time()
-            print(f"[DCC REACTIVE FREEZE] {completed_user} really has left {target_chan}. Starting the timer...")
-            announce_mod.send_debug(f"DCC reactive freeze triggered for {completed_user} in {target_chan}. Initiating 5-minute cooldown timer.", category="QUIT")
-            
-            def user_queue_timer(sock, target_user, original_chan):
-                """A verifying countdown, replacing the old blind 300-second sleep.
-                The clock pauses entirely while the bot is disconnected - the bot's own
-                downtime must NEVER count against a user's queue - and the countdown
-                aborts as soon as the user reappears via JOIN or a NAMES sync."""
-                t_key = target_user.lower()
-                elapsed = 0
-                
-                while elapsed < 300:
-                    time.sleep(10)
-                    
-                    # A) Something else already thawed the queue (JOIN / NAMES / !rehash)
-                    if t_key not in getattr(config, 'frozen_queues', {}):
-                        print(f"[DCC FREEZE-ABORT] {target_user} is already thawed. The countdown stops; the queue is safe.")
-                        return
-                        
-                    # B) The bot itself is offline - freeze the clock, do NOT advance elapsed
-                    if not getattr(config, 'bot_joined_channel', False):
-                        print(f"[DCC FREEZE-PAUSE] The bot is off the network. Pausing {target_user}'s countdown at {elapsed}s.")
-                        continue
-                        
-                    # C) The bot is back online - check against the fresh channel list
-                    if user_is_present_in_ram(t_key):
-                        with queue_lock:
-                            config.frozen_queues.pop(t_key, None)
-                        print(f"[DCC FREEZE-ABORT] {target_user} was found in the channel list. The queue is kept and woken.")
-                        announce_mod.send_debug(f"Queue for {config.C_BOLD}{target_user}{config.C_RESET} preserved - user verified back in channel before timeout.", category="JOIN")
-                        threading.Thread(target=check_queue_and_send, args=(sock, target_user), daemon=True).start()
-                        return
-                        
-                    elapsed += 10
-                
-                if hasattr(config, 'frozen_queues') and t_key in config.frozen_queues:
-                    with queue_lock:
-                        if t_key in config.dcc_queue:
-                            for f_obj in config.dcc_queue[t_key]:
-                                if isinstance(f_obj, dict) and f_obj.get('is_temporary_zip') is True and os.path.exists(f_obj['path']) and not f_obj.get('is_unpacked_rar_folder'):
-                                    try: os.remove(f_obj['path'])
-                                    except: pass
-                            del config.dcc_queue[t_key]
-                            db.save_dcc_queue()
-                        del config.frozen_queues[t_key]
-                    announce_mod.send_debug(f"Timer expired for {target_user} in {original_chan}. Personal queue has been erased.", category="PART")
-                    
-            threading.Thread(target=user_queue_timer, args=(irc_sock, completed_user, target_chan), daemon=True).start()
+            # Not in any of our channels: freeze and start the countdown. The
+            # policy lives in freeze_absent_user() so the global sweep below
+            # applies exactly the same one (#530).
+            freeze_absent_user(irc_sock, completed_user, target_chan)
             return
 
     # =====================================================================
@@ -1187,6 +1277,7 @@ def check_queue_and_send(irc_sock, completed_user):
     if oserve:
         oserve.active_downloads = len(config.active_transfers)
         
+    absent_users = []
     if len(config.active_transfers) < config.MAX_DCC_SLOTS:
         with queue_lock:
             # FIXED: re-check the slot count INSIDE the lock. The test above is already
@@ -1256,24 +1347,27 @@ def check_queue_and_send(irc_sock, completed_user):
                 g_name = g_next.get('file', '')
                 g_path = g_next.get('path', '')
 
-                raw_chan = g_next.get('channel')
-                user_is_globally_active = False
-                if isinstance(raw_chan, str) and raw_chan.strip():
-                    channels_to_check = [raw_chan]
-                elif isinstance(raw_chan, list) and raw_chan:
-                    channels_to_check = raw_chan
-                else:
-                    channels_to_check = config.CHANNEL.split(',')
+                # PRESENCE IS ASKED OF EVERY CHANNEL WE ARE IN, NOT OF THE
+                # ROW (#530). This used to build a list from g_next['channel']
+                # and look for the user only there. A request made by PRIVATE
+                # MESSAGE records the wire target as its channel - which is
+                # the bot's own nick, and no such key ever exists in
+                # channel_users - so a PM-originated head row was invisible
+                # to this sweep however many channels the user was sitting
+                # in. The specific-user branch above has always asked every
+                # channel; this is the same question and now the same answer.
+                # The row's channel is where to ANNOUNCE (g_chan, above), not
+                # where to LOOK.
+                user_is_globally_active = user_is_present_in_ram(queue_key)
 
-                with runtime.channel_users_lock():
-                    if hasattr(config, 'channel_users'):
-                        for single_chan in channels_to_check:
-                            n_chan = str(single_chan).strip().lower()
-                            if n_chan in config.channel_users:
-                                lowered_glob_users = [u.lower() for u in config.channel_users[n_chan]]
-                                if queue_key in lowered_glob_users:
-                                    user_is_globally_active = True
-                                    break
+                if not user_is_globally_active:
+                    # Not here. Until #530 this was a silent `continue`, and
+                    # a queue only the sweep ever looked at could sit
+                    # forever. Freeze them exactly as the specific-user
+                    # branch does - after the lock is released, because the
+                    # freeze announces to the debug channel.
+                    absent_users.append((real_username, g_chan))
+                    continue
 
                 if user_is_globally_active is True:
                     if g_next.get('is_unpacked_rar_folder') is True:
@@ -1297,6 +1391,9 @@ def check_queue_and_send(irc_sock, completed_user):
                     announce_mod.send_dcc_sending_notice(real_username, g_name)
                     threading.Thread(target=start_dcc_send, args=(irc_sock, real_username, g_path, g_name, g_chan, g_next), daemon=True).start()
                     break
+
+    for absent_user, absent_chan in absent_users:
+        freeze_absent_user(irc_sock, absent_user, absent_chan)
 
 
 MIN_DCC_BLOCK_SIZE = 4096
@@ -1518,6 +1615,11 @@ def handle_resume_request(irc_sock, user, body):
         return False
     print(f"[DCC-RESUME] {user} already has {position} of {size} bytes of "
           f"{offered_name}; accepted and will send from there.")
+    import stats_mgr
+    announce.send_debug(
+        f'Resumed "{offered_name}" for {user} at '
+        f'{stats_mgr.format_size_human(position)} of {stats_mgr.format_size_human(size)}',
+        category="RESUMED")
     return True
 
 
@@ -1926,7 +2028,7 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
                 print(f"[RAR QUEUE] Added virtuell mapp {master_rar_filename} for {user} at position #{user_pos}.")
                 
                 # One single clean line to the debug channel, nothing more
-                announce_mod.send_debug(f"{user} requested \"{clean_folder_name}\". Starting rar and sending when done.", category="INFO")
+                announce_mod.send_debug(f"{user} asked for the folder \"{clean_folder_name}\" - packing it, sending when done.", category="REQUEST")
                 
                 announce_mod.send_dcc_queue_notice(user, folder_name, user_pos)
                 threading.Thread(target=check_queue_and_send, args=(irc_sock, user), daemon=True).start()
@@ -2002,11 +2104,39 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
             list_paths = list_mod.all_list_paths(wanted_list)
             if list_paths:
                 try:
-                    lines = []
-                    for one_list in list_paths:
-                        with open(one_list, "r", encoding="utf-8",
-                                  errors="ignore") as lf:
-                            lines.extend(lf.readlines())
+                    # STREAMED, NOT LOADED. This used to readlines() every
+                    # published list into one Python list and then, on a match,
+                    # walk BACKWARDS through it to the nearest folder heading.
+                    # The only thing the whole list in memory was for was that
+                    # backward walk. On a 5.4-million-file library that is
+                    # 460 MB of text as ~5.9 GB of str objects, on EVERY file
+                    # request - full_path below is "<first folder>/<name>" and a
+                    # track is never in a folder's root, so the direct check
+                    # fails and this runs each time. Measured live: a 5.9 GB
+                    # peak and 1.5 GB held afterwards, because the allocator
+                    # keeps its arenas. Three busy slots could mean three at
+                    # once.
+                    #
+                    # Headings precede their rows, so "the nearest heading
+                    # above the matching row" is simply the last heading seen
+                    # on the way down. One variable carries it; nothing is kept.
+                    # The heading is still resolved LAZILY, on a match only, so
+                    # a miss costs exactly what it cost before minus the memory.
+                    #
+                    # One generator across every list, in order, so a `break`
+                    # below leaves the whole lookup exactly as it left the old
+                    # single loop over the concatenation - and the heading
+                    # state carries across the file boundary the same way the
+                    # concatenation carried it, which is what the comment above
+                    # ("each list carries its own headings above its own rows")
+                    # relies on.
+                    def _list_lines(paths):
+                        for one_list in paths:
+                            with open(one_list, "r", encoding="utf-8",
+                                      errors="ignore") as lf:
+                                for raw_line in lf:
+                                    yield raw_line
+
                     # THE LIST'S OWN SPELLING TRAVELS WITH THE FOLDER (#445).
                     #
                     # The match below is case-insensitive, deliberately -
@@ -2025,81 +2155,73 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
                     fallback_folder = None
                     fallback_name = ""
                     clean_req = str(requested_file).lower().strip()
+                    request_prefix = f"!{config.NICKNAME} "
+                    # The most recent heading line, unresolved. ANY known
+                    # prefix, not just the one we write: this is what
+                    # RECOGNISES a heading, and checking only the current
+                    # prefix stops seeing the headings in every list already
+                    # in somebody's hands. Found by the test that counts
+                    # resolutions.
+                    last_heading = None
 
-                    for idx, line in enumerate(lines):
+                    for line in _list_lines(list_paths):
                         line_clean = line.strip()
-                        if line_clean.startswith(f"!{config.NICKNAME} "):
-                            # str.split() puts what came BEFORE the separator in
-                            # [0], and the line starts with the separator - so
-                            # [0] is the empty string on every line here, and
-                            # this comparison never matched anything. The
-                            # filename is in [1]; the whole list lookup was dead
-                            # code without it, leaving the os.walk() below to
-                            # answer every request.
-                            parts_nick = line_clean.split(f"!{config.NICKNAME} ", 1)
-                            rest_in_list = parts_nick[1].strip() if len(parts_nick) > 1 else ""
+                        if any(line_clean.upper().startswith(p)
+                               for p in list_mod.LIST_FOLDER_PREFIXES):
+                            last_heading = line_clean
+                            continue
+                        if not line_clean.startswith(request_prefix):
+                            continue
+                        # str.split() puts what came BEFORE the separator in
+                        # [0], and the line starts with the separator - so [0]
+                        # is the empty string on every line here. The filename
+                        # is in [1]; the whole list lookup was dead code
+                        # without it, leaving the os.walk() below to answer
+                        # every request.
+                        parts_nick = line_clean.split(request_prefix, 1)
+                        rest_in_list = parts_nick[1].strip() if len(parts_nick) > 1 else ""
 
-                            current_file_in_list, current_size_in_list = list_mod.strip_info_suffix(rest_in_list)
+                        current_file_in_list, current_size_in_list = list_mod.strip_info_suffix(rest_in_list)
 
-                            if clean_req == str(current_file_in_list).lower().strip():
-                                found_folder = None
-                                for back_idx in range(idx, -1, -1):
-                                    back_line = lines[back_idx].strip()
-                                    # The prefix-stripping itself is
-                                    # list_mod.resolve_list_folder() - this used
-                                    # to be a second, hand-written copy of it
-                                    # (a hardcoded back_line[9:] rather than
-                                    # len(LIST_FOLDER_PREFIX), and its own
-                                    # trailing-backslash/separator handling),
-                                    # which could silently drift from the
-                                    # original if the list format ever changed.
-                                    # ANY known prefix, not just the one
-                                    # we write. This is what RECOGNISES
-                                    # a heading, so checking only the
-                                    # current prefix stops seeing the
-                                    # headings in every list already in
-                                    # somebody's hands - a bare request
-                                    # against one then resolves nothing
-                                    # at all. Found by the test that
-                                    # counts resolutions.
-                                    if any(back_line.upper().startswith(p)
-                                           for p in list_mod.LIST_FOLDER_PREFIXES):
-                                        # No explicit base: the heading itself
-                                        # says which folder it belongs to once
-                                        # there is more than one (#164), and
-                                        # pinning it to base_directory would
-                                        # resolve every heading into the first.
-                                        found_folder = list_mod.resolve_list_folder(
-                                            back_line, name=wanted_list)
-                                        break
-                                if found_folder is None:
-                                    continue
+                        if clean_req != str(current_file_in_list).lower().strip():
+                            continue
+                        if last_heading is None:
+                            continue
+                        # The prefix-stripping itself is
+                        # list_mod.resolve_list_folder() - this used to be a
+                        # second, hand-written copy of it, which could drift
+                        # from the original if the list format ever changed.
+                        # No explicit base: the heading itself says which
+                        # folder it belongs to once there is more than one
+                        # (#164), and pinning it to base_directory would
+                        # resolve every heading into the first.
+                        found_folder = list_mod.resolve_list_folder(
+                            last_heading, name=wanted_list)
+                        if found_folder is None:
+                            continue
 
-                                # Two or more copies can share this exact name
-                                # and differ only in size. Without a size hint,
-                                # or if it matches nothing, the first copy the
-                                # list names wins - same as before this change,
-                                # and pinned by
-                                # test_no_error_is_reported_for_a_duplicate.
-                                # With one, a copy whose own ::INFO:: size
-                                # matches it wins instead, so a request built
-                                # from a search result's exact line reaches the
-                                # copy that result actually named. A bare
-                                # request (no hint - AutoQ.mrc and every
-                                # existing caller) still stops at this first
-                                # match exactly as before; only a hinted
-                                # request that has not matched yet pays for
-                                # scanning on, since that is the one case
-                                # where the answer isn't already known.
-                                if fallback_folder is None:
-                                    fallback_folder = found_folder
-                                    fallback_name = str(current_file_in_list).strip()
-                                    if not requested_size_hint:
-                                        break
-                                if requested_size_hint and current_size_in_list.lower().strip() == requested_size_hint:
-                                    target_folder = found_folder
-                                    target_name = str(current_file_in_list).strip()
-                                    break
+                        # Two or more copies can share this exact name and
+                        # differ only in size. Without a size hint, or if it
+                        # matches nothing, the first copy the list names wins -
+                        # same as before this change, and pinned by
+                        # test_no_error_is_reported_for_a_duplicate. With one,
+                        # a copy whose own ::INFO:: size matches it wins
+                        # instead, so a request built from a search result's
+                        # exact line reaches the copy that result actually
+                        # named. A bare request (no hint - AutoQ.mrc and every
+                        # existing caller) still stops at this first match
+                        # exactly as before; only a hinted request that has
+                        # not matched yet pays for scanning on, since that is
+                        # the one case where the answer isn't already known.
+                        if fallback_folder is None:
+                            fallback_folder = found_folder
+                            fallback_name = str(current_file_in_list).strip()
+                            if not requested_size_hint:
+                                break
+                        if requested_size_hint and current_size_in_list.lower().strip() == requested_size_hint:
+                            target_folder = found_folder
+                            target_name = str(current_file_in_list).strip()
+                            break
 
                     if target_folder is None:
                         target_folder = fallback_folder
@@ -2142,6 +2264,12 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
             return
 
         file_name = os.path.basename(full_path)
+
+        # The console feed (#528): the request is real and the file exists -
+        # whether it sends now or queues is decided under the lock below, and
+        # each of those reports itself (SENDING / QUEUED). A refused request
+        # is reported by its refusal.
+        announce.send_debug(f'{user} asked for "{file_name}"', category="REQUEST")
 
         with queue_lock:
             total_global_queued = get_total_queued_count()
@@ -2195,6 +2323,117 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
         print(f"[DCC ERROR] {e}")
         oserve = sys.modules.get('oserve')
         if oserve: oserve.send_fails_count += 1
+
+# ------------------------------------------------------------- DCC ACKs
+#
+# THE RECEIVER SAYS WHAT IT HAS. After every packet a DCC receiver sends back
+# a 4-byte big-endian running total of the bytes it holds, and that total is
+# the ONLY signal of what arrived. sendall() says nothing about it: it returns
+# the moment the kernel's send buffer accepts the bytes - 4 MB of them on
+# Windows by default - which for most files is the whole file, instantly.
+#
+# Nothing here read those acknowledgements. "Complete" meant "written to the
+# kernel", so the bot declared success at t~0, reported a speed measured
+# against a memcpy ("Speed: n/a (<1s)"), counted the file, slept 1.5 seconds
+# and CLOSED - with megabytes still queued behind a link doing 50 KB/s. The
+# receiver was cut off at whatever the wire had managed and reported the
+# transfer incomplete; the channel had already been told it was sent. Found
+# by a second operator, reproduced with mIRC (#526). The operator's own
+# workaround - DCC_SEND_BUFFER = 4096 - "worked" because a tiny buffer makes
+# sendall() block on the actual wire, so the loop tracked delivery by
+# accident. The bigger the buffer, the earlier the bot hung up.
+#
+# The counter is 32 bits and a file may not be, so it is tracked unwrapped:
+# a new value below the low 32 bits of what we already hold means it wrapped.
+# Acks are cumulative and never go backwards, so the tracker only advances.
+
+ACK_STALL_SECONDS = 60.0     # no ack progress for this long = the link is dead
+
+
+class _AckTracker:
+    """The receiver's acknowledged byte count, parsed from whatever arrives."""
+
+    def __init__(self, start=0):
+        self.acked = int(start)
+        self.received_any = False
+        self.eof = False
+        self.last_advance_at = time.time()
+        self._pending = b""
+
+    def feed(self, data):
+        """Absorb raw bytes from the data socket; b"" means the peer closed."""
+        if not data:
+            self.eof = True
+            return
+        self.received_any = True
+        self._pending += data
+        while len(self._pending) >= 4:
+            (word,) = struct.unpack("!I", self._pending[:4])
+            self._pending = self._pending[4:]
+            self._advance(word)
+
+    def _advance(self, word):
+        base = self.acked & ~0xFFFFFFFF
+        candidate = base | word
+        if candidate < self.acked:
+            # Below what we hold. Two things look like that and only the SIZE
+            # of the drop tells them apart: a receiver past 4 GB whose 32-bit
+            # counter wrapped (a drop of nearly 2**32), or a stale/duplicated
+            # word (a small one). Serial-number arithmetic: more than half the
+            # counter's range is a wrap; anything less is noise and is ignored,
+            # because a cumulative total never genuinely goes backwards.
+            if self.acked - candidate > (1 << 31):
+                candidate += 1 << 32
+            else:
+                return
+        if candidate > self.acked:
+            self.acked = candidate
+            self.last_advance_at = time.time()
+
+    def stalled(self, now=None):
+        return ((now if now is not None else time.time())
+                - self.last_advance_at) > ACK_STALL_SECONDS
+
+
+def _drain_acks(conn, tracker, wait=0.0):
+    """Read whatever acknowledgements are waiting, without blocking the send.
+
+    `wait` is how long to sit for one if none is there yet - 0 inside the send
+    loop, a short pause while waiting for the final one. Never blocks longer.
+    """
+    try:
+        readable, _, _ = select.select([conn], [], [], wait)
+    except (OSError, ValueError):
+        tracker.eof = True
+        return
+    if not readable:
+        return
+    try:
+        data = conn.recv(4096)
+    except socket.timeout:
+        return
+    except OSError:
+        tracker.eof = True
+        return
+    tracker.feed(data)
+
+
+def _wait_for_final_ack(conn, tracker, file_size):
+    """Sit until the receiver has acknowledged the whole file, or has clearly
+    stopped. Returns the moment the final ack arrived, or None.
+
+    Bounded by PROGRESS, not by a fixed clock: a slow link that is still
+    advancing is allowed to finish, and a link that has not advanced for
+    ACK_STALL_SECONDS is dead whether or not bytes are still queued in the
+    kernel. The old fixed sleep(1.5) was the wrong shape entirely - it gave a
+    50 KB/s link 75 KB of the 2.7 MB it still had to deliver.
+    """
+    while tracker.acked < file_size:
+        if tracker.eof or tracker.stalled():
+            return None
+        _drain_acks(conn, tracker, wait=0.25)
+    return tracker.last_advance_at
+
 
 def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
     """Handle the network ports and the CTCP, and stream the bytes with accurate timing."""
@@ -2521,6 +2760,10 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
         # for every path that never got this far.
         resume_offset = int((clear_send_offer(user, assigned_port)
                              or {}).get("position") or 0)
+        # The receiver acknowledges ABSOLUTE positions, so a resume starts the
+        # tracker at the offset it already holds and the completeness check
+        # below compares against the whole file, exactly as bytes_sent does.
+        acks = _AckTracker(start=resume_offset)
         if resume_offset:
             # bytes_sent counts what the RECEIVER ends up holding, so the
             # completeness check below still compares against the whole file.
@@ -2552,6 +2795,16 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
                     bytes_sent += len(chunk)
                 except socket.error as e:
                     raise e
+                # Read whatever the receiver has acknowledged so far, without
+                # waiting for it - the sends must not sit behind the acks any
+                # more than the acks should be ignored. A receiver that has gone
+                # quiet for ACK_STALL_SECONDS while bytes are outstanding is
+                # dead, and this is the first place that can tell.
+                _drain_acks(conn, acks)
+                if acks.eof and acks.acked < bytes_sent:
+                    raise _ReceiverGone(acks.acked)
+                if acks.stalled() and acks.acked < bytes_sent:
+                    raise _ReceiverStalled(acks.acked)
                 for tx in config.active_transfers:
                     if tx['user'].lower() == user.lower():
                         tx['bytes_sent'] += len(chunk)
@@ -2571,11 +2824,38 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
         # NFS guards. Before this, the short send was recorded as a COMPLETED
         # transfer: counted in the totals, credited to the download counter,
         # and the queue row deleted, so nothing would ever retry it.
-        transfer_completed = bytes_sent >= file_size
-        if not transfer_completed:
-            print(f"[DCC-FAIL] {file_name} for {user}: sent {bytes_sent} of "
-                  f"{file_size} bytes before the file ended. Recorded as a "
-                  f"failure rather than a completed transfer.")
+        # The loop above ends on LOCAL EOF, which says the file stopped giving
+        # bytes and that the kernel accepted them - not that the receiver has
+        # them. Completion is the receiver's final acknowledgement equalling
+        # the file size, and it is waited for here, bounded by progress. The
+        # clock stops when THAT arrives: that is the transfer, and it is what
+        # the speed record, the advert and the counters are a record of.
+        short_read = bytes_sent < file_size
+        if short_read:
+            _report_transfer_failure(user, file_name,
+                f"sent {bytes_sent:,} of {file_size:,} bytes before the file ended. "
+                f"Recorded as a failure rather than a completed transfer.")
+            final_ack_at = None
+        else:
+            final_ack_at = _wait_for_final_ack(conn, acks, file_size)
+        transfer_completed = final_ack_at is not None
+        if not transfer_completed and not short_read:
+            if not acks.received_any:
+                _report_transfer_failure(user, file_name,
+                    "the receiver never acknowledged a single byte, so there "
+                    "is no evidence any of it arrived. Not counted. (A DCC "
+                    "receiver acknowledges every packet; one that sends none "
+                    "cannot be told apart from one that got nothing.)")
+            elif acks.eof:
+                _report_transfer_failure(user, file_name,
+                    f"the receiver closed the connection having acknowledged "
+                    f"{acks.acked:,} of {file_size:,} bytes. Not counted.")
+            else:
+                _report_transfer_failure(user, file_name,
+                    f"the receiver stopped acknowledging at {acks.acked:,} of "
+                    f"{file_size:,} bytes and made no progress for "
+                    f"{int(ACK_STALL_SECONDS)}s. The link is dead; whatever the "
+                    f"kernel still held will not arrive. Not counted.")
         # THE CLOCK STOPS WHEN THE BYTES DO. Everything below this line is
         # settling: 1.5 seconds for the receiver to close its file calmly,
         # another half-second further down, and the statistics write. None of
@@ -2589,12 +2869,14 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
         # mIRC" turned out to mean. The transfer was never slow; the number
         # was. It also fed the speed RECORD and the advert, so the figure the
         # channel saw was wrong in the same direction.
-        transfer_finished_at = time.time()
+        transfer_finished_at = final_ack_at if transfer_completed else time.time()
         if transfer_completed:
-            print(f"[DCC-SUCCESS] Sent the whole file to {user} with no errors.")
-        # The original pause: gives mIRC 1.5 seconds to close the file calmly
-        try: time.sleep(1.5)
-        except: pass
+            print(f"[DCC-SUCCESS] Sent the whole file to {user}; the receiver "
+                  f"acknowledged all {file_size} bytes.")
+        # The 1.5-second "let mIRC close its file calmly" pause is gone: the
+        # receiver's final ack IS it telling us it has everything, and the
+        # wait above already returned on that. Sleeping after it only held a
+        # DCC slot for nothing.
  
         # ---------------------------------------------------------------------
         # Update the statistics on disk
@@ -2653,12 +2935,28 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
         try: conn.close()
         except: pass
 
+    except _ReceiverGone as gone:
+        _report_transfer_failure(user, file_name,
+            f"closed the connection mid-transfer, having acknowledged "
+            f"{gone.acked:,} of {file_size:,} bytes.")
+        oserve = sys.modules.get('oserve')
+        if oserve: oserve.send_fails_count += 1
+    except _ReceiverStalled as stalled:
+        _report_transfer_failure(user, file_name,
+            f"stopped acknowledging at {stalled.acked:,} of {file_size:,} bytes "
+            f"and made no progress for {int(ACK_STALL_SECONDS)}s; giving up on "
+            f"a dead link.")
+        oserve = sys.modules.get('oserve')
+        if oserve: oserve.send_fails_count += 1
     except socket.timeout:
-        # FIXED (issue #30): previously silent. A handshake can succeed and the client can
-        # connect, but if they never acknowledge fast enough the send loop times out here
-        # with no log line at all - the only trace was a gap in the log between DCC-CONNECT
-        # and the finally block's cleanup lines.
-        print(f"[DCC-FAIL] Timeout sending to {user}: no data acknowledged within the socket timeout.")
+        # FIXED (issue #30): previously silent. This is the SEND side blocking:
+        # the kernel buffer is full and the peer has not drained it within the
+        # socket timeout. The old message said "no data acknowledged", which
+        # was never what it measured - nothing read acknowledgements then. The
+        # ack-based stall above is that check; this one is the write stalling.
+        _report_transfer_failure(user, file_name,
+            "the send blocked for the whole socket timeout with the receiver "
+            "not draining it.")
         oserve = sys.modules.get('oserve')
         if oserve: oserve.send_fails_count += 1
     except Exception as e:
@@ -2666,7 +2964,7 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
         # pipe, or any other mid-transfer failure produced the exact same silence - no way
         # to tell which one happened after the fact, especially once the temp archive is
         # already deleted and the queue row already gone.
-        print(f"[DCC-FAIL] Transfer to {user} failed: {type(e).__name__}: {e}")
+        _report_transfer_failure(user, file_name, f"{type(e).__name__}: {e}")
         oserve = sys.modules.get('oserve')
         if oserve: oserve.send_fails_count += 1
     finally:
@@ -2682,17 +2980,19 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
         except Exception:
             pass
 
-        # Give the network buffer 0.5s to flush the final acknowledgement
-        try:
-            import time
-            time.sleep(0.5)
-        except:
-            pass
+        # There used to be a 0.5 s sleep here "to give the network buffer time
+        # to flush the final acknowledgement" - a pause standing in for the ack
+        # that nothing read. The ack is read now, and a completed transfer
+        # only reaches this point once it has arrived; a failed one has
+        # nothing to wait for. Sleeping here only held the DCC slot half a
+        # second longer on every exit path.
 
         # The real-time speed counter
-        # transfer_finished_at is set the instant the last byte went out; it
-        # only exists on the path that actually completed a transfer, so the
-        # fallbacks below cover the abort paths that reach here without one.
+        # transfer_finished_at is the moment of the receiver's final
+        # acknowledgement (#526) - or, for a send that fell short, the moment
+        # the wait for it gave up. It only exists on the path that reached
+        # the completion check, so the fallbacks below cover the abort paths
+        # that arrive here without one.
         _ended = (transfer_finished_at if 'transfer_finished_at' in locals()
                   else time.time())
         acute_duration = _ended - (start_time if 'start_time' in locals() else _ended)

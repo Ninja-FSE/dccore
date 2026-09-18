@@ -94,12 +94,14 @@ class ThePillSaysRequested(unittest.TestCase):
         return body.split("}", 1)[0]
 
     def test_the_offered_state_is_labelled_requested(self):
-        self.assertIn('offered: "Requested"', self.label_map())
+        """The label is a translation key, not literal text - see
+        web/lang/en.json's download.state.requested."""
+        self.assertIn('offered: "download.state.requested"', self.label_map())
 
     def test_no_row_is_labelled_offered_anywhere_in_the_map(self):
         """The whole point. A second state picking the word back up would be
         the same mistake in a new place."""
-        self.assertNotIn("Offered", self.label_map())
+        self.assertNotIn("download.state.offered", self.label_map())
 
     def test_the_internal_state_name_is_untouched(self):
         """It is persisted in the fetch queue file and matched by name

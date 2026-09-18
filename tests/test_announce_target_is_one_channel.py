@@ -172,14 +172,27 @@ class TheGlobalScanSeparatesTheTwoQuestions(unittest.TestCase):
         with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
             return handle.read()
 
-    def test_the_membership_check_still_handles_a_list(self):
+    def test_the_membership_check_asks_every_channel(self):
         """Narrowing it to one channel would silently stop the scan finding a
-        user who is present in the second of two."""
-        source = self.source()
+        user who is present in the second of two.
 
-        self.assertIn("isinstance(raw_chan, list)", source,
-                      "the global-queue scan no longer handles a list of "
-                      "channels for its membership test")
+        This used to assert that the scan handled a LIST in the row's
+        'channel'. #530 went further: the row's channel is not consulted for
+        presence at all - a request made by private message records the
+        bot's own nick there, which is in no channel list, so a user sitting
+        in every channel we serve was invisible to the sweep. The scan now
+        asks the same question the specific-user branch always has: is this
+        user in ANY channel we are in.
+        """
+        source = self.source()
+        scan = source[source.index("# B) Global queue handling"):]
+
+        self.assertIn("user_is_globally_active = user_is_present_in_ram(queue_key)", scan,
+                      "the global-queue scan no longer asks every channel "
+                      "for its membership test")
+        self.assertNotIn("channels_to_check = [raw_chan]", scan,
+                         "the scan is looking for the user in the row's own "
+                         "channel again - a PM row names the bot's nick there")
 
     def test_the_announce_target_comes_from_the_helper(self):
         """And not from the same value the membership test uses."""

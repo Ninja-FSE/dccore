@@ -207,9 +207,11 @@ class AForegroundOnlyCodeKeepsTheBackground(DCCoreTestCase):
 class TheMenuNoLongerClaimsThereIsNoBackground(unittest.TestCase):
 
     def test_the_option_says_what_it_does(self):
+        """The wording is a translation key, not literal text - see
+        web/lang/en.json's settings.keepPrevious."""
         picker = function("ircColourPickerHtml")
 
-        self.assertIn('options(picked.bg, "Keep previous")', picker)
+        self.assertIn('options(picked.bg, "settings.keepPrevious")', picker)
 
     def test_and_no_longer_says_what_it_does_not(self):
         self.assertNotIn('"No background"', code_only())
@@ -254,10 +256,11 @@ class TheWarningIsOnlyWhereItBelongs(unittest.TestCase):
         self.assertIn('picked.fg === ""', self.warning())
 
     def test_it_says_which_way_round_the_problem_is(self):
+        """The wording is a translation key, not literal text - see
+        web/lang/en.json's settings.keepsPreviousBackgroundWarning."""
         body = self.warning()
 
-        self.assertIn("keeps the previous background", body)
-        self.assertIn("drawn as a block", body)
+        self.assertIn('t("settings.keepsPreviousBackgroundWarning")', body)
 
     def test_it_is_visible_rather_than_decorative(self):
         css = read("style.css")

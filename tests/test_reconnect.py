@@ -542,7 +542,18 @@ class ReconnectThawSummaryTests(DCCoreTestCase):
         """The debounce must reset on every new arrival, so the summary
         fires shortly after the LAST channel in the burst settles - not a
         fixed time after the first, which would still split a slow burst
-        into two lines."""
+        into two lines.
+
+        Widened past setUp()'s usual 0.05s for this one test (#546): reading
+        "not yet flushed" at 60% of a 0.05s window leaves only ~20ms before
+        the real timer fires on its own - not enough headroom on a loaded CI
+        runner. Confirmed as exactly this, not a real bug: macOS's
+        GitHub-hosted runners hit it in practice, ~50% of the time, while
+        the identical assertion never once failed on Linux or Windows.
+        0.3s keeps the same 60% checkpoint but with ~120ms of slack instead
+        of ~20ms - still well inside wait_for_flush()'s 1.0s default below.
+        """
+        irc._RECONNECT_THAW_QUIET_SECONDS = 0.3
         irc._note_reconnect_thaw("#one", 1)
         time.sleep(irc._RECONNECT_THAW_QUIET_SECONDS * 0.6)
         self.assertEqual(self.captured, [],

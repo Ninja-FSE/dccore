@@ -4,6 +4,7 @@ import time
 import datetime
 import defaults as config
 import library
+import runtime
 import oserve
 import dcc
 import announce
@@ -207,6 +208,92 @@ def find_latest_list_file(name=None):
         return os.path.join(directory, files[0])
     return None
 
+# The count is the answer to "how many files do I share", and it is asked
+# constantly: every advert cycle, every Stats page load, every -que from
+# somebody with nothing queued, the admin console's status. It is answered by
+# reading every published list end to end and counting the lines that start
+# with "!". On a library that is 5.4 million files - 460 MB of list - that is
+# three seconds warm and considerably more cold, paid again by every caller,
+# for a number that cannot change between one !update and the next.
+#
+# So it is computed once per build. The cache key is each list file's path,
+# mtime and size; update_list.py publishes a new list with os.replace(), which
+# gives it a new mtime and (almost always) a new size, so the first call after
+# a rebuild misses, recounts once, and every call until the next rebuild is
+# free. Nothing is invalidated by hand, because there is nothing to forget:
+# the file on disk is the truth, and the key IS the file on disk.
+# The lock is runtime.py's, not constructed here, for the reason dcc.queue_lock
+# gives at length: this module is reloaded by !rehash, and a Lock() built here
+# would be a new object after every reload while a caller still inside the
+# count held the old one. The cache dict IS constructed here, deliberately -
+# rebinding it on reload costs one recount, which is harmless.
+_count_lock = runtime.list_count_lock
+_count_cache = {}     # signature -> count
+
+
+def _list_signature(paths):
+    """What has to be unchanged for a cached count to still be right."""
+    parts = []
+    for path in paths:
+        try:
+            st = os.stat(path)
+            parts.append((path, st.st_mtime_ns, st.st_size))
+        except OSError:
+            parts.append((path, None, None))
+    return tuple(parts)
+
+
+def count_request_lines(paths):
+    """The number of request lines across `paths`, cached per file state.
+
+    Count only real request lines, skipping the "===" folder separators,
+    blank lines and text headers. This matches on "!" alone rather than on
+    f"!{config.NICKNAME} ": the list is written with whatever nick was
+    current at generation time, so after a 433 fallback a nick-specific test
+    matched nothing and the advert reported 0 files even though the list was
+    fine. Every request line in the generated file starts with "!"
+    (update_list.py) and no header or separator does - the same filter
+    execute_search applies to the same file.
+
+    Each path gets its OWN try (#433): one unreadable list - an AV scanner or
+    backup agent holding the VIDEO list open with no sharing, on Windows; a
+    permission change or a vanished path on either platform - must cost only
+    that list's lines, not the count from the ones that read fine.
+    """
+    paths = list(paths)
+    signature = _list_signature(paths)
+    with _count_lock:
+        cached = _count_cache.get(signature)
+        if cached is not None:
+            return cached
+
+        count = 0
+        complete = True
+        for one_list in paths:
+            try:
+                with open(one_list, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        if line.strip().startswith("!"):
+                            count += 1
+            except OSError as list_err:
+                print(f"[LIST] Could not read {one_list}: {list_err}")
+                complete = False
+
+        # Only a COMPLETE count is kept. The #433 case is a list that stat()s
+        # fine but will not open - an AV scanner holding it - and that leaves
+        # the signature unchanged when the scanner lets go. Caching the short
+        # count under it would serve that number until the next !update; the
+        # uncached code retried on the next call, and so does this.
+        #
+        # One entry. A stale signature is a list that no longer exists on
+        # disk in that form, and keeping its count around would only serve a
+        # later caller a number for a file nobody can read any more.
+        if complete:
+            _count_cache.clear()
+            _count_cache[signature] = count
+        return count
+
+
 def get_file_count_date_size_and_raw_bytes(name=None):
     """The EXACT number of music files, counting only lines that start with the trigger.
 
@@ -218,37 +305,12 @@ def get_file_count_date_size_and_raw_bytes(name=None):
         return 0, "No List", "0B", 0
         
     try:
-        count = 0
         # EVERY list, not just the master. Film and series moved into their
         # own file, and counting one of two would advertise a number smaller
         # than the library the bot actually serves - and smaller than what a
         # user sees when they open the archive. The date below still comes
         # from the master list, which is the one always present.
-        # Count only real request lines, skipping the "===" folder separators,
-        # blank lines and text headers.
-        #
-        # This matches on "!" alone rather than on f"!{config.NICKNAME} ". The list
-        # is written with whatever nick was current at generation time, so after a
-        # 433 fallback the old test matched nothing and the advert reported 0 files
-        # even though the list was fine. Every request line in the generated file
-        # starts with "!" (update_list.py:156) and no header or separator does, so
-        # this is the same filter execute_search already applies to the same file.
-        for one_list in all_list_paths(name):
-            # #433: each path gets its OWN try, the same as the two side-file
-            # reads a few lines down and for the identical reason - this used
-            # to sit inside the outer try below, so one unreadable list (an
-            # AV scanner or backup agent holding the VIDEO list open with no
-            # sharing, on Windows; a permission change or a vanished path on
-            # either platform) collapsed the WHOLE tuple to (0, "Error",
-            # "0B", 0), throwing away a master-list count and date that were
-            # perfectly fine.
-            try:
-                with open(one_list, "r", encoding="utf-8", errors="ignore") as f:
-                    for line in f:
-                        if line.strip().startswith("!"):
-                            count += 1
-            except OSError as list_err:
-                print(f"[LIST] Could not read {one_list}: {list_err}")
+        count = count_request_lines(all_list_paths(name))
             
         mtime = os.path.getmtime(latest_list)
         dt = datetime.datetime.fromtimestamp(mtime)
@@ -1163,6 +1225,14 @@ def execute_search(irc_sock, user, search_term, channel):
             found_entries, total_matches = [], 0
         # The row is kept exactly as it is on disk - matches go to IRC raw.
         matches = [entry["line"] for entry in found_entries]
+
+        # The console feed (#528): one line per served search, hits or none.
+        # total_matches, not len(matches): the reply is capped at
+        # MAX_SEARCH_RESULTS, and the operator wants to know what the list
+        # had, not what the cap let through.
+        announce.send_debug(
+            f'{user} searched "{search_term}" - {total_matches} result'
+            f'{"" if total_matches == 1 else "s"}', category="SEARCH")
 
         if matches:
             # Send the search header privately to the requester

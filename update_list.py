@@ -93,6 +93,12 @@ def rar_extensions():
     return _extension_set("RAR_EXTENSIONS")
 
 
+def video_companion_extensions():
+    """Extensions that follow a video into its list when they share its
+    folder - subtitles, .nfo, .sfv. See LIST_VIDEO_COMPANION_EXTENSIONS."""
+    return _extension_set("LIST_VIDEO_COMPANION_EXTENSIONS")
+
+
 def pack_size_over(path, cap):
     """Is packing `path` going to exceed `cap` bytes? Returns (over, measured).
 
@@ -230,9 +236,57 @@ def _has_extension(name, extensions):
     return bool(extensions) and str(name).lower().endswith(tuple(extensions))
 
 
+def folder_totals(rows):
+    """{folder: (file count, bytes)} over (folder, name, bytes) rows."""
+    totals = {}
+    for folder, _name, size in rows:
+        count, total = totals.get(folder, (0, 0))
+        totals[folder] = (count + 1, total + (size or 0))
+    return totals
+
+
+def folder_summary_line(count, total_bytes, human):
+    """The line under a folder heading that says what the folder holds (#69):
+
+        14 files, 1.20GB
+
+    ITS OWN LINE, AFTER THE CLOSING RULE, and never on the heading itself.
+    The heading is not decoration: list.py's reader and dcc.py's request
+    resolver both take the whole heading line as the folder path, and so
+    does every older DCCore fetching this list - a size appended there would
+    resolve to a folder that does not exist on every one of them. A line
+    that is neither a rule nor a "!" request row is skipped by all of those
+    readers (list.py's state machine drops it in its resting state; dcc.py
+    only looks at prefix lines and "!" lines; AutoQ imports "!" rows), so
+    this can say anything. Indented so it reads as belonging to the heading
+    above rather than as a heading of its own.
+    """
+    return f"    {count:,} file{'' if count == 1 else 's'}, {human(total_bytes)}"
+
+
 def is_video_file(name, video=None):
-    """Does this file belong in the video list rather than the music one?"""
+    """Is this file a video, by extension?"""
     return _has_extension(name, video_extensions() if video is None else video)
+
+
+def is_video_companion_file(name, companions=None):
+    """Is this a file that belongs beside a video - a subtitle, .nfo, .sfv?"""
+    return _has_extension(name, video_companion_extensions() if companions is None else companions)
+
+
+def belongs_in_video_list(name, folder_has_video, video=None, companions=None):
+    """Does this file go in the video list rather than the music one?
+
+    A video does, wherever it is. A companion file does only when its folder
+    holds a video (#411): a scene release then travels whole - the .mkv, its
+    .srt, its .nfo and its .sfv - while an album's .nfo stays with the album.
+    `folder_has_video` is the caller's, decided once per folder from the
+    folder's own files, so the answer for a companion cannot depend on the
+    order the files were met in.
+    """
+    if is_video_file(name, video):
+        return True
+    return bool(folder_has_video) and is_video_companion_file(name, companions)
 
 
 def is_packable_file(name, packable=None):
@@ -1267,6 +1321,7 @@ def generate_master_list(list_name=None):
     # library would have rebuilt each tuple 719,000 times.
     ignored = ignored_extensions()
     video_exts = video_extensions()
+    companion_exts = video_companion_extensions()
     packable_exts = rar_extensions()
     split_video = bool(getattr(config, "SEPARATE_VIDEO_LIST", True))
 
@@ -1380,6 +1435,15 @@ def generate_master_list(list_name=None):
                 unlistable_dirs.append(rel_dir)
                 continue
 
+            # Decided once per folder, before the per-file loop: a companion
+            # file's list depends on whether a video sits beside it (#411),
+            # and that must not depend on which file the walk handed over
+            # first. is_listed_file() is not consulted here on purpose - a
+            # video the operator has ignored still says what kind of folder
+            # this is.
+            folder_has_video = split_video and any(
+                is_video_file(name, video_exts) for name, _bytes in files)
+
             # Keep every track under its exact, complete path on disk
             for file, file_bytes in files:
                 if is_listed_file(file, ignored):
@@ -1412,7 +1476,7 @@ def generate_master_list(list_name=None):
                     # WHICH list the row goes in. With the split off, video
                     # lands in the same list as everything else, which is the
                     # behaviour this had before the setting existed.
-                    if split_video and is_video_file(file, video_exts):
+                    if split_video and belongs_in_video_list(file, folder_has_video, video_exts, companion_exts):
                         video_files_data.append((rel_dir, file, file_bytes))
                     else:
                         all_files_data.append((rel_dir, file, file_bytes))
@@ -1576,6 +1640,10 @@ def generate_master_list(list_name=None):
 
             current_folder = None
             written_rar_folders = set()  # Keeps the !rar list free of duplicate rows
+            # Per-folder count and size, for the line under each heading
+            # (#69). One pass over rows already in memory; the heading is
+            # written before its rows, so the total has to be known first.
+            music_totals = folder_totals(all_files_data)
 
             for folder, filename, bytes_size in all_files_data:
                 if folder != current_folder:
@@ -1600,6 +1668,7 @@ def generate_master_list(list_name=None):
                     f.write(f"\n{folder_rule}\n")
                     f.write(f"{folder_line}\n")
                     f.write(f"{folder_rule}\n")
+                    f.write(folder_summary_line(*music_totals[folder], format_size_human) + "\n")
                     
                     # Strip multi-disc suffixes, for the !rar album list ONLY.
                     #
@@ -1697,12 +1766,13 @@ def generate_master_list(list_name=None):
                         # constrained this line, so the objection had to be
                         # rediscovered.
                         #
-                        # The size belongs on the MAIN list's per-folder heading
-                        # instead - see the folder_line write below. That heading
-                        # is framed decoration, not a row AutoQ imports, so it can
-                        # carry anything; and putting it there leaves this file at
-                        # exactly one line per album, which a second ::INFO:: line
-                        # per row would not. Tracked in #69.
+                        # The size belongs in the MAIN list instead, and it is
+                        # there now (#69): a summary line under each folder
+                        # heading - see folder_summary_line() for why it is its
+                        # own line and NOT on the heading, which every reader
+                        # takes as the folder path. Putting it there leaves
+                        # this file at exactly one line per album, which a
+                        # second ::INFO:: line per row would not.
                         #
                         # THE REASON, corrected against AutoQ.mrc itself rather
                         # than the second-hand version this comment used to give.
@@ -1757,6 +1827,7 @@ def generate_master_list(list_name=None):
                 f_video.write("\n")
 
                 video_folder = None
+                video_totals = folder_totals(video_files_data)
                 for folder, filename, bytes_size in video_files_data:
                     if folder != video_folder:
                         video_folder = folder
@@ -1765,6 +1836,7 @@ def generate_master_list(list_name=None):
                         line = _one_line(raw.replace("/", "\\"))
                         rule = "=" * len(line)
                         f_video.write(f"\n{rule}\n{line}\n{rule}\n")
+                        f_video.write(folder_summary_line(*video_totals[folder], format_size_human) + "\n")
                     f_video.write(
                         f"!{config.NICKNAME} {_one_line(filename)}"
                         f"  ::INFO:: {format_size_human(bytes_size)}\n")

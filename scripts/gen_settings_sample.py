@@ -17,12 +17,15 @@ import ast
 import io
 import os
 import sys
+import textwrap
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import settings_file  # noqa: E402
+import settings_help  # noqa: E402
+from settings_help import assignment_parts, doc_lines as _doc_lines  # noqa: E402,F401
 
 HEADER = """\
 # =====================================================================
@@ -54,25 +57,6 @@ HEADER = """\
 """
 
 
-def assignment_parts(node):
-    """(targets, value_node) for a module-level assignment, else (None, None).
-
-    `MAX_DCC_SLOTS = 3` parses to ast.Assign, but `MAX_DCC_SLOTS: int = 3`
-    parses to ast.AnnAssign - a different node type, with `.target` rather
-    than `.targets`. Matching only Assign makes every annotated setting
-    invisible, which for this generator means silently emitting a sample with
-    nothing in it.
-
-    `value_node` is None for a bare annotation (`NICKNAME: str`), which
-    declares a name's type without giving it a value.
-    """
-    if isinstance(node, ast.Assign):
-        return node.targets, node.value
-    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-        return [node.target], node.value
-    return None, None
-
-
 def _render(value):
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -81,36 +65,6 @@ def _render(value):
     if value is None:
         return ""
     return str(value)
-
-
-def _doc_lines(source_lines, node):
-    """The comment block immediately above a setting, plus its inline comment."""
-    doc = []
-    index = node.lineno - 2                  # the line above, 0-based
-    block = []
-    while index >= 0:
-        stripped = source_lines[index].strip()
-        if stripped.startswith("#") and not stripped.startswith("# ---") \
-                and not stripped.startswith("# ==="):
-            block.append(stripped.lstrip("#").strip())
-            index -= 1
-            continue
-        break
-    doc.extend(reversed(block))
-
-    # Look for the inline comment only AFTER the value ends. Splitting the
-    # whole line on "#" cuts inside a string literal, so
-    #     CHANNEL = "#example-one,#example-two,..."
-    # produced a junk comment line reading `example-one,...#example-three"` above
-    # every channel-valued setting in the generated sample.
-    own = source_lines[node.lineno - 1]
-    if node.end_lineno == node.lineno:
-        tail = own[node.end_col_offset:]
-        if "#" in tail:
-            inline = tail.split("#", 1)[1].strip()
-            if inline:
-                doc.append(inline)
-    return doc
 
 
 def build():
@@ -158,7 +112,18 @@ def build():
                 out.append(f"\n[{section}]\n")
                 current = section
 
-            for line in _doc_lines(lines, node):
+            # The operator's explanation first - what the "?" on the
+            # dashboard shows - then the developer's comment block from
+            # defaults.py, separated by a blank comment line, for whoever
+            # wants the reasoning. Same order a reader wants them in.
+            plain = settings_help.plain_text(name)
+            doc = _doc_lines(lines, node)
+            if plain:
+                for wrapped in textwrap.wrap(plain, width=76):
+                    out.append(f"# {wrapped}\n")
+                if doc:
+                    out.append("#\n")
+            for line in doc:
                 out.append(f"# {line}\n")
             # settings_file.REQUIRED (issue #170's RFC): shipping a real value
             # here is exactly the defect this exists to close - a copy-paste

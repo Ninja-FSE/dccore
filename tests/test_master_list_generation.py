@@ -524,8 +524,8 @@ class FilmAndSeriesGetTheirOwnList(MasterListCase):
 
     def test_everything_else_stays_with_the_music(self):
         """Artwork, cue sheets and notes sit beside the tracks they belong to.
-        A film's subtitles land there too - the one rough edge of deciding per
-        file, and deliberate: see LIST_VIDEO_EXTENSIONS."""
+        (A film's subtitles used to land there too; #411 sends them after
+        the film - see AReleaseTravelsWhole below.)"""
         for name in ("Music/Artist/Album/cover.jpg", "Music/Artist/Album/disc.cue",
                      "Music/Artist/Album/notes.txt", "Music/Artist/Album/README"):
             self.add(name, b"data")
@@ -664,6 +664,131 @@ class FilmAndSeriesGetTheirOwnList(MasterListCase):
                         "an index of its own")
 
         self.assertIn("A Film.mkv", self.read_video_list())
+
+
+class AReleaseTravelsWhole(MasterListCase):
+    """#411. A video-only list's "master" file was 99.97% subtitles: 3,637
+    .srt and one .nfo, because by extension alone only the .mkv is video and
+    everything beside it fell into the music list.
+
+    A companion file - a subtitle, the .nfo, the .sfv - follows the video it
+    sits beside. Decided per FOLDER: a folder holding a video takes its
+    companions into the video list; a folder holding none keeps them with
+    the music, so an album's .nfo and .sfv stay exactly where they were.
+    """
+
+    RELEASE = "Films/Some.Film.2021.1080p-GRP/"
+
+    def add_release(self):
+        for name in ("some.film.2021.1080p-grp.mkv", "some.film.2021.1080p-grp.srt",
+                     "some.film.2021.1080p-grp.nfo", "some.film.2021.1080p-grp.sfv"):
+            self.add(self.RELEASE + name)
+
+    def test_subtitles_nfo_and_sfv_follow_the_film(self):
+        self.add_release()
+
+        self.assertTrue(self.generate())
+
+        video, music = self.read_video_list(), self.read_list()
+        for name in ("grp.mkv", "grp.srt", "grp.nfo", "grp.sfv"):
+            with self.subTest(file=name):
+                self.assertIn(name, video, name + " did not follow the film")
+                self.assertNotIn(name, music, name + " is still in the music list")
+
+    def test_an_albums_nfo_and_sfv_stay_with_the_album(self):
+        """The same extensions, no video beside them: unchanged."""
+        for name in ("Music/Artist/Album/01 - Track.flac", "Music/Artist/Album/album.nfo",
+                     "Music/Artist/Album/album.sfv"):
+            self.add(name)
+
+        self.assertTrue(self.generate())
+
+        music = self.read_list()
+        self.assertIn("album.nfo", music)
+        self.assertIn("album.sfv", music)
+        self.assertFalse(self.has_video_list())
+
+    def test_a_stray_subtitle_with_no_video_stays_with_the_music(self):
+        """The rule is the folder's, not the extension's."""
+        self.add("Music/Artist/Album/Track.flac")
+        self.add("Music/Artist/Album/lyrics.srt", b"subtitle text")
+
+        self.assertTrue(self.generate())
+
+        self.assertIn("lyrics.srt", self.read_list())
+        self.assertFalse(self.has_video_list())
+
+    def test_only_the_folders_own_files_count(self):
+        """A video in a SUBFOLDER does not pull the parent's files after it:
+        a series folder's own .nfo beside season subfolders is not beside a
+        video, and a release folder decides for itself."""
+        self.add("Series/Show/show.nfo")
+        self.add("Series/Show/Season 1/show.s01e01.mkv")
+        self.add("Series/Show/Season 1/show.s01e01.srt")
+
+        self.assertTrue(self.generate())
+
+        video, music = self.read_video_list(), self.read_list()
+        self.assertIn("show.s01e01.srt", video)
+        self.assertIn("show.nfo", music)
+        self.assertNotIn("show.nfo", video)
+
+    def test_a_mixed_folder_sends_its_companions_with_the_video(self):
+        """The one folder that has to pick: an album and a video together.
+        The tracks stay per file, as before; the .nfo goes with the video,
+        because "is there a video here" is the only question the rule asks.
+        Stated so the choice is visible rather than accidental."""
+        self.add("Mixed/Concert/Live Set.flac")
+        self.add("Mixed/Concert/Live Set.mkv")
+        self.add("Mixed/Concert/concert.nfo")
+
+        self.assertTrue(self.generate())
+
+        self.assertIn("Live Set.flac", self.read_list())
+        self.assertIn("concert.nfo", self.read_video_list())
+
+    def test_with_the_split_off_nothing_moves(self):
+        self.set_config(SEPARATE_VIDEO_LIST=False)
+        self.add_release()
+
+        self.assertTrue(self.generate())
+
+        self.assertFalse(self.has_video_list())
+        for name in ("grp.mkv", "grp.srt", "grp.nfo", "grp.sfv"):
+            self.assertIn(name, self.read_list())
+
+    def test_the_operator_can_change_the_companion_set(self):
+        """A setting, like LIST_VIDEO_EXTENSIONS beside it - an operator who
+        wants .txt to travel too, or .nfo to stay, edits one line."""
+        self.set_config(LIST_VIDEO_COMPANION_EXTENSIONS=[".srt"])
+        self.add_release()
+
+        self.assertTrue(self.generate())
+
+        video, music = self.read_video_list(), self.read_list()
+        self.assertIn("grp.srt", video)
+        self.assertIn("grp.nfo", music)
+        self.assertIn("grp.sfv", music)
+
+    def test_the_video_list_count_includes_the_companions(self):
+        """The header's "List of N Films & Series" is the row count of that
+        file, companions included, the same way the master's count is."""
+        self.add_release()
+
+        self.assertTrue(self.generate())
+
+        self.assertIn("List of 4 ", self.read_video_list())
+
+    def test_the_predicate_itself(self):
+        """belongs_in_video_list() in isolation, so the folder flag is seen
+        to be the caller's and not re-derived."""
+        video, companions = [".mkv"], [".srt", ".nfo"]
+        self.assertTrue(update_list.belongs_in_video_list("a.mkv", False, video, companions))
+        self.assertTrue(update_list.belongs_in_video_list("a.srt", True, video, companions))
+        self.assertFalse(update_list.belongs_in_video_list("a.srt", False, video, companions))
+        self.assertFalse(update_list.belongs_in_video_list("a.flac", True, video, companions))
+        self.assertTrue(update_list.belongs_in_video_list("A.NFO", True, video, companions),
+                        "case must not matter, as for every other extension set")
 
 
 class TheOperatorsOwnNameDoesNotHideTheirList(MasterListCase):

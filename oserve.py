@@ -11,9 +11,15 @@ import os
 # platform_compat.install_console_encoding_guard for the full explanation.
 import platform_compat
 platform_compat.install_console_encoding_guard()
+# Timestamps go on at the same moment, with the built-in format, so the
+# config-loading lines that print next are stamped too. The operator's own
+# format is applied the line after config exists.
+platform_compat.install_console_timestamps()
 
 # Load the bot's modules
 import defaults as config
+platform_compat.set_console_timestamp_format(
+    getattr(config, "CONSOLE_TIMESTAMP_FORMAT", "%H:%M:%S"))
 
 # Allocate the locks at startup, in memory. This keeps config.py free of
 # function calls and imports.
