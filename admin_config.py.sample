@@ -62,7 +62,7 @@ ADMIN_PASSWORD_HASH = ""
 # VPN, a router that does not forward the port, or a firewall that drops
 # rather than rejects - all of which show up as a TIMEOUT on the dial and then
 # cost the full connect timeout on every login before the fallback takes over.
-ADMIN_CHAT_MODE = "listen"
+ADMIN_CHAT_MODE = "auto"
 
 
 # ---------------------------------------------------------------------
@@ -94,7 +94,10 @@ DEBUG_TO_CONSOLE = True
 # A status page (search / queue / file lists / cross-bot fetch) served by
 # webserver.py. Flask is optional - if it is not installed, the dashboard
 # logs a line and stays off; it never stops the daemon from starting.
-WEBUI_ENABLED = True
+#
+# Off unless you turn it on: it is a network listener, and a copied file is
+# not consent to open one. Set True to have it.
+WEBUI_ENABLED = False
 
 # EVERY ROUTE REQUIRES A LOGIN, including static assets - see webserver.py's
 # module docstring for the detail. The password is the same one

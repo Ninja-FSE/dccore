@@ -378,6 +378,22 @@ def strip_control_codes(text):
     return _CONTROL_CODE_RE.sub('', clean)
 
 
+# Every C0 control, DEL and the C1 range (#670, audit L6). What a user typed
+# in a request or a search is printed to the operator's terminal, sent to
+# the debug channel and rendered by the admin chat, and strip_control_codes()
+# leaves reverse (\x16), italics (\x1d), a mid-line \x01, an ESC and a BEL in
+# it: "!rar \x1b]0;pwned\x07\x034,4 SENT: admin.rar to victim" retitled a
+# Windows Terminal window and drew a red block that read like a fake SENT
+# line inside the PART line. CR and LF never get this far (the reader splits
+# on them); nothing else below a space belongs in a filename or a search.
+_UNPRINTABLE_RE = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+
+
+def printable_text(text):
+    """strip_control_codes(), then every remaining control character."""
+    return _UNPRINTABLE_RE.sub('', strip_control_codes(text))
+
+
 def _has_marker(path, marker):
     """True if the builder's `marker` appears in the part of the name it owns.
 
@@ -1158,21 +1174,6 @@ def execute_search(irc_sock, user, search_term, channel):
         print(f"[MAINTENANCE BLOCK] Refused a search (@find) from {user}: an !update is running.")
         return
 
-    # Guard against two searches at once. This used to print to the console and
-    # return, sending the user nothing at all - their @find simply vanished.
-    #
-    # It was also unreachable with PAUSE_ON_UPDATE on, because the branch above
-    # returned first on the very same flag. Now that the two flags mean
-    # different things, this is the branch a second searcher actually reaches,
-    # so it has to say something, and something accurate: the previous wording
-    # anywhere near here blamed a MasterList rebuild that is not happening.
-    if getattr(config, 'search_inprogress', False):
-        oserve = sys.modules.get('oserve')
-        if oserve:
-            oserve.queue_message(user, f"NOTICE {user} :{config.C_BOLD}System Message{config.C_RESET}: Another search is running right now - try again in a moment.\r\n")
-        print(f"[SEARCH BLOCK] Ignored a search from {user}: another scan is already running.")
-        return
-        
     if len(search_term) < 3:
         oserve = sys.modules.get('oserve')
         if oserve:
@@ -1190,8 +1191,33 @@ def execute_search(irc_sock, user, search_term, channel):
               f"from {user}.")
         return
 
-    config.search_inprogress = True
-    
+    # Guard against two searches at once. This used to print to the console and
+    # return, sending the user nothing at all - their @find simply vanished.
+    #
+    # It was also unreachable with PAUSE_ON_UPDATE on, because the branch above
+    # returned first on the very same flag. Now that the two flags mean
+    # different things, this is the branch a second searcher actually reaches,
+    # so it has to say something, and something accurate: the previous wording
+    # anywhere near here blamed a MasterList rebuild that is not happening.
+    #
+    # CHECKED AND SET AS ONE STEP (#607). Every @find runs on its own thread,
+    # and this guard used to read the flag at the top of the function and set
+    # it here, with list_name_for_request()'s trip to lists.json in between -
+    # so two @find lines dispatched from the same recv() buffer both passed
+    # the check, both walked the master list at once, and the first to finish
+    # cleared the flag while the other was still running, admitting a third.
+    # The gate is the one !update takes for the same flag, so a rebuild and a
+    # search cannot slip past each other either. The refused searcher returns
+    # BEFORE the try below, so its finally never clears a flag it did not set.
+    with runtime.list_update_gate:
+        if getattr(config, 'search_inprogress', False):
+            oserve = sys.modules.get('oserve')
+            if oserve:
+                oserve.queue_message(user, f"NOTICE {user} :{config.C_BOLD}System Message{config.C_RESET}: Another search is running right now - try again in a moment.\r\n")
+            print(f"[SEARCH BLOCK] Ignored a search from {user}: another scan is already running.")
+            return
+        config.search_inprogress = True
+
     try:
         current_list_path = find_latest_list(wanted)
         if not current_list_path or not os.path.exists(current_list_path):
@@ -1230,9 +1256,11 @@ def execute_search(irc_sock, user, search_term, channel):
         # total_matches, not len(matches): the reply is capped at
         # MAX_SEARCH_RESULTS, and the operator wants to know what the list
         # had, not what the cap let through.
-        announce.send_debug(
+        announce.feed_event(
+            "SEARCH",
             f'{user} searched "{search_term}" - {total_matches} result'
-            f'{"" if total_matches == 1 else "s"}', category="SEARCH")
+            f'{"" if total_matches == 1 else "s"}',
+            nick=user, channel=channel, results=total_matches, term=search_term)
 
         if matches:
             # Send the search header privately to the requester

@@ -12,7 +12,7 @@ import runtime
 # channel caller keeps the default and the nick check.
 
 
-def is_admin(user):
+def is_admin(user, host=None):
     """Return True if `user` may run admin commands.
 
     Centralises a check that was duplicated across five handlers, so the eventual
@@ -27,11 +27,15 @@ def is_admin(user):
     * ADMIN_NICK may now be a comma-separated list, so a second operator can be added
       without reintroducing a hardcoded name.
 
-    KNOWN LIMITATION: this is still nick-based, and an Undernet nick is not owned without
-    services auth - anyone can take the nick while the real admin is offline and gain
-    every admin command, now including the destructive !clearqueue. Closing that properly
-    means matching ident@host, which irc.py does not currently capture: its PRIVMSG regex
-    keeps only the nick. That is a separate change to irc.py plus this file.
+    An Undernet nick is not owned without services auth: anyone can take it while the
+    real admin is offline. So when ADMIN_HOSTMASKS is set, the nick alone is not enough
+    (#579) - the sender's HOST must match one of those patterns too, the same test the
+    DCC console applies. `host` is the "ident@host" half of the sender's prefix, as
+    irc.parse_privmsg() returns it (a bare host works too); a caller that cannot say
+    where the line came from passes nothing, and then it is refused - an authorisation
+    check has one safe direction when it does not know. With ADMIN_HOSTMASKS empty
+    (the default) nothing changes: the check is the nick, as it always was, and the
+    channel commands can be switched off with ADMIN_CHANNEL_COMMANDS.
     """
     import defaults as config
 
@@ -47,7 +51,16 @@ def is_admin(user):
     # answer, and it is to refuse.
     raw = getattr(config, 'ADMIN_NICK', '') or ''
     allowed = {n.strip().lower() for n in str(raw).split(',') if n.strip()}
-    return str(user).lower() in allowed
+    if str(user).lower() not in allowed:
+        return False
+
+    import adminchat
+    if not adminchat.admin_host_patterns():
+        return True
+    # adminchat reads the host half of an ident@host; a bare host has none.
+    if host and "@" not in str(host):
+        host = "x@" + str(host)
+    return adminchat.is_admin_host(host)
 
 
 def handle_help_request(s, user, target):
@@ -211,7 +224,7 @@ def handle_queue_remove(s, user, target):
         print(f"[COMMANDS] Removed {len(removed_archives)} orphaned temp archive(s) with {user}'s queue.")
     print(f"[COMMANDS] {user} removed their entire queue from the disk layout.")
 
-def handle_admin_clear_queue(user, target_chan, msg_text, authorised=False):
+def handle_admin_clear_queue(user, target_chan, msg_text, authorised=False, user_host=None):
     """Force-clear ANOTHER user's queue entirely - admin only (issue #15).
 
     For a ghost nick left behind by a netsplit or a reconnect.
@@ -224,7 +237,7 @@ def handle_admin_clear_queue(user, target_chan, msg_text, authorised=False):
     import db
     import dcc
 
-    if not authorised and not is_admin(user):
+    if not authorised and not is_admin(user, user_host):
         print(f"[SECURITY] Unauthorised user {user} tried to run !clearqueue.")
         return
 
@@ -268,8 +281,31 @@ def handle_admin_clear_queue(user, target_chan, msg_text, authorised=False):
             category="INFO")
         print(f"[ADMIN CLEARQUEUE] {user} tried to clear {target_nick}, but no queue or frozen entry was found.")
 
+def diagnostics_are_for_the_admin(user, host=None):
+    """Whether `user` may run the bot's diagnostics - !ping and !debugnames.
+
+    They used to answer ANYONE in the channel. Seen live by the user: another
+    operator typed !ping to check their own bot, and every DCCore in the
+    channel ran a latency check, each spending a paced server line (the slot
+    the adverts share) and each reporting into its own admin console - so
+    one person's ping showed up in a stranger's console as if the stranger
+    had asked. Neither command even answers the person who typed it: !ping
+    reports only to the operator, !debugnames is a RAM-CHECK notice about the
+    bot's own membership mirror. They are the operator's tools, so they
+    answer the operator - the same is_admin() the admin commands use.
+
+    Not !list: that is the discovery command every serving bot answers with
+    its trigger, on purpose, and it stays public.
+    """
+    return is_admin(user, host)
+
+
 def handle_ping_request(irc_sock, user, target_chan):
     """Start the timer and send a unique latency PING to the IRC server.
+
+    Answers only the admin - see diagnostics_are_for_the_admin(). Checked
+    here as well as at the dispatch in irc.py so that no other caller can
+    make the bot ping on a stranger's behalf.
 
     #425: this used to write straight to the socket, the last responder in
     the dispatch chain that never touched the shared outbound clock #406
@@ -289,6 +325,9 @@ def handle_ping_request(irc_sock, user, target_chan):
     import time
     import defaults as config
     import runtime
+
+    if not diagnostics_are_for_the_admin(user):
+        return
 
     runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)
 
@@ -348,8 +387,12 @@ def handle_pong_response(category="INFO"):
 # NOT preserved, deliberately - these are cleared ON PURPOSE and that behaviour is kept:
 #   send_queue          - blanked below so stale text cannot collide after the reload
 #   rar_inprogress      - the documented "lock-clearing rehash" escape hatch for a
-#   user_processing_lock  packer that wedged; !rehash is the only way to clear them
+#   user_processing_lock  packer that wedged; !rehash is the only way to clear them.
+#                         Kept instead while the packer's thread is alive (#651) -
+#                         see clear_or_keep_pack_interlocks().
 PRESERVE_RUNTIME = (
+    'feed_counts',        # failures and searches since the process started (#754); the
+                          # panel's Since box would go back to zero on every Save
     'active_transfers',   # losing this reports 0 active slots while transfers run,
                           # so the bot admits work beyond MAX_DCC_SLOTS
     'banned_users',       # every timed ban silently released
@@ -404,6 +447,41 @@ PRESERVE_RUNTIME = (
 )
 
 
+def clear_or_keep_pack_interlocks(cfg, pack_running, packing_for, log=print):
+    """The rehash's "lock-clearing" step, made conditional (#651, audit M49).
+
+    Cleared: config.rar_inprogress and user_processing_lock, the folder
+    packer's two process-wide interlocks. That has always been the
+    documented escape hatch for a packer that died without releasing them -
+    and it was unconditional, so a rehash whose quiesce wait timed out
+    under a RUNNING pack (a big album takes minutes; the wait gives up after
+    REHASH_TRANSFER_WAIT) cleared them anyway and woke the queue. The user's
+    still-queued row then passed both interlocks on the next trigger and a
+    second rar started on the same archive path, unlinking the file the
+    first was writing.
+
+    So: `pack_running` (the packer THREAD is alive - dcc.a_pack_is_running())
+    keeps them. The reload has already reset rar_inprogress to False, so it
+    is put back, and the lock keeps the users it held. The packer's own
+    finally releases both when it finishes, as it always did. Not running
+    means the flags, if set, are stale - the wedged case - and the hatch
+    works as before. Returns True if the interlocks were cleared.
+    """
+    if pack_running:
+        cfg.rar_inprogress = True
+        if not hasattr(cfg, 'user_processing_lock') or cfg.user_processing_lock is None:
+            cfg.user_processing_lock = set()
+        cfg.user_processing_lock.update(packing_for)
+        who = ", ".join(sorted(packing_for)) or "someone"
+        log(f"[REHASH] A folder pack is still running for {who}; the pack interlocks "
+            f"are kept and release when it finishes. Nothing was interrupted.")
+        return False
+    cfg.rar_inprogress = False
+    if hasattr(cfg, 'user_processing_lock'):
+        cfg.user_processing_lock = set()
+    return True
+
+
 def rehash_nick_change_line(old_baseline_nick, new_nickname):
     """The raw "NICK <new>\\r\\n" line to send live if a rehash just renamed
     the bot in config.py, or None if the nickname did not actually change.
@@ -449,6 +527,27 @@ def reattach_debug_sinks(announce_module, live_sinks):
     return reattached
 
 
+def reattach_event_sinks(announce_module, live_sinks):
+    """The structured feed's half of reattach_debug_sinks() (#576).
+
+    importlib.reload(announce) also resets announce._event_sinks to [], the
+    registry a structured console session (the mIRC script after `hello`)
+    receives every REQUEST/QUEUED/SENDING/SENT/FAIL/SEARCH/RESUMED and the
+    event-driven STATUS burst through. Only _debug_sinks was put back, and a
+    structured session drops those kinds from its debug sink because it
+    expects them as fields - so after any rehash it heard neither, while its
+    LOG lines kept arriving and made it look alive. Returns the sinks
+    actually appended.
+    """
+    reattached = []
+    with announce_module._debug_sinks_lock:
+        for sink in live_sinks:
+            if sink not in announce_module._event_sinks:
+                announce_module._event_sinks.append(sink)
+                reattached.append(sink)
+    return reattached
+
+
 def restore_preserved_runtime(cfg, preserved_runtime):
     """Merge `preserved_runtime` (captured from `cfg` right before a reload)
     back into `cfg`'s current attributes - MUTATING each container in
@@ -476,16 +575,35 @@ def restore_preserved_runtime(cfg, preserved_runtime):
     copy, and came back as a permanent phantom DCC slot on the very next
     rehash - two rehashes in a row is all it took.
 
-    Kept general rather than assuming `value is current` always holds (true
-    today for every name in PRESERVE_RUNTIME, since all of them are
-    runtime.py-bound) - if a future preserved key ever is NOT bound that
-    way, reload really would hand back a fresh, empty container, and the
-    merge below still produces the right content; only the final write
-    changes, from rebind to in-place mutation.
+    When `value is current` - true today for every name in PRESERVE_RUNTIME,
+    since all of them are runtime.py-bound - there is nothing to merge: the
+    snapshot IS the live object, and the reload never emptied it. That key
+    is counted as restored (the operator's log line says what survived) and
+    the container is not touched. It used to be merged anyway, which came
+    out as `current.clear(); current.update(copy_of_current)` on the live
+    dict and `current[:] = copy_of_current` on the live list - run on the
+    rehash thread with no lock held (#604). Every other writer of these
+    containers holds queue_lock / the fetch lock / the offers lock, so the
+    copy could go stale between being taken and being written back: a
+    transfer that finished and removed itself in between came back as a
+    phantom slot; a dict was momentarily empty between clear() and update(),
+    which count_active_fetches() and check_user_status() could see; and
+    clear() under another thread's iteration raised RuntimeError on the IRC
+    read thread, whose outer handler closes the socket.
+
+    Kept general below that check rather than assuming identity always
+    holds - if a future preserved key ever is NOT runtime.py-bound, reload
+    really would hand back a fresh, empty container, and the merge produces
+    the right content; only the final write changes, from rebind to in-place
+    mutation. (That merge is the only path that writes, and it runs with no
+    lock; a key that needs it should take the container's own lock here.)
     """
     restored = set()
     for key, value in preserved_runtime.items():
         current = getattr(cfg, key, None)
+        if value is current:
+            restored.add(key)
+            continue
         if isinstance(value, dict) and isinstance(current, dict):
             merged = dict(value)
             merged.update(current)      # window writes win
@@ -803,7 +921,7 @@ def reload_modules_in_order(modules=CORE_MODULES, reload_self=True):
     return reloaded
 
 
-def handle_rehash_request(user, target_chan, authorised=False):
+def handle_rehash_request(user, target_chan, authorised=False, user_host=None):
     """Reload the modules live, in memory - one rehash at a time.
 
     THE SERIALISATION IS THE POINT OF THIS WRAPPER. The body below reloads
@@ -832,7 +950,7 @@ def handle_rehash_request(user, target_chan, authorised=False):
     before that write landed. Dropping it would silently lose the
     operator's change; waiting applies it.
     """
-    if not authorised and not is_admin(user):
+    if not authorised and not is_admin(user, user_host):
         print(f"[REHASH SECURITY] Ignored a rehash attempt from an unauthorised user: {user}")
         return
 
@@ -963,6 +1081,7 @@ def _handle_rehash_request(user, target_chan):
     # including this very rehash's own "Rehash completed!" line.
     with announce._debug_sinks_lock:
         live_debug_sinks = list(announce._debug_sinks)
+        live_event_sinks = list(announce._event_sinks)
 
     try:
         # 1b. QUIESCE FIRST (#310). A reload swaps the modules a
@@ -977,6 +1096,13 @@ def _handle_rehash_request(user, target_chan):
         # occasionally interrupts a transfer, and the log says which happened.
         import dcc as _dcc_quiesce
         _dcc_quiesce.wait_for_transfers_to_finish()
+        # Whether a folder pack is STILL running when the wait gives up
+        # (#651): the wait counts one as busy, but after REHASH_TRANSFER_WAIT
+        # it carries on regardless, and the reload below resets
+        # config.rar_inprogress to False. Read before the reload, acted on
+        # after it - see clear_or_keep_pack_interlocks().
+        _pack_still_running = _dcc_quiesce.a_pack_is_running()
+        _packing_for = set(getattr(config, 'user_processing_lock', set()) or set())
 
         # 2. REHASH: reload every core module live, in memory. The ORDER matters
         # and is documented on reload_modules_in_order() itself.
@@ -1043,6 +1169,15 @@ def _handle_rehash_request(user, target_chan):
             _cfg.ORIGINAL_NICK = _cfg.NICKNAME
             print(f"[REHASH RAM] config.py changed the nickname to {_cfg.NICKNAME!r}; "
                   f"re-baselined, still answering to {baseline_nick!r}.")
+            # The new name is the TARGET, not yet the bot's name on the wire
+            # (#635): config.NICKNAME stays what the server calls us until
+            # its NICK event says otherwise - a rename refused with 438
+            # ("too fast") or 433 used to leave config saying a name the
+            # server never gave. ORIGINAL_NICK carries the target, so a
+            # reconnect asks for it and the reclaim path chases it.
+            _wanted_nick = _cfg.NICKNAME
+            if live_nick:
+                _cfg.NICKNAME = live_nick
 
             # Also change it LIVE, right now, over the connection that is
             # already open - the same live-sync treatment a CHANNEL edit
@@ -1054,14 +1189,14 @@ def _handle_rehash_request(user, target_chan):
             # watching the change happen in the dashboard has every reason to
             # expect the bot to answer to the new name immediately, the way
             # a channel add/remove already does.
-            _nick_line = rehash_nick_change_line(baseline_nick, _cfg.NICKNAME)
+            _nick_line = rehash_nick_change_line(baseline_nick, _wanted_nick)
             if _nick_line:
                 _oserve_for_nick = sys.modules.get('oserve')
                 _live_sock_for_nick = getattr(_oserve_for_nick, 'irc_connection', None) if _oserve_for_nick else None
                 if _live_sock_for_nick:
                     try:
                         _live_sock_for_nick.sendall(_nick_line.encode("utf-8", errors="ignore"))
-                        print(f"[REHASH NICK] Sent a live NICK change to {_cfg.NICKNAME!r}.")
+                        print(f"[REHASH NICK] Sent a live NICK change to {_wanted_nick!r}.")
                     except Exception as _nick_err:
                         print(f"[REHASH NICK ERROR] Could not send the live nick change: {_nick_err}")
                 else:
@@ -1079,6 +1214,11 @@ def _handle_rehash_request(user, target_chan):
         _reattached_sinks = reattach_debug_sinks(_ann, live_debug_sinks)
         if _reattached_sinks:
             print(f"[REHASH RAM] Reattached {len(_reattached_sinks)} admin console debug sink(s).")
+        # ...and the structured feed's own registry (#576), which the same
+        # reload emptied and which nothing else refills.
+        _reattached_events = reattach_event_sinks(_ann, live_event_sinks)
+        if _reattached_events:
+            print(f"[REHASH RAM] Reattached {len(_reattached_events)} structured feed sink(s).")
 
         # Read the freshly reloaded config
         import defaults as config
@@ -1124,7 +1264,22 @@ def _handle_rehash_request(user, target_chan):
         if hasattr(announce, 'last_announce_time'):
             import time
             announce.last_announce_time = time.time()
-            
+
+        # The automatic list refresh (#625). oserve.startup() starts its
+        # worker only when AUTO_REFETCH_LISTS is on at boot, and a dashboard
+        # save that ticks it on lands here - so this is where it has to
+        # start, or the setting is "rehash started" and nothing else until
+        # the next restart. Idempotent: runtime.py remembers a worker already
+        # running, and a rehash that changed nothing starts nothing.
+        try:
+            import list_fetch as _list_fetch
+            if _list_fetch.ensure_auto_refetch_worker():
+                print("[REHASH] AUTO_REFETCH_LISTS is on: the automatic list "
+                      "refresh has started.")
+        except Exception as refetch_err:
+            print(f"[REHASH] Could not start the automatic list refresh: "
+                  f"{refetch_err}")
+
         # ---------------------------------------------------------------------
         # 4. FULLY AUTOMATIC CHANNEL SYNC (JOIN NEW / PART REMOVED)
         # ---------------------------------------------------------------------
@@ -1161,10 +1316,19 @@ def _handle_rehash_request(user, target_chan):
         # 5. Confirm, through the VIP express lane
         announce.send_debug(f"Rehash completed! RAM-Memory preserved seamlessly without disk-paging.", category="INFO")
         
-        # Clear any stale locks and ghost blocks left over before the rehash
-        config.rar_inprogress = False
-        if hasattr(config, 'user_processing_lock'):
-            config.user_processing_lock = set()
+        # Clear any stale locks and ghost blocks left over before the rehash -
+        # unless the packer that holds them is still running (#651).
+        import dcc as _dcc_pack
+        clear_or_keep_pack_interlocks(
+            config, _pack_still_running and _dcc_pack.a_pack_is_running(), _packing_for)
+
+        # ADMIN_HOSTMASKS may have just changed; a very broad entry is
+        # accepted but said out loud, here as at boot (#669).
+        try:
+            import adminchat as _adminchat_rehash
+            _adminchat_rehash.report_broad_host_patterns()
+        except Exception as hostmask_err:
+            print(f"[REHASH] Could not check ADMIN_HOSTMASKS: {hostmask_err}")
 
         # Take the real, live network socket straight from memory
         oserve_mod = sys.modules.get('oserve')
@@ -1181,9 +1345,13 @@ def _handle_rehash_request(user, target_chan):
             import dcc
             import threading
             print("[REHASH-WAKE] Letting queued users into the free slots...")
+            # One look per free slot, not one pass (#668): a pass dispatches
+            # at most one user, and requests made during the quiesce are
+            # queued now rather than refused, so several users may be
+            # waiting on this wake with nothing else due to wake them.
             threading.Thread(
-                target=dcc.check_queue_and_send, 
-                args=(live_socket, "system_next_trigger_fallback"), 
+                target=dcc.wake_restored_queues,
+                args=(live_socket,),
                 daemon=True
             ).start()
         else:
@@ -1204,12 +1372,12 @@ def _handle_rehash_request(user, target_chan):
         announce.send_debug(f"Rehash FAILED (Notices Resumed for safety): {e}", category="INFO")
 
 
-def handle_hard_ban_request(user, target_chan, msg_text, authorised=False):
+def handle_hard_ban_request(user, target_chan, msg_text, authorised=False, user_host=None):
     """Add a permanent wildcard pattern to hard_bans.txt, straight from IRC."""
     import defaults as config
     import announce
     
-    if not authorised and not is_admin(user):
+    if not authorised and not is_admin(user, user_host):
         print(f"[SECURITY] Unauthorised user {user} tried to run !ban.")
         return
 
@@ -1257,13 +1425,13 @@ def handle_hard_ban_request(user, target_chan, msg_text, authorised=False):
     else:
         announce.send_debug(f"Pattern {pattern} is already banned permanently.", category="INFO")
 
-def handle_hard_unban_request(user, target_chan, msg_text, authorised=False):
+def handle_hard_unban_request(user, target_chan, msg_text, authorised=False, user_host=None):
     """Remove a permanent wildcard pattern from hard_bans.txt, straight from IRC."""
     import defaults as config
     import announce
     import os
     
-    if not authorised and not is_admin(user):
+    if not authorised and not is_admin(user, user_host):
         # Logged, like !ban / !clearqueue / !rehash / !update all are. This
         # returned silently, so an operator auditing attempted privilege abuse
         # had a blind spot on exactly one command (#234).
@@ -1404,6 +1572,52 @@ def count_from_master_list():
         return 0
 
 
+def count_by_list():
+    """[(name, files)] for every configured list, in the operator's order.
+
+    count_from_master_list() reads the PRIMARY list only - a call without a name
+    means the primary - so a second list (films, series, whatever the operator
+    called it) was never counted: the rebuild report gave the music's total and
+    said nothing of the rest (#873). The names are the ones the operator gave
+    the lists in lists.json; nothing here knows what they are.
+    """
+    import library
+    import list as _list_mod
+
+    counts = []
+    for entry in library.lists():
+        try:
+            files = _list_mod.get_file_count_date_size_and_raw_bytes(entry.name)[0]
+        except Exception as err:
+            print(f"[LIST READ ERROR] Could not count the list {entry.name!r}: {err}")
+            files = 0
+        counts.append((entry.name, int(files or 0)))
+    return counts
+
+
+def describe_list_counts(old, new):
+    """(sentence, shrunk) - what the rebuild report says about the lists.
+
+    One list keeps the wording it always had. Several are named one by one, each
+    with what it gained, so a second list's files are not lost in a total that
+    covers only the first. `shrunk` is the [(name, was, now)] of the lists that
+    ended up smaller: a folder that lost its mount does not look like "0 new".
+    """
+    before = dict(old)
+    shrunk = [(name, before.get(name, 0), count) for name, count in new
+              if count < before.get(name, 0)]
+    if len(new) == 1:
+        name, count = new[0]
+        added = count - before.get(name, 0)
+        return (f"MasterList now contains {count:,} files. "
+                f"Added {added:,} new file(s) since last index."), shrunk
+    parts = []
+    for name, count in new:
+        added = count - before.get(name, 0)
+        parts.append(f"{name}: {count:,} files ({added:+,} new)")
+    return "; ".join(parts) + ".", shrunk
+
+
 class ListUpdateStalled(Exception):
     """The child stopped reporting for longer than the stall window.
 
@@ -1524,7 +1738,7 @@ def describe_duration(seconds):
     return f"{total // 3600}h {(total % 3600) // 60:02d}m"
 
 
-def handle_list_update_request(user, target_chan, authorised=False):
+def handle_list_update_request(user, target_chan, authorised=False, user_host=None):
     """Run update_list.py, wait for it, and read the file count from line 1 of the list."""
     import subprocess
     import sys
@@ -1536,7 +1750,7 @@ def handle_list_update_request(user, target_chan, authorised=False):
     import threading
     import time
     
-    if not authorised and not is_admin(user):
+    if not authorised and not is_admin(user, user_host):
         print(f"[SECURITY] Unauthorised user {user} tried to run !update.")
         return
 
@@ -1555,22 +1769,34 @@ def handle_list_update_request(user, target_chan, authorised=False):
     # Every path that returns after this point must put the flag back, or the
     # bot refuses every future update until it restarts. There is exactly one
     # such path today - the search-already-running denial below - and it does.
+    #
+    # The search flag is checked and set inside the SAME gate (#607). It used
+    # to be read and raised just below it, outside the lock - and every @find
+    # runs on its own thread and raises the same flag, so a search arriving in
+    # that window passed its own guard while this request passed this one,
+    # and the rebuild's finally then cleared a flag the searcher still relied
+    # on. list.execute_search() takes this gate for its check-and-set too, so
+    # whichever of the two gets the lock first is the one the other sees.
+    paused_searches = False
     with runtime.list_update_gate:
         if getattr(config, 'update_inprogress', False) is True:
             announce.send_debug(f"List update request from {user} denied: An update is already running.", category="INFO")
             return
         config.update_inprogress = True
 
-    # The global maintenance lock is only taken if the switch is True in config
-    if getattr(config, 'PAUSE_ON_UPDATE', True) is True:
-        if getattr(config, 'search_inprogress', False) is True:
-            announce.send_debug(f"List update request from {user} denied: Another system scan is already running.", category="INFO")
-            # The flag was raised by the gate above and this request is not
-            # going to use it. Leaving it set would deny every later update
-            # for the life of the process.
-            config.update_inprogress = False
-            return
-        config.search_inprogress = True
+        # The global maintenance lock is only taken if the switch is True in config
+        if getattr(config, 'PAUSE_ON_UPDATE', True) is True:
+            if getattr(config, 'search_inprogress', False) is True:
+                announce.send_debug(f"List update request from {user} denied: Another system scan is already running.", category="INFO")
+                # The flag was raised by the gate above and this request is not
+                # going to use it. Leaving it set would deny every later update
+                # for the life of the process.
+                config.update_inprogress = False
+                return
+            config.search_inprogress = True
+            paused_searches = True
+
+    if paused_searches:
         print(f"[MAINTENANCE START] {user} ran !update. Searching and sharing are now PAUSED.")
         announce.send_debug(f"System maintenance initiated by {user}. MasterList is rebuilding, file requests temporarily paused...", category="INFO")
     else:
@@ -1578,7 +1804,7 @@ def handle_list_update_request(user, target_chan, authorised=False):
         announce.send_debug(f"List update triggered by {user} from {target_chan}. Indexing the music directory...", category="INFO")
 
     # 1. Take the previous real file count from line 1
-    old_count = count_from_master_list()
+    old_counts = count_by_list()
     announce.send_debug(f"List update triggered by {user} from {target_chan}. Indexing the music directory, bot paused...", category="INFO")
     def async_list_updater():
         # HOW LONG THE WHOLE THING TOOK, from here rather than from the
@@ -1645,10 +1871,10 @@ def handle_list_update_request(user, target_chan, authorised=False):
                 # ---------------------------------------------------------------------
                 
                 # 3. Read the new file count from line 1
-                new_count = count_from_master_list()
+                new_counts = count_by_list()
 
-                # Work out the exact difference
-                added_files = new_count - old_count
+                # Work out the exact difference, list by list (#873)
+                summary, shrunk = describe_list_counts(old_counts, new_counts)
 
                 # #230: clamping straight to zero made a SHRUNK library read
                 # identically to an unchanged one - "Added 0 new file(s)" - even
@@ -1658,27 +1884,41 @@ def handle_list_update_request(user, target_chan, authorised=False):
                 # than before) passes that guard, publishes a truncated index,
                 # and the operator who just lost real files from their share was
                 # told nothing changed.
-                if added_files < 0:
+                if shrunk:
                     # No dedicated warning category exists in send_debug() (see
                     # its own category list) - "INFO" here, same as the normal
                     # path, since the wording itself is what carries the
                     # warning; inventing a category that falls through to the
                     # same [INFO] tag anyway would only look distinct without
                     # being distinct.
-                    announce.send_debug(
-                        f"List update completed, but the file count DROPPED from "
-                        f"{old_count:,} to {config.C_BOLD}{new_count:,}{config.C_RESET} "
-                        f"({-added_files:,} fewer). Check the music directory/mount "
-                        f"before trusting this list.",
-                        category="INFO"
-                    )
+                    for name, was, now in shrunk:
+                        # Named by the list, and the folder it says to check
+                        # is that list's own: "the music directory" is a
+                        # wrong pointer when it is the films that vanished.
+                        several = len(new_counts) > 1
+                        which = f" of the list {name!r}" if several else ""
+                        where = "that list's folder/mount" if several else "the music directory/mount"
+                        announce.send_debug(
+                            f"List update completed, but the file count{which} DROPPED from "
+                            f"{was:,} to {config.C_BOLD}{now:,}{config.C_RESET} "
+                            f"({was - now:,} fewer). Check {where} "
+                            f"before trusting this list.",
+                            category="INFO"
+                        )
+                    if len(new_counts) > 1:
+                        # A list that shrank must not hide what the others
+                        # gained: with several lists the summary follows the
+                        # warning. One list keeps the warning alone, as before.
+                        announce.send_debug(
+                            f"List update completed in "
+                            f"{describe_duration(time.time() - started)}. {summary}",
+                            category="INFO"
+                        )
                 else:
                     # 4. Confirm, through the VIP express lane
                     announce.send_debug(
                         f"List update successfully completed in "
-                        f"{describe_duration(time.time() - started)}! MasterList "
-                        f"now contains {new_count:,} files. "
-                        f"Added {added_files:,} new file(s) since last index.",
+                        f"{describe_duration(time.time() - started)}! {summary}",
                         category="INFO"
                     )
                 # The script itself succeeded either way - #230's shrink
@@ -1731,8 +1971,11 @@ def handle_list_update_request(user, target_chan, authorised=False):
             config.last_list_update_error = str(e)
             config.last_list_update_seconds = int(time.time() - started)
         finally:
-            # Release the global pause lock again
-            config.search_inprogress = False
+            # Release the global pause lock again - but only if THIS request
+            # raised it. With PAUSE_ON_UPDATE off the flag belongs to whatever
+            # @find is running, and clearing it here let a second search in.
+            if paused_searches:
+                config.search_inprogress = False
 
             # Clear the maintenance flag, so list.py knows the list is ready
             config.update_inprogress = False

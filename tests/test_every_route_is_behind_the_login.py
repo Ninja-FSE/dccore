@@ -18,7 +18,8 @@ holding. Three realistic ways it could:
   * the check becomes path-based again, at which point any route sharing a
     prefix with /login rides in with it
   * a future blueprint or second Flask app registers routes that this app's
-    before_request never sees
+    before_request never sees - the setup app IS that second app, and gets
+    its own walk below (#674)
 
 The test below walks url_map itself, so a route added tomorrow is covered
 without anybody remembering this file exists. That is the property worth
@@ -215,3 +216,61 @@ class TheFourRoutesThatHadNoHttpTest(RouteCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EverySetupRouteIsBehindTheToken(DCCoreTestCase):
+    """The second Flask app the docstring above warns about (#674, audit
+    L10): create_setup_app() has its own before_request gate and its own
+    url_map, and nothing walked it. Each of its three routes was pinned by
+    hand in test_set_it_up_in_the_browser.py, so this is a guard against a
+    route or an exemption added tomorrow, not a hole today. Walked the
+    same way: every rule, every method, and the gate has to answer - with
+    a foreign Host, without the token, and with the token but a foreign
+    Host."""
+
+    def setUp(self):
+        super().setUp()
+        self.done = []
+        self.app = webserver.create_setup_app("the-token", self.done.append, port=8420)
+        self.client = self.app.test_client()
+
+    def every_rule(self):
+        for rule in self.app.url_map.iter_rules():
+            path = str(rule)
+            for name in rule.arguments:
+                path = path.replace(f"<{name}>", "no-such-thing")
+                for converter in ("path:", "int:", "string:"):
+                    path = path.replace(f"<{converter}{name}>", "no-such-thing")
+            for method in sorted(rule.methods & {"GET", "POST", "PUT", "DELETE"}):
+                yield rule.endpoint, path, method
+
+    def test_the_walk_sees_the_routes_it_is_meant_to(self):
+        """A walk of nothing would pass the tests below."""
+        self.assertEqual(sorted({path for _e, path, _m in self.every_rule()}),
+                         ["/", "/login", "/setup"])
+
+    def test_every_rule_refuses_a_request_without_the_token(self):
+        for endpoint, path, method in self.every_rule():
+            with self.subTest(endpoint=endpoint, path=path, method=method):
+                resp = self.client.open(path, method=method, headers={"Host": "127.0.0.1:8420"})
+
+                self.assertEqual(resp.status_code, 403,
+                                 f"{method} {path} answered {resp.status_code} without the token")
+                self.assertIn(b"one-time code", resp.data)
+
+    def test_every_rule_refuses_a_foreign_host_even_with_the_token(self):
+        for endpoint, path, method in self.every_rule():
+            with self.subTest(endpoint=endpoint, path=path, method=method):
+                resp = self.client.open(path + "?token=the-token", method=method,
+                                        headers={"Host": "evil.example:8420"})
+
+                self.assertEqual(resp.status_code, 403,
+                                 f"{method} {path} answered {resp.status_code} to a foreign host")
+                self.assertIn(b"127.0.0.1", resp.data)
+
+    def test_nothing_was_applied_by_any_of_it(self):
+        for _endpoint, path, method in self.every_rule():
+            self.client.open(path, method=method, headers={"Host": "127.0.0.1:8420"})
+            self.client.open(path + "?token=the-token", method=method, headers={"Host": "evil.example"})
+
+        self.assertEqual(self.done, [])

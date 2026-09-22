@@ -219,16 +219,20 @@ class TheLoopParsersTakeTheSameNames(unittest.TestCase):
         self.assertIn("is_valid_irc_target(m366.group(1))", source)
 
     def test_join_takes_any_target(self):
+        """Through parse_join() since #693; the property - any non-space
+        channel name, then the target check - is the same."""
         source = self.source()
 
-        self.assertIn(r'JOIN :?(\S+)"', source)
-        self.assertIn("is_valid_irc_target(join_match.group(2))", source)
+        self.assertIn(r'JOIN\s+:?(\S+)"', source)
+        self.assertIn("is_valid_irc_target(join_match[1])", source)
+        self.assertEqual(irc.parse_join(":n!u@h JOIN &weird^name"), ("n", "&weird^name"))
 
     def test_part_takes_any_target(self):
         source = self.source()
 
-        self.assertIn(r'PART (\S+)"', source)
-        self.assertIn("is_valid_irc_target(part_match.group(2))", source)
+        self.assertIn(r'PART\s+(\S+)"', source)
+        self.assertIn("is_valid_irc_target(part_match[1])", source)
+        self.assertEqual(irc.parse_part(":n!u@h PART &weird^name"), ("n", "&weird^name"))
 
     def test_the_names_reply_takes_any_channel(self):
         """The one that mattered most. 353 populates config.channel_users,

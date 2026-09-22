@@ -128,7 +128,11 @@ class TheChannelNoticeCanBeTurnedOff(DCCoreTestCase):
         gated = body.split('if getattr(config, "ANNOUNCE_TRANSFERS", True):', 1)[1]
         self.assertIn('oserve.queue_message("channel_announce", msg)',
                       gated.split("\n    else:", 1)[0])
-        self.assertIn("send_debug(", body)
+        # feed_event("SENT", ...) since #550 - it sends the debug line and
+        # the structured event together; the property is the same: it sits
+        # OUTSIDE the channel gate.
+        self.assertIn('feed_event("SENT"', body)
+        self.assertNotIn("feed_event(", gated.split("\n    else:", 1)[0])
         self.assertNotIn("send_debug(", gated.split("\n    else:", 1)[0])
 
     def test_off_still_says_so_in_the_log(self):

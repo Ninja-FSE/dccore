@@ -256,6 +256,13 @@ RUNTIME_ASSIGNED = {
                       "you need to pin it"),
     "ORIGINAL_NICK": ("the daemon remembers this for itself, from NICKNAME, so "
                       "it can go back to it after a nick collision"),
+    # NOT_SETTINGS' one member (#688, audit L24): an older dashboard's
+    # Settings page offered it and wrote it here, nothing ever removed the
+    # line, and every boot and !rehash since said "check the spelling" of
+    # a name DCCore itself had written.
+    "SCRIPT_VERSION": ("the code's own version, which an older Settings page "
+                       "wrote here; it is no longer configurable. Delete this "
+                       "line"),
 }
 
 
@@ -443,6 +450,109 @@ def encode_irc_escapes(text):
         lambda match: "\\x%02x" % ord(match.group()), str(text))
 
 
+# WHAT AN IRC NICKNAME MAY BE (#591). The server decides, and the protocol
+# (RFC 2812, and ircu on Undernet) says: ASCII, a letter or one of [ ] \\ ` _ ^ { | }
+# first, then those plus digits and "-". Anything else - a Greek letter, "!",
+# ".", "*", a comma, a leading "-" or digit, a space - is answered with 432
+# "Erroneous Nickname", which the handshake treats like 433 "in use": the bot
+# quietly ran as the shipped alternate ("DCCore_") and reported the nick as
+# "taken". Every path that writes a nickname comes through here, so the operator
+# hears it when they type it.
+NICK_SETTINGS = frozenset({"NICKNAME", "ALT_NICKNAME", "ADMIN_NICK"})
+_NICK_FIRST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz[]\\`_^{|}"
+_NICK_REST = _NICK_FIRST + "0123456789-"
+
+
+def nick_problem(nick):
+    """Why `nick` cannot be an IRC nickname, or None if it can."""
+    text = str(nick)
+    if not text:
+        return "a nickname cannot be empty"
+    if "\n" in text or "\r" in text:
+        return f"{text!r} has a line break in it"
+    for character in text:
+        if character == " ":
+            return f"{text!r} has a space in it"
+        if ord(character) > 127:
+            return (f"{text!r} has the character {character!r}, which is not ASCII - "
+                    "IRC servers refuse it")
+    if text[0] not in _NICK_FIRST:
+        return f"{text!r} starts with {text[0]!r}; a nickname starts with a letter or one of [ ] \\ ` _ ^ {{ | }}"
+    for character in text[1:]:
+        if character not in _NICK_REST:
+            return f"{text!r} has {character!r} in it; a nickname has letters, digits and [ ] \\ ` _ ^ {{ | }} -"
+    return None
+
+
+def server_problem(value):
+    """Why `value` cannot be SERVER - a host name the bot can resolve - or
+    None if it can (#687, audit L23).
+
+    The natural first-timer spellings "irc.undernet.org:6667" and a pasted
+    "irc://irc.undernet.org" were accepted, and connect() then failed on
+    name resolution every ten seconds for ever - "[ERROR] Connection failed:
+    [Errno 11001] getaddrinfo failed" - with nothing saying the colon or the
+    scheme was the problem. The port has its own setting (PORT), and a host
+    name has no ":", "/" or spaces in it.
+    """
+    text = str(value).strip()
+    if not text:
+        return "a server name cannot be empty"
+    if "://" in text:
+        return (f"{text!r} is a URL; SERVER is the host name alone, "
+                f"e.g. {text.split('://', 1)[1].split('/', 1)[0].split(':', 1)[0] or 'irc.undernet.org'}")
+    if "/" in text:
+        return f"{text!r} has a / in it; SERVER is the host name alone"
+    if ":" in text:
+        host, _colon, port = text.partition(":")
+        if port.isdigit():
+            return f"{text!r} carries the port; put {host!r} in SERVER and {port} in PORT"
+        return f"{text!r} has a : in it; SERVER is the host name alone, and PORT is its own setting"
+    if " " in text:
+        return f"{text!r} has a space in it"
+    return None
+
+
+def admin_host_problem(value):
+    """Why `value` cannot be the host half of an ADMIN_HOSTMASKS entry, or
+    None if it can (#811, follow-up to audit M52/H4, #654/#579).
+
+    Setup asks for the host alone - what `/whois yourself` shows once you
+    are logged into services and set +x, e.g. "yourname.users.undernet.org"
+    - and wraps it as "*!*@<value>" itself; this checks the part the
+    operator actually typed. A "*" is refused outright: a real host from
+    /whois never has one, and the one way to end up with one here is
+    pasting the wildcard-breadth mistake audit L5 (#669) warns about
+    instead of an actual host - refusing it at the source is cheaper than
+    warning about it after it is written.
+    """
+    text = str(value).strip()
+    if not text:
+        return "a host cannot be empty"
+    if "://" in text:
+        return f"{text!r} looks like a URL; give the host alone, e.g. yourname.users.undernet.org"
+    for character in " /@!*":
+        if character in text:
+            return f"{text!r} has a {character!r} in it; give the host alone, without the nick, ident or a wildcard"
+    if "." not in text:
+        return f"{text!r} does not look like a host - it should end in something like .users.undernet.org"
+    return None
+
+
+def nicks_problem(value):
+    """The same for a comma-separated list (ADMIN_NICK)."""
+    parts = [part.strip() for part in str(value).split(",")]
+    if not any(parts):
+        return "a nickname cannot be empty"
+    for part in parts:
+        if not part:
+            continue
+        problem = nick_problem(part)
+        if problem:
+            return problem
+    return None
+
+
 def coerce(name, raw, default, declared=None):
     """Convert `raw` to `declared`, or to the type of `default` without one.
 
@@ -480,6 +590,16 @@ def coerce(name, raw, default, declared=None):
         if isinstance(default, int):
             return int(lowered)
         return lowered
+
+    if name in NICK_SETTINGS and text:
+        problem = nicks_problem(text) if name == "ADMIN_NICK" else nick_problem(text)
+        if problem:
+            raise ValueError(f"not a valid IRC nickname: {problem}")
+
+    if name == "SERVER" and text:
+        problem = server_problem(text)
+        if problem:
+            raise ValueError(f"not a server name: {problem}")
 
     if default is None and not text:
         # A setting whose default is None is "unset unless you say otherwise"
@@ -534,7 +654,8 @@ def apply_to(namespace, path=None, log=print):
     still get a correct daemon with the defaults intact.
     """
     path = path or settings_path()
-    report = {"path": path, "applied": {}, "unknown": [], "bad": [], "read_error": None}
+    report = {"path": path, "applied": {}, "unknown": [], "bad": [], "shadowed": [],
+              "read_error": None}
 
     if not os.path.exists(path):
         return report
@@ -568,14 +689,50 @@ def apply_to(namespace, path=None, log=print):
         namespace[key] = value
         report["applied"][key] = value
 
+    report["shadowed"] = _overridden_admin_config_values(report["applied"])
     _log_summary(report, path, log)
     return report
+
+
+def _overridden_admin_config_values(applied):
+    """[(name, admin_config's value)] for each name this file just applied
+    that admin_config.py had ALSO set - to something else.
+
+    The only other shadow check, shadowed_by_admin_config(), runs when the
+    dashboard SAVES a setting. Nothing said anything when the daemon
+    STARTED, which is when the collision actually bites: an operator who
+    edits WEBUI_HOST in admin_config.py (its own comment tells them to) and
+    restarts gets a dashboard that ignores the edit and a console that
+    says nothing about why (#623).
+
+    sys.modules rather than `import admin_config`: what matters is the
+    module THIS process applied, `from admin_config import *` in defaults.py
+    a moment before this runs. A process that never imported it (no file at
+    boot, or a caller that is not defaults.py) has nothing to compare
+    against, and importing one from disk here would report a file the
+    daemon did not read.
+
+    Only a DIFFERENT value counts. The same value in both files loses
+    nothing - and a warning that fires on every boot for a harmless line
+    is a warning nobody reads by the time it matters.
+    """
+    module = sys.modules.get("admin_config")
+    if module is None:
+        return []
+    return sorted(((key, getattr(module, key)) for key, value in applied.items()
+                   if hasattr(module, key) and getattr(module, key) != value),
+                  key=lambda item: item[0])
 
 
 def _log_summary(report, path, log):
     name = os.path.basename(path)
     if report["applied"]:
         log(f"[CONFIG] Applied {len(report['applied'])} setting(s) from {name}.")
+    for key, admin_value in report["shadowed"]:
+        log(f"[CONFIG] {name} overrides {key}, which admin_config.py also sets "
+            f"(to {admin_value!r}): {name} is applied second and wins. Change "
+            f"it in {name} or the dashboard's Settings page, or remove the "
+            f"line from admin_config.py.")
     for key in report["unknown"]:
         assigned = RUNTIME_ASSIGNED.get(key)
         if assigned:

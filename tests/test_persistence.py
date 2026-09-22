@@ -106,16 +106,21 @@ class TestQueueRoundTrip(PersistenceTestCase):
         self.assertEqual(config.dcc_queue["dave"][0]["file"], "01 - Enter Sandman.flac")
         self.assertIs(config.dcc_queue["erik"][0]["is_temporary_zip"], True)
 
-    def test_save_drops_users_whose_list_is_empty(self):
+    def test_save_leaves_users_whose_list_is_empty_out_of_the_file(self):
         """Defect: users with an emptied list stayed in dcc_queue.txt and were reloaded at
-        boot as phantom queue holders. save_dcc_queue() sanitises them away both in
-        memory and on disk."""
+        boot as phantom queue holders. save_dcc_queue() leaves them out of the file.
+
+        It no longer pops them from the live dict as well (#606): two callers
+        run outside queue_lock, and that pop raced the lock-held live walks in
+        dcc.py. Emptying a queue and dropping its key are now one step, under
+        the lock, in dcc.release_queue_entry() - see
+        tests/test_the_queue_save_never_touches_the_live_dict.py."""
         config.dcc_queue = self.sample_queue()
         config.dcc_queue["ghost"] = []
 
         db.save_dcc_queue()
 
-        self.assertNotIn("ghost", config.dcc_queue)
+        self.assertIn("ghost", config.dcc_queue, "the save must not mutate the live dict")
         self.assertNotIn("ghost", json.loads(self.read_queue_file()))
 
     def test_save_leaves_no_tmp_residue(self):

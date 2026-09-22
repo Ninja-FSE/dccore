@@ -68,7 +68,7 @@ class DispatchAdmissionTests(DCCoreTestCase):
         self.notices = []
         self._record_lock = threading.Lock()
 
-        def fake_notice(user, file_name):
+        def fake_notice(user, file_name, path=None, channel=None):
             with self._record_lock:
                 self.notices.append((user, file_name))
 

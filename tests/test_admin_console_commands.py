@@ -169,6 +169,15 @@ class ReadOnlyCommands(DCCoreTestCase):
         self.assertIn("erin", out)
         self.assertIn("3 file(s) queued", out)
 
+    def test_queue_lists_the_users_in_the_order_they_are_served(self):
+        """The same walk dcc.check_queue_and_send() makes - first to ask,
+        first served - not the alphabet, which put zed after alice though
+        zed was next in line (#612)."""
+        config.dcc_queue = {"zed": [{"file": "a.flac"}], "alice": [{"file": "b.flac"}]}
+        out = self.run_command("queue")
+        self.assertLess(out.index("zed"), out.index("alice"))
+        self.assertIn("in serving order", out)
+
     def test_queue_can_name_one_user_and_shows_their_files(self):
         config.dcc_queue = {"dave": [{"file": "Enter Sandman.flac"}]}
         out = self.run_command("queue dave")
@@ -286,7 +295,10 @@ class DebugOutputReachesTheConsole(DCCoreTestCase):
         self.addCleanup(lambda: announce._debug_sinks.clear())
         announce.send_debug("still fine")  # must not raise
 
-    def test_mirc_formatting_is_stripped_for_the_console(self):
+    def test_mirc_formatting_is_stripped_for_the_console_when_colours_are_off(self):
+        """ADMIN_CHAT_COLOURS off is the pre-#550 console: plain [TAG] text,
+        every code stripped, for a client that would show them as junk."""
+        self.set_config(ADMIN_CHAT_COLOURS=False)
         session = adminchat.Session(socket.socket(), "127.0.0.1", "SysOp", "h")
         self.addCleanup(session.close, None)
         session.authenticated = True
@@ -295,6 +307,18 @@ class DebugOutputReachesTheConsole(DCCoreTestCase):
         self.assertIn("dave returned", line)
         self.assertNotIn(config.C_BOLD, line)
         self.assertIn("[JOIN]", line)
+
+    def test_the_tag_is_coloured_by_default(self):
+        """A DCC chat is an IRC client; the tag carries the debug channel's
+        own colour for the category (#550, step 1)."""
+        session = adminchat.Session(socket.socket(), "127.0.0.1", "SysOp", "h")
+        self.addCleanup(session.close, None)
+        session.authenticated = True
+        session.debug_sink("dave returned", "JOIN")
+        line = session._outbox[-1]
+        self.assertIn("[JOIN]", line)
+        self.assertIn(config.C_CYAN, line, "JOIN's colour in the channel is cyan; so here")
+        self.assertTrue(line.endswith(" dave returned"))
 
     def test_an_unauthenticated_session_receives_nothing(self):
         session = adminchat.Session(socket.socket(), "127.0.0.1", "SysOp", "h")

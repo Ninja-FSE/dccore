@@ -120,9 +120,13 @@ class ParsingARefusal(unittest.TestCase):
         the operator serves fewer, which is the same shape as a ban and the
         same reason a bounded retry is right. It is answered in different
         WORDS, because "gave up after 3 attempts" would send somebody looking
-        for a fault on the channel's side."""
+        for a fault on the channel's side.
+
+        476, 477 and 479 joined in #632: a bad channel name and Undernet's
+        +r (needs a services login) are refusals that keep being refusals,
+        and were being answered in silence and retried for ever."""
         self.assertEqual(irc.JOIN_REFUSED_NUMERICS,
-                         {"405", "471", "473", "474", "475"})
+                         {"405", "471", "473", "474", "475", "476", "477", "479"})
 
 
 class WhatWeStartTrackingAndWhy(DCCoreTestCase):

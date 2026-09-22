@@ -45,16 +45,22 @@ substring - this index is only the dashboard's cross-list filter.
 
 FAILURE POSTURE
 
-Every function here is best-effort. A missing, locked, corrupt or
-old-schema database costs the filter bar and nothing else: the lists
-themselves are on disk, the browser still pages them, and the index rebuilds
-the next time a list is fetched. Nothing in the daemon's serving path reads
-this file, so it is never a reason to refuse to start or to fail a fetch.
+Every function here is best-effort. A missing, locked or old-schema database
+costs the filter bar and nothing else: the lists themselves are on disk, the
+browser still pages them, and each list is indexed again the next time it is
+fetched. A DAMAGED database is not left in place: sqlite3 refuses it on every
+open, and every caller - a fetch completing, the startup backfill, the filter
+bar - opens it the same way, so nothing would ever repair it. _connect() moves
+it aside as `<file>.corrupt-<timestamp>`, starts a fresh one, and the held
+lists are re-indexed from disk on the next filter query. Nothing in the
+daemon's serving path reads this file, so it is never a reason to refuse to
+start or to fail a fetch.
 """
 
 import os
 import sqlite3
 import threading
+import time
 
 import defaults as config
 
@@ -83,6 +89,9 @@ _SCHEMA_VERSION = 1
 # cheapest thing here to get wrong.
 _connection = None
 _connection_path = None
+# Set by _connect() after it replaced a damaged file; consumed by the readers
+# through _prepare_to_read(). A flag and not a lock, so it lives here.
+_rebuild_pending = False
 
 
 def _index_path():
@@ -100,8 +109,19 @@ def _connect():
     Returns None when the database cannot be opened at all - a read-only
     directory, a disk that is full, sqlite3 built without FTS5. The caller
     treats that as "no index", which costs the filter bar and nothing else.
+
+    A DAMAGED file is the one failure that is repaired here rather than
+    reported. This used to print that the filter was "off until the next
+    fetch" and return None - but the fetch opens the file through this same
+    function and failed the same way, as did the startup backfill, so a torn
+    restore or a disk error cost the filter for the rest of the install's
+    life, with a log line promising the opposite on every keystroke. The
+    only recovery was deleting the file by hand, and nothing said so. The
+    index is a cache of lists still on disk, so the file is moved aside (kept,
+    never deleted - the operator may want to look at it) and a fresh one is
+    started in its place.
     """
-    global _connection, _connection_path
+    global _connection, _connection_path, _rebuild_pending
 
     path = _index_path()
     if _connection is not None and _connection_path == path:
@@ -112,10 +132,52 @@ def _connect():
         parent = os.path.dirname(os.path.abspath(path))
         if parent and not os.path.isdir(parent):
             os.makedirs(parent, exist_ok=True)
+        conn = _open(path)
+    except Exception as err:
+        if not (_is_damage(err) and os.path.isfile(path)):
+            print(f"[LIST-INDEX] Unavailable ({err}); the cross-list filter "
+                  f"is off until it can be opened. Browsing and @find are "
+                  f"unaffected.")
+            return None
+        aside = _move_aside(path)
+        if aside is None:
+            return None
+        try:
+            conn = _open(path)
+        except Exception as again:
+            print(f"[LIST-INDEX] Unavailable ({again}) even after moving the "
+                  f"damaged index to {aside}; the cross-list filter is off "
+                  f"until it can be opened. Browsing and @find are unaffected.")
+            return None
+        print(f"[LIST-INDEX] {path} was damaged ({err}); moved it to {aside} "
+              f"and started a fresh index. The lists you hold are indexed "
+              f"again from disk on the next filter query; browsing and @find "
+              f"are unaffected.")
+        _rebuild_pending = True
+
+    _connection = conn
+    _connection_path = path
+    return conn
+
+
+def _open(path):
+    """Open `path` and make sure the schema is in it. Raises on any failure.
+
+    THE HANDLE IS CLOSED BEFORE THE ERROR LEAVES. sqlite3.connect() is lazy -
+    it succeeds on a corrupt file, on a text file, on anything openable - and
+    the failure lands on the first execute() below, with a real open handle
+    already in hand. Dropping it unclosed leaked one connection PER CALL, and
+    _connect() is called on every search: an operator whose index file was
+    damaged leaked one for every keystroke in the filter bar. On Windows the
+    file also stays locked until the object is collected, so the next attempt
+    fails for a new reason and the log stops describing the original one -
+    and the move-aside in _connect() could not rename it at all.
+    """
+    conn = None
+    try:
         # check_same_thread=False: the dashboard answers on Flask's threads
         # while a fetch completing writes from the transfer thread, and every
         # caller here holds _conn_lock for the whole operation anyway.
-        conn = None
         conn = sqlite3.connect(path, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute(
@@ -130,30 +192,92 @@ def _connect():
         conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)",
                      (str(_SCHEMA_VERSION),))
         conn.commit()
-    except Exception as err:
-        # THE HANDLE IS CLOSED BEFORE IT IS DROPPED. sqlite3.connect() is
-        # lazy - it succeeds on a corrupt file, on a text file, on anything
-        # openable - and the failure lands on the first execute() below, with
-        # a real open handle already in hand. Returning None without closing
-        # it leaked one connection PER CALL, and this function is called on
-        # every search: an operator whose index file is damaged leaks one for
-        # every keystroke in the filter bar. On Windows the file also stays
-        # locked until the object is collected, so the next attempt fails for
-        # a new reason and the log stops describing the original one.
+    except Exception:
         if conn is not None:
             try:
                 conn.close()
             except Exception:
                 pass
-        print(f"[LIST-INDEX] Unavailable ({err}); the cross-list filter is "
-              f"off until the next fetch. Browsing and @find are unaffected.")
-        _connection = None
-        _connection_path = None
-        return None
-
-    _connection = conn
-    _connection_path = path
+        raise
     return conn
+
+
+def _is_damage(err):
+    """True when sqlite3 says the FILE is wrong, not the environment.
+
+    sqlite3 raises the bare DatabaseError for exactly the result codes that
+    mean the file's content is unusable - SQLITE_NOTADB ("file is not a
+    database") and SQLITE_CORRUPT ("database disk image is malformed").
+    Everything environmental - a locked file, a full disk, a directory that
+    cannot be written, a build without FTS5 - is an OperationalError, a
+    SUBCLASS, and must not match: moving a healthy index aside because the
+    disk was full for a moment would throw away an index that was fine.
+    """
+    return type(err) is sqlite3.DatabaseError
+
+
+def _move_aside(path):
+    """Rename a damaged index, and its WAL sidecars, out of the way.
+
+    Returns the new path, or None with the reason printed - and then the
+    operator IS told what to do, which the old message never did.
+
+    The `-wal` and `-shm` files go with it when they are still there. sqlite3
+    normally deletes them itself as the last connection closes, which the
+    failed open in _open() just did; when it could not (another process
+    holding them), a WAL left beside a fresh database would be replayed into
+    it on open and carry the damage straight back across.
+    """
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    aside = f"{path}.corrupt-{stamp}"
+    n = 1
+    while os.path.exists(aside):
+        n += 1
+        aside = f"{path}.corrupt-{stamp}-{n}"
+    try:
+        os.rename(path, aside)
+    except OSError as err:
+        print(f"[LIST-INDEX] {path} is damaged and could not be moved aside "
+              f"({err}); the cross-list filter is off until the file is "
+              f"deleted by hand. Browsing and @find are unaffected.")
+        return None
+    for suffix in ("-wal", "-shm"):
+        if os.path.exists(path + suffix):
+            try:
+                os.replace(path + suffix, aside + suffix)
+            except OSError:
+                try:
+                    os.remove(path + suffix)
+                except OSError:
+                    pass
+    return aside
+
+
+def _prepare_to_read():
+    """Open the index for a reader and run the rebuild a repair has flagged.
+
+    Returns False when there is no index to read. Called by the dashboard's
+    readers BEFORE they take _conn_lock for their own query, because the
+    rebuild cannot run from inside _connect(): backfill_missing() takes the
+    lock per list itself. And it is the readers that must not answer from the
+    fresh, empty index - bots_with_a_match() would report every held list as
+    empty, which is the false claim its "no index" branch exists to avoid. A
+    fetch completing does not need this; writing into an empty index is fine.
+
+    The connection this opens is the cached one the reader's own _connect()
+    then finds, so an unavailable index is still reported once per call, not
+    twice. Same cost as the startup backfill, paid once, on the first filter
+    query after the repair; the flag is cleared under the lock so two
+    dashboard threads do not both pay it.
+    """
+    global _rebuild_pending
+    with _conn_lock:
+        available = _connect() is not None
+        pending = _rebuild_pending
+        _rebuild_pending = False
+    if pending:
+        backfill_missing(dict(getattr(config, "fetched_bot_lists", None) or {}))
+    return available
 
 
 def _close_locked():
@@ -413,6 +537,10 @@ def bots_with_a_match(terms, bots):
     if query is None or not candidates:
         return set(), set()
 
+    if not _prepare_to_read():
+        # No index is not "no bot matches": claiming every list is empty
+        # would grey out the whole sidebar and read as a broken filter.
+        return set(), set()
     matched = set()
     # A bot whose own query FAILED is neither matched nor empty. Falling out
     # of `matched` used to put it straight into `empty` below, and `empty` is
@@ -512,6 +640,8 @@ def search(terms, limit=None, bots=None):
         limit = DEFAULT_SEARCH_LIMIT
     limit = min(limit, MAX_SEARCH_LIMIT)
 
+    if not _prepare_to_read():
+        return []
     with _conn_lock:
         conn = _connect()
         if conn is None:
@@ -584,11 +714,13 @@ def backfill_missing(held, log=print):
         if index_bot_list(bot, rows):
             done += 1
     if done:
-        log(f"[LIST-INDEX] Indexed {done} list(s) held from before the search "
-            f"index existed.")
+        log(f"[LIST-INDEX] Indexed {done} held list(s) the search index did "
+            f"not have.")
     return done
 
 
 def reset_for_tests():
     """Close the connection and forget the path. Tests only."""
+    global _rebuild_pending
     close()
+    _rebuild_pending = False

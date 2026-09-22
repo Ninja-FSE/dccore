@@ -355,6 +355,15 @@
                     data-i18n-title="filelists.downloadSelectedTitle"
                     data-i18n="common.downloadSelected"
                     title="Tick the files you want. Shift-click a second box to take everything between it and the last one you touched.">Download selected</button>
+            <!-- Fetch this bot's list again by hand - for when automatic
+                 re-fetching (AUTO_REFETCH_LISTS) is off or is not working, so
+                 the nick does not have to be typed into the fetch box. Same
+                 rule as the purge button beside it: only for a list held from
+                 another bot. renderFilelistsPurge() decides both. -->
+            <button type="button" class="btn btn-small" id="filelists-redownload-btn" hidden
+                    data-i18n-title="filelists.redownloadTitle"
+                    data-i18n="filelists.redownloadList"
+                    title="Ask this bot for its list again. Progress is on the Downloads tab.">Re-download list</button>
             <!-- Shown only for a list fetched from another bot: your own is
                  the library itself, and a bot you have only seen advertising
                  has nothing to remove. renderFilelistsPurge() decides.

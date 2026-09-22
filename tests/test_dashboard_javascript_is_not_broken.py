@@ -1,6 +1,8 @@
 """The dashboard's JavaScript is not left syntactically broken.
 
-There is no JS engine in this suite, and the whole dashboard is one script:
+This is the half that runs everywhere; where node is on PATH,
+test_the_dashboard_javascript_parses_in_a_real_engine.py parses the same
+files for real (#648). The whole dashboard is one script:
 a single unterminated string anywhere in web/app.js takes down every tab at
 once, silently, with a blank page and one line in a console nobody has open.
 That is the same shape as the failure that reached the RC1 beta - the Settings

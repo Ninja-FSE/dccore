@@ -63,57 +63,42 @@ class BuildAdminConfigTextTests(unittest.TestCase):
 
 
 class WriteAdminConfigPasswordTests(unittest.TestCase):
-    """The file I/O wrapper, against real temp files - never the repo's own
-    admin_config.py/admin_config.py.sample, via the path/sample_path
-    overrides configure.py's own functions accept for exactly this reason."""
+    """The file I/O wrapper, against a real temp file - never the repo's own
+    admin_config.py, via the path override configure.py's own function
+    accepts for exactly this reason."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="dccore-setup-test-")
         self.path = os.path.join(self.tmp, "admin_config.py")
-        self.sample_path = os.path.join(self.tmp, "admin_config.py.sample")
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def test_creates_from_the_sample_when_neither_real_file_exists(self):
-        with open(self.sample_path, "w", encoding="utf-8") as handle:
-            handle.write("ADMIN_HOSTMASKS = [\"\"]\n# Generate with: python adminchat.py\nADMIN_PASSWORD_HASH = \"\"\n")
-
+    def test_creates_the_header_and_the_password_line_when_no_file_exists(self):
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
-            configure.write_admin_config_password("REALHASH", path=self.path,
-                                              sample_path=self.sample_path)
+            configure.write_admin_config_password("REALHASH", path=self.path)
 
         with open(self.path, encoding="utf-8") as handle:
             written = handle.read()
-        self.assertIn('ADMIN_PASSWORD_HASH = "REALHASH"', written)
-        self.assertIn('ADMIN_HOSTMASKS = [""]', written)
+        self.assertEqual(written, configure.NEW_ADMIN_CONFIG_HEADER
+                         + 'ADMIN_PASSWORD_HASH = "REALHASH"\n')
 
-    def test_creates_a_bare_file_when_neither_real_file_nor_sample_exists(self):
-        configure.write_admin_config_password("REALHASH", path=self.path,
-                                          sample_path=self.sample_path)
-
-        with open(self.path, encoding="utf-8") as handle:
-            written = handle.read()
-        self.assertIn('ADMIN_PASSWORD_HASH = "REALHASH"', written)
-
-    def test_a_real_existing_file_is_edited_not_replaced_from_the_sample(self):
-        with open(self.sample_path, "w", encoding="utf-8") as handle:
-            handle.write("ADMIN_HOSTMASKS = [\"\"]\nADMIN_PASSWORD_HASH = \"\"\n")
+    def test_a_real_existing_file_is_edited_not_replaced(self):
         with open(self.path, "w", encoding="utf-8") as handle:
             handle.write("ADMIN_HOSTMASKS = [\"real.host.example\"]\n"
                          "ADMIN_PASSWORD_HASH = \"OLDHASH\"\n")
 
-        configure.write_admin_config_password("NEWHASH", path=self.path,
-                                          sample_path=self.sample_path)
+        configure.write_admin_config_password("NEWHASH", path=self.path)
 
         with open(self.path, encoding="utf-8") as handle:
             written = handle.read()
         self.assertIn('ADMIN_PASSWORD_HASH = "NEWHASH"', written)
         self.assertIn("real.host.example", written,
                       "an existing real admin_config.py must never be "
-                      "replaced by the sample's own placeholder content")
+                      "replaced")
+        self.assertNotIn(configure.NEW_ADMIN_CONFIG_HEADER, written)
 
 
 class WriteSettingsConfTests(DCCoreTestCase):
@@ -147,10 +132,10 @@ class WriteSettingsConfTests(DCCoreTestCase):
 
     def test_writes_exactly_the_dict_it_was_given(self):
         """No filtering happens at this layer any more - collect_answers()
-        already decided what belongs in `changes` (a blank SERVER, or the
-        dashboard left off, are both simply absent from the dict, never
-        written as an explicit "no"). A key genuinely absent from `changes`
-        must not appear in the file at all."""
+        already decided what belongs in `changes` (a blank SERVER is simply
+        absent from the dict; the dashboard answer is in it either way, see
+        test_declining_the_dashboard_writes_an_explicit_off). A key genuinely
+        absent from `changes` must not appear in the file at all."""
         configure.write_settings_conf({"NICKNAME": "MyBot"}, path=self.path)
 
         with open(self.path, encoding="utf-8") as handle:
@@ -158,6 +143,19 @@ class WriteSettingsConfTests(DCCoreTestCase):
         self.assertIn("NICKNAME = MyBot", written)
         self.assertNotIn("SERVER", written)
         self.assertNotIn("WEBUI", written)
+
+
+    def test_declining_the_dashboard_writes_an_explicit_off(self):
+        """#637: the declined dashboard IS written, as `false`, and to the
+        file the daemon reads last - so a re-run that says no to a dashboard
+        an earlier run switched on really switches it off, and WINDOWS.md
+        can point at settings.conf as the one place to turn it on."""
+        configure.write_settings_conf({"NICKNAME": "MyBot", "WEBUI_ENABLED": False},
+                                      path=self.path)
+
+        with open(self.path, encoding="utf-8") as handle:
+            written = handle.read()
+        self.assertIn("WEBUI_ENABLED = false", written)
 
 
 class CurrentValueTests(DCCoreTestCase):
@@ -217,6 +215,7 @@ class CollectAnswersEndToEndTests(DCCoreTestCase):
             "",                # server (accept default)
             "#my-channel",     # channel
             "MyAdmin",         # admin nick
+            "",                # services host: skip (#811)
             self.tree.music,   # file directory (exists already via make_tree)
             "n",               # web dashboard: skip
         ])
@@ -233,6 +232,25 @@ class CollectAnswersEndToEndTests(DCCoreTestCase):
         self.assertTrue(password_hash)
         self.assertTrue(adminchat.verify_password(password_hash, "secret123"))
 
+    def test_a_services_host_is_wrapped_into_admin_hostmasks(self):
+        answers, _hash = self._run_with_answers([
+            "MyBot", "", "#my-channel", "MyAdmin",
+            "myaccount.users.undernet.org",  # services host (#811)
+            self.tree.music, "n",
+        ])
+
+        self.assertEqual(answers["ADMIN_HOSTMASKS"], ["*!*@myaccount.users.undernet.org"])
+
+    def test_a_bad_services_host_is_reprompted_not_accepted(self):
+        answers, _hash = self._run_with_answers([
+            "MyBot", "", "#my-channel", "MyAdmin",
+            "*.users.undernet.org",           # a wildcard: refused
+            "myaccount.users.undernet.org",   # the real thing, second try
+            self.tree.music, "n",
+        ])
+
+        self.assertEqual(answers["ADMIN_HOSTMASKS"], ["*!*@myaccount.users.undernet.org"])
+
     def test_a_blank_required_field_is_reprompted_not_accepted(self):
         """A genuinely fresh install (NICKNAME still unset - DCCoreTestCase's
         own baseline sets it to "DCCore" for every OTHER test, so this one
@@ -246,6 +264,7 @@ class CollectAnswersEndToEndTests(DCCoreTestCase):
             "",
             "#chan",
             "Admin",
+            "",                # services host: skip (#811)
             self.tree.music,
             "n",
         ])
@@ -253,7 +272,7 @@ class CollectAnswersEndToEndTests(DCCoreTestCase):
 
     def test_mismatched_passwords_are_reprompted(self):
         answers, password_hash = self._run_with_answers(
-            ["MyBot", "", "#chan", "Admin", self.tree.music, "n"],
+            ["MyBot", "", "#chan", "Admin", "", self.tree.music, "n"],
             passwords=("first-password", "different-password", "matched", "matched"))
 
         self.assertTrue(adminchat.verify_password(password_hash, "matched"))
@@ -261,7 +280,7 @@ class CollectAnswersEndToEndTests(DCCoreTestCase):
 
     def test_enabling_the_dashboard_asks_about_lan_access(self):
         answers, _hash = self._run_with_answers([
-            "MyBot", "", "#chan", "Admin", self.tree.music,
+            "MyBot", "", "#chan", "Admin", "", self.tree.music,
             "y",   # enable the dashboard
             "n",   # localhost only
         ])
@@ -270,7 +289,7 @@ class CollectAnswersEndToEndTests(DCCoreTestCase):
 
     def test_enabling_lan_access_sets_the_lan_host(self):
         answers, _hash = self._run_with_answers([
-            "MyBot", "", "#chan", "Admin", self.tree.music,
+            "MyBot", "", "#chan", "Admin", "", self.tree.music,
             "y",   # enable the dashboard
             "y",   # reachable from the LAN
         ])

@@ -235,6 +235,47 @@ def list_for_request(channel=None):
     return fallback if not fallback.channels else None
 
 
+def list_name_for_label(label, default_name):
+    """Which list a labelled folder path belongs to, for a request that
+    arrived with no channel - or None when the label is ambiguous.
+
+    A private message carries no channel, and list_for_request() answers
+    it with the primary (#653, audit M51). But a `!rar <Label>/<Album>` row
+    copied from a list bound to another channel DOES carry something to
+    route on: its first component is a folder label, and labels belong to
+    lists. Resolved against the primary only, such a row was refused as
+    not found - or, with the same label and path under the primary too,
+    the primary's folder was packed instead of the one the row advertised,
+    which is the very outcome routing exists to prevent.
+
+    The rule: the list the channel routing chose (`default_name`, the
+    primary) keeps the request if it has the label; otherwise the one other
+    list that has it; two others whose labels name the same folder are one
+    answer, not two; two others whose labels name different folders are
+    ambiguous, and None says so - the caller tells the user to ask in the
+    channel the row came from. No list with the label at all returns
+    `default_name`, and the existence check downstream fails exactly as it
+    did before.
+    """
+    wanted = str(label or "").strip().lower()
+    if not wanted:
+        return default_name
+    holders = []
+    for served in lists():
+        for entry in served.folders:
+            if entry.name.lower() == wanted:
+                holders.append((served.name, os.path.normcase(os.path.normpath(entry.path))))
+                break
+    if not holders:
+        return default_name
+    for name, _path in holders:
+        if name == default_name:
+            return default_name
+    if len({path for _name, path in holders}) == 1:
+        return holders[0][0]
+    return None
+
+
 def list_name_for_request(channel=None):
     """Just the name, or None. What the list-reading functions actually take."""
     chosen = list_for_request(channel)

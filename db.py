@@ -35,8 +35,52 @@ PRIVATE_MESSAGES_FILE = getattr(config, "PRIVATE_MESSAGES_FILE",
                                 os.path.join("data", "private_messages.json"))
 
 
-def _atomic_write(path, text):
+# The temp file's name, and how it is swapped in (#692, audit L28). One
+# prefix and suffix, so the sweep below knows exactly what it may remove.
+_SWAP_PREFIX, _SWAP_SUFFIX = ".tmp_", ".swap"
+
+
+def discard_stale_swaps(directory=None):
+    """Remove `.tmp_*.swap` files a previous run was killed in the middle of
+    (#692, audit L28), the way update_list._discard_stale_temps() removes its
+    own staging files. Returns how many went.
+
+    _atomic_write() cleans up after an exception, but a hard kill - or a
+    Ctrl-C, before this file caught BaseException there - between mkstemp
+    and replace left the temp behind, and nothing ever removed it: every
+    crash added a hidden file to data/. Called at startup, where this run
+    has staged nothing yet, so every such file belongs to a run that is no
+    longer alive.
+    """
+    directory = directory or os.path.dirname(os.path.abspath(DCC_QUEUE_FILE)) or "."
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return 0
+    removed = 0
+    for name in entries:
+        if not (name.startswith(_SWAP_PREFIX) and name.endswith(_SWAP_SUFFIX)):
+            continue
+        try:
+            os.remove(os.path.join(directory, name))
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        print(f"[DB] Removed {removed} leftover temp file(s) from an earlier run in {directory}.")
+    return removed
+
+
+def _atomic_write(path, text, mode=None):
     """Write `text` to `path` atomically.
+
+    `mode`: the permission bits for a file that does not exist yet. mkstemp()
+    creates its file 0600 and the replace carries that through, so on POSIX
+    every state file this module writes - hard_bans.txt and dcc_queue.txt,
+    documented as hand-editable - became owner-only after its first save
+    (#692). A file that exists keeps the mode it has (the operator's, if
+    they set one); a new one gets `mode`, 0o644 unless the caller says
+    otherwise - the token store says 0o600, since it holds secrets.
 
     Writes to a temporary file in the SAME directory (so the final step is a rename
     within one filesystem), flushes and fsyncs it, then swaps it into place.
@@ -54,14 +98,21 @@ def _atomic_write(path, text):
     directory = os.path.dirname(path) or "."
     os.makedirs(directory, exist_ok=True)
 
-    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".tmp_", suffix=".swap")
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=_SWAP_PREFIX, suffix=_SWAP_SUFFIX)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
+        try:
+            wanted = os.stat(path).st_mode & 0o777 if os.path.exists(path) else (0o644 if mode is None else mode)
+            os.chmod(tmp_path, wanted)
+        except OSError:
+            pass  # a filesystem without modes; the content is what matters
         platform_compat.replace_with_retry(tmp_path, path)
-    except Exception:
+    except BaseException:
+        # BaseException, not Exception (#692): a Ctrl-C between mkstemp and
+        # the replace is a KeyboardInterrupt, and the temp was left behind.
         try:
             os.remove(tmp_path)
         except OSError:
@@ -228,11 +279,30 @@ def remove_hard_ban(pattern):
 # already holding the lock.
 # ---------------------------------------------------------------------------
 
+def _default_stats_row():
+    """All zeros, dated today: the row a bot with no history starts from."""
+    return [0, 0, 0, 0, 0, 0, datetime.datetime.now().strftime("%Y-%m-%d")]
+
+
 def _load_advanced_stats_unlocked():
-    """Parse stats.txt. Caller must hold _disk_lock."""
+    """Parse stats.txt. Caller must hold _disk_lock.
+
+    Raises whatever open()/read() raised when the file exists but cannot be
+    read at this instant (a share-deny lock from an AV or backup tool on
+    Windows, an EIO, a network share hiccup). It used to catch that and hand
+    back the all-zero row, which was harmless for a display and fatal for a
+    writer: update_stats_on_complete() incremented the zeros and atomically
+    wrote them over the real file, and unlike the malformed-column path below
+    it kept no .corrupt copy. One unreadable moment at the end of one transfer
+    cost the lifetime totals, which nothing recomputes (#626). The file was
+    fine - it just could not be read right then - so preserving it is wrong
+    too; the only correct move for a writer is to leave it alone and say so.
+    The read-only entry points (load_advanced_stats, load_advanced_stats_rolled)
+    catch this themselves and keep showing zeros for that one refresh.
+    """
     STATS_FILE = config.STATS_FILE
     today_str = datetime.datetime.now().strftime("%Y-%m-%d")
-    default_stats = [0, 0, 0, 0, 0, 0, today_str]
+    default_stats = _default_stats_row()
 
     if not os.path.exists(STATS_FILE):
         return default_stats
@@ -241,12 +311,8 @@ def _load_advanced_stats_unlocked():
     # PermissionError on Windows - which is finding #25 in the same audit,
     # committed here while fixing #26. Caught by running it, not by reading it.
     reason = None
-    try:
-        with open(STATS_FILE, "r") as f:
-            parts = f.read().strip().split()
-    except Exception as e:
-        print(f"[DB ERROR] Could not read stats.txt, using defaults: {e}")
-        return default_stats
+    with open(STATS_FILE, "r") as f:
+        parts = f.read().strip().split()
 
     try:
         if len(parts) == 7:
@@ -351,10 +417,56 @@ def _coerce_file_size(file_size):
         return 0
 
 
+def _load_for_display_unlocked():
+    """The row for a READER, which must not raise: a file that cannot be read
+    this instant shows as zeros for one refresh, and nothing on this path
+    writes those zeros back. Returns (row, error-or-None) so the caller can
+    log after releasing _disk_lock. Caller must hold _disk_lock."""
+    try:
+        return _load_advanced_stats_unlocked(), None
+    except Exception as err:
+        return _default_stats_row(), err
+
+
 def load_advanced_stats():
     """Read stats.txt. Format: total_files total_bytes yest_files yest_bytes today_files today_bytes last_date"""
     with _disk_lock:
-        return _load_advanced_stats_unlocked()
+        stats, unreadable = _load_for_display_unlocked()
+    if unreadable is not None:
+        print(f"[DB ERROR] Could not read stats.txt, using defaults: {unreadable}")
+    return stats
+
+
+def set_lifetime_totals(total_files=None, total_bytes=None):
+    """Replace the lifetime columns of stats.txt, leaving the day columns
+    and the date as they are - under ONE _disk_lock acquisition (#690,
+    audit L26).
+
+    The stats import did this as load_advanced_stats() then
+    save_advanced_stats(): two acquisitions, and a transfer completing in
+    the gap - update_stats_on_complete() from the send's own thread - had
+    its +1 file and +bytes on Today and Total discarded by the import's
+    stale write (the lost update this file's own header describes for the
+    old dcc.py code), and a day rotation in that gap was undone. Read,
+    modified and written here without letting go, so what the bot did in
+    between is in the row that lands. Returns the row as written.
+    """
+    try:
+        with _disk_lock:
+            row = list(_load_advanced_stats_unlocked() or [])
+            while len(row) < 7:
+                row.append(0)
+            if total_files is not None:
+                row[0] = total_files
+            if total_bytes is not None:
+                row[1] = total_bytes
+            _save_advanced_stats_unlocked(row)
+    except Exception as err:
+        # As save_advanced_stats(): a stats write must not take the caller
+        # down. None tells the import nothing landed.
+        print(f"[DB ERROR] Could not save to stats.txt: {err}")
+        return None
+    return row
 
 
 def save_advanced_stats(stats):
@@ -392,7 +504,9 @@ def load_advanced_stats_rolled():
     a defensive copy here would be guarding nothing.
     """
     with _disk_lock:
-        stats = _load_advanced_stats_unlocked()
+        stats, unreadable = _load_for_display_unlocked()
+    if unreadable is not None:
+        print(f"[DB ERROR] Could not read stats.txt, using defaults: {unreadable}")
     _rotate_day_unlocked(stats)
     return stats
 
@@ -404,7 +518,9 @@ def check_and_rotate_day():
     returned a freshly loaded row on failure, which meant a logging error could
     make this hand back UN-ROTATED counters that the caller would treat as
     current - silently wrong data instead of a loud failure. The original had no
-    handler either; this keeps that contract.
+    handler either; this keeps that contract. A stats.txt that cannot be read
+    raises out of here too, before anything is written (#626) - the caller in
+    irc.py reports it and tries again a minute later.
     """
     with _disk_lock:
         stats = _load_advanced_stats_unlocked()
@@ -423,6 +539,11 @@ def update_stats_on_complete(file_size):
     acquisition, which is the entire point of this function: dcc.py used to do
     it by hand with load and save as separate locked calls, and concurrent
     completions silently overwrote each other's increments.
+
+    Raises when stats.txt exists but cannot be read, and writes NOTHING then:
+    counting this one transfer on top of zeros would replace the lifetime
+    totals with it (#626). The caller in dcc.py logs it; the transfer goes
+    uncounted, which is the smaller loss by far.
     """
     clean_size = _coerce_file_size(file_size)
     with _disk_lock:
@@ -856,15 +977,56 @@ def load_known_bots():
         return {}
 
 
-def save_known_bots(registry):
-    """Write the bot registry, atomically, through the same lock and the same
-    temp-file-then-replace the other state files use."""
+ADMIN_TOKENS_FILE = getattr(config, "ADMIN_TOKENS_FILE", os.path.join("data", "adminchat_tokens.json"))
+
+
+def load_admin_tokens():
+    """{name: {"hash": ..., "created": ...}} for every paired console client
+    (#550, step 3), or {} - a file that will not parse costs the paired
+    clients a fresh `pair`, nothing else."""
+    if not os.path.exists(ADMIN_TOKENS_FILE):
+        return {}
+    try:
+        with io.open(ADMIN_TOKENS_FILE, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except Exception as err:
+        print(f"[DB ERROR] Could not read the console token store: {err}")
+        return {}
+
+
+def save_admin_tokens(tokens):
     try:
         with _disk_lock:
+            # Secrets: owner-only from the first write (#692).
+            _atomic_write(ADMIN_TOKENS_FILE,
+                          json.dumps(tokens, indent=1, sort_keys=True, ensure_ascii=False),
+                          mode=0o600)
+    except Exception as err:
+        print(f"[DB ERROR] Could not save the console token store: {err}")
+
+
+def save_known_bots(registry):
+    """Write the bot registry, atomically, through the same lock and the same
+    temp-file-then-replace the other state files use. True when it landed,
+    False when it did not (#691, audit L27): the caller stamps its flush
+    time by this, so a failed write is tried again on the next advert
+    rather than in KNOWN_BOTS_FLUSH_SECONDS.
+
+    Serialised from a snapshot, not the live dict: the IRC thread inserts a
+    bot in place while a dashboard request flushes, and json.dumps() over a
+    dict that changes size mid-iteration is a RuntimeError.
+    """
+    try:
+        snapshot = {key: (dict(entry) if isinstance(entry, dict) else entry)
+                    for key, entry in dict(registry).items()}
+        with _disk_lock:
             _atomic_write(KNOWN_BOTS_FILE,
-                          json.dumps(registry, indent=1, sort_keys=True, ensure_ascii=False))
+                          json.dumps(snapshot, indent=1, sort_keys=True, ensure_ascii=False))
+        return True
     except Exception as err:
         print(f"[DB ERROR] Could not save the bot registry: {err}")
+        return False
 
 
 def load_fetched_bot_lists():
@@ -1074,17 +1236,26 @@ def save_fetch_history(rows):
 
 
 def save_dcc_queue():
-    """Persist the DCC queue, dropping users whose list is now empty.
+    """Persist the DCC queue, leaving out users whose list is now empty.
 
     Previously this truncated dcc_queue.txt and then serialised straight into the open
     handle. Any crash, disk-full or concurrent writer between those two steps left a
     truncated file - and load_dcc_queue() treats an unparseable file as "start empty",
     so the entire queue disappeared silently on the next boot.
+
+    This function READS config.dcc_queue and never writes to it (#606). It used
+    to pop the emptied keys from the live dict as well, and two of its callers
+    run after their `with queue_lock:` block has closed - so that pop raced the
+    lock-held live iterations in dcc.py (next_waiting_pack_owner, the temp-
+    archive cleanup in start_dcc_send's finally) and raised "dictionary
+    changed size during iteration" in THEIR thread. Emptied keys are now
+    dropped by the code that empties them, under queue_lock, in
+    dcc.release_queue_entry(); the file never held them either way.
     """
     import json
 
     try:
-        # ONE COPY, THEN WALK THE COPY (#452). Both loops below used to walk
+        # ONE COPY, THEN WALK THE COPY (#452). The loop below used to walk
         # config.dcc_queue live while holding only _disk_lock - which guards
         # the FILE, not the dict. Every writer mutates it under queue_lock,
         # so a key added or removed mid-walk raised "dictionary changed size
@@ -1092,20 +1263,14 @@ def save_dcc_queue():
         # only in RAM until the next successful save, and a restart in between
         # lost it.
         #
-        # queue_lock cannot be taken here - five of the six callers in dcc.py
-        # are already inside `with queue_lock:` and it is a plain
+        # queue_lock cannot be taken here - most callers in dcc.py and
+        # commands.py are already inside `with queue_lock:` and it is a plain
         # threading.Lock, so locking would deadlock the request path. dict()
         # copies the mapping in one step under the GIL, which is what #432
         # settled on for get_total_queued_count() for the same reason: a
         # concurrent change can leave this snapshot one entry stale, never
         # raise.
         live = dict(config.dcc_queue)
-
-        # Drop users whose queue is now empty. Deleting from the real dict is
-        # the point, but the KEYS come from the copy.
-        for user_key, files in live.items():
-            if not files:
-                config.dcc_queue.pop(user_key, None)
 
         with _disk_lock:
             snapshot = {k: list(v) for k, v in live.items() if v}

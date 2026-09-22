@@ -31,39 +31,25 @@ class AMuteIsNotLabelledAsABan(unittest.TestCase):
     both rendered as [TEMPBAN]. An operator watching the console could not tell
     a slap from a sentence - which is the whole reason the tag exists."""
 
-    def tag_line(self, category):
-        """The tag_str assignment inside one category's branch.
-
-        The ASSIGNMENT, not the whole block: my first version scanned the
-        branch text and flagged the comment explaining this very change, which
-        is the same "cannot tell a mention from the thing" mistake #202 was
-        about, made twice more in this session already.
-        """
-        with io.open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as handle:
-            lines = handle.read().split(chr(10))
-
-        start = next(n for n, l in enumerate(lines)
-                     if f'category.upper() == "{category}"' in l)
-        for line in lines[start:start + 12]:
-            if line.strip().startswith("tag_str"):
-                return line
-        raise AssertionError(f"no tag_str assignment under {category}")
-
     def test_the_two_categories_are_distinct_in_the_source_map(self):
-        """The formatter is a chain of elif on category, so what matters is
-        that MUTE and TBAN reach different branches."""
+        """The formatter is one table on category (announce.category_tag(),
+        which replaced an elif chain in #550), so what matters is that MUTE
+        and TBAN are separate entries in it."""
         with io.open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as handle:
             source = handle.read()
+        table = source[source.index("def category_tag("):source.index("def send_debug(")]
 
-        self.assertIn('category.upper() == "MUTE"', source)
-        self.assertIn('category.upper() == "TBAN"', source)
+        self.assertIn('"MUTE":', table)
+        self.assertIn('"TBAN":', table)
 
     def test_they_render_different_tags(self):
-        mute = self.tag_line("MUTE")
-        tban = self.tag_line("TBAN")
+        import announce
+        import theme
+        mute = announce.category_tag("MUTE", theme.blocks())
+        tban = announce.category_tag("TBAN", theme.blocks())
 
-        self.assertIn("[MUTED]", mute)
-        self.assertIn("[TEMPBAN]", tban)
+        self.assertEqual(mute[0], "MUTED")
+        self.assertEqual(tban[0], "TEMPBAN")
         self.assertNotEqual(mute, tban)
 
     def test_the_mute_path_uses_the_mute_category(self):

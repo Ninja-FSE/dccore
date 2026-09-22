@@ -13,7 +13,7 @@ What DCCore does today, and what it does not do yet.
 - **DCC SEND over IRC**, with a per-user and global queue, configurable slot limits, and a DCC port range you control.
 - **Album packing** — `!rar <folder>` builds an archive on demand and cleans it up afterwards, bounded by `MAX_RAR_FOLDER_SIZE` so a request cannot ask for an unbounded pack.
 - **Freeze box** — a user who parts or quits keeps their queue for five minutes; rejoining thaws it instantly rather than losing their place.
-- **Anti-flood** — a rolling request window, temporary mutes, and escalation to a day-ban for anyone who keeps going while muted.
+- **Anti-flood** — a rolling request window, temporary mutes, and escalation to a timed ban (`FLOOD_BAN_SECONDS`, one hour by default) for anyone who keeps going while muted.
 - **Ban list** — hard bans by hostmask pattern, timed bans, and a guard that refuses a pattern matching everyone.
 - **Long paths and non-ASCII filenames** work on both platforms: Windows `MAX_PATH` is handled throughout, and Greek, Cyrillic and CJK filenames survive both ends of the IRC connection.
 
@@ -22,44 +22,12 @@ What DCCore does today, and what it does not do yet.
 - **One master list**, rebuilt by `!update` or on a schedule, published atomically so a failed scan never overwrites a good index.
 - **Three formats** — `.txt`, `.zip` and `.rar`, all built every time; `LIST_FORMAT` picks which one is offered.
 - **Search** — `@find <words>` against the master list, with results fitted to the IRC line limit.
+- **Every folder heading says what it holds** — `14 files, 1.20GB` on its own line under the heading, placed so that every program that reads these lists (other DCCore bots, AutoQ, DCCore's own request handling) ignores it. Companion files (`.srt`, `.nfo`, `.sfv`…) travel with the film they belong to when the video list is split out, and stay with an album otherwise.
 - **A partially unreadable library fails the rebuild** rather than silently publishing a truncated list.
 
-### Receiving files from other bots
-
-- **Cross-bot fetch** — request a file with `!<bot> <filename>` or a whole list with `@<botnick>`, and track it from the dashboard.
-- **Broadcast search** — send one `@find` to a channel and collect every bot's reply, grouped under each bot's own parsed header.
-- **Both DCC directions** — active and passive/reverse SEND, since bots behind NAT use the latter.
-- **Hostile-input handling** — every other bot is treated as untrusted: admission control, size caps, and zip-slip / zip-bomb guards on any archive received.
-
-### Operating it
-
-- **Authenticated admin console over DCC CHAT**, gated on the operator's services host *and* a PBKDF2-hashed password. Read-only commands (`status`, `queue`, `slots`, `bans`, `uptime`, `version`) and action commands (`ban`, `unban`, `clearqueue`, `rehash`, `update`) — see [ADMIN-CONSOLE.md](ADMIN-CONSOLE.md).
-- **Optional web dashboard** — Search, Queue, List Browser grouped by folder, Downloads, a duplicate-filename verifier (which the build now warns about too, for operators who never open the dashboard), a list rebuilder, a Settings page, and a Console (the DCC CHAT admin console's commands and live log, in the browser — for an operator who wants neither a second IRC client nor a debug channel). Off by default, loopback by default, behind the same password as the DCC CHAT console.
-- **Purging a fetched list** - the manual half of the fetched-list purge, in two shapes: one bot at a time from its own list, and every offline bot at once from the toolbar. Removes the entry, the extracted files and the search index rows together. An automatic TTL is still open and deliberately second: `fetched_at` answers list staleness, not "this bot is gone", and a timer that deletes an operator's data by default is a surprise waiting to happen.
-- **Messages people send the bot** - a private message that is not a command gets no reply, and now leaves a record: a Messages page with an unread count, throttled per sender. The bot still never answers. Turning it off (`PRIVATE_MESSAGES_ENABLED = false`) keeps nothing, hides the page and its menu entry, and tells the sender once where to go instead - a NOTICE, once per person per day, under a burst ceiling, on the ordinary send lane.
-- **A notice badge in the dashboard** - the short list beside the long one. Kicks, channels given up on and failed rebuilds raise a counted, colour-coded notice in the status panel, kept across restarts; everything else stays in the Console's log where it belongs. See [ADMIN-CONSOLE.md](ADMIN-CONSOLE.md).
-- **Guided first-run setup** — `python3 configure.py` asks a short series of questions and writes a working configuration.
-- **Pre-flight check** — `start-dccore.sh check` verifies the setup without opening a socket.
-- **Two configuration mechanisms** — `admin_config.py` for Python, `settings.conf` for plain text; the dashboard and console both write to the latter.
-- **`!rehash`** reloads code and settings live, preserving queues and transfer state.
-- **Channel adverts** on a timer, with a per-bot theme (five presets, or your own colours).
-- **Statistics** — totals, today and yesterday, per-file download counts, a speed record, and a live rate.
-
-### Quality
-
-- **4994 tests**, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14, in CI on every push and pull request.
-- **Stdlib-only** — the daemon and its test suite need no third-party packages; Flask is required only for the optional dashboard.
-- **No reloaded module owns a lock** — `!rehash` re-executes a module body, so a module-level `threading.Lock()` is rebound while a thread is still inside it. Every lock in a reloaded module is allocated in `runtime.py` and bound by name, and `tests/test_no_reloaded_module_owns_a_lock.py` fails if a new one appears — the class, not the four instances that prompted it.
-- **A cross-list search index** — SQLite FTS5, built as each bot list is fetched, so the dashboard can filter every held list live rather than re-reading them at 2-11 seconds a keystroke.
-- **Two adversarial audits** — an internal audit (32 defects, all fixed) and a pre-publication sweep before the first public release.
-
----
-
-## Planned
-
-Ordered by what unblocks what, not by preference.
-
 ### Multiple lists, and multiple folders per list
+
+Done, all five stages - kept here with the design it was built to, because the reasoning is what a later change has to argue with.
 
 The largest gap against OmenServe, which has had both since long before this project started. DCCore now serves **several** directories into **one** list, and **several** lists, each bound to its own channels — #26 below is complete.
 
@@ -81,7 +49,7 @@ Multi-list then follows: allow more than one list object, with per-channel adver
 
 **Stage 2 is in.** A list's files live in its own directory: the primary keeps `LOCAL_LIST_DIR` itself — so nothing moves and no upgrade migrates anything — and every other list gets a subdirectory named after it. The list is in the *path*, not the filename, so the `-RAR-`/`-VIDEO-`/`-FULL-` markers and everything that parses them are untouched. `generate_master_list()` takes a list name and `generate_all_lists()` builds every one, each independently: one failing does not stop the rest, and the failures are named.
 
-**Stage 3 is in.** A request is answered from the list bound to the channel it arrived in. The rule has three parts: an explicitly bound channel gets its list; otherwise the primary answers *if it binds no channels of its own*, which is what every install today is and what stops this being an upgrade that silences every bot; otherwise nothing, which is what makes binding mean something. A private message is always the primary, since it carries nothing to route on. The list request, `@find` and file requests all route; a channel bound to nothing is answered with silence rather than an error, because an error implies something went wrong and nothing did.
+**Stage 3 is in.** A request is answered from the list bound to the channel it arrived in. The rule has three parts: an explicitly bound channel gets its list; otherwise the primary answers *if it binds no channels of its own*, which is what every install today is and what stops this being an upgrade that silences every bot; otherwise nothing, which is what makes binding mean something. A private message is the primary - it carries no channel to route on - except that a `!rar` row copied from another list's advert carries its folder label, and that routes it to the list the label belongs to (#653). The list request, `@find` and file requests all route; a channel bound to nothing is answered with silence rather than an error, because an error implies something went wrong and nothing did.
 
 **Stage 4 is in.** Each channel advertises the list it actually serves. The advert loop already read the figures once per channel — it just read the same ones every time — so this is the loop asking which list first, and skipping a channel with none bound. The advert is where the multi-list rule is most visible: a bot silently present in a channel it does not serve, rather than one announcing a library it will refuse to send from.
 
@@ -91,6 +59,44 @@ Two pieces were worth doing carefully rather than quickly, and one of them turne
 
 - **Containment.** This said `is_safe_path()` would become "inside *any* configured root", and called that the one place a mistake is a security bug rather than an inconvenience. Right about the risk, wrong about the answer: widening it that way is a strictly weaker test. Because a heading names its own folder, resolution returns *which* folder it landed in and the check runs against that one — the same strength as when there was only ever one. `is_safe_path()` itself was never touched.
 - **Index identity.** Two folders can hold the same relative path — the same album in flac and in mp3 is the ordinary case — so an entry has to record which folder it came from. That is the label leading every path, and it is what makes the containment answer above possible.
+
+### Receiving files from other bots
+
+- **Cross-bot fetch** — request a file with `!<bot> <filename>` or a whole list with `@<botnick>`, and track it from the dashboard.
+- **Broadcast search** — send one `@find` to a channel and collect every bot's reply, grouped under each bot's own parsed header.
+- **Both DCC directions** — active and passive/reverse SEND, since bots behind NAT use the latter.
+- **Hostile-input handling** — every other bot is treated as untrusted: admission control, size caps, and zip-slip / zip-bomb guards on any archive received.
+
+### Operating it
+
+- **Authenticated admin console over DCC CHAT**, gated on the operator's services host *and* a PBKDF2-hashed password. Read-only commands (`status`, `queue`, `slots`, `bans`, `uptime`, `version`) and action commands (`ban`, `unban`, `clearqueue`, `rehash`, `update`) — see [ADMIN-CONSOLE.md](ADMIN-CONSOLE.md). The feed's tags are in the bot's own theme colours (`ADMIN_CHAT_COLOURS`), and the diagnostic channel commands (`!ping`, `!debugnames`) answer only the bot's own admin, so two DCCore bots in one channel never answer each other's operator.
+- **A structured feed for scripts, and the bot's own window in mIRC.** A console session that says `hello <client> <version>` gets every event as one `DCCORE <TYPE> <fields…> <free text>` line — requests, queue positions, sends, resumes, completions, failures, searches, the rest as `LOG` — plus a `STATUS`/`SLOT`/`QUEUE` burst after every change and every 30 s (the heartbeat). `pair` mints a login token for a script that opens the console and nothing else. `scripts/mirc/dccore.mrc` (mIRC 6.10+) draws it all: the feed coloured per kind, a side panel with what is sending and who is waiting, the slots and today's totals in the title bar, console commands typed in the window, an options dialog; `/dccore pair <bot>` once, then it logs in by itself.
+- **Optional web dashboard** — Search, Queue, List Browser grouped by folder, Downloads, a duplicate-filename verifier (which the build now warns about too, for operators who never open the dashboard), a list rebuilder, a Settings page, and a Console (the DCC CHAT admin console's commands and live log, in the browser — for an operator who wants neither a second IRC client nor a debug channel). Off by default, loopback by default, behind the same password as the DCC CHAT console.
+- **Purging a fetched list** - the manual half of the fetched-list purge, in two shapes: one bot at a time from its own list, and every offline bot at once from the toolbar. Removes the entry, the extracted files and the search index rows together. An automatic TTL is still open and deliberately second: `fetched_at` answers list staleness, not "this bot is gone", and a timer that deletes an operator's data by default is a surprise waiting to happen.
+- **Messages people send the bot** - a private message that is not a command gets no reply, and now leaves a record: a Messages page with an unread count, throttled per sender. The bot still never answers. Turning it off (`PRIVATE_MESSAGES_ENABLED = false`) keeps nothing, hides the page and its menu entry, and tells the sender once where to go instead - a NOTICE, once per person per day, under a burst ceiling, on the ordinary send lane.
+- **A notice badge in the dashboard** - the short list beside the long one. Kicks, channels given up on and failed rebuilds raise a counted, colour-coded notice in the status panel, kept across restarts; everything else stays in the Console's log where it belongs. See [ADMIN-CONSOLE.md](ADMIN-CONSOLE.md).
+- **The launcher is the install.** Extract, double-click (`start-dccore.bat`, `start-dccore.sh`, `start-dccore.command`): the first run opens a setup page in the browser — nickname, server, channels, your nick, the password, the music folder, the dashboard, each with the same **?** explanation the Settings page has, in English, French or Spanish — loopback-only, one-shot, behind a one-time code in the link, and the bot starts the moment you save. No Flask, or no browser: the same questions in the terminal (`configure.py`). On Windows with no Python at all, the launcher offers to download python.org's installer, checks it against a fingerprint pinned in the script, and runs it with both boxes ticked. Every run after that checks the setup and starts the bot.
+- **Starting with the system, the firewall, the router.** `install-autostart` scripts for Windows (Task Scheduler), Linux (a systemd user unit) and macOS (launchd), each with a remover, each running the launcher so the working directory is right; `allow-firewall.bat` adds the Windows rule for the bot's ports and the setup check names the `ufw`/`firewall-cmd` lines on Linux; port forwarding explained in plain words in both guides.
+- **Pre-flight check** — `start-dccore.sh check` verifies the setup without opening a socket, and says what stands between the bound ports and the outside on this OS.
+- **Every setting explains itself.** The **?** beside each of the 117 settings on the dashboard — and the comment above it in `settings.conf.sample` — is written for the person running the bot, in English, French and Spanish; the dashboard itself is translated the same three ways.
+- **Two configuration mechanisms** — `admin_config.py` for Python, `settings.conf` for plain text; the dashboard and console both write to the latter.
+- **`!rehash`** reloads code and settings live, preserving queues and transfer state.
+- **Channel adverts** on a timer, with a per-bot theme (five presets, or your own colours).
+- **Statistics** — totals, today and yesterday, per-file download counts, a speed record, and a live rate.
+
+### Quality
+
+- **6378 tests**, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14, in CI on every push and pull request — and a preflight script that runs the whole suite twice, the second time with the host's own tooling hidden, so a test that only passes on a developer's machine fails before it is pushed.
+- **Stdlib-only** — the daemon and its test suite need no third-party packages; Flask is required only for the optional dashboard.
+- **No reloaded module owns a lock** — `!rehash` re-executes a module body, so a module-level `threading.Lock()` is rebound while a thread is still inside it. Every lock in a reloaded module is allocated in `runtime.py` and bound by name, and `tests/test_no_reloaded_module_owns_a_lock.py` fails if a new one appears — the class, not the four instances that prompted it.
+- **A cross-list search index** — SQLite FTS5, built as each bot list is fetched, so the dashboard can filter every held list live rather than re-reading them at 2-11 seconds a keystroke.
+- **Four adversarial audits so far** — an internal audit (32 defects), a pre-publication sweep, the v1.12.0 audit (44 findings) and the 2026-09-20 audit (145 findings, twelve independent lenses) — all fixed or otherwise resolved. See "From the audits" below for the two most recent.
+
+---
+
+## Planned
+
+Ordered by what unblocks what, not by preference.
 
 ### Test coverage where it is thinnest
 
@@ -103,6 +109,8 @@ What remains is narrower and does not show up in that number. Several "the wirin
 The same file closes a larger gap found alongside it. All 37 dashboard rules sit behind one `before_request` hook and not a single per-route decorator, which is the right design — a decorator is a thing somebody can forget — but it put the whole authentication story on one function that nothing tested as a whole. An audit probed every rule unauthenticated and found none reachable, so it held; now a test walks `url_map` itself, so a route added tomorrow is covered without anyone remembering the test exists.
 
 ### From the audits
+
+**The 2026-09-20 audit is the largest yet, and it too is fully closed.** Twelve independent auditing lenses over `main`, each finding attacked by an independent skeptic told to refute it: 145 findings after dedup, 0 critical (27 high, 62 medium, 53 low, after severity correction), 3 refuted outright. The other 142 - 139 confirmed and 3 the skeptic could not rule out either way - each got its own issue and its own fix: 140 closed by a direct fix on `main`, and 2 closed as duplicates once tracing them down turned up that a different auditor had already found and fixed the same bug under a different number (the write-up on each says which one). Every fix is written up in `docs/UPDATES.md` with its failure scenario, the same discipline the v1.12.0 audit below established - and one of the duplicate write-ups spawned its own follow-up (#811, the setup page asking for the operator's `+x` host), filed separately so the part beyond the original finding is not lost.
 
 **The v1.12.0 audit left the list this section used to ask for.** Six independent lenses — security, concurrency, the transfer path, lists, the IRC surface, and persistence — each adversarially refuted before anything counted, followed by a second, pre-publication sweep of the actual public export itself. **44 findings confirmed, and all 44 are closed: 42 fixed, 2 recorded in tests as considered and deliberately not changed.** Every one is written up in `docs/UPDATES.md` with its failure scenario, so the next audit starts from a record rather than from "roughly forty".
 

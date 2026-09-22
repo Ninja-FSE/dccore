@@ -127,7 +127,7 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
 
         self.settle("dave", mine, delivered=True)
 
-        self.assertEqual(self.config.dcc_queue["dave"], [])
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [])
         self.assertEqual(self.config.dcc_queue["erin"], [theirs])
 
     def test_user_key_is_case_insensitive(self):
@@ -137,7 +137,7 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
 
         self.settle("DaVe", row, delivered=True)
 
-        self.assertEqual(self.config.dcc_queue["dave"], [])
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [])
 
     # -- failure keeps the row until the budget runs out -----------------
 
@@ -182,7 +182,7 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
             self.assertIn(row, self.config.dcc_queue["dave"])
 
         self.assertFalse(self.settle("dave", row, delivered=False))
-        self.assertEqual(self.config.dcc_queue["dave"], [])
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [])
         self.assertEqual(row["send_fails"], 5)
 
     def test_budget_of_one_drops_on_the_first_failure(self):
@@ -194,7 +194,7 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
         retained = self.settle("dave", row, delivered=False)
 
         self.assertFalse(retained)
-        self.assertEqual(self.config.dcc_queue["dave"], [])
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [])
 
     def test_dropped_row_notifies_the_user(self):
         """Guards: the positional pop discarded files with no word to the user."""
@@ -234,7 +234,7 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
 
         # Third attempt finally gets through: the row - counter and all - is gone.
         self.assertFalse(self.settle("dave", row, delivered=True))
-        self.assertEqual(self.config.dcc_queue["dave"], [])
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [])
 
         # The same user asks for the same file again. A fresh row must start from
         # zero; if the count had been kept in a dict keyed by user/filename this
@@ -251,11 +251,14 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
     # -- rows that must not be retried -----------------------------------
 
     def test_consumed_temporary_archive_is_dropped_on_first_failure(self):
-        """Guards: retrying a temp .rar the cleanup step already deleted."""
-        # The cleanup step in start_dcc_send removes the temporary archive from
-        # disk, so any retry would abort on file_size == 0 and emit a misleading
-        # error to the channel. Such a row is settled at once.
-        temp = queue_row(user="dave", filename="Album.rar", is_temporary_zip=True)
+        """Guards: retrying a temp .rar that is gone from disk."""
+        # A temporary archive that no longer exists cannot be sent again: any
+        # retry would abort on file_size == 0 and emit a misleading error to
+        # the channel. Such a row is settled at once. (One whose archive is
+        # still on disk is retried like a plain file since #657 - see
+        # test_a_failed_pack_send_keeps_its_archive_and_row.py.)
+        temp = queue_row(user="dave", filename="Album.rar", is_temporary_zip=True,
+                         path="/nowhere/on/this/disk/Album.rar")
         neighbour = queue_row(user="dave", filename="Neighbour.flac")
         self.config.dcc_queue["dave"] = [temp, neighbour]
 
@@ -308,7 +311,7 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
         retained = self.settle("dave", legacy, delivered=True)
 
         self.assertFalse(retained)
-        self.assertEqual(self.config.dcc_queue["dave"], [])
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [])
 
     # -- degenerate input must never raise -------------------------------
 
@@ -317,10 +320,12 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
         orphan = queue_row(user="ghost", filename="Nothing.flac")
 
         self.assertFalse(self.settle("ghost", orphan, delivered=True))
-        # A failure still charges the retry budget - the row simply is not in any
-        # queue, so nothing is removed. What matters is that it does not raise.
-        self.assertTrue(self.settle("ghost", orphan, delivered=False))
-        self.assertEqual(orphan["send_fails"], 1)
+        # A failure of a row that is in no queue (the direct-send fast path's
+        # synthetic one) is settled on the spot, not "kept for retry": nothing
+        # could ever retry it, and the user is told (#599). What matters here
+        # is that it does not raise.
+        self.assertFalse(self.settle("ghost", orphan, delivered=False))
+        self.assertNotIn("send_fails", orphan)
         # No queue was created as a side effect of settling.
         self.assertEqual(self.config.dcc_queue.get("ghost", []), [])
         self.assertNotIn("ghost", self.config.dcc_queue)
@@ -331,7 +336,7 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
         row = queue_row(user="dave", filename="Nothing.flac")
 
         self.assertFalse(self.settle("dave", row, delivered=True))
-        self.assertEqual(self.config.dcc_queue["dave"], [])
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [])
 
     def test_none_entry_does_not_raise(self):
         """Guards: a crash settling a None entry after an aborted selection."""
@@ -355,7 +360,7 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
         self.config.dcc_queue["dave"] = [row]
 
         self.assertFalse(self.settle("dave", row, delivered=False))
-        self.assertEqual(self.config.dcc_queue["dave"], [])
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [])
 
     def test_persistence_failure_does_not_lose_the_settlement(self):
         """Guards: a disk error must not abort the in-RAM queue update."""
@@ -367,7 +372,7 @@ class ReleaseQueueEntryTests(DCCoreTestCase):
         self.config.dcc_queue["dave"] = [row]
 
         self.assertFalse(self.settle("dave", row, delivered=True))
-        self.assertEqual(self.config.dcc_queue["dave"], [])
+        self.assertEqual(self.config.dcc_queue.get("dave", []), [])
 
 
 if __name__ == "__main__":

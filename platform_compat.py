@@ -384,6 +384,111 @@ def describe():
     )
 
 
+# ---------------------------------------------------------------------
+# ONE DAEMON PER DATA FOLDER (#710, audit L46). Nothing checked for an
+# already-running instance: a logon task plus a manual double-click (or a
+# second logon session of the same account) ran two bots on one data folder
+# - the second took ALT_NICKNAME, both wrote dcc_queue.txt and stats.txt
+# whole, and their DCC listeners shared the eleven-port range. The guard is
+# an OS lock on a file, not the file's existence: a lock dies with its
+# process, so a crash or a power cut leaves nothing stale behind for the
+# next start to be refused by. msvcrt on Windows, fcntl elsewhere - both
+# stdlib, both advisory-exclusive, both released the moment the handle
+# closes or the process ends.
+# ---------------------------------------------------------------------
+
+class AlreadyRunning(RuntimeError):
+    """Another DCCore holds the lock. `pid` is what it wrote, or None."""
+
+    def __init__(self, path, pid=None):
+        super().__init__(f"another DCCore is already running on this folder ({path})")
+        self.path = path
+        self.pid = pid
+
+
+_instance_lock = {"handle": None, "path": None}
+# Windows locks a byte RANGE, and a locked byte cannot be read by anyone -
+# the holder included - so the pid at the start of the file would be
+# unreadable if the lock sat there. It sits well past the pid instead; a
+# range past the end of the file is a legal thing to lock on Windows.
+_LOCK_OFFSET = 1024
+
+
+def _pid_in(path):
+    """The pid the holder wrote at the start of the lock file, or None. A
+    raw read of the first bytes only: a buffered text read would take a
+    chunk that includes the locked byte and be refused on Windows."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return None
+    try:
+        return int(os.read(fd, 64).decode("ascii", "replace").strip() or "0") or None
+    except (OSError, ValueError):
+        return None
+    finally:
+        os.close(fd)
+
+
+def take_instance_lock(path):
+    """Hold `path` for this process's life, or raise AlreadyRunning.
+
+    Idempotent within one process (a second call returns the same handle),
+    so a test that boots twice is not its own second instance. The pid is
+    written into the file for the refusal's message; the LOCK is what
+    guards, the pid is only what is said.
+    """
+    if _instance_lock["handle"] is not None and _instance_lock["path"] == os.path.abspath(path):
+        return _instance_lock["handle"]
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle = open(path, "a+", encoding="utf-8")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(_LOCK_OFFSET)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise AlreadyRunning(os.path.abspath(path), _pid_in(path))
+    try:
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+    except OSError:
+        pass  # the lock is held either way; the pid is only for the message
+    _instance_lock["handle"] = handle
+    _instance_lock["path"] = os.path.abspath(path)
+    return handle
+
+
+def release_instance_lock():
+    """Let the lock go (tests; the daemon holds it until it exits)."""
+    handle = _instance_lock["handle"]
+    if handle is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(_LOCK_OFFSET)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        handle.close()
+    except OSError:
+        pass
+    _instance_lock["handle"] = None
+    _instance_lock["path"] = None
+
+
 def replace_with_retry(src, dst, attempts=5, base_delay=0.02):
     """os.replace(), retrying a bounded number of times with backoff on
     PermissionError.

@@ -82,15 +82,21 @@ class TheRoadmapKeepsItsTwoHalves(unittest.TestCase):
 
         self.assertLess(body.index("## Implemented"), body.index("## Planned"))
 
-    def test_the_unbuilt_features_are_under_planned(self):
-        """The two things most likely to be assumed finished, because they have
-        been designed and written up in detail."""
+    def test_the_built_features_are_under_implemented(self):
+        """The two things this test used to keep under Planned because they
+        had been designed in detail before they were built. They are built
+        (all five stages, #26 closed), and the roadmap filed them under
+        Planned regardless - right under the sentence that says everything
+        there is not working (#701). Now they must sit under Implemented,
+        and nothing under Planned may report a stage as in."""
         body = read(os.path.join("docs", "FUTURE.md"))
+        implemented = body[body.index("## Implemented"):body.index("## Planned")]
         planned = body[body.index("## Planned"):]
 
         for feature in ("Multiple lists", "multiple folders per list"):
             with self.subTest(feature=feature):
-                self.assertIn(feature, planned)
+                self.assertIn(feature, implemented)
+        self.assertNotIn("Stage 5 is in", planned)
 
 
 class TheReadmeStaysAnEntryPoint(unittest.TestCase):

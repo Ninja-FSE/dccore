@@ -520,8 +520,12 @@ class BroadcastSearchTests(DCCoreTestCase):
 
         webserver.start_broadcast_search("sandman")
         self.assertTrue(config.broadcast_search_inprogress)
-        time.sleep(0.4)
-        self.assertFalse(config.broadcast_search_inprogress)
+        # Waited for, not slept past (#706): the closer is a thread with a
+        # sleep of its own, and a loaded runner that descheduled it beyond
+        # a fixed 0.4 s failed this for nothing.
+        from tests.test_adminchat import wait_for
+        self.assertTrue(wait_for(lambda: not config.broadcast_search_inprogress, timeout=5.0),
+                        "the window never closed")
 
     def test_a_second_broadcast_while_one_is_open_is_rejected(self):
         webserver.start_broadcast_search("sandman")

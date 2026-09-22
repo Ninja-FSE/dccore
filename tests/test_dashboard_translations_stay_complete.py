@@ -3,10 +3,12 @@ and with what the page actually references.
 
 WHAT THIS GUARDS AGAINST
 
-Three JSON files (web/lang/en.json, fr.json, es.json) and two source files
-(web/index.html's data-i18n attributes, web/app.js's views{} object) all
-have to agree on the same set of keys - and nothing enforces that by
-construction. Four ways that drifts, each silent until an operator notices:
+Three JSON files (web/lang/en.json, fr.json, es.json) and three source files
+(web/index.html's data-i18n attributes, web/app.js's views{} object, and
+the server-rendered setup page's "setup.*" lookups in webserver.py - the
+one page that reads the lang files from Python, #621) all have to agree on
+the same set of keys - and nothing enforces that by construction. Four ways
+that drifts, each silent until an operator notices:
 
   * A key added to one language and forgotten in another. t() falls back to
     English for a viewer in that language, which is a real user staring at
@@ -75,6 +77,12 @@ DATA_I18N = re.compile(r'data-i18n(?:-html|-placeholder|-title)?="([^"]+)"')
 # stopped one character short of "settings.field.SERVER"'s neighbours.
 JS_KEY_SHAPED_STRING = re.compile(r'"([a-z][a-zA-Z0-9_]*(?:\.[a-zA-Z][a-zA-Z0-9_]*)+)"')
 
+# The setup page (#547) is rendered by webserver.py, not app.js: its strings
+# are looked up as strings.get("setup.something", "the English fallback").
+# The keys are namespaced "setup." so this match cannot pick up a dotted
+# module path or a settings name from elsewhere in the file.
+SETUP_KEY_STRING = re.compile(r'"(setup\.[a-zA-Z0-9_]+(?:\.[a-zA-Z0-9_]+)*)"')
+
 HELP_KEY_SUFFIX = ".help"
 
 
@@ -100,12 +108,16 @@ def keys_referenced_in_source():
     data-i18n-title attributes, plus every key-shaped string literal in
     app.js (see JS_KEY_SHAPED_STRING above for why a shape match, not a
     narrower t(...)-call match, is what covers all of app.js's ways of
-    naming a key)."""
+    naming a key), plus the "setup.*" keys the server-rendered setup page
+    looks up in webserver.py."""
     html = read("index.html")
     found = set(DATA_I18N.findall(html))
 
     js = read("app.js")
     found.update(JS_KEY_SHAPED_STRING.findall(js))
+
+    with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+        found.update(SETUP_KEY_STRING.findall(handle.read()))
 
     return found
 

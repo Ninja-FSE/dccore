@@ -15,9 +15,10 @@ point in irc.py, dcc.py and commands.py. These tests exercise the real,
 already-locked dcc.user_is_present_in_ram() against a writer thread that adds
 and removes channel keys exactly the way irc.py's JOIN handler and
 commands.py's channel-sync loop do (through the same lock), and separately
-prove that the identical add/delete-key workload reliably corrupts iteration
-when left unlocked - so the passing test above is shown to depend on the fix,
-not merely be compatible with it.
+prove, with the interleaving forced rather than left to the scheduler, that a
+channel added in the middle of an iteration raises when left unlocked and
+waits its turn when locked - so the passing test above is shown to depend on
+the fix, not merely be compatible with it.
 """
 
 import threading
@@ -118,42 +119,76 @@ class ConcurrentChannelKeyChurnAgainstRamCheck(DCCoreTestCase):
         self.assertEqual(errors, [],
                          f"concurrent access raised despite the shared lock: {errors!r}")
 
-    def test_without_the_lock_the_same_workload_corrupts_state(self):
-        """Control: the identical add/delete-key workload, left unlocked.
+    def _iterate_while_another_thread_adds_a_channel(self, locked):
+        """Hold an iteration open, let a writer add a channel key, resume.
 
-        Demonstrates the test above is not vacuously passing - the same
-        churn that dcc.user_is_present_in_ram() now survives reliably raises
-        "dictionary changed size during iteration" when nothing serialises
-        it, which is exactly the bug this PR fixes.
+        Deterministic on purpose (#596): the control used to churn an unlocked
+        dict for three seconds and assert that the scheduler happened to
+        interleave a writer inside an iteration - which a lightly loaded runner
+        does not always do, and main went red for a change that touched
+        nothing near it. Here the interleaving is forced with events, so the
+        outcome does not depend on the scheduler at all.
         """
-        stop = threading.Event()
+        config.channel_users.clear()
+        config.channel_users["#race0"] = {"someuser"}
+        inside_the_loop = threading.Event()
+        writer_done = threading.Event()
         errors = []
-        deadline = time.monotonic() + self.DEADLINE_SECONDS
 
-        def unlocked_reader():
+        def writer():
+            inside_the_loop.wait(5)
+            if locked:
+                with runtime.channel_users_lock():
+                    config.channel_users["#race1"] = {"someuser"}
+            else:
+                config.channel_users["#race1"] = {"someuser"}
+            writer_done.set()
+
+        def reader():
             try:
-                while not stop.is_set() and time.monotonic() < deadline:
+                def walk():
                     for users_set in config.channel_users.values():
                         for known_user in users_set:
                             str(known_user).lower()
+                        # The writer runs here, in the middle of the iteration
+                        # - unless the lock keeps it out until the loop is over.
+                        inside_the_loop.set()
+                        writer_done.wait(0.5 if locked else 5)
+                if locked:
+                    with runtime.channel_users_lock():
+                        walk()
+                else:
+                    walk()
             except Exception as exc:
                 errors.append(exc)
-            finally:
-                stop.set()
 
-        writer = threading.Thread(
-            target=_add_remove_channel_keys, args=(stop, deadline, False), daemon=True)
-        reader = threading.Thread(target=unlocked_reader, daemon=True)
-        writer.start()
-        reader.start()
-        writer.join(timeout=self.DEADLINE_SECONDS + 5)
-        stop.set()
-        reader.join(timeout=5)
+        threads = [threading.Thread(target=writer, daemon=True),
+                   threading.Thread(target=reader, daemon=True)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        self.assertFalse(any(thread.is_alive() for thread in threads), "a thread never finished")
+        return errors
 
-        self.assertTrue(len(errors) > 0,
-                        "the unlocked control workload finished without ever "
-                        "raising - this test would no longer prove the fix "
-                        "prevents anything; it needs a heavier workload")
+    def test_without_the_lock_a_channel_added_mid_iteration_raises(self):
+        """Control: the same reader and writer, nothing serialising them.
+
+        Shows the tests above are not vacuously passing - the churn
+        dcc.user_is_present_in_ram() survives is exactly what raises
+        "dictionary changed size during iteration" when nothing serialises it.
+        """
+        errors = self._iterate_while_another_thread_adds_a_channel(locked=False)
+
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIsInstance(errors[0], RuntimeError)
+        self.assertIn("changed size during iteration", str(errors[0]))
+
+    def test_with_the_lock_the_writer_waits_for_the_iteration_to_finish(self):
+        errors = self._iterate_while_another_thread_adds_a_channel(locked=True)
+
+        self.assertEqual(errors, [])
+        self.assertIn("#race1", config.channel_users, "the writer never got its turn after the loop")
 
 
 if __name__ == "__main__":

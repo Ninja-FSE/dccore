@@ -292,6 +292,10 @@ class ThePingCommand(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
+        # "operator" pings below: !ping answers only the bot's own admin now
+        # (tests/test_diagnostics_answer_only_the_admin.py); what this class
+        # covers is what happens once a ping IS accepted.
+        self.set_config(ADMIN_NICK="operator")
         # #425: handle_ping_request() now reserves a slot from
         # runtime.outbound_pacer before sending. It is a process-wide
         # singleton the harness does not reset between tests (see

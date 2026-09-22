@@ -1,10 +1,12 @@
 # DCCore
 
-**v1.12.2** · Python 3.10+ · Linux, Windows and macOS
+**v1.13.0** · Python 3.10+ · Linux, Windows and macOS
 
 An IRC DCC file-sharing daemon — a modern reimplementation of OmenServe, the mIRC script that has run these channels for twenty years.
 
 It sits in a channel, advertises a catalogue, and serves files over DCC to whoever asks. It can also fetch files *from* other bots, which OmenServe never could. No third-party packages: everything it needs to talk to IRC, move files, pack albums and run its admin console is in the standard library.
+
+**Getting started:** install Python 3.10+, extract, and run the launcher for your system - `scripts\windows\start-dccore.bat` (double-click), `scripts/linux/start-dccore.sh`, or `scripts/macos/start-dccore.command`. The first run asks the setup questions itself. Details in [docs/INSTALL.md](docs/INSTALL.md) and [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ## What it does
 
@@ -44,7 +46,7 @@ Full guide, including configuring it by hand and upgrading from an older install
 |---|---|
 | [INSTALL.md](docs/INSTALL.md) | requirements, setup, configuration, upgrading |
 | [FUTURE.md](docs/FUTURE.md) | what is implemented, what is planned |
-| [ADMIN-CONSOLE.md](docs/ADMIN-CONSOLE.md) | the authenticated DCC CHAT console |
+| [ADMIN-CONSOLE.md](docs/ADMIN-CONSOLE.md) | the authenticated DCC CHAT console, and the mIRC window script that sits on it |
 | [WINDOWS.md](docs/WINDOWS.md) | the Windows guide |
 | [CONVENTIONS.md](docs/CONVENTIONS.md) | how this codebase is written, if you want to contribute |
 | [UPDATES.md](docs/UPDATES.md) | the changelog |
@@ -62,7 +64,7 @@ The optional dashboard is `webserver.py` and `web/`, and disables itself cleanly
 python3 -m unittest discover -s tests -t .
 ```
 
-4994 of them, stdlib-only, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14 in CI.
+Thousands of them - the count is kept in [docs/FUTURE.md](docs/FUTURE.md) - stdlib-only, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14 in CI.
 
 ## License
 

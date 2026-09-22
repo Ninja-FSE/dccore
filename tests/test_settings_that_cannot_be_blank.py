@@ -269,12 +269,18 @@ class BothCallSitesUseIt(unittest.TestCase):
                          "again - its default cannot fire, because defaults.py "
                          "always defines the attribute")
 
-    def test_both_handlers_call_the_helper(self):
+    def test_the_ladder_calls_the_helper(self):
+        """Since #633/#634/#635 there is one 433 path - the registration
+        ladder in fallback_nick(), whose first rung is the alternate - and
+        a registered bot keeps its name on a refusal, so the helper has one
+        caller: the definition plus that rung."""
         with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
 
-        self.assertEqual(source.count("resolve_alt_nick("), 3,
-                         "expected the definition plus both 433 call sites")
+        self.assertEqual(source.count("resolve_alt_nick("), 2,
+                         "expected the definition plus the ladder's first rung")
+        ladder = source.split("def fallback_nick(", 1)[1][:2500]
+        self.assertIn("alt = resolve_alt_nick(main_nick)", ladder)
 
 
 if __name__ == "__main__":

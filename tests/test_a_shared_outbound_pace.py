@@ -150,15 +150,20 @@ class TheCombinedOutboundRateIsCapped(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
-        config.MSG_DELAY = 0.05
-        config.DEBUG_MSG_DELAY = 0.01  # deliberately far below MSG_DELAY
+        # Through set_config() (#667): set directly, the tiny pace outlived
+        # the test and every later one ran at it.
+        self.set_config(MSG_DELAY=0.05,
+                        DEBUG_MSG_DELAY=0.01)  # deliberately far below MSG_DELAY
         config.vip_queue = []
         config.send_queue = {}
         config.bot_joined_channel = True
         self.oserve.bot_joined_channel = True
+        # The pump also waits for activation (#630); the harness resets this.
+        config.activation_triggered = True
 
         # A fresh clock per test - the real one is a process-wide singleton
-        # and other tests must not see this test's tiny MSG_DELAY.
+        # and other tests must not inherit the moment this one's last line
+        # left (the value itself is restored by set_config above).
         runtime.outbound_pacer = runtime.OutboundPacer()
 
         self.sock = TimestampedSocket()
@@ -254,11 +259,13 @@ class TheStandardLaneIsNoLongerStarvedByVip(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
-        config.MSG_DELAY = 0.01
+        self.set_config(MSG_DELAY=0.01)
         config.vip_queue = []
         config.send_queue = {}
         config.bot_joined_channel = True
         self.oserve.bot_joined_channel = True
+        # The pump also waits for activation (#630); the harness resets this.
+        config.activation_triggered = True
         runtime.outbound_pacer = runtime.OutboundPacer()
         self.sock = TimestampedSocket()
         self.oserve.irc_connection = self.sock
@@ -320,7 +327,13 @@ class TheStandardLaneIsNoLongerStarvedByVip(DCCoreTestCase):
 
         self.start_queue_worker()
 
-        deadline = time.time() + 2.0
+        # A CEILING, not a delay: the loop returns the moment the twentieth
+        # line lands, which on a quiet machine is well under a second. It
+        # was 2.0 s, and macOS's hosted runners delivered 17 and 19 of 20 in
+        # that - the same scheduler jitter #548 met - so the test failed on
+        # timing while the property it asserts held. Ten seconds costs a
+        # healthy run nothing and a loaded one the slack it needs.
+        deadline = time.time() + 10.0
         while time.time() < deadline and len(self.sock.sent) < 20:
             time.sleep(0.01)
 
@@ -358,7 +371,11 @@ class TheThirdUnpacedWriterIsFixedToo(unittest.TestCase):
             "continue", 1)[0]
 
     def debugnames_block(self):
-        return self.source().split('elif msg.lower() == "!debugnames":', 1)[1][:1500]
+        # Up to the next branch of the same chain, not a fixed number of
+        # characters: the admin gate in front of the notice pushed the
+        # queue_message() line past the 1500 this used to take.
+        rest = self.source().split('elif msg.lower() == "!debugnames":', 1)[1]
+        return rest[:rest.index('elif msg.lower() == "!ping":')]
 
     def test_the_version_reply_no_longer_writes_the_socket_directly(self):
         self.assertNotIn("s.send(version_reply", self.version_reply_block())
@@ -412,7 +429,10 @@ class TheFourthUnpacedWriterIsFixedToo(DCCoreTestCase):
         self.real_pacer = runtime.outbound_pacer
         runtime.outbound_pacer = runtime.OutboundPacer()
         self.addCleanup(setattr, runtime, "outbound_pacer", self.real_pacer)
-        self.set_config(MSG_DELAY=0.1)
+        # The pingers below are admins: !ping answers only the bot's own
+        # admin now (tests/test_diagnostics_answer_only_the_admin.py), and
+        # what this class measures is the pacing of a ping that IS sent.
+        self.set_config(MSG_DELAY=0.1, ADMIN_NICK="alice, bob")
 
     def test_a_second_ping_waits_out_the_shared_interval(self):
         sock = TimestampedSocket()

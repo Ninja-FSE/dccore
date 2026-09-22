@@ -339,13 +339,14 @@ class TheNotifiedNickSetIsBounded(unittest.TestCase):
     nicks against it, grew the set for the life of the process.
     """
 
-    def test_the_old_shape_would_have_grown_without_limit(self):
-        """Control. A plain set is what this replaced; if THIS ever stops
-        growing, the premise below is wrong."""
-        plain = set()
-        for i in range(20000):
-            plain.add(f"leech{i}")
-        self.assertEqual(len(plain), 20000)
+    def test_the_module_global_is_the_bounded_shape(self):
+        """The regression this class documents, guarded (#705, audit L41):
+        the tests below build their own _NotifiedNicks, so reverting
+        security._ban_notified to a plain set() left all of them green.
+        (This replaced a "control" that added 20000 items to a plain set and
+        asserted 20000 - a test of Python's set, which could not fail.)"""
+        self.assertIsInstance(security._ban_notified, security._NotifiedNicks)
+        self.assertFalse(isinstance(security._ban_notified, set))
 
     def test_entries_outside_the_window_are_swept_away(self):
         """The bound is RATE x WINDOW, not an absolute cap - so what has to be

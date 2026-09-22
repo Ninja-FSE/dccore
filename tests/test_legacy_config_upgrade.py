@@ -8,7 +8,7 @@ handles that at import time.
 
 The launchers defeated it. Their "no config found" test runs in shell, BEFORE
 any Python is imported, so it fired before the migration could - and the advice
-it printed ("copy admin_config.py.sample to admin_config.py") is exactly the
+it printed then ("copy admin_config.py.sample to admin_config.py") is exactly the
 condition that makes the migration skip for good, because it only acts when
 admin_config.py does NOT already exist. Reproduced against the real v1.10.0 tag:
 the operator followed the instruction and ended with an empty sample config,
@@ -55,15 +55,18 @@ class BothLaunchersRecogniseAPreRenameInstall(unittest.TestCase):
                 self.assertIn(LEGACY, read(path),
                               "the launcher cannot tell an upgrade from a fresh install")
 
-    def test_the_legacy_branch_comes_before_the_generic_refusal(self):
+    def test_the_legacy_branch_comes_before_the_first_run_branch(self):
         """Order is the whole fix. Both branches match an upgrading install -
         it has neither admin_config.py nor settings.conf - so whichever is
-        tested first decides what the operator is told."""
+        tested first decides what the operator is told. Since #547 the
+        no-config branch RUNS configure.py rather than printing advice, which
+        makes the order matter more, not less: configure.py would happily
+        write a fresh settings.conf beside the stranded local_config.py."""
         for path in (LINUX, WINDOWS):
             with self.subTest(launcher=os.path.basename(path)):
                 body = read(path)
-                self.assertLess(body.index(LEGACY), body.index("Copy admin_config.py.sample"),
-                                "the generic 'copy the sample' advice is reached first")
+                self.assertLess(body.index(LEGACY), body.index("Welcome to DCCore"),
+                                "the first-run branch is reached before the legacy one")
 
     def test_neither_launcher_tells_an_upgrading_operator_to_copy_the_sample(self):
         """That single instruction is what stranded the config: creating
@@ -88,13 +91,17 @@ class BothLaunchersRecogniseAPreRenameInstall(unittest.TestCase):
                 self.assertIn("oserve.py", window,
                               "nothing tells them starting the daemon migrates it")
 
-    def test_the_generic_refusal_still_exists_for_a_genuinely_fresh_install(self):
-        """The control. A launcher that stopped refusing an unconfigured
-        install would be a worse bug than the one being fixed - it would let a
-        bot start on the upstream defaults."""
+    def test_a_genuinely_fresh_install_is_configured_never_started_on_the_defaults(self):
+        """The control. A launcher that let an unconfigured install start
+        would be a worse bug than the one being fixed - it would put a bot on
+        the upstream defaults. Since #547 the answer to "no config" is to run
+        configure.py right there; and with no configure.py to run, to refuse.
+        Both must be present, and nothing may fall through to oserve.py."""
         for path in (LINUX, WINDOWS):
             with self.subTest(launcher=os.path.basename(path)):
-                self.assertIn("admin_config.py.sample to admin_config.py", read(path))
+                body = read(path)
+                self.assertIn("configure.py", body)
+                self.assertIn("Extract the download again", body)
 
     def test_no_launcher_still_names_the_pre_rename_config_module(self):
         """Both messages said "the defaults in config.py", which #170 renamed."""
@@ -150,12 +157,24 @@ class TheLauncherActuallyTakesThatBranch(unittest.TestCase):
 
         self.assertNotIn("admin_config.py.sample to admin_config.py", out)
 
-    def test_a_genuinely_fresh_install_still_gets_the_sample_instruction(self):
-        """The control, executed rather than grepped."""
-        out = self.run_launcher({})
+    def test_a_genuinely_fresh_install_runs_configure(self):
+        """The control, executed rather than grepped: no config and a
+        configure.py present means configure.py runs - and, because stdin is
+        closed here, exits non-zero, after which the launcher must stop
+        rather than start the daemon."""
+        out = self.run_launcher({"configure.py": "import sys\nprint('CONFIGURE-RAN')\nsys.exit(1)\n",
+                                 "oserve.py": "print('OSERVE-RAN')\n"})
 
-        self.assertIn("admin_config.py.sample", out)
+        self.assertIn("CONFIGURE-RAN", out)
+        self.assertIn("did not finish", out)
+        self.assertNotIn("OSERVE-RAN", out)
         self.assertNotIn(LEGACY, out)
+
+    def test_a_fresh_install_with_no_configure_is_refused(self):
+        out = self.run_launcher({"oserve.py": "print('OSERVE-RAN')\n"})
+
+        self.assertIn("Extract the download again", out)
+        self.assertNotIn("OSERVE-RAN", out)
 
 
 class TheWindowsLauncherTakesThatBranchToo(unittest.TestCase):
@@ -201,10 +220,19 @@ class TheWindowsLauncherTakesThatBranchToo(unittest.TestCase):
 
         self.assertNotIn("admin_config.py.sample to admin_config.py", out)
 
-    def test_a_genuinely_fresh_install_still_gets_the_sample_instruction(self):
-        out = self.run_launcher({})
+    def test_a_genuinely_fresh_install_runs_configure(self):
+        out = self.run_launcher({"configure.py": "import sys\nprint('CONFIGURE-RAN')\nsys.exit(1)\n",
+                                 "oserve.py": "print('OSERVE-RAN')\n"})
 
-        self.assertIn("admin_config.py.sample", out)
+        self.assertIn("CONFIGURE-RAN", out)
+        self.assertIn("did not finish", out)
+        self.assertNotIn("OSERVE-RAN", out)
+
+    def test_a_fresh_install_with_no_configure_is_refused(self):
+        out = self.run_launcher({"oserve.py": "print('OSERVE-RAN')\n"})
+
+        self.assertIn("Extract the download again", out)
+        self.assertNotIn("OSERVE-RAN", out)
 
 
 class TheSetupCheckDoesNotFailAnUpgrade(unittest.TestCase):

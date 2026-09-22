@@ -297,7 +297,9 @@ class WhatTheServerSaidIsNoLongerDiscarded(unittest.TestCase):
         looked like nothing had happened."""
         with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
             code = handle.read()
-        block = code.split("count = note_join_refused(refused_chan)", 1)[1][:2000]
+        # 3000, not 2000: #632 put the 477 wording between the count and
+        # the uncounted branch this looks for.
+        block = code.split("count = note_join_refused(refused_chan)", 1)[1][:3000]
         block = re.sub(chr(35) + "[^" + chr(10) + "]*", "", block)
 
         self.assertIn("else:", block)

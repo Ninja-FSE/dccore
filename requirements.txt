@@ -13,6 +13,6 @@
 #
 # The one optional extra is the web dashboard, which needs Flask. It is opt-in
 # and lives in requirements-web.txt, so a headless install stays dependency
-# free. See docs/README.md.
+# free. See README.md.
 #
 # Python 3.10 or newer.

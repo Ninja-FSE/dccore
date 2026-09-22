@@ -75,12 +75,24 @@ class BootCase(DCCoreTestCase):
         self._real_worker = queue_mgr.queue_worker
         queue_mgr.queue_worker = lambda: self.workers.append(1)
         self.addCleanup(lambda: setattr(queue_mgr, "queue_worker", self._real_worker))
+        # And the fetch dispatcher it starts eleven lines later (#799). Only
+        # the subclass that tests it stubbed it, so every OTHER boot left a
+        # real `while True` thread calling dcc_fetch.check_fetch_queue()
+        # every 2 s for the rest of the process - through whichever oserve
+        # stub a later test had installed, which is how a test that had
+        # just paused transfers found three fetch requests already sent.
+        import dcc_fetch
+        self.dispatchers = []
+        self._real_dispatcher = dcc_fetch.fetch_dispatcher_worker
+        dcc_fetch.fetch_dispatcher_worker = lambda: self.dispatchers.append(1)
+        self.addCleanup(setattr, dcc_fetch, "fetch_dispatcher_worker",
+                        self._real_dispatcher)
 
-    def boot(self):
+    def boot(self, **kwargs):
         """Run startup(), capturing its console output."""
         buffer = io.StringIO()
         with redirect_stdout(buffer):
-            self.oserve.startup()
+            self.oserve.startup(**kwargs)
         return buffer.getvalue()
 
 
@@ -134,7 +146,7 @@ class StartupRunsOnThisPlatform(BootCase):
         never got configured at all looks like, minus the other five."""
         self.set_config(NICKNAME=config.SHIPPED_DEFAULTS["NICKNAME"])
         with self.assertRaises(SystemExit) as caught:
-            self.boot()
+            self.boot(setup_page=False)
         self.assertEqual(caught.exception.code, 1)
 
     def test_the_refusal_names_which_settings_are_still_unconfigured(self):
@@ -145,7 +157,7 @@ class StartupRunsOnThisPlatform(BootCase):
         buffer = io.StringIO()
         with redirect_stdout(buffer):
             with self.assertRaises(SystemExit):
-                self.oserve.startup()
+                self.oserve.startup(setup_page=False)
         output = buffer.getvalue()
         self.assertIn("NICKNAME", output)
         self.assertIn("CHANNEL", output)
@@ -159,7 +171,7 @@ class StartupRunsOnThisPlatform(BootCase):
         than one that never touched it at all."""
         self.set_config(CHANNEL="")
         with self.assertRaises(SystemExit) as caught:
-            self.boot()
+            self.boot(setup_page=False)
         self.assertEqual(caught.exception.code, 1)
 
     def test_a_value_that_merely_resembles_the_upstream_brand_is_not_flagged(self):
@@ -303,7 +315,9 @@ class TheEntryPointStillWiresItUp(unittest.TestCase):
             self.source = handle.read()
 
     def test_main_calls_startup_then_run_forever(self):
-        tail = self.source.split('if __name__ == "__main__":', 1)[1]
+        # The LAST guard: the console installs at the top of the file sit
+        # under a guard of their own since #707.
+        tail = self.source.rsplit('if __name__ == "__main__":', 1)[1]
         self.assertIn("startup()", tail)
         self.assertIn("run_forever()", tail)
         self.assertLess(tail.index("startup()"), tail.index("run_forever()"),
@@ -339,14 +353,8 @@ class TheCrossBotFetchDispatcherIsStarted(BootCase):
         super().setUp()
         import dcc_fetch
         self.dcc_fetch = dcc_fetch
-        # Stubbed like the queue worker above, and for the same reason: the
-        # real one is a while True loop, and the suite would accumulate one
-        # live thread per test that boots.
-        self.dispatchers = []
-        self._real_dispatcher = dcc_fetch.fetch_dispatcher_worker
-        dcc_fetch.fetch_dispatcher_worker = lambda: self.dispatchers.append(1)
-        self.addCleanup(setattr, dcc_fetch, "fetch_dispatcher_worker",
-                        self._real_dispatcher)
+        # The stub itself now lives in BootCase.setUp (#799): every boot
+        # needs it, not just this class. self.dispatchers is what it records.
 
     def _wait_for_dispatchers(self):
         """The thread is real even though its target is stubbed."""

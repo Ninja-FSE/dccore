@@ -51,9 +51,6 @@ class WritingTheHashIsAtomic(DCCoreTestCase):
         super().setUp()
         self.tree = self.make_tree()
         self.path = os.path.join(self.tree.root, "admin_config.py")
-        self.sample = os.path.join(self.tree.root, "admin_config.py.sample")
-        with io.open(self.sample, "w", encoding="utf-8") as handle:
-            handle.write('ADMIN_HOSTMASKS = ["*!*@example.invalid"]\n')
 
     def test_a_failed_write_leaves_the_original_intact(self):
         """The whole point of atomicity. Before this, the file was truncated
@@ -71,8 +68,7 @@ class WritingTheHashIsAtomic(DCCoreTestCase):
         self.addCleanup(lambda: setattr(settings_file, "_atomic_write", real_write))
 
         with self.assertRaises(OSError):
-            configure.write_admin_config_password("NEW", path=self.path,
-                                                  sample_path=self.sample)
+            configure.write_admin_config_password("NEW", path=self.path)
 
         with io.open(self.path, encoding="utf-8") as handle:
             left = handle.read()
@@ -88,16 +84,14 @@ class WritingTheHashIsAtomic(DCCoreTestCase):
         with io.open(self.path, "w", encoding="utf-8") as handle:
             handle.write('ADMIN_PASSWORD_HASH = "OLD"\n')
 
-        configure.write_admin_config_password("NEW", path=self.path,
-                                              sample_path=self.sample)
+        configure.write_admin_config_password("NEW", path=self.path)
 
         with io.open(self.path, encoding="utf-8") as handle:
             ast.parse(handle.read())
 
     def test_the_new_hash_is_actually_written(self):
         """Control: atomicity is worthless if it writes nothing."""
-        configure.write_admin_config_password("BRANDNEW", path=self.path,
-                                              sample_path=self.sample)
+        configure.write_admin_config_password("BRANDNEW", path=self.path)
 
         with io.open(self.path, encoding="utf-8") as handle:
             self.assertIn("BRANDNEW", handle.read())
@@ -109,8 +103,7 @@ class WritingTheHashIsAtomic(DCCoreTestCase):
             handle.write('ADMIN_HOSTMASKS = ["*!*@keepme.invalid"]\n'
                          'ADMIN_PASSWORD_HASH = "OLD"\n')
 
-        configure.write_admin_config_password("NEW", path=self.path,
-                                              sample_path=self.sample)
+        configure.write_admin_config_password("NEW", path=self.path)
 
         with io.open(self.path, encoding="utf-8") as handle:
             left = handle.read()
@@ -124,9 +117,6 @@ class AShadowedPasswordIsReported(DCCoreTestCase):
         super().setUp()
         self.tree = self.make_tree()
         self.path = os.path.join(self.tree.root, "admin_config.py")
-        self.sample = os.path.join(self.tree.root, "admin_config.py.sample")
-        with io.open(self.sample, "w", encoding="utf-8") as handle:
-            handle.write("# sample\n")
         self.conf = os.environ["DCCORE_SETTINGS_FILE"]
 
     def write_settings(self, text):
@@ -167,7 +157,7 @@ class AShadowedPasswordIsReported(DCCoreTestCase):
         self.write_settings("ADMIN_PASSWORD_HASH = pbkdf2_sha256$1$aa$bb\n")
 
         shadow = configure.write_admin_config_password(
-            "NEW", path=self.path, sample_path=self.sample)
+            "NEW", path=self.path)
 
         self.assertIsNotNone(
             shadow,
@@ -178,7 +168,7 @@ class AShadowedPasswordIsReported(DCCoreTestCase):
         self.write_settings("NICKNAME = SomeBot\n")
 
         shadow = configure.write_admin_config_password(
-            "NEW", path=self.path, sample_path=self.sample)
+            "NEW", path=self.path)
 
         self.assertIsNone(shadow)
 

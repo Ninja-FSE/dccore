@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate settings.conf.sample from config.py.
+"""Generate settings.conf.sample from defaults.py.
 
 The sample has to list every setting an operator may change, with its default
-and the explanation that sits beside it in config.py. Written by hand it would
+and the explanation that sits beside it in defaults.py. Written by hand it would
 drift the moment somebody adds a setting - which is the failure this project
 has already had twice, with PRESERVE_RUNTIME and with the two import lists.
 
@@ -39,7 +39,7 @@ HEADER = """\
 # settings.conf is gitignored, so your values never show up as a diff
 # and are never overwritten by an update.
 #
-# GENERATED FILE - do not edit by hand. It is produced from config.py by
+# GENERATED FILE - do not edit by hand. It is produced from defaults.py by
 # scripts/gen_settings_sample.py, and a test fails if the two disagree.
 #
 # NOTES

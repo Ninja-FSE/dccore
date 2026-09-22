@@ -761,6 +761,127 @@ class RestorePreservedRuntimeTests(unittest.TestCase):
         cfg = self.FakeCfg()
         self.assertEqual(commands.restore_preserved_runtime(cfg, {}), set())
 
+    class WatchedDict(dict):
+        """A dict that records every write made to it, and what a reader
+        without the lock would see in the middle of each one."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.writes = []
+            self.sizes_seen_by_a_reader = []
+
+        def clear(self):
+            self.writes.append("clear")
+            super().clear()
+            # count_active_fetches() / check_user_status() reading without
+            # the lock between clear() and update() would see this.
+            self.sizes_seen_by_a_reader.append(len(self))
+
+        def update(self, *args, **kwargs):
+            self.writes.append("update")
+            super().update(*args, **kwargs)
+
+        def __setitem__(self, key, value):
+            self.writes.append("setitem")
+            super().__setitem__(key, value)
+
+        def __delitem__(self, key):
+            self.writes.append("delitem")
+            super().__delitem__(key)
+
+        def pop(self, *args):
+            self.writes.append("pop")
+            return super().pop(*args)
+
+    class WatchedList(list):
+        """A list that records every write made to it."""
+
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.writes = []
+
+        def __setitem__(self, key, value):
+            self.writes.append("setitem")
+            super().__setitem__(key, value)
+
+        def __delitem__(self, key):
+            self.writes.append("delitem")
+            super().__delitem__(key)
+
+        def append(self, row):
+            self.writes.append("append")
+            super().append(row)
+
+        def extend(self, rows):
+            self.writes.append("extend")
+            super().extend(rows)
+
+        def remove(self, row):
+            self.writes.append("remove")
+            super().remove(row)
+
+        def clear(self):
+            self.writes.append("clear")
+            super().clear()
+
+    def test_the_live_dict_is_not_written_when_the_snapshot_is_the_live_object(self):
+        """#604: every PRESERVE_RUNTIME name is runtime.py-bound, so the
+        snapshot handle_rehash_request() takes IS the live container and a
+        reload never empties it. Restoring used to clear() and refill it
+        anyway - on the rehash thread, with no lock held - so a reader
+        without the lock could see it empty for a moment, and a row removed
+        under the lock between the copy and the write-back came back.
+
+        The right number of writes to a container that already holds its
+        own state is zero."""
+        cfg = self.FakeCfg()
+        live = self.WatchedDict({"abc123": {"state": "receiving", "bot": "somebot"}})
+        cfg.fetch_queue = live
+
+        restored = commands.restore_preserved_runtime(cfg, {"fetch_queue": live})
+
+        self.assertIs(cfg.fetch_queue, live)
+        self.assertEqual(live.writes, [],
+                         "the live dict must not be written when it is its own snapshot")
+        self.assertEqual(live.sizes_seen_by_a_reader, [],
+                         "there must be no clear()-to-update() window a reader "
+                         "without the lock could observe as 'no active fetches'")
+        self.assertEqual(live, {"abc123": {"state": "receiving", "bot": "somebot"}})
+        self.assertEqual(restored, {"fetch_queue"},
+                         "the key still counts as restored, for the operator's log line")
+
+    def test_the_live_list_is_not_written_when_the_snapshot_is_the_live_object(self):
+        """The list half of the test above: active_transfers used to get
+        `current[:] = copy` - a whole-list overwrite that dcc.py's completion
+        path (which removes its row under queue_lock) could lose against,
+        putting a finished transfer back as a phantom DCC slot."""
+        cfg = self.FakeCfg()
+        live = self.WatchedList([{"user": "alice", "file": "a.flac"}])
+        cfg.active_transfers = live
+
+        restored = commands.restore_preserved_runtime(cfg, {"active_transfers": live})
+
+        self.assertIs(cfg.active_transfers, live)
+        self.assertEqual(live.writes, [],
+                         "the live list must not be overwritten when it is its own snapshot")
+        self.assertEqual(live, [{"user": "alice", "file": "a.flac"}])
+        self.assertEqual(restored, {"active_transfers"})
+
+    def test_a_fresh_container_from_a_reload_is_still_merged_into(self):
+        """The skip is on identity only. A preserved key that is NOT
+        runtime.py-bound would come back from a reload as a new, empty
+        object, and that one must still be filled from the snapshot."""
+        cfg = self.FakeCfg()
+        fresh = self.WatchedDict()
+        cfg.banned_users = fresh
+
+        restored = commands.restore_preserved_runtime(cfg, {"banned_users": {"dave": "row"}})
+
+        self.assertIs(cfg.banned_users, fresh)
+        self.assertEqual(fresh, {"dave": "row"})
+        self.assertNotEqual(fresh.writes, [])
+        self.assertEqual(restored, {"banned_users"})
+
 
 class ReattachDebugSinksTests(unittest.TestCase):
     """#162 finding #14: importlib.reload(announce) re-executes

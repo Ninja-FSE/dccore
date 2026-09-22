@@ -51,7 +51,7 @@ if REPO_ROOT not in sys.path:
 # Named by RECEIVER and by file, so the exemption cannot quietly spread: a
 # `session.send()` appearing in another module would be a new thing to look
 # at rather than something this list waves through.
-SESSION_SEND = {"adminchat.py": {"session", "self", "previous"}}
+SESSION_SEND = {"adminchat.py": {"session", "self"}}
 
 
 def daemon_modules():
