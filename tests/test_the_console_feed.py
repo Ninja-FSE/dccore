@@ -236,8 +236,8 @@ class TheEventsAreEmittedWhereTheyHappen(DCCoreTestCase):
             source = handle.read()
         body = source[source.index("def handle_download_request("):]
         found = body.index("file_name = os.path.basename(full_path)")
-        request = body.index('category="REQUEST"', found)
-        decision = body.index("if not user_already_transferring", found)
+        request = body.index('feed_event("REQUEST"', found)
+        decision = body.index("sends_now = (not user_already_transferring", found)
 
         self.assertLess(found, request)
         self.assertLess(request, decision)
@@ -246,7 +246,8 @@ class TheEventsAreEmittedWhereTheyHappen(DCCoreTestCase):
         with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn('asked for the folder \\"{clean_folder_name}\\"', source)
-        self.assertIn('packing it, sending when done.", category="REQUEST"', source)
+        self.assertIn('feed_event("REQUEST", f"{user} asked for the folder', source)
+        self.assertIn('kind="folder", name=clean_folder_name', source)
 
     def test_a_resume_says_where_from(self):
         with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
@@ -254,17 +255,18 @@ class TheEventsAreEmittedWhereTheyHappen(DCCoreTestCase):
         body = source[source.index("def handle_resume_request("):]
         body = body[:body.index("def resume_transfers(")]
 
-        self.assertIn('category="RESUMED"', body)
+        self.assertIn('"RESUMED",', body)
+        self.assertIn("at_bytes=position, total_bytes=size", body)
         accepted = body.index("accepted and will send from there")
-        self.assertLess(accepted, body.index('category="RESUMED"'),
+        self.assertLess(accepted, body.index('"RESUMED"'),
                         "the RESUMED line must follow the accept, not precede a refusal")
 
     def test_a_search_reports_the_total_not_the_capped_count(self):
         with io.open(os.path.join(REPO_ROOT, "list.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def execute_search("):]
-        line = body.index('category="SEARCH"')
-        block = body[body.rindex("send_debug", 0, line):line]
+        line = body.index('"SEARCH",')
+        block = body[line:body.index("term=search_term", line)]
 
         self.assertIn("total_matches", block)
         self.assertNotIn("len(matches)", block)

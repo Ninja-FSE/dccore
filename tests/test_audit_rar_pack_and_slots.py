@@ -137,21 +137,26 @@ class ThePackRechecksItsSlotBeforeTakingOne(DCCoreTestCase):
     def test_a_refused_pack_releases_the_interlock_it_holds(self):
         """Returning without clearing rar_inprogress would stop every future
         pack for every user until the daemon restarted - the exact failure the
-        RAR_TIMEOUT comment above it warns about."""
+        RAR_TIMEOUT comment above it warns about. The release is the
+        wrapper's finally, ONCE (#714): the refusal returns None to it rather
+        than releasing itself and being released again."""
         source = self.source()
-        refusal = source.split("the packed archive stays queued")[1][:600]
+        refusal = source.split("the packed archive stays queued")[1][:400]
 
-        self.assertIn("config.rar_inprogress = False", refusal)
-        self.assertIn("user_processing_lock", refusal)
+        self.assertNotIn("config.rar_inprogress = False", refusal, "released twice")
+        self.assertIn("Released by the wrapper's finally, once", refusal)
+        finally_block = source.split("if not handed_off:", 1)[1][:600]
+        self.assertIn("config.rar_inprogress = False", finally_block)
+        self.assertIn("user_processing_lock", finally_block)
 
     def test_a_refused_pack_lets_a_waiting_one_start(self):
         """redispatch_waiting_pack() is the only thing that revisits a user
         turned away at [RAR-HOLD]; without it they wait for a trigger that
-        never comes."""
+        never comes. It is the wrapper's finally that calls it, once."""
         source = self.source()
-        refusal = source.split("the packed archive stays queued")[1][:600]
+        finally_block = source.split("if not handed_off:", 1)[1][:600]
 
-        self.assertIn("redispatch_waiting_pack", refusal)
+        self.assertIn("redispatch_waiting_pack(irc_sock, just_finished=completed_user)", finally_block)
 
     def test_the_pre_dispatch_checks_are_all_still_there(self):
         """Control on the control: this fix is about the ONE append that had

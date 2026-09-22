@@ -772,7 +772,17 @@ def lists_worth_refetching(now=None):
         # NOT MORE OFTEN THAN THE INTERVAL, whatever the advert says. A bot
         # rebuilding its list hourly would otherwise be re-fetched hourly.
         fetched_at = entry.get("fetched_at") or 0
-        if interval and (now - float(fetched_at or 0)) < interval:
+        # The floor runs from the LATER of the last completed fetch and the
+        # last time we automatically asked. Measured from the fetch alone, a
+        # bot whose list never arrives (it is not answering, or we were
+        # offline when it did) keeps its old fetched_at for ever, so every
+        # hourly sweep - and every restart - asked it again.
+        last_asked = entry.get("last_attempt") or 0
+        try:
+            last_asked = float(last_asked)
+        except (TypeError, ValueError):
+            last_asked = 0.0
+        if interval and (now - max(float(fetched_at or 0), last_asked)) < interval:
             continue
 
         rows = [row for row in webserver.build_fetched_bot_list_summaries()
@@ -783,6 +793,36 @@ def lists_worth_refetching(now=None):
 
     due.sort()
     return [bot for _when, bot in due]
+
+
+def _tell_the_console(bot, action, text):
+    """One `LISTFETCH` line for a console or the mIRC window (#750). Never raises:
+    a console that cannot be told must not fail a fetch."""
+    try:
+        import announce
+        announce.feed_event("LISTFETCH", text, bot=bot, action=action)
+    except Exception as err:
+        print(f"[LIST-FETCH] Could not tell the console about {bot}: {err}")
+
+
+def _note_auto_attempt(bot, when):
+    """Remember that a sweep just asked `bot` for its list, on disk.
+
+    Only an AUTOMATIC ask is recorded: what limits the sweep is how often it
+    has bothered a bot, and a click on Re-download list is the operator's own
+    decision and is not the sweep's to count. A completed fetch replaces the
+    entry, so the mark goes with it - by then fetched_at is newer anyway.
+    Persisted, because a restart is exactly when a failing bot used to be
+    asked again at once."""
+    key = str(bot).strip().lower()
+    with _lock():
+        store = _ensure_fetched_bot_lists()
+        entry = store.get(key)
+        if not isinstance(entry, dict):
+            return
+        entry["last_attempt"] = when
+        snapshot = dict(store)
+    db.save_fetched_bot_lists(snapshot)
 
 
 def refetch_due_lists(log=print, now=None):
@@ -839,8 +879,10 @@ def refetch_due_lists(log=print, now=None):
         status, result = webserver.build_list_fetch_enqueue_result(bot)
         if status == 200:
             started.append(bot)
+            _note_auto_attempt(bot, time.time() if now is None else now)
             log(f"[LIST-FETCH] {bot}'s list has changed since we took our copy "
                 f"- asking again automatically.")
+            _tell_the_console(bot, "auto", f"{bot}'s list has changed - asking again automatically")
         else:
             # Not an error worth stopping for: the usual reason is that a
             # fetch for that bot is already outstanding, which is the right
@@ -850,8 +892,44 @@ def refetch_due_lists(log=print, now=None):
     return started
 
 
+def ensure_auto_refetch_worker(start=None):
+    """Start the hourly loop below if AUTO_REFETCH_LISTS is on and it is not
+    already running. Returns True only when this call started it.
+
+    Called from oserve.startup() AND from the rehash body (#625). The worker
+    used to be started by startup() alone, so ticking the setting on the
+    dashboard - a save that fires a rehash - reported "rehash started" with
+    no restart notice and started nothing: held lists went stale until the
+    next restart, and the only live effect was the one-shot sweep irc.py runs
+    on a reconnect.
+
+    ONCE. The lock and the flag are runtime.py's, not this module's, for the
+    reason every start guard in this project lives there: a module a rehash
+    reloads gets a fresh flag and a fresh lock, and whether this module is on
+    that list today is not something "one worker, never two" should depend
+    on - a flag reset by the very rehash about to consult it would start one
+    more worker per Settings save, each asking bots for lists. Turning the
+    setting OFF needs no stop: refetch_due_lists() reads the flag on every
+    pass and does nothing while it is off, so the worker simply idles.
+
+    `start` is the thread starter, injectable so a test can watch the
+    decision without a real thread outliving it.
+    """
+    if not getattr(config, "AUTO_REFETCH_LISTS", False):
+        return False
+    with runtime.auto_refetch_guard:
+        if runtime.auto_refetch_started:
+            return False
+        starter = start or (lambda: threading.Thread(
+            target=auto_refetch_worker, daemon=True).start())
+        starter()
+        runtime.auto_refetch_started = True
+    return True
+
+
 def auto_refetch_worker(sleep=None):
-    """The loop. Started from oserve.startup() when AUTO_REFETCH_LISTS is on.
+    """The loop. Started by ensure_auto_refetch_worker() above, from boot or
+    from a rehash, once AUTO_REFETCH_LISTS is on.
 
     Deliberately its own thread and not a branch of the fetch dispatcher: that
     one runs every two seconds and only touches the queue, while this reads
@@ -927,7 +1005,21 @@ def process_fetched_list_zip(bot, zip_path):
     seconds) is the same accepted tradeoff as above, extended to reads.
     """
     with _lock():
-        return _process_fetched_list_zip_unlocked(bot, zip_path)
+        result = _process_fetched_list_zip_unlocked(bot, zip_path)
+    # Outside the lock: telling a console can take a moment and nothing
+    # else should wait for it (#750).
+    try:
+        succeeded, reason = result
+    except (TypeError, ValueError):
+        succeeded, reason = bool(result), ""
+    if succeeded:
+        entry = (getattr(config, "fetched_bot_lists", {}) or {}).get(str(bot).strip().lower())
+        count = int((entry or {}).get("entry_count") or 0) if isinstance(entry, dict) else 0
+        _tell_the_console(bot, "arrived", f"{bot}'s list arrived: {count:,} files")
+    else:
+        _tell_the_console(bot, "unusable",
+                          f"{bot}'s list could not be used" + (f": {reason}" if reason else ""))
+    return result
 
 
 def _hold_existing_list(extract_dir):

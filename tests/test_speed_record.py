@@ -281,20 +281,6 @@ class TheClockStopsWhenTheBytesDo(DCCoreTestCase):
             "every pause between the last byte and here is counted as "
             "transfer time")
 
-    def test_what_the_old_arithmetic_did_to_a_real_file(self):
-        """Not a test of the code - a test of the claim, so the size of the
-        error is written down somewhere it cannot quietly stop being true.
-        A 10 MB file at 46 MB/s takes 0.22s; two seconds of settling made it
-        report a tenth of its real rate."""
-        megabytes, real_rate, settling = 10.0, 46.0, 2.0
-        honest_seconds = megabytes / real_rate
-
-        reported = megabytes / (honest_seconds + settling)
-
-        self.assertLess(reported, real_rate / 9,
-                        "the settling pause no longer dominates a small "
-                        "file, so this note is out of date")
-
 
 if __name__ == "__main__":
     unittest.main()

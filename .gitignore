@@ -3,6 +3,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# What dccore.mrc writes beside itself when an operator runs it from a
+# checkout: its settings (/hsave) and the one-pixel background bitmaps.
+# Theirs, like settings.conf - never part of a diff or a pull.
+scripts/mirc/dccore.ini
+scripts/mirc/dccore-bg-*.bmp
+
 # Ignore everything inside lists/ and data/
 lists/*
 data/*

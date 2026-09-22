@@ -123,11 +123,13 @@ class _WorkerCase(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
-        config.MSG_DELAY = 0.01
+        self.set_config(MSG_DELAY=0.01)
         config.vip_queue = []
         config.send_queue = {}
         config.bot_joined_channel = True
         self.oserve.bot_joined_channel = True
+        # The pump also waits for activation (#630); the harness resets this.
+        config.activation_triggered = True
         runtime.outbound_pacer = runtime.OutboundPacer()
         self.sock = TimestampedSocket()
         self.oserve.irc_connection = self.sock

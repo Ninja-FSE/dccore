@@ -57,6 +57,21 @@ a rehash is unchanged.
 import threading
 import time
 
+# The thread running the folder packer, while one runs (#651). dcc.py sets
+# it when it starts inline_rar_packer and clears it in that thread's finally;
+# dcc.a_pack_is_running() reads it. Here and not in dcc.py because a !rehash
+# reloads dcc.py, and this is exactly the moment the rehash needs the answer:
+# config.rar_inprogress is a scalar the reload resets to False, so on its own
+# it cannot say whether a pack is still running or merely left a stale flag.
+packer_thread = None
+
+# When the bot's own link went down, while it is down (#652). The freeze
+# box's clock - frozen_queues holds the moment each absent user was frozen -
+# must not run during the bot's own outage, so on the way back every frozen
+# timestamp is moved forward by the time spent here. Kept in this module so a
+# !rehash during the outage cannot lose it; None while the bot is up.
+freeze_clock_paused_at = None
+
 # Per-user bookkeeping -------------------------------------------------------
 failed_transfers = {}    # Failed-transfer counter, per user
 channel_users    = {}    # Users currently seen in the channels
@@ -194,6 +209,16 @@ list_index_lock = threading.Lock()
 # reload costs one recount, which is harmless, where rebinding the lock is not.
 list_count_lock = threading.Lock()
 
+# The automatic list refresh's start guard (#625). list_fetch.ensure_auto_
+# refetch_worker() starts the hourly loop from wherever AUTO_REFETCH_LISTS is
+# found on - boot, or the rehash a dashboard save fires - and must start it
+# ONCE. Both halves of "once" live here: the lock for the reason every other
+# lock in this file does, and the flag because a flag in a module a rehash
+# reloads is reset by the very rehash that is about to consult it, and every
+# Settings save would then start one more worker.
+auto_refetch_guard   = threading.Lock()
+auto_refetch_started = False
+
 # Other bots advertising in our channels ------------------------------------
 # nick.lower() -> {"nick", "channel", "files", "list_date", "list_size",
 #                  "last_seen"}, built from the periodic advert every
@@ -288,6 +313,15 @@ private_messages_lock = threading.Lock()
 kicked_channels = {}
 kicked_channels_lock = threading.Lock()
 
+# config.send_queue's lock (#665, audit L1). The per-user text lanes are
+# written by every request, search and reply thread (oserve.queue_message)
+# and drained by the pump (queue_mgr.next_standard_line), and had no lock:
+# their correctness rested on where CPython happens to check for a thread
+# switch, which differs between 3.10 and 3.11+ and is gone on a
+# free-threaded build. The two touches are tiny; both take this. Here, not
+# in queue_mgr.py or oserve.py - a !rehash reloads those.
+send_queue_lock = threading.Lock()
+
 dcc_send_offers = {}
 dcc_send_offers_lock = threading.Lock()
 
@@ -359,12 +393,21 @@ def resolve_display_nick(nick):
 # in between - so two requests arriving in that window both passed the guard
 # and both started a rebuild, two subprocesses writing the same .new temp
 # paths. The check and the set have to be one step.
+#
+# list.execute_search() takes the same gate for search_inprogress (#607): a
+# thread per @find read that flag and set it twenty lines later, so two @find
+# lines from one recv() buffer both walked the master list at once. One lock
+# for both flags, so a search and a rebuild cannot slip past each other.
 list_update_gate = threading.Lock()
 
 # Live transfer rate ---------------------------------------------------------
 # Sampled by stats_mgr.live_speed(); kept here rather than in that module so a
 # !rehash cannot reset it, and so readers that must not import the daemon can
 # still see it. webserver.py reads these two directly for the dashboard.
+# Failures and searches since this PROCESS started (#754), counted where every
+# one passes: announce.feed_event(). Here and not in announce.py, which a
+# !rehash reloads - a counter there would go back to zero on every Save.
+feed_counts = {"FAIL": 0, "SEARCH": 0}
 live_speed_bps = 0        # bytes/sec across every sending transfer, summed
 live_speed_sampled_at = 0.0
 
@@ -386,26 +429,61 @@ live_speed_sampled_at = 0.0
 # faster - and every reservation, from either lane, holds the SAME clock for
 # that long before anyone else's next send. The combined rate can never
 # exceed one interval's worth of traffic, however the two lanes interleave.
+#
+# FIRST COME, FIRST SERVED (#655, audit M53). This used to be sleep-and-retry
+# with no queue: every waiter slept until the same instant and whoever woke
+# first took the slot. Four threads share the clock - queue_worker's VIP and
+# standard lanes, the debug drain, the !ping and DCC ACCEPT direct waiters -
+# so queue_worker's strict alternation bounded VIP to two of its OWN slots
+# while the worker lost each of those to the drain by coin toss. Measured
+# with the real threads: a drain backlog gave VIP about a quarter of the
+# slots and gaps of ten to fourteen slots (a minute at MSG_DELAY=5) between
+# consecutive VIP lines. Tickets, handed out in arrival order and served in
+# that order, make every lane's wait bounded by the number of lanes ahead of
+# it; a waiter that leaves without its slot (an exception) is stepped over
+# rather than blocking the line.
 class OutboundPacer:
     def __init__(self):
-        self._lock = threading.Lock()
+        self._cond = threading.Condition()
         self._next_allowed = 0.0
+        self._next_ticket = 0    # the next ticket to hand out
+        self._serving = 0        # the ticket whose turn it is
+        self._abandoned = set()  # tickets whose holder left without a slot
 
     def wait_for_slot(self, min_interval):
-        """Block until the shared clock has a slot free, then take it.
+        """Block until the shared clock has a slot free AND it is this
+        caller's turn, then take it.
 
-        Loops rather than computing the wait once and sleeping outside the
-        lock, because a second thread could otherwise wake at the same
-        moment, both see the slot as free, and both reserve it.
+        The turn is the ticket order. Only the ticket being served sleeps
+        against the clock; everyone behind it waits to be woken, so nothing
+        wakes early and races. A waiter that raises while queued (the
+        thread is being torn down) marks its ticket abandoned on the way out
+        and wakes the others, so the line moves on.
         """
-        while True:
-            with self._lock:
-                now = time.monotonic()
-                if now >= self._next_allowed:
-                    self._next_allowed = now + min_interval
-                    return
-                remaining = self._next_allowed - now
-            time.sleep(remaining)
+        with self._cond:
+            ticket = self._next_ticket
+            self._next_ticket += 1
+            served = False
+            try:
+                while True:
+                    while self._serving in self._abandoned:
+                        self._abandoned.discard(self._serving)
+                        self._serving += 1
+                    now = time.monotonic()
+                    if ticket == self._serving:
+                        if now >= self._next_allowed:
+                            self._next_allowed = now + min_interval
+                            self._serving += 1
+                            served = True
+                            self._cond.notify_all()
+                            return
+                        self._cond.wait(self._next_allowed - now)
+                    else:
+                        self._cond.wait()
+            finally:
+                if not served:
+                    self._abandoned.add(ticket)
+                    self._cond.notify_all()
 
 
 outbound_pacer = OutboundPacer()

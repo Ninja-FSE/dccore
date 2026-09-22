@@ -35,7 +35,8 @@ settings.conf.sample entries, the rest of the dashboard's own Settings page
 WHERE EACH ANSWER GOES
 
     NICKNAME, SERVER, CHANNEL, ADMIN_NICK, WEBUI_ENABLED,
-    WEBUI_HOST, FILE_DIRECTORY (if given)                    -> settings.conf
+    WEBUI_HOST, FILE_DIRECTORY (if given),
+    ADMIN_HOSTMASKS (if a services host is given, #811)      -> settings.conf
     ADMIN_PASSWORD_HASH                                      -> admin_config.py
 
 The first five are ordinary operational settings - settings_file.py already
@@ -98,7 +99,7 @@ import defaults as config  # noqa: E402
 import settings_file  # noqa: E402
 
 
-def _ask(prompt, default=None):
+def _ask(prompt, default=None, check=None):
     """One prompt, with `default` shown and used on a bare Enter.
 
     Every field here either has a real, always-non-blank default (SERVER,
@@ -115,6 +116,13 @@ def _ask(prompt, default=None):
             if default:
                 return default
             print("  This can't be blank - it's required before the daemon will start.")
+            continue
+        # `check` returns what is wrong with an answer, or None (#591): asked
+        # again here, where the operator can fix it, rather than written to
+        # settings.conf to fail at the IRC server as a nick that is "taken".
+        problem = check(raw) if check else None
+        if problem:
+            print(f"  That will not do: {problem}.")
             continue
         return raw
 
@@ -150,18 +158,39 @@ def collect_answers():
 
     changes = {}
 
-    nickname = _ask("Nickname", default=_current("NICKNAME"))
+    nickname = _ask("Nickname", default=_current("NICKNAME"), check=settings_file.nick_problem)
     changes["NICKNAME"] = nickname
 
-    server = _ask("IRC server", default=_current("SERVER", "irc.undernet.org"))
+    server = _ask("IRC server", default=_current("SERVER", "irc.undernet.org"),
+                  check=settings_file.server_problem)
     changes["SERVER"] = server
 
     channel = _ask("Channel(s), comma-separated", default=_current("CHANNEL"))
     changes["CHANNEL"] = channel
 
     admin_nick = _ask("Admin nick (who may run !ban/!rehash/!update/!clearqueue)",
-                      default=_current("ADMIN_NICK"))
+                      default=_current("ADMIN_NICK"), check=settings_file.nicks_problem)
     changes["ADMIN_NICK"] = admin_nick
+
+    print()
+    print("Optional: your services host locks the admin console (and, with it")
+    print("set, the in-channel admin commands) to your account rather than")
+    print("your nick, which anyone can take while you are offline. Log into")
+    print("services and set +x, then /whois yourself - you want the host it")
+    print("shows, ending in something like .users.undernet.org.")
+    current_hostmasks = _current("ADMIN_HOSTMASKS")
+    default_host = (current_hostmasks[0].rsplit("@", 1)[-1]
+                    if current_hostmasks and current_hostmasks[0] else "")
+    suffix = f" [{default_host}]" if default_host else ""
+    admin_host = input(f"Your services host (blank to skip){suffix}: ").strip() or default_host
+    while admin_host:
+        problem = settings_file.admin_host_problem(admin_host)
+        if not problem:
+            break
+        print(f"  That will not do: {problem}.")
+        admin_host = input("Your services host (blank to skip): ").strip()
+    if admin_host:
+        changes["ADMIN_HOSTMASKS"] = [f"*!*@{admin_host}"]
 
     print()
     print("Admin console password (for the DCC CHAT console - see")
@@ -277,6 +306,12 @@ def offer_to_install_web_requirements():
               "stay off until you install it.")
         return
 
+    if os.environ.get("DCCORE_AUTOSTART"):
+        # The logon task's window (#710): an input() here waited for a key
+        # nobody was going to press, with the bot not yet started behind it.
+        print("  Started by the autostart task, so not asking. To have the dashboard, run")
+        print("  once by hand: pip install -r requirements-web.txt")
+        return
     install = input("  Install it now (pip install -r requirements-web.txt)? "
                     "[Y/n]: ").strip().lower() in ("", "y", "yes")
     if not install:
@@ -299,20 +334,23 @@ def write_settings_conf(changes, path=None):
     """A thin pass-through to settings_file.save() - the exact same
     read-modify-write-and-verify path the dashboard's Settings page and CLI
     edits already use, not a hand-rolled write. `changes` is already exactly
-    what should be written - collect_answers() decides what belongs in it
-    (a blank SERVER, or the web dashboard left off, are both deliberately
-    absent rather than written as an explicit "no" - config.py's own real
-    defaults already say that). `path` overrides settings_file's own
-    default location - tests use it, real runs never pass it."""
+    what should be written - collect_answers() decides what belongs in it:
+    a blank SERVER is deliberately absent rather than written as an explicit
+    "no" (defaults.py already says that), while the dashboard answer IS
+    written either way, as `WEBUI_ENABLED = false` when declined - a re-run
+    that says no to a dashboard an earlier run switched on must switch it
+    off, and settings.conf is where the daemon reads that switch from last
+    (#637). `path` overrides settings_file's own default location - tests
+    use it, real runs never pass it."""
     # save() already logs its own "[CONFIG] Wrote N setting(s)..." line
     # (log=print by default) - nothing more to print here.
     return settings_file.save(vars(config), changes, path=path)
 
 
 def build_admin_config_text(existing_text, password_hash):
-    """The pure edit: `existing_text` (whatever admin_config.py, or failing
-    that admin_config.py.sample, or failing that a bare fresh comment,
-    already reads as - see write_admin_config_password()) with
+    """The pure edit: `existing_text` (whatever admin_config.py already
+    reads as, or NEW_ADMIN_CONFIG_HEADER when there is none yet - see
+    write_admin_config_password()) with
     ADMIN_PASSWORD_HASH set to `password_hash`, replacing an existing
     assignment in place or appending a new one. Pulled out as a pure
     function, no file I/O, so the text transformation itself is directly
@@ -334,25 +372,43 @@ def build_admin_config_text(existing_text, password_hash):
     return text + new_line + "\n"
 
 
-def write_admin_config_password(password_hash, path=None, sample_path=None):
+# What a NEW admin_config.py starts as - a header and nothing live. It used
+# to be seeded from admin_config.py.sample, whose ACTIVE lines (WEBUI_ENABLED
+# = True, WEBUI_HOST, WEBUI_PORT, ADMIN_CHAT_MODE = "listen", the DEBUG_TO_*
+# pair) then sat in the operator's own file from birth: dead where the setup
+# had just written the same name to settings.conf, which is applied second,
+# and silently different from defaults.py where it had not (an install that
+# declined the dashboard still carried WEBUI_ENABLED = True; every install
+# got ADMIN_CHAT_MODE = "listen" under a comment naming "auto" as the
+# default). The sample stays what it is - documentation to copy by hand -
+# but the setup seeds only what it actually sets (#623).
+NEW_ADMIN_CONFIG_HEADER = """\
+# admin_config.py - created by the DCCore setup.
+#
+# The setup writes only the console/dashboard password here. Everything else
+# it asked for went to settings.conf, which defaults.py applies AFTER this
+# file - so a setting present in both takes settings.conf's value, and a
+# line added here for a name settings.conf also sets does nothing (the daemon
+# says so at startup). Edit settings.conf, or the dashboard's Settings page,
+# for those. admin_config.py.sample explains what else can go in this file.
+"""
+
+
+def write_admin_config_password(password_hash, path=None):
     """Only ADMIN_PASSWORD_HASH - never overwrites anything else a hand-
     edited admin_config.py already has (ADMIN_HOSTMASKS, most notably).
     Replaces an existing ADMIN_PASSWORD_HASH line in place if this is a
-    re-run; appends a new one otherwise, creating the file from
-    admin_config.py.sample's own template if it does not exist yet at all.
-    `path`/`sample_path` override the real repo locations - tests use them,
-    real runs never pass them.
+    re-run; appends a new one otherwise, creating the file as
+    NEW_ADMIN_CONFIG_HEADER plus that one line if it does not exist yet at
+    all. `path` overrides the real repo location - tests use it, real runs
+    never pass it.
     """
     path = path or os.path.join(REPO_ROOT, "admin_config.py")
-    sample_path = sample_path or os.path.join(REPO_ROOT, "admin_config.py.sample")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as handle:
             existing_text = handle.read()
-    elif os.path.exists(sample_path):
-        with open(sample_path, "r", encoding="utf-8") as handle:
-            existing_text = handle.read()
     else:
-        existing_text = "# admin_config.py - created by configure.py\n"
+        existing_text = NEW_ADMIN_CONFIG_HEADER
 
     text = build_admin_config_text(existing_text, password_hash)
 
@@ -549,8 +605,10 @@ def offer_to_generate_master_list(file_directory_set):
 
 def main():
     changes, password_hash = collect_answers()
-    write_settings_conf(changes)
+    # The password file first - the only order that fails safe if the second
+    # write does not happen; webserver.apply_setup() says why (#624).
     write_admin_config_password(password_hash)
+    write_settings_conf(changes)
     offer_to_generate_master_list("FILE_DIRECTORY" in changes)
     offer_to_import_omenserve_stats()
 
@@ -566,7 +624,115 @@ def main():
     print("Then start the daemon the same way, without \"check\".")
 
 
+def offer_flask_if_the_dashboard_is_on():
+    """`configure.py --flask`: the launchers' pre-start hook (#547, Proposal 1).
+
+    An operator who turned the dashboard on - here, in the dashboard, or by
+    hand in settings.conf - and has no Flask found out at step 7 of the old
+    install, from a log line, that step 4 had been needed. The launchers
+    now ask this just before starting the daemon, every time: it is silent
+    when the dashboard is off or Flask is present, so an install that is
+    already right never sees it, and it is the same offer
+    offer_to_install_web_requirements() makes during setup, so there is one
+    wording and one pip invocation. Returns 0 whatever happens - a declined
+    or failed install is not a reason to stop the daemon starting, exactly
+    as during setup.
+    """
+    if not bool(getattr(config, "WEBUI_ENABLED", False)):
+        return 0
+    try:
+        import flask  # noqa: F401
+        return 0
+    except ImportError:
+        pass
+    print()
+    print("The web dashboard is enabled in your settings.")
+    offer_to_install_web_requirements()
+    print()
+    return 0
+
+
+def over_ssh(environ=None):
+    """True in an SSH session: the browser page listens on 127.0.0.1 of THIS
+    machine, and the person at the keyboard is on another one (#595)."""
+    environ = os.environ if environ is None else environ
+    return any(environ.get(name) for name in ("SSH_CONNECTION", "SSH_TTY", "SSH_CLIENT"))
+
+
+def offer_setup_in_browser(ask=input, log=print, environ=None):
+    """`configure.py --setup-in-browser`: the launchers' first-run hook (#547,
+    Proposal 4). Returns 0 when the daemon can be started straight away to
+    serve its setup page - Flask is importable, installed just now if the
+    operator said yes - and 2 when the questions should be asked here in
+    the terminal instead: Flask declined, not installable, no one at the
+    keyboard to ask, or an SSH session. Never raises for any of those; the
+    terminal path is what it was.
+
+    THE BROWSER IS FOR A PERSON AT THE MACHINE (#595). The setup page listens
+    on 127.0.0.1, so over SSH the printed link is unreachable from the operator's
+    own computer and the daemon waited for a form nobody could open, for ever -
+    and Flask being importable was the only test, so it was the same dead end on
+    every later run. In an SSH session the questions are asked here.
+    DCCORE_SETUP_IN_BROWSER=1 says "I have a tunnel" and keeps the page.
+    """
+    environ = os.environ if environ is None else environ
+    if over_ssh(environ) and environ.get("DCCORE_SETUP_IN_BROWSER") != "1":
+        log("  You are connected over SSH, so a page on this machine's own address")
+        log("  (127.0.0.1) could not be opened from your computer - the questions")
+        log("  follow here instead. To use the browser page anyway, tunnel the port")
+        log("  (ssh -L 8420:127.0.0.1:8420 <this machine>) and run this again with")
+        log("  DCCORE_SETUP_IN_BROWSER=1.")
+        return 2
+    try:
+        import flask  # noqa: F401
+        log("  Setup opens in your browser.")
+        return 0
+    except ImportError:
+        pass
+    log("  DCCore can be set up in your browser instead of here - the same")
+    log("  questions, with an explanation beside each. That needs one package,")
+    log("  Flask (pip install -r requirements-web.txt), which the dashboard")
+    log("  uses afterwards too.")
+    try:
+        yes = ask("  Install it and set up in the browser? [Y/n]: ").strip().lower() in ("", "y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return 2
+    if not yes:
+        log("  Fine - the questions follow here.")
+        return 2
+    try:
+        import pip  # noqa: F401
+    except ImportError:
+        log("  pip is not installed for this Python, so Flask cannot be installed")
+        log("  from here - the questions follow instead. (docs/INSTALL.md says how")
+        log("  to get pip.)")
+        return 2
+    log("  Installing...")
+    result = subprocess.run([sys.executable, "-m", "pip", "install", "-r",
+                             os.path.join(REPO_ROOT, "requirements-web.txt")])
+    if result.returncode != 0:
+        log("  The install did not finish - the questions follow here instead.")
+        return 2
+    try:
+        import importlib
+        importlib.invalidate_caches()
+        importlib.import_module("flask")
+    except ImportError:
+        log("  Flask still cannot be imported - the questions follow here instead.")
+        return 2
+    log("  Setup opens in your browser.")
+    return 0
+
+
 if __name__ == "__main__":
+    if "--setup-in-browser" in sys.argv[1:]:
+        sys.exit(offer_setup_in_browser())
+    if "--flask" in sys.argv[1:]:
+        try:
+            sys.exit(offer_flask_if_the_dashboard_is_on())
+        except (KeyboardInterrupt, EOFError):
+            print("\n  Skipped.")
+            sys.exit(0)
     try:
         main()
     except (KeyboardInterrupt, EOFError):

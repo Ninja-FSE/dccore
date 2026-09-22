@@ -252,8 +252,13 @@ def dashed_addresses(text):
     return found
 
 
+# .mrc (the mIRC script) and .command (the macOS launcher) are shipped text
+# too: a suffix missing from this list is a file nobody scans. Shared with
+# tests/test_no_conflict_marker_is_left_behind.py, which imports it, so a
+# new file type joins both sweeps with one edit.
 TEXT_SUFFIXES = (".py", ".js", ".md", ".css", ".html", ".txt", ".sample",
-                 ".conf", ".bat", ".sh", ".yml", ".yaml", ".json")
+                 ".conf", ".bat", ".sh", ".yml", ".yaml", ".json",
+                 ".mrc", ".command")
 
 
 def shipped_paths():

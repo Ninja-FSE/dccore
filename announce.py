@@ -12,6 +12,7 @@ import db
 import runtime
 import stats_mgr
 import theme
+import platform_compat
 
 is_ready = False
 
@@ -148,8 +149,12 @@ def _debug_drain_worker(my_id):
             # sleep on separate, unrelated clocks, and the server only ever saw
             # their sum. Reserved before the send for the same reason the other
             # lane does it before, not after: a failed send still costs its slot.
+            # The floor is the point, and the setting's help now says so
+            # (#650): a DEBUG_MSG_DELAY below MSG_DELAY - the shipped 0.5
+            # was one - changed nothing, while three texts described it as
+            # the debug channel's own pace. 0 means "the same as MSG_DELAY".
             runtime.outbound_pacer.wait_for_slot(
-                max(config.MSG_DELAY, getattr(config, 'DEBUG_MSG_DELAY', 0.5)))
+                max(config.MSG_DELAY, getattr(config, 'DEBUG_MSG_DELAY', 0)))
             try:
                 irc_sock.sendall(msg.encode("utf-8", errors="ignore"))
             except Exception as send_err:
@@ -195,6 +200,66 @@ def remove_debug_sink(sink):
     with _debug_sinks_lock:
         if sink in _debug_sinks:
             _debug_sinks.remove(sink)
+
+
+# THE FEED AS FIELDS (#550, step 2). send_debug() carries prose; a client
+# that wants to draw a window wants the nick, the size, the count. Every
+# feed emitter calls feed_event(kind, text, **fields), which sends the prose
+# through send_debug() exactly as before AND hands the fields to these
+# sinks - a second registry so the (text, category) contract every existing
+# sink relies on is untouched. adminchat's structured session is the first
+# taker; the shape is client-agnostic on purpose.
+_event_sinks = []
+
+
+def add_event_sink(sink):
+    with _debug_sinks_lock:
+        if sink not in _event_sinks:
+            _event_sinks.append(sink)
+
+
+def remove_event_sink(sink):
+    with _debug_sinks_lock:
+        if sink in _event_sinks:
+            _event_sinks.remove(sink)
+
+
+def feed_event(_kind, _text, **fields):
+    """One feed event, told twice: the prose to send_debug() under the kind
+    as its category, and the fields to every event sink. The console
+    tickboxes (console_wants) and the console switch itself
+    (DEBUG_TO_CONSOLE) gate the fields exactly as they gate the prose, so
+    a kind the operator unticked - or a console they switched off -
+    reaches no client either way.
+
+    The two positionals are underscored so no field can collide with them:
+    REQUEST carries a field called `kind` ("file" or "folder"), and a plain
+    `kind` parameter made that call a TypeError - caught by a test that
+    expected a dispatch and saw none.
+    """
+    # Counted before anything can refuse the line: what the bot has seen since it
+    # started is a fact about the bot, whatever a client chooses to show (#754).
+    try:
+        import runtime
+        if _kind in ("FAIL", "SEARCH"):
+            runtime.feed_counts[_kind] = runtime.feed_counts.get(_kind, 0) + 1
+    except Exception:
+        pass
+    send_debug(_text, category=_kind)
+    # DEBUG_TO_CONSOLE was checked on the prose path alone (#678, audit
+    # L14): with it off the plain console went quiet as documented, while
+    # a structured session kept getting every REQUEST/QUEUED/SENDING/SENT/
+    # FAIL/SEARCH line - only LOG stopped - and the stdout floor printed
+    # the same event as undelivered at the same time.
+    if not getattr(config, "DEBUG_TO_CONSOLE", True) or not console_wants(_kind):
+        return
+    with _debug_sinks_lock:
+        sinks = _event_sinks[:]
+    for sink in sinks:
+        try:
+            sink(_kind, dict(fields), _text)
+        except Exception as sink_err:
+            print(f"[ANNOUNCE] Event sink raised and was dropped: {sink_err}")
 
 
 def _fan_out_to_sinks(msg_text, category):
@@ -308,8 +373,12 @@ def build_transfer_complete_line(channel, user, shown_name, total_sent,
     )
 
 
-def send_transfer_complete(channel, user, file_name, file_size, start_time, actual_speed):
-    """Send the block-styled transfer notice once a file has finished."""
+def send_transfer_complete(channel, user, file_name, file_size, start_time, actual_speed, duration=None):
+    """Send the block-styled transfer notice once a file has finished.
+
+    `duration` (seconds) is optional and only feeds the structured SENT
+    event (#550); the notice's own speed figure comes from `actual_speed`.
+    """
     import sys
     import db
     import stats_mgr
@@ -384,12 +453,23 @@ def send_transfer_complete(channel, user, file_name, file_size, start_time, actu
     # The closing line, using the live 'speed_str' safely
     try:
         safe_file = str(file_name)
-        send_debug(f"Sent: \"{safe_file}\" to {user} [{speed_str}]", category="INFO")
+        # category SENT, not INFO. It was INFO from the start, so the [SENT]
+        # tag the channel line has rendered since #526 never fired for the
+        # one line it was for, and #528's "sends" tickbox never governed it.
+        feed_event("SENT", f"Sent: \"{safe_file}\" to {user} [{speed_str}]",
+                   nick=user, channel=channel, bytes=file_size, seconds=duration,
+                   bytes_per_s=actual_speed, name=file_name)
     except Exception as debug_err:
         print(f"[DEBUG-SENT ERROR] Could not send the closing notice to the debug channel: {debug_err}")
 
-def send_dcc_sending_notice(user, file_name):
-    """Send the user a matching private NOTICE when a transfer starts or is queued."""
+def send_dcc_sending_notice(user, file_name, path=None, channel=None):
+    """Send the user a matching private NOTICE when a transfer starts or is queued.
+
+    `path` is optional and only feeds the structured SENDING event's size
+    (#550): the notice itself never needed it, and a caller without it in
+    hand reports 0 rather than guessing.
+    """
+    import os
     import sys
     import defaults as config
     oserve = sys.modules.get('oserve')
@@ -400,7 +480,14 @@ def send_dcc_sending_notice(user, file_name):
     # dispatcher just made it - this transfer is already counted.
     busy = len(getattr(config, "active_transfers", []) or [])
     slots = getattr(config, "MAX_DCC_SLOTS", 0)
-    send_debug(f'Sending "{file_name}" to {user} (slot {busy}/{slots})', category="SENDING")
+    size = 0
+    if path:
+        try:
+            size = os.path.getsize(platform_compat.long_path(path))
+        except OSError:
+            size = 0
+    feed_event("SENDING", f'Sending "{file_name}" to {user} (slot {busy}/{slots})',
+               nick=user, channel=channel, slot=busy, slots=slots, bytes=size, name=file_name)
     
     # ---------------------------------------------------------------------
     # Private notice block, framed exactly like the channel one
@@ -532,9 +619,25 @@ def announce_worker():
                 except Exception as rejoin_err:
                     print(f"[REJOIN ERROR] Could not attempt a rejoin: {rejoin_err}")
 
+                # Once per cycle, not per channel, and through the same
+                # module that owns the rule - see channels_we_are_out_of().
+                try:
+                    import irc as irc_mod
+                    out_of = irc_mod.channels_we_are_out_of()
+                except Exception as membership_err:
+                    print(f"[ANNOUNCE] Could not read which channels we are in: {membership_err}")
+                    out_of = set()
+
                 for chan in channels_to_spam:
                     chan = chan.strip()
                     if not chan:
+                        continue
+                    # Not in there (#631): kicked, refused, or never
+                    # confirmed. The server would answer 404 to both lines,
+                    # nothing reads that, and each costs a pacer slot the
+                    # channels the bot IS in are waiting for. The rejoin
+                    # above keeps asking for as long as it is allowed to.
+                    if chan.lower() in out_of:
                         continue
 
                     # #432: one channel's failure must cost that channel, not
@@ -690,7 +793,13 @@ def send_search_result_header(user, search_term, match_count, channel):
     # mid-colour-code.
     msg = fit_irc_line(_build, search_term)
     if oserve:
-        oserve.queue_message("channel_announce", msg)
+        # The requester's OWN lane, in front of the rows that follow it - not
+        # the shared VIP lane. This is a private message to one user, and its
+        # rows are queued in that user's lane by the caller; the two lanes take
+        # strict turns (queue_mgr), so a header sitting in the VIP lane behind
+        # the channel advert's lines came out AFTER its own results: seen live
+        # while an advert cycle was running, "Found: 3 Match(es)" arrived last.
+        oserve.queue_message(user, msg)
     print(f"[SEARCH RESULTS] Found {match_count} sending {sending_count} to {user} in {channel} for '{search_term}'")
 
 def send_dcc_error(user, error_type):
@@ -699,17 +808,19 @@ def send_dcc_error(user, error_type):
     errors = {
         "invalid_path": "Error: Invalid path.",
         "file_not_found": "Error: File not found.",
+        "busy": "Error: Busy looking up other files - try again in a moment.",
         "global_full": f"Error: The server's global queue is full ({config.MAX_GLOBAL_QUEUE} max).",
         "user_full": f"Error: You have reached your personal queue limit of {config.MAX_USER_QUEUE} files.",
         "rar_disabled": "Error: Folder packing (!rar) is disabled on this bot.",
         "not_configured": "Error: This bot's music library is not configured yet - ask the operator to set it up.",
+        "ambiguous_list": "Error: That folder name is served by more than one of this bot's lists - request it in the channel it was advertised in.",
     }
     msg_text = errors.get(error_type, "Error: Unknown transfer issue.")
     msg = f"NOTICE {user} :{config.C_BOLD}{msg_text}{config.C_RESET}\r\n"
     if oserve:
         oserve.queue_message(user, msg)
 
-def send_dcc_queue_notice(user, file_name, position):
+def send_dcc_queue_notice(user, file_name, position, channel=None):
     """Send the user their queue position privately, in the same colour theme."""
     import sys
     import defaults as config
@@ -719,7 +830,8 @@ def send_dcc_queue_notice(user, file_name, position):
     # come through here when the request queues rather than sends.
     busy = len(getattr(config, "active_transfers", []) or [])
     slots = getattr(config, "MAX_DCC_SLOTS", 0)
-    send_debug(f'Queued "{file_name}" for {user} at #{position} ({busy}/{slots} slots busy)', category="QUEUED")
+    feed_event("QUEUED", f'Queued "{file_name}" for {user} at #{position} ({busy}/{slots} slots busy)',
+               nick=user, channel=channel, pos=position, busy=busy, slots=slots, name=file_name)
     if oserve:
         # The mIRC colour blocks and separators
         BG_RED_BLOCK, BG_CYAN_BLOCK, BG_TEXT_BOX, R, B, V, A, X = theme.blocks()
@@ -750,6 +862,27 @@ def send_dcc_queue_notice(user, file_name, position):
 # A third level would be a level nobody can tell apart from the other two at a
 # glance, which is the only moment a badge gets read.
 NOTICE_SEVERITIES = ("warning", "error")
+
+# WHAT EARNS A NOTICE, written down once (#708, audit L44). record_notice()
+# is reached only through send_debug(notice=...), by the call sites that
+# know they are one - and that relied on every author remembering, with no
+# list of the intended events anywhere and a help text that promised
+# "disconnects" when no code path raised one. Each entry names the event,
+# the module that emits it and a piece of the line it emits, so a test can
+# find the emitter and check it passes notice=; a new kind of notice is
+# added here and there together.
+NOTICE_EVENTS = (
+    ("a list rebuild failed",           "commands.py", "External update_list.py failed",   "error"),
+    ("a list rebuild stalled",          "commands.py", "The library it",                    "error"),
+    ("a list rebuild timed out",        "commands.py", "Script execution timed out",       "error"),
+    ("activated with channels missing", "irc.py",      "channel(s) never confirmed via NAMES", "error"),
+    ("rejoined after a kick",           "irc.py",      "Rejoined {back.group(1)}",         "warning"),
+    ("kicked from a channel",           "irc.py",      "Kicked from {kicked_chan}",        "warning"),
+    ("the server allows fewer channels", "irc.py",     "more than the server",             "error"),
+    ("a join was refused",              "irc.py",      "Attempt {count}/{limit}",          "error"),
+    ("gave up rejoining",               "irc.py",      "gave up after {count} attempt(s)", "error"),
+    ("the connection was lost",         "irc.py",      "Lost the connection to the IRC server", "warning"),
+)
 
 NOTICES_MAX = 200
 
@@ -1028,7 +1161,7 @@ FEED_SWITCHES = {
     "FAIL":    "CONSOLE_SHOW_FAILURES",
     "SEARCH":  "CONSOLE_SHOW_SEARCHES",
 }
-FEED_ONLY_CATEGORIES = frozenset({"REQUEST", "QUEUED", "SENDING", "RESUMED", "SEARCH"})
+FEED_ONLY_CATEGORIES = frozenset({"REQUEST", "QUEUED", "SENDING", "RESUMED", "SEARCH", "LISTFETCH"})
 
 
 def console_wants(category, config=None):
@@ -1050,6 +1183,51 @@ def channel_wants(category, config=None):
     if str(category).upper() in FEED_ONLY_CATEGORIES:
         return bool(getattr(config, "DEBUG_CHANNEL_FEED", False))
     return True
+
+
+def category_tag(category, palette=None):
+    """(label, colour code) for one debug category - what the channel line's
+    tag block and the admin console's `[TAG]` are both drawn from.
+
+    `palette` is theme.blocks()'s tuple. send_debug() passes the one it has
+    already unpacked, so this adds no second palette read to announce.py -
+    tests/test_theme.py counts those against its golden fixture. A caller
+    outside this module (adminchat) passes theme.blocks() itself.
+
+    One table, read by both, because until #550 the console had no colours
+    at all and the channel had this as an elif chain nobody else could
+    reach. The label is not always the category: BAN renders [HARDBAN]
+    (an admin confirming a !ban), and HARDBAN renders [SECURITY] (dcc.py's
+    blocked path traversal or poisoned queue entry) - the two must not look
+    alike, since one is routine administration and the other is someone
+    probing the filesystem. MUTE is [MUTED] and TBAN [TEMPBAN] for the same
+    reason: the 30-second mute and the escalation ban used to share a tag.
+    The feed's own categories (#528) take the [SENT] block colour: they are
+    the same story told from the start rather than the end.
+    """
+    import defaults as config
+    if palette is None:
+        raise TypeError("category_tag() needs the theme palette - pass theme.blocks()")
+    _border, _sep, _box, _reset, _bold, value, alert, _accent = palette
+    cat = str(category or "INFO").upper()
+    table = {
+        "SENT":    ("SENT", value),
+        "REQUEST": ("REQUEST", value),
+        "QUEUED":  ("QUEUED", value),
+        "SENDING": ("SENDING", value),
+        "RESUMED": ("RESUMED", value),
+        "SEARCH":  ("SEARCH", value),
+        "LISTFETCH": ("LISTS", value),
+        "FAIL":    ("FAIL", alert),
+        "PART":    ("PART", alert),
+        "QUIT":    ("QUIT", config.C_PURPLE),
+        "JOIN":    ("JOIN", config.C_CYAN),
+        "BAN":     ("HARDBAN", alert),
+        "HARDBAN": ("SECURITY", alert),
+        "MUTE":    ("MUTED", config.C_PURPLE),
+        "TBAN":    ("TEMPBAN", config.C_PURPLE),
+    }
+    return table.get(cat, ("INFO", config.C_GREY))
 
 
 def send_debug(msg_text, category="INFO", notice=None):
@@ -1082,61 +1260,31 @@ def send_debug(msg_text, category="INFO", notice=None):
     # 1. The opening block: the timestamp, framed in white
     msg = f"PRIVMSG {config.DEBUG_CHANNEL} :{BG_RED_BLOCK} {BG_CYAN_BLOCK} {BG_TEXT_BOX} [{current_time}] DEBUG "
     
-    # 2. The tag block, colour-coded by event
-    if category.upper() == "SENT":
-        tag_str = f"{V}[SENT]{R}{BG_TEXT_BOX}"
-    elif category.upper() in ("REQUEST", "QUEUED", "SENDING", "RESUMED", "SEARCH"):
-        # The console feed's own events (#528). Same block as [SENT] - they
-        # are the same story told from the start rather than the end - and
-        # only ever on the channel under DEBUG_CHANNEL_FEED.
-        tag_str = f"{V}[{category.upper()}]{R}{BG_TEXT_BOX}"
-    elif category.upper() == "FAIL":
-        # A transfer that did NOT complete. Until #526 every one of these was
-        # a plain print() to the console window and nothing else, while a
-        # completed one went to the debug channel and the admin console as
-        # [SENT] - so an operator watching either saw successes and never
-        # failures, and a cut-off transfer that the old code miscounted as a
-        # success was reported as one. The alert colour, like [PART]: it is
-        # the line an operator needs to see.
-        tag_str = f"{A}[FAIL]{R}{BG_TEXT_BOX}"
-    elif category.upper() == "PART":
-        tag_str = f"{A}[PART]{R}{BG_TEXT_BOX}"
-    elif category.upper() == "QUIT":
-        tag_str = f"{config.C_PURPLE}[QUIT]{R}{BG_TEXT_BOX}"
-    elif category.upper() == "JOIN":
-        tag_str = f"{config.C_CYAN}[JOIN]{R}{BG_TEXT_BOX}"
-    elif category.upper() == "BAN":
-        # A red block label for PERMANENT bans
-        tag_str = f"{A}[HARDBAN]{R}{BG_TEXT_BOX}"
-    elif category.upper() == "HARDBAN":
-        # dcc.py raises this for a blocked path traversal and for a poisoned queue entry -
-        # the two most serious alerts the daemon can produce. Without this branch they fell
-        # through to the grey [INFO] tag, visually identical to routine chatter, so a
-        # filesystem probing campaign looked like ordinary traffic in the debug channel.
-        #
-        # Labelled [SECURITY], not [HARDBAN]: the "BAN" category above already renders
-        # [HARDBAN], and that one is an admin confirming a !ban. These two must not look
-        # alike - one is routine administration, the other is someone probing the filesystem.
-        tag_str = f"{A}[SECURITY]{R}{BG_TEXT_BOX}"
-    elif category.upper() == "MUTE":
-        # Its own tag. A 30-second mute and the escalation ban both used
-        # TBAN, so both rendered [TEMPBAN] and an operator watching the
-        # console could not tell a slap from a sentence (#234).
-        tag_str = f"{config.C_PURPLE}[MUTED]{R}{BG_TEXT_BOX}"
-    elif category.upper() == "TBAN":
-        # A purple block label for TEMPORARY day-bans
-        tag_str = f"{config.C_PURPLE}[TEMPBAN]{R}{BG_TEXT_BOX}"
-    else:
-        tag_str = f"{config.C_GREY}[INFO]{R}{BG_TEXT_BOX}"
-  
+    # 2. The tag block, colour-coded by event - the same label and colour the
+    # admin console shows (category_tag(), below), so the two can never
+    # disagree about what a category looks like.
+    label, colour = category_tag(category, (BG_RED_BLOCK, BG_CYAN_BLOCK, BG_TEXT_BOX, R, B, V, A, X))
+    tag_str = f"{colour}[{label}]{R}{BG_TEXT_BOX}"
+
     msg += f"{BG_CYAN_BLOCK} {BG_RED_BLOCK} {BG_TEXT_BOX} Category: {tag_str} "
     
-    # 3. The text block, stripped of any colour codes that would clash
+    # 3. The text block, stripped of any colour codes that would clash, and
+    # 4. the closing block, ending the line with the colour separators -
+    # rendered together through fit_irc_line() (#694, audit L30), as every
+    # other outbound builder is. The framing is ~170 bytes on its own, and a
+    # long folder name, hostmask or exception text pushed the line past what
+    # the server relays: it was cut at 512 bytes, inside the text, with the
+    # background colour smeared to the end and the closing block gone. The
+    # text is shrunk with an ellipsis until the whole line fits, and a colour
+    # code is never sliced.
     clean_text = msg_text.replace(config.C_BOLD, "").replace(config.C_RESET, "").replace("\x02", "").replace("\x0f", "")
-    msg += f"{BG_CYAN_BLOCK} {BG_RED_BLOCK} {BG_TEXT_BOX} Log: {clean_text} "
-        
-    # 4. The closing block, ending the line with the colour separators
-    msg += f"{BG_CYAN_BLOCK} {BG_RED_BLOCK} {R}\r\n"
+    head = msg
+
+    def _build(text):
+        return (head + f"{BG_CYAN_BLOCK} {BG_RED_BLOCK} {BG_TEXT_BOX} Log: {text} "
+                + f"{BG_CYAN_BLOCK} {BG_RED_BLOCK} {R}\r\n")
+
+    msg = fit_irc_line(_build, clean_text)
     
     # ---------------------------------------------------------------------
     # NON-BLOCKING HAND-OFF. This used to hold config.debug_flood_lock across a

@@ -9,7 +9,7 @@
 # settings.conf is gitignored, so your values never show up as a diff
 # and are never overwritten by an update.
 #
-# GENERATED FILE - do not edit by hand. It is produced from config.py by
+# GENERATED FILE - do not edit by hand. It is produced from defaults.py by
 # scripts/gen_settings_sample.py, and a test fails if the two disagree.
 #
 # NOTES
@@ -96,15 +96,17 @@
 #NICKNAME = 
 
 # A backup name used if the main one is already taken when the bot connects.
-# The bot switches back to the main name as soon as it is free.
+# If this one is taken too, a digit is added to it. The bot switches back to
+# the main name as soon as it is free.
 #
-# Used when NICKNAME is taken; the bot keeps trying to reclaim the main nick afterwards
+# Used when NICKNAME is taken (with a digit added if this is taken too); the bot keeps trying to reclaim the main nick afterwards
 #ALT_NICKNAME = DCCore_
 
 # Your own nick(s) - the people allowed to use the admin commands such as
-# !ban, !rehash and !update. Separate several with commas. Required.
+# !ban, !rehash and !update. Separate several with commas. Required. If you
+# have set ADMIN_HOSTMASKS, the command must also come from that host.
 #
-# Who may use the admin commands (!ban, !rehash, !update...), comma-separated for more than one; the DCC console checks ADMIN_HOSTMASKS as well
+# Who may use the admin commands (!ban, !rehash, !update...), comma-separated for more than one; with ADMIN_HOSTMASKS set, they must come from that host as well
 # REQUIRED - the daemon refuses to start until this is set.
 #ADMIN_NICK = 
 
@@ -342,11 +344,13 @@
 # folder in the library became packable - including one holding a single
 # text file, and including a season of a series that is tens of gigabytes.
 # 
-# There is no size cap anywhere on packing (see the roadmap), so an
-# unbounded amount of CPU, disk and one transfer slot sat behind a line
-# anybody in the channel could paste. RAR_ENABLED was the only defence and
-# it is all-or-nothing: an operator who wanted albums packable had to accept
-# films packable too.
+# At the time there was no size cap on packing at all, so an unbounded
+# amount of CPU, disk and one transfer slot sat behind a line anybody in the
+# channel could paste. MAX_RAR_FOLDER_SIZE (below) has bounded it since, at
+# 10 GB - but a cap alone still lets a 9 GB film through, and packing a film
+# is pointless work for the receiver. RAR_ENABLED was the only other defence
+# and it is all-or-nothing: an operator who wanted albums packable had to
+# accept films packable too.
 # 
 # An album is a genuine multi-file collection - tracks, a cover, a cue sheet
 # - which is what makes packing it useful. A film is one large file that can
@@ -378,6 +382,16 @@
 # Permanent hostmask patterns added with !ban; timed bans live in BANS_FILE
 #HARD_BANS_FILE = ./data/hard_bans.txt
 
+# Where the per-user send queue is saved. The single-instance lock lives
+# beside it.
+#
+# db.py has always read this one through getattr(config, "DCC_QUEUE_FILE", ...)
+# rather than importing it directly, so nothing shipped noticed it was never
+# actually defined here - until #710's instance lock (oserve.startup())
+# referenced config.DCC_QUEUE_FILE directly and a real, unconfigured install
+# crashed with AttributeError on the very first line of startup.
+#DCC_QUEUE_FILE = ./data/dcc_queue.txt
+
 # Where the folders you added on the Library page are saved.
 #
 # The ordered set of folders served, once there is more than one of them
@@ -398,6 +412,13 @@
 # which resolves to one implicit list over LIBRARY_FOLDERS_FILE/FILE_DIRECTORY
 # - so nothing changes until an operator defines more than one.
 #LISTS_FILE = ./data/lists.json
+
+# Where the login tokens of scripts paired with the admin console are kept
+# (hashed, like the password). Made by the console's pair command; remove one
+# with unpair.
+#
+# Hashed login tokens of scripts paired with the admin console (pair / unpair)
+#ADMIN_TOKENS_FILE = ./data/adminchat_tokens.json
 
 # Where the commands sent on connect (such as your X login) are saved.
 #
@@ -451,7 +472,8 @@
 # EXPECT IT TO BE LARGE. Roughly the size of the lists again - four million
 # rows measured at 452MB. Built as each list is fetched, and safe to delete:
 # the filter stops working until the next fetch rebuilds it, and nothing else
-# reads it.
+# reads it. A damaged one is moved aside as list_index.db.corrupt-<timestamp>
+# and rebuilt from the lists on disk (#628); the copy can be deleted.
 #LIST_INDEX_FILE = ./data/list_index.db
 
 # Where the count of how often each file was sent is kept, for the Most
@@ -488,8 +510,8 @@
 # once the process that was driving them is gone.
 #FETCH_HISTORY_FILE = ./data/fetch_history.json
 
-# Where the notices shown on the dashboard - kicks, failed rebuilds,
-# disconnects - are saved.
+# Where the notices shown on the dashboard - a lost connection, a kick or a
+# refused join, a failed list rebuild - are saved.
 #
 # Where the operator-facing notices live - the kicks, the give-ups, the
 # rebuilds that failed. Persisted because the events worth telling somebody
@@ -653,10 +675,13 @@
 # Delay in seconds for the ordinary message queue
 #MSG_DELAY = 5.0
 
-# The same wait, for lines going to your debug channel.
+# How long to wait between lines to your debug channel. Never less than
+# MSG_DELAY - every line the bot sends shares one clock, and a smaller number
+# here has no effect. Set it higher than MSG_DELAY to slow the debug channel
+# down further; 0 means the same as MSG_DELAY.
 #
-# Pause between each line sent to the debug channel
-#DEBUG_MSG_DELAY = 0.5
+# Wait between debug-channel lines; the larger of this and MSG_DELAY is used, so it can only slow the debug channel down (0 = the same as MSG_DELAY)
+#DEBUG_MSG_DELAY = 0.0
 
 # Who may open the admin console over DCC chat, by host. On Undernet, log in
 # to X with mode +x and use your yourname.users.undernet.org host - only you
@@ -699,11 +724,17 @@
 #ADMIN_CHAT_MODE = auto
 
 # Let the admin commands (!ban, !rehash, !update...) also work when you type
-# them in the channel or a private message, not only in the console. Turn off
-# once you use the console, so a stolen nick cannot run them.
+# them in the channel or a private message, not only in the console. With
+# ADMIN_HOSTMASKS set they need your host as well as your nick; without it a
+# stolen nick can run them, so turn this off.
 #
 # Whether !ban, !unban, !rehash, !update and !clearqueue still work when typed in
 # a channel or a private message.
+# 
+# With ADMIN_HOSTMASKS set they need the right nick AND the right host, so a
+# stolen nick alone is not enough. With it empty they are checked on the nick
+# only, which anyone on Undernet can take while you are offline - set the
+# hostmask, or turn this off.
 # 
 # Left ON. The console is new, and locking yourself out of every admin command
 # because a hostmask has a typo in it is a bad first experience. Turn it off once
@@ -714,6 +745,18 @@
 # The user commands (!list, !ping, !debugnames, @find, the queue triggers) are
 # not affected by this.
 #ADMIN_CHANNEL_COMMANDS = true
+
+# Colour the [SENT], [FAIL], [REQUEST] tags in the admin DCC chat the same way
+# they are coloured in the debug channel, using your theme. Turn off if your
+# client shows the colour codes as junk.
+#
+# The admin DCC chat is an IRC client window, and it renders colour codes the
+# way a channel does. On, every feed line's tag ([SENT], [FAIL], [REQUEST]...)
+# is coloured as it is in the debug channel, in the chosen THEME. Off gives
+# plain "[TAG] text" for a client that shows the codes as junk. The
+# dashboard's Console page is never coloured either way. (#550, step 1)
+# Colour the tags in the admin DCC chat the way the debug channel is coloured
+#ADMIN_CHAT_COLOURS = true
 
 # Send the bot's running report (transfers, joins, bans, problems) to your
 # debug channel.
@@ -937,12 +980,17 @@
 # means. A timer alone would re-ask every bot for a list we already have.
 #AUTO_REFETCH_LISTS = false
 
-# The least time between two automatic fetches of the same bot's list, in
-# hours, so a bot that rebuilds hourly is not fetched hourly.
+# The least time between two automatic asks for the same bot's list, in hours.
+# Counted from the last list that arrived or the last time the bot was asked,
+# so a bot that rebuilds hourly - or does not answer - is not asked every
+# hour.
 #
 # How stale a held list may get before it is re-asked for, in hours. Not how
 # often the check runs (that is hourly); this is the floor on how often any one
-# bot is asked, so a bot rebuilding hourly is not re-fetched hourly.
+# bot is asked, so a bot rebuilding hourly is not re-fetched hourly. Counted
+# from the later of the last list that ARRIVED and the last time the sweep
+# ASKED (kept on disk, so a restart does not forget it): a bot that never
+# answers is asked once per interval, not once per hour.
 #AUTO_REFETCH_INTERVAL_HOURS = 24
 
 # The most lists to re-fetch in one go. If many are out of date at once, the
@@ -1165,6 +1213,20 @@
 #
 # Attempts per queued file before it is dropped (see dcc.release_queue_entry)
 #MAX_SEND_FAILS = 3
+
+# How many seconds the bot waits for someone to accept a file it has offered
+# before withdrawing the offer and counting one failed attempt. A person who
+# has to click Accept in a dialog often needs more than the default 30.
+#
+# HOW LONG AN OFFER STANDS. After the DCC SEND handshake the bot listens for
+# the receiver to connect; when nobody has by this deadline the offer is
+# withdrawn and counted as one failed attempt against MAX_SEND_FAILS. This
+# was a fixed 30 s, and a night's feed showed what that costs (#879): a
+# person who has to click Accept in a dialog often needs longer, and every
+# miss was a strike. It is not the transfer's own clock - once bytes are
+# moving, the acknowledgement stall check is what decides a dead link.
+# Seconds the bot waits for the receiver to connect after offering a file
+#DCC_ACCEPT_TIMEOUT = 30
 
 # How many seconds a folder may take to pack before the bot gives up on it.
 #

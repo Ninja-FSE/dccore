@@ -347,11 +347,14 @@ class QueueWorkerReconnectTests(DCCoreTestCase):
         # so _SleepShim's cap on queue_mgr.time.sleep() below no longer
         # shortens it at all, it only makes the loop check more often over
         # the SAME real wall-clock span. The value itself is what has to be
-        # small now.
-        config.MSG_DELAY = 0.01
+        # small now - and set through set_config() (#667), so it is put
+        # back for the tests that run after this one.
+        self.set_config(MSG_DELAY=0.01)
         config.vip_queue = []
         config.send_queue = {}
         self._real_time = queue_mgr.time
+        # The pump also waits for activation (#630); the harness resets this.
+        config.activation_triggered = True
         self.shim = _SleepShim()
         queue_mgr.time = self.shim
         self.worker = None
@@ -544,21 +547,27 @@ class ReconnectThawSummaryTests(DCCoreTestCase):
         fixed time after the first, which would still split a slow burst
         into two lines.
 
-        Widened past setUp()'s usual 0.05s for this one test (#546): reading
-        "not yet flushed" at 60% of a 0.05s window leaves only ~20ms before
-        the real timer fires on its own - not enough headroom on a loaded CI
-        runner. Confirmed as exactly this, not a real bug: macOS's
-        GitHub-hosted runners hit it in practice, ~50% of the time, while
-        the identical assertion never once failed on Linux or Windows.
-        0.3s keeps the same 60% checkpoint but with ~120ms of slack instead
-        of ~20ms - still well inside wait_for_flush()'s 1.0s default below.
+        Without a sleep. The first version slept 60% of the quiet window
+        and asserted nothing had flushed yet; that is a bet on the
+        scheduler, and macOS's GitHub-hosted runners lost it at 0.05s
+        (#546) and, widened to 0.3s (#548), lost it again. The property
+        is that the second arrival CANCELS the timer the first one armed
+        and arms a new one - checked on the timer objects themselves,
+        which cannot be late - and the one line that then flushes counts
+        both channels.
         """
-        irc._RECONNECT_THAW_QUIET_SECONDS = 0.3
         irc._note_reconnect_thaw("#one", 1)
-        time.sleep(irc._RECONNECT_THAW_QUIET_SECONDS * 0.6)
-        self.assertEqual(self.captured, [],
-                         "must not have flushed yet - a second channel is still due")
+        first_timer = irc._reconnect_thaw_summary["timer"]
+        self.assertIsNotNone(first_timer)
+        self.assertFalse(first_timer.finished.is_set(),
+                         "the first channel's timer is armed and still pending")
+
         irc._note_reconnect_thaw("#two", 1)
+        second_timer = irc._reconnect_thaw_summary["timer"]
+        self.assertTrue(first_timer.finished.is_set(),
+                        "the late arrival must cancel the pending timer")
+        self.assertIsNot(second_timer, first_timer,
+                         "and arm a new one, so the window restarts")
 
         self.wait_for_flush()
         self.assertEqual(len(self.captured), 1,

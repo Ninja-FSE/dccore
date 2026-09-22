@@ -59,7 +59,7 @@ class OnlyOneListenerAtATime(unittest.TestCase):
         release = threading.Event()
         entered = []
 
-        def blocking(_sock, nick, _host, _token=None):
+        def blocking(_sock, nick, _host, _token=None, _expected_ip=None):
             entered.append(nick)
             started.set()
             release.wait(5)
@@ -85,7 +85,7 @@ class OnlyOneListenerAtATime(unittest.TestCase):
         entered = []
         lock = threading.Lock()
 
-        def blocking(_sock, nick, _host, _token=None):
+        def blocking(_sock, nick, _host, _token=None, _expected_ip=None):
             with lock:
                 entered.append(nick)
             release.wait(5)
@@ -139,7 +139,7 @@ class OnlyOneListenerAtATime(unittest.TestCase):
         """Refusing must not be sticky - the console has to stay usable."""
         entered = []
         adminchat._listen_and_serve_locked = (
-            lambda _s, nick, _h, _t=None: entered.append(nick))
+            lambda _s, nick, _h, _t=None, _ip=None: entered.append(nick))
 
         adminchat._listen_and_serve(None, "first", "host", None)
         adminchat._listen_and_serve(None, "second", "host", None)
@@ -149,7 +149,7 @@ class OnlyOneListenerAtATime(unittest.TestCase):
     def test_the_flag_is_cleared_when_the_listener_raises(self):
         """Otherwise one failed offer wedges the console for good, which is
         worse than the exhaustion this exists to prevent."""
-        def boom(_sock, _nick, _host, _token=None):
+        def boom(_sock, _nick, _host, _token=None, _expected_ip=None):
             raise RuntimeError("bang")
 
         adminchat._listen_and_serve_locked = boom

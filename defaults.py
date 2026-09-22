@@ -21,7 +21,7 @@ import runtime
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
-SCRIPT_VERSION: str = "DCCore v1.12.2"
+SCRIPT_VERSION: str = "DCCore v1.13.0"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
@@ -62,8 +62,8 @@ PORT: int          = 6667          # The server's port; 6667 is plain IRC, and t
 # reasoning, and RAR_BINARY above for the same "None means unset" convention
 # this already used before REQUIRED existed.
 NICKNAME: str      = None
-ALT_NICKNAME: str  = "DCCore_"     # Used when NICKNAME is taken; the bot keeps trying to reclaim the main nick afterwards
-ADMIN_NICK: str    = None          # Who may use the admin commands (!ban, !rehash, !update...), comma-separated for more than one; the DCC console checks ADMIN_HOSTMASKS as well
+ALT_NICKNAME: str  = "DCCore_"     # Used when NICKNAME is taken (with a digit added if this is taken too); the bot keeps trying to reclaim the main nick afterwards
+ADMIN_NICK: str    = None          # Who may use the admin commands (!ban, !rehash, !update...), comma-separated for more than one; with ADMIN_HOSTMASKS set, they must come from that host as well
 CHANNEL: str       = None          # The channel(s) to serve in, comma-separated; the first one is where announcements go by default
 # Ships BLANK, and that is a deliberate reversal of #171's "#dccore-debug".
 #
@@ -242,11 +242,13 @@ LIST_VIDEO_COMPANION_EXTENSIONS: list = [
 # folder in the library became packable - including one holding a single
 # text file, and including a season of a series that is tens of gigabytes.
 #
-# There is no size cap anywhere on packing (see the roadmap), so an
-# unbounded amount of CPU, disk and one transfer slot sat behind a line
-# anybody in the channel could paste. RAR_ENABLED was the only defence and
-# it is all-or-nothing: an operator who wanted albums packable had to accept
-# films packable too.
+# At the time there was no size cap on packing at all, so an unbounded
+# amount of CPU, disk and one transfer slot sat behind a line anybody in the
+# channel could paste. MAX_RAR_FOLDER_SIZE (below) has bounded it since, at
+# 10 GB - but a cap alone still lets a 9 GB film through, and packing a film
+# is pointless work for the receiver. RAR_ENABLED was the only other defence
+# and it is all-or-nothing: an operator who wanted albums packable had to
+# accept films packable too.
 #
 # An album is a genuine multi-file collection - tracks, a cover, a cue sheet
 # - which is what makes packing it useful. A film is one large file that can
@@ -267,6 +269,12 @@ FETCHED_FILES_DIR: str = "./data/fetched"
 BANS_FILE: str      = "./data/bans.txt"
 STATS_FILE: str     = "./data/stats.txt"       # Lifetime totals, the speed record and the daily figures the advert and Stats page show
 HARD_BANS_FILE: str = "./data/hard_bans.txt"   # Permanent hostmask patterns added with !ban; timed bans live in BANS_FILE
+# db.py has always read this one through getattr(config, "DCC_QUEUE_FILE", ...)
+# rather than importing it directly, so nothing shipped noticed it was never
+# actually defined here - until #710's instance lock (oserve.startup())
+# referenced config.DCC_QUEUE_FILE directly and a real, unconfigured install
+# crashed with AttributeError on the very first line of startup.
+DCC_QUEUE_FILE: str = "./data/dcc_queue.txt"
 
 # The ordered set of folders served, once there is more than one of them
 # (#164). JSON rather than a settings.conf list for the reason KNOWN_BOTS_FILE
@@ -283,6 +291,7 @@ LIBRARY_FOLDERS_FILE: str = "./data/library_folders.json"
 # which resolves to one implicit list over LIBRARY_FOLDERS_FILE/FILE_DIRECTORY
 # - so nothing changes until an operator defines more than one.
 LISTS_FILE: str = "./data/lists.json"
+ADMIN_TOKENS_FILE: str = "./data/adminchat_tokens.json"   # Hashed login tokens of scripts paired with the admin console (pair / unpair)
 # Commands sent to the server once registered and BEFORE joining - X
 # login, usermodes, whatever the network wants. See on_connect.py for why
 # the ordering matters and why the file is never logged.
@@ -321,7 +330,8 @@ KNOWN_BOTS_FILE: str = "./data/known_bots.json"
 # EXPECT IT TO BE LARGE. Roughly the size of the lists again - four million
 # rows measured at 452MB. Built as each list is fetched, and safe to delete:
 # the filter stops working until the next fetch rebuilds it, and nothing else
-# reads it.
+# reads it. A damaged one is moved aside as list_index.db.corrupt-<timestamp>
+# and rebuilt from the lists on disk (#628); the copy can be deleted.
 LIST_INDEX_FILE: str = "./data/list_index.db"
 
 # One row per thing this bot has ever sent, {relative path or archive name ->
@@ -453,7 +463,7 @@ MAX_USER_QUEUE: int     = 100    # Most files a single user may queue
 MAX_GLOBAL_QUEUE: int   = 1000   # Most files across every queue combined
 MAX_SEARCH_RESULTS: int = 5      # Maximum result lines sent in reply to an @find
 MSG_DELAY: float        = 5.0    # Delay in seconds for the ordinary message queue
-DEBUG_MSG_DELAY: float  = 0.5    # Pause between each line sent to the debug channel
+DEBUG_MSG_DELAY: float  = 0.0    # Wait between debug-channel lines; the larger of this and MSG_DELAY is used, so it can only slow the debug channel down (0 = the same as MSG_DELAY)
 
 # Port range for DCC sends (must be open on the firewall and router)
 # ---------------------------------------------------------------------
@@ -492,6 +502,11 @@ ADMIN_CHAT_MODE: str = "auto"
 # Whether !ban, !unban, !rehash, !update and !clearqueue still work when typed in
 # a channel or a private message.
 #
+# With ADMIN_HOSTMASKS set they need the right nick AND the right host, so a
+# stolen nick alone is not enough. With it empty they are checked on the nick
+# only, which anyone on Undernet can take while you are offline - set the
+# hostmask, or turn this off.
+#
 # Left ON. The console is new, and locking yourself out of every admin command
 # because a hostmask has a typo in it is a bad first experience. Turn it off once
 # the console has proved itself - at which point admin authority rests entirely
@@ -501,6 +516,13 @@ ADMIN_CHAT_MODE: str = "auto"
 # The user commands (!list, !ping, !debugnames, @find, the queue triggers) are
 # not affected by this.
 ADMIN_CHANNEL_COMMANDS: bool = True
+
+# The admin DCC chat is an IRC client window, and it renders colour codes the
+# way a channel does. On, every feed line's tag ([SENT], [FAIL], [REQUEST]...)
+# is coloured as it is in the debug channel, in the chosen THEME. Off gives
+# plain "[TAG] text" for a client that shows the codes as junk. The
+# dashboard's Console page is never coloured either way. (#550, step 1)
+ADMIN_CHAT_COLOURS: bool = True    # Colour the tags in the admin DCC chat the way the debug channel is coloured
 
 # ---------------------------------------------------------------------
 # WHERE RUNTIME REPORTS GO
@@ -654,7 +676,10 @@ MAX_FETCH_SLOTS: int        = 3        # Max simultaneous in-flight/offered fetc
 AUTO_REFETCH_LISTS: bool = False
 # How stale a held list may get before it is re-asked for, in hours. Not how
 # often the check runs (that is hourly); this is the floor on how often any one
-# bot is asked, so a bot rebuilding hourly is not re-fetched hourly.
+# bot is asked, so a bot rebuilding hourly is not re-fetched hourly. Counted
+# from the later of the last list that ARRIVED and the last time the sweep
+# ASKED (kept on disk, so a restart does not forget it): a bot that never
+# answers is asked once per interval, not once per hour.
 AUTO_REFETCH_INTERVAL_HOURS: int = 24
 # Most lists to ask for in one sweep. A bot back after a month offline has a
 # lot of stale lists, and asking for all of them at once is a burst of
@@ -785,6 +810,14 @@ MUTE_TIME: int      = 30       # Mute in seconds on the first flood violation
 # midnight accidentally did - repeat offenders are a hard-ban case (!ban).
 FLOOD_BAN_SECONDS: int = 3600  # Ban in seconds when someone floods while muted
 MAX_SEND_FAILS: int = 3        # Attempts per queued file before it is dropped (see dcc.release_queue_entry)
+# HOW LONG AN OFFER STANDS. After the DCC SEND handshake the bot listens for
+# the receiver to connect; when nobody has by this deadline the offer is
+# withdrawn and counted as one failed attempt against MAX_SEND_FAILS. This
+# was a fixed 30 s, and a night's feed showed what that costs (#879): a
+# person who has to click Accept in a dialog often needs longer, and every
+# miss was a strike. It is not the transfer's own clock - once bytes are
+# moving, the acknowledgement stall check is what decides a dead link.
+DCC_ACCEPT_TIMEOUT: int = 30   # Seconds the bot waits for the receiver to connect after offering a file
 RAR_TIMEOUT: int    = 1800     # Longest a rar packing run may take, in seconds, before it is abandoned
 # A REBUILD THAT IS STILL WORKING IS NOT HUNG, and a wall clock cannot tell
 # the two apart. This used to be a flat 1800s, which is a bet that no library
@@ -974,6 +1007,7 @@ known_bots = runtime.known_bots
 # above it: a rehash re-executing this file must not strand a transfer that is
 # mid-handshake.
 dcc_send_offers = runtime.dcc_send_offers
+feed_counts = runtime.feed_counts          # FAIL and SEARCH events since the process started (#754)
 
 # Alt-nick reconnects (#376): a peer bot's own nick disappearing and an
 # ordinary collision variant of it (an added "_" or digit) joining shortly
@@ -1273,5 +1307,20 @@ def _sanitize_list_base_name(name):
     return cleaned or "DCCore"
 
 
-if LIST_BASE_NAME == "DCCore" and NICKNAME:
-    LIST_BASE_NAME = _sanitize_list_base_name(NICKNAME)
+def derive_list_base_name():
+    """An untouched LIST_BASE_NAME takes the nickname's value.
+
+    Run when this module is (re)loaded, and again by the browser setup page
+    once it has applied the new settings to the running process (#590): that
+    assigns NICKNAME but never re-executes this module, so the daemon kept the
+    shipped "DCCore" while the list rebuild - a fresh process that imports this
+    file anew - wrote "<nick>-<date>.zip". The daemon then looked for DCCore-*
+    and saw no list, though the dashboard said the rebuild had worked.
+    """
+    global LIST_BASE_NAME
+    if LIST_BASE_NAME == "DCCore" and NICKNAME:
+        LIST_BASE_NAME = _sanitize_list_base_name(NICKNAME)
+    return LIST_BASE_NAME
+
+
+derive_list_base_name()

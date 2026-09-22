@@ -510,17 +510,25 @@ class WhenTheIndexIsNotThere(IndexCase):
         self.addCleanup(setattr, list_index.sqlite3, "connect", real)
         self.assertEqual(list_index.search(["anything"]), [])
 
-        self.assertEqual(len(opened), 1, "the failing path opened nothing")
+        # Two opens: the one that failed on the damaged file, and the fresh
+        # index started after it was moved aside (#628). The first must be
+        # closed - on Windows the rename that moves it aside fails otherwise.
+        self.assertEqual(len(opened), 2, "the failing path opened nothing")
         with self.assertRaises(sqlite3_mod.ProgrammingError):
             opened[0].execute("SELECT 1")
+        self.assertIs(opened[1], list_index._connection)
 
     def test_no_index_does_not_grey_out_every_bot(self):
         """"We cannot tell" is not "nobody has it". Crossing out the whole
-        sidebar would read as a definite answer, and the wrong one."""
-        path = os.path.join(self.index_dir, "corrupt2.db")
-        with open(path, "wb") as handle:
-            handle.write(b"nope")
-        self.set_config(LIST_INDEX_FILE=path)
+        sidebar would read as a definite answer, and the wrong one.
+
+        The index is made unopenable by putting a plain FILE where its
+        parent directory should be - a damaged file no longer counts, since
+        #628 moves that aside and starts a fresh one."""
+        blocker = os.path.join(self.index_dir, "not-a-directory")
+        with open(blocker, "wb") as handle:
+            handle.write(b"a file sits where the index directory should be")
+        self.set_config(LIST_INDEX_FILE=os.path.join(blocker, "idx.db"))
         list_index.reset_for_tests()
 
         matched, empty = list_index.bots_with_a_match(["x"], ["BoomBox"])

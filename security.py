@@ -173,7 +173,7 @@ def check_user_status(user, hostmask=None):
         return False
 
     # ---------------------------------------------------------------------
-    # 1. TIMED BANS (the day-bans the flood protection issues)
+    # 1. TIMED BANS (the FLOOD_BAN_SECONDS bans the flood protection issues)
     # These live in config.banned_users as {nick: expiry} and are read from
     # bans.txt at boot. They are TIMESTAMPED ROWS, not wildcard patterns, so they
     # must never be regex-matched the way the old code did.
@@ -496,7 +496,7 @@ def is_flooding(user):
             spell = format_ban_duration(ban_seconds)
             print(f"[SECURITY BAN] Banned {user} for {spell}. Saved to {config.BANS_FILE} via db.py.")
             
-            # VIP log: send the day-ban notice straight out, with no queue delay
+            # VIP log: send the ban notice straight out, with no queue delay
             announce.send_debug(
                 f"User {user} ignored warnings and flooded during mute. Upgraded to a {spell} ban! Saved to disk layout.", 
                 category="TBAN"

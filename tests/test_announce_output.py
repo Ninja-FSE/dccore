@@ -210,7 +210,10 @@ class TransferCompleteLineTests(QuietTestCase):
         )
         self.assertTrue(self.debug_lines, "transfer completion produced no debug line")
         category, text = self.debug_lines[-1]
-        self.assertEqual(category, "INFO")
+        # SENT, not INFO. This pinned INFO from the day the line was written,
+        # which is how the [SENT] tag never fired for the one line it was
+        # for, and #528's "sends" tickbox never governed it (found by #550).
+        self.assertEqual(category, "SENT")
         self.assertIn(CLASSICAL_TRACK, text)
 
 
@@ -363,8 +366,9 @@ class DebugDrainDeliveryTests(QuietTestCase):
         # Close the gate again for whatever runs next, so a live drain can
         # never swallow another test's queued lines.
         self.addCleanup(self._close_gate)
-        # Speed the pump up; the default pause between lines is 0.5s.
-        self.config.DEBUG_MSG_DELAY = 0.01
+        # Speed the pump up, for this test only (#667). The drain paces at
+        # the larger of the two delays, so both have to be small.
+        self.set_config(MSG_DELAY=0.01, DEBUG_MSG_DELAY=0.01)
         # #424: send_debug() now requires a non-blank DEBUG_CHANNEL before
         # queuing at all, which ships blank - unrelated to what this class
         # tests (the drain thread's own two gates), so a channel is set here

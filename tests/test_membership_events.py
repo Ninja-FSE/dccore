@@ -229,14 +229,14 @@ class GuardsAreWiredToTheRightHandlers(unittest.TestCase):
         self.assertFalse(_evaluate(condition, GENUINE["PART"]), condition)
 
     def test_the_part_handler_is_gated_on_part(self):
-        condition = _guard_condition_for("p_user = part_match.group(1).lower()")
+        condition = _guard_condition_for("p_user = part_match[0].lower()")
         self.assertTrue(_evaluate(condition, GENUINE["PART"]), condition)
         self.assertFalse(_evaluate(condition, GENUINE["QUIT"]), condition)
         self.assertFalse(
             _evaluate(condition, ":attacker!u@h PRIVMSG #c :should i PART #c ?"), condition)
 
     def test_the_join_handler_is_gated_on_join(self):
-        condition = _guard_condition_for("joined_user = join_match.group(1)")
+        condition = _guard_condition_for("joined_user = join_match[0]")
         self.assertTrue(_evaluate(condition, GENUINE["JOIN"]), condition)
         self.assertTrue(_evaluate(condition, GENUINE["JOIN_COLON"]), condition)
         self.assertFalse(_evaluate(condition, GENUINE["PART"]), condition)
@@ -246,7 +246,7 @@ class GuardsAreWiredToTheRightHandlers(unittest.TestCase):
     def test_the_join_handler_still_ignores_the_bots_own_join(self):
         """Losing that half would make the bot thaw queues off its own JOIN."""
         import defaults as config
-        condition = _guard_condition_for("joined_user = join_match.group(1)")
+        condition = _guard_condition_for("joined_user = join_match[0]")
         own = f":{config.NICKNAME}!bot@host JOIN #dccore-test"
         self.assertFalse(_evaluate(condition, own), condition)
 

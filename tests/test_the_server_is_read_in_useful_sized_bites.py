@@ -144,8 +144,10 @@ class ABiggerReadSplitsTheSameWay(unittest.TestCase):
 
 
 class BothLoopsUseIt(unittest.TestCase):
-    """The registration loop reads the same stream through the same helper -
-    and the server's 001-005 and MOTD arrive there, in a burst of their own."""
+    """The registration loop read the same stream through the same helper -
+    and the server's 001-005 and MOTD arrive there, in a burst of their own.
+    Since #634 there is ONE read loop: NICK and USER go out back to back and
+    the main loop is the registration, so there is one recv() to check."""
 
     def source(self):
         with io.open(os.path.join(REPO_ROOT, "irc.py"),
@@ -176,18 +178,18 @@ class BothLoopsUseIt(unittest.TestCase):
 
         self.assertEqual(offenders, [])
 
-    def test_both_reads_take_the_named_size(self):
+    def test_the_read_takes_the_named_size(self):
         import ast
 
         named = [arg.id for arg in self.recv_calls()
                  if isinstance(arg, ast.Name)]
 
-        self.assertEqual(named, ["SOCKET_READ_BYTES"] * 2)
+        self.assertEqual(named, ["SOCKET_READ_BYTES"])
 
     def test_that_search_actually_finds_the_reads(self):
         """Guard on the guard: an AST walk that matched nothing would satisfy
         both assertions above."""
-        self.assertEqual(len(self.recv_calls()), 2)
+        self.assertEqual(len(self.recv_calls()), 1)
 
 if __name__ == "__main__":
     unittest.main()

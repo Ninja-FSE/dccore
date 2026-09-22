@@ -108,6 +108,12 @@ reasonably concluding the codebase was broken. It was not.
 
 A skip says *"not here"*, which is true. A failure says *"broken"*, which was not.
 
+A skip is also a test that ran nothing, so `preflight.py` counts them: it prints
+every skip reason with how many tests gave it, and refuses to pass above a
+ceiling (#642). A dozen skips on a Windows box are the permission-bit and
+MAX_PATH hazards that cannot be reproduced there - fine. "no POSIX shell on PATH"
+means the launcher tests did not run: from Windows, run preflight from Git Bash.
+
 ---
 
 ## 7. English, in code and comments

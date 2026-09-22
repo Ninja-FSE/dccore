@@ -83,7 +83,21 @@ def format_speed(bytes_per_sec):
 MIN_RECORD_SECONDS = 1.0
 
 
-def speed_is_measurable(duration):
+# A BIG FILE IS NOT A MEMORY COPY. The one-second floor exists because a small
+# file fits in the socket's send buffer (4 MB by default) and is "sent" in one
+# go, so the clock measures memory. A file well past the buffer cannot be: the
+# kernel blocks once it is full and the send paces itself against the
+# receiver - and since #526 the clock stops at the receiver's FINAL
+# acknowledgement, not at the last sendall(). Such a transfer on a fast link
+# (a LAN, a fibre line: 35 MB/s is a 40 MB file in a second) finished in under
+# a second, was reported "at 0B/s", and its real speed was thrown away. Twice
+# the buffer, and at least a tenth of a second so a timer's resolution is not
+# most of the figure.
+LARGE_TRANSFER_BYTES = 8 * 1024 * 1024
+MIN_LARGE_TRANSFER_SECONDS = 0.1
+
+
+def speed_is_measurable(duration, size=None):
     """Whether a transfer of this duration has a rate worth reporting.
 
     sendall() returns once the bytes are in the KERNEL, not once the peer has
@@ -104,7 +118,13 @@ def speed_is_measurable(duration):
     one - because a number too unreliable to keep is too unreliable to say.
     """
     try:
-        return duration is not None and float(duration) >= MIN_RECORD_SECONDS
+        if duration is None:
+            return False
+        seconds = float(duration)
+        if seconds >= MIN_RECORD_SECONDS:
+            return True
+        return (size is not None and float(size) >= LARGE_TRANSFER_BYTES
+                and seconds >= MIN_LARGE_TRANSFER_SECONDS)
     except (TypeError, ValueError):
         return False
 

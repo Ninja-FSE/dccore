@@ -179,6 +179,7 @@
     // cleanly in git and then silently keep the last one, so one of the two
     // buttons would stop working with no error anywhere.
     filelistsPurgeListBtn: document.getElementById("filelists-purge-btn"),
+    filelistsRedownloadBtn: document.getElementById("filelists-redownload-btn"),
     filelistsBotList: document.getElementById("filelists-bot-list"),
     filelistsPurgeBtn:    document.getElementById("filelists-purge-offline-btn"),
     filelistsPurgeStatus: document.getElementById("filelists-purge-status"),
@@ -1275,7 +1276,13 @@
         return;
       }
       var key = res.data.already_known ? "filelists.sourceAlreadyKnown" : "filelists.sourceAdded";
-      showFilelistsSourceStatus(t(key).replace("{nick}", res.data.added), false);
+      // A 200 with a warning (#691): the row is on the page, and not on
+      // the disk. Said as the error it is, not swallowed into "added".
+      if (res.data.warning) {
+        showFilelistsSourceStatus(t(key).replace("{nick}", res.data.added) + " " + t("filelists.sourceNotOnDisk"), true);
+      } else {
+        showFilelistsSourceStatus(t(key).replace("{nick}", res.data.added), false);
+      }
       el.filelistsAddSourceInput.value = "";
       pollFilelistsBots();
     }).finally(function () {
@@ -1296,7 +1303,11 @@
           t("filelists.couldNotForgetSource").replace("{error}", (res.data && res.data.error) || ("HTTP " + res.status)), true);
         return;
       }
-      showFilelistsSourceStatus(t("filelists.sourceForgotten").replace("{nick}", res.data.removed), false);
+      if (res.data.warning) {
+        showFilelistsSourceStatus(t("filelists.sourceForgotten").replace("{nick}", res.data.removed) + " " + t("filelists.sourceNotOnDisk"), true);
+      } else {
+        showFilelistsSourceStatus(t("filelists.sourceForgotten").replace("{nick}", res.data.removed), false);
+      }
       el.filelistsAddSourceInput.value = "";
       pollFilelistsBots();
     }).finally(function () {
@@ -2408,6 +2419,9 @@
       });
     }
 
+    if (el.filelistsRedownloadBtn) {
+      el.filelistsRedownloadBtn.addEventListener("click", redownloadCurrentList);
+    }
     if (el.filelistsPurgeListBtn) {
       el.filelistsPurgeListBtn.addEventListener("click", purgeCurrentList);
     }
@@ -2749,6 +2763,39 @@
 
     button.hidden = isOwnSource(source) || !row || !row.held;
     button.disabled = false;
+
+    // The same rule for the re-download button beside it.
+    var again = el.filelistsRedownloadBtn;
+    if (again) {
+      again.hidden = button.hidden;
+      again.disabled = false;
+    }
+  }
+
+  // Fetch the open bot's list again, by hand. AUTO_REFETCH_LISTS does this on
+  // a timer and is off by default; when it is off or not working the only way
+  // was to type the nick into the fetch box. The BOT, not row.label: the tab
+  // open now may be its RAR or VIDEO list, and the request is for the bot's
+  // list archive, exactly as the fetch box's is.
+  function redownloadCurrentList() {
+    var source = state.filelistsSource;
+    var row = state.filelistsBots[source];
+    if (!source || isOwnSource(source) || !row || !row.held) { return; }
+
+    var bot = row.nick || row.bot || row.label || source;
+    el.filelistsRedownloadBtn.disabled = true;
+    postJson("/api/filelists/fetch", { bot: bot }).then(function (res) {
+      if (!res.ok) {
+        showFilelistsFetchStatus(res.data.error || ("HTTP " + res.status), true);
+        return;
+      }
+      showFilelistsFetchStatus(t("filelists.redownloadRequested").replace("{bot}", bot));
+      pollFilelistsBots();
+    }).catch(function (err) {
+      showFilelistsFetchStatus(t("common.requestFailed").replace("{error}", err.message), true);
+    }).finally(function () {
+      el.filelistsRedownloadBtn.disabled = false;
+    });
   }
 
   function purgeCurrentList() {
@@ -3709,6 +3756,7 @@
     BANS_FILE: "settings.field.BANS_FILE",
     STATS_FILE: "settings.field.STATS_FILE",
     HARD_BANS_FILE: "settings.field.HARD_BANS_FILE",
+    DCC_QUEUE_FILE: "settings.field.DCC_QUEUE_FILE",
     KNOWN_BOTS_FILE: "settings.field.KNOWN_BOTS_FILE",
     LIST_INDEX_FILE: "settings.field.LIST_INDEX_FILE",
     DOWNLOAD_COUNTS_FILE: "settings.field.DOWNLOAD_COUNTS_FILE",
@@ -3729,6 +3777,7 @@
     LIST_HEADER_MAX_BYTES: "settings.field.LIST_HEADER_MAX_BYTES",
     LIBRARY_FOLDERS_FILE: "settings.field.LIBRARY_FOLDERS_FILE",
     LISTS_FILE: "settings.field.LISTS_FILE",
+    ADMIN_TOKENS_FILE: "settings.field.ADMIN_TOKENS_FILE",
     ON_CONNECT_FILE: "settings.field.ON_CONNECT_FILE",
     THEME: "settings.field.THEME",
     CUSTOM_THEME_BORDER: "settings.field.CUSTOM_THEME_BORDER",
@@ -3747,6 +3796,7 @@
     REQUEST_WINDOW: "settings.field.REQUEST_WINDOW",
     MUTE_TIME: "settings.field.MUTE_TIME",
     FLOOD_BAN_SECONDS: "settings.field.FLOOD_BAN_SECONDS",
+    DCC_ACCEPT_TIMEOUT: "settings.field.DCC_ACCEPT_TIMEOUT",
     MAX_SEND_FAILS: "settings.field.MAX_SEND_FAILS",
     RAR_TIMEOUT: "settings.field.RAR_TIMEOUT",
     LIST_UPDATE_TIMEOUT: "settings.field.LIST_UPDATE_TIMEOUT",
@@ -3754,6 +3804,7 @@
     ADMIN_HOSTMASKS: "settings.field.ADMIN_HOSTMASKS",
     ADMIN_CHAT_MODE: "settings.field.ADMIN_CHAT_MODE",
     ADMIN_CHANNEL_COMMANDS: "settings.field.ADMIN_CHANNEL_COMMANDS",
+    ADMIN_CHAT_COLOURS: "settings.field.ADMIN_CHAT_COLOURS",
     WEBUI_ENABLED: "settings.field.WEBUI_ENABLED",
     WEBUI_HOST: "settings.field.WEBUI_HOST",
     WEBUI_PORT: "settings.field.WEBUI_PORT",
@@ -3826,6 +3877,13 @@
   function settingsHelpHtml(field) {
     var help = fieldHelp(field);
     if (!help) { return ""; }
+    // The help is one text for two readers (#686): settings.conf.sample,
+    // where the value IS bytes, and this page, where a size field is typed
+    // and shown in the unit on its chip. So the page says which, after the
+    // shared text, or "in bytes" in the tooltip contradicts the MB beside it.
+    if (field.unit) {
+      help += " " + t("settings.help.shownIn").replace("{unit}", field.unit);
+    }
     return '<span class="settings-help" tabindex="0">' +
       '<span class="settings-help-mark" aria-hidden="true">?</span>' +
       '<span class="visually-hidden">' + escapeHtml(t("settings.whatThisDoes")) + "</span>" +

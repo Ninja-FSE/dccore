@@ -15,7 +15,10 @@ before.
 
 `is_admin()` compares a nick against `ADMIN_NICK`. On Undernet a nick is not owned
 without services auth, so anyone can take the admin nick while you are offline and
-inherit every admin command, including the destructive `!clearqueue`.
+inherit every admin command, including the destructive `!clearqueue`. With
+`ADMIN_HOSTMASKS` set, the channel and private-message commands check the sender's
+host as well as the nick (see "The admin commands typed in a channel" below); with
+it empty they are still checked on the nick alone.
 
 The console replaces that with two independent factors:
 
@@ -70,9 +73,14 @@ ISP hostname, `+x` did not take and the console will not let you in.
 
 ### 2. Generate a password hash
 
-`python3 configure.py` does steps 2 and 3 together - the same password prompt as
+`python3 configure.py` does this step for you - the same password prompt as
 below, writing the resulting hash straight into `admin_config.py` - if you
-have not already run it. To do it by hand instead:
+have not already run it. **It also offers step 3**, optionally: your services
+host, straight after the admin nick question, blank to skip (#811). Answer it
+and `ADMIN_HOSTMASKS` is set for you, in `settings.conf`; leave it blank and
+the console ignores every DCC CHAT without a word until you set it by hand as
+step 3 shows, or on the dashboard's **Settings → Admin console** page. To do
+the hash by hand instead:
 
 From the DCCore directory, on either platform:
 
@@ -125,7 +133,12 @@ ADMIN_HOSTMASKS = ["operator.users.undernet.org", "operator2.users.undernet.org"
 ```
 
 A pattern that reduces to bare `*` is refused and logged — it would admit the
-whole network and make the gate decorative.
+whole network and make the gate decorative. A pattern that is accepted but
+names far more than one operator is warned about at start-up, on `!rehash` and
+by `setup_check.py`, and still works as written: `*.users.undernet.org` puts
+the wildcard where your account name goes, so every X-authenticated user on
+the network reaches the password prompt; `*.org` names a top-level domain. The
+documented shape is your own services host in full.
 
 ### 4. Restart the daemon
 
@@ -135,6 +148,12 @@ changes too, but a restart is the sure thing while you are setting this up.
 ---
 
 ## Using it
+
+**Using mIRC?** `scripts/mirc/dccore.mrc` turns the console into one
+window - the feed coloured per kind, a side panel with what is sending and
+who is waiting, the slots and today's totals in the title bar - and logs in
+by itself. See [The window, in mIRC](#the-window-in-mirc) below; the rest
+of this section is what happens underneath it.
 
 **Would rather not open a second IRC client at all?** The web dashboard's
 Console page runs the exact same command set and shows the exact same live
@@ -189,7 +208,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.10.0-RC1 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.13.0 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -209,7 +228,7 @@ prefix.
 | Command | Effect |
 |---|---|
 | `status` | everything at a glance — slots, queue, bans, list, uptime |
-| `queue [nick]` | queued files, all users or one |
+| `queue [nick]` | queued files, all users (in the order they are served) or one |
 | `slots` | what is sending right now, and how far along |
 | `bans` | permanent and timed bans |
 | `uptime` | how long the daemon has been running |
@@ -225,8 +244,19 @@ prefix.
 | `clearqueue <nick>` | force-clear another user's queue |
 | `rehash` | reload modules in place |
 | `update` | rebuild the MasterList |
+| `lists` | the bots' lists we hold, whether each has changed since we took our copy, how big and how old |
+| `fetch [<bot>]` | ask every held bot whose list has changed (up to 10 at a time, skipping offline ones), or one bot whatever its freshness |
 | `help` | the command list |
+| `hello <client> <version>` | switch this session to the structured feed (below) |
+| `pair <client> <version>` | mint a login token for a script (below) |
+| `unpair [<client>]` | list the paired scripts, or revoke one |
 | `quit` | close the session |
+
+`lists` and `fetch` are the console side of the List Browser's freshness check and
+its automatic refresh. `fetch` goes through the same enqueue as the dashboard's
+button, so the slot limits, the duplicate guard and the queue ceiling are the same,
+and the lists arrive as their transfers finish - a structured client is told with
+a `LISTFETCH` line when one is asked for automatically, arrives, or cannot be used.
 
 `rehash` and `update` run in the background — `update` walks the whole library
 and can take minutes — so the console stays usable while they work. Their
@@ -252,7 +282,7 @@ failures. It has two destinations, both on by default:
 | | |
 |---|---|
 | `DEBUG_TO_CHANNEL` | the coloured line in `DEBUG_CHANNEL`, as always |
-| `DEBUG_TO_CONSOLE` | the plain text in an attached admin console |
+| `DEBUG_TO_CONSOLE` | the plain text in an attached admin console - and, for `dccore.mrc`, the structured feed's event lines too: off means the window goes quiet, not just its `LOG` lines |
 
 Once the console is doing the job, in `admin_config.py`:
 
@@ -268,6 +298,15 @@ to be connected, `send_debug` falls back to stdout — so the LXC console and th
 journal always have it. That case, something going wrong while nobody is
 watching, is the one worth protecting. It is a floor, not a third destination:
 when the channel or a console did take the line, nothing extra is printed.
+
+### In colour
+
+The chat window is an IRC client, so the tag on each line - `[SENT]`,
+`[FAIL]`, `[REQUEST]`, `[SECURITY]` - is coloured the same way it is in the
+debug channel, in whatever theme the bot uses. `ADMIN_CHAT_COLOURS`
+(**Settings → Admin console**) turns that off for a client that shows the
+codes as junk; off gives plain `[TAG] text`. The dashboard's Console page is
+never coloured.
 
 ### The transfer feed
 
@@ -418,8 +457,327 @@ ADMIN_CHANNEL_COMMANDS = False
 ```
 
 Admin authority then rests entirely on the services host plus the password, and
-no longer on a nick. The user commands — `!list`, `!ping`, `!debugnames`,
-`@find`, the queue triggers — are not affected either way.
+no longer on a nick. You do not have to turn them off to be safe from a stolen
+nick, though: with `ADMIN_HOSTMASKS` set, `!ban`, `!unban`, `!rehash`, `!update`,
+`!clearqueue`, `!ping` and `!debugnames` typed in a channel or a private message
+are honoured only when the nick is in `ADMIN_NICK` **and** the sender's host
+matches one of the masks - the same test the console uses, so a host that lets you
+into the console lets you use these too, and a nick somebody else has taken does
+not. A line that does not say where it came from is refused. With
+`ADMIN_HOSTMASKS` empty the check is the nick alone, as it always was. The user commands — `!list`, `@find`, the queue triggers —
+are not affected either way. `!ping` and `!debugnames` are the operator's
+diagnostics rather than user commands: they answer only a nick in `ADMIN_NICK`
+(and, being channel commands, keep doing so with `ADMIN_CHANNEL_COMMANDS` off).
+
+## The structured feed, for a script
+
+A client that draws a window - `dccore.mrc` is the one this exists for - wants
+fields, not prose. After logging in, send one console command:
+
+```
+hello dccore.mrc 1.1
+```
+
+The bot answers `DCCORE HELLO 1.1 <botnick> <version>` and, from then on, every
+line it sends on this session starts with `DCCORE`. The second word of your
+`hello` is your client's own version, and the bot reads it: one older than
+the oldest script that reads this bot's lines right (`1.1`, the first to know
+the channel field) is answered, right after `HELLO`, with a plain line saying
+to update the script - the feed still switches on, since the major is the
+same, but a field will read wrong until you do. A bot without this feature
+answers `Unknown command: hello` instead - stay in prose mode. The number in
+`HELLO` is the protocol version as `major.minor` (a bot from before the minor
+was added says a bare `1`): refuse a major you do not know; a minor you do not
+know means a fixed field has been inserted on one side - the lines still
+parse, but a field is not where you expect it - so warn, and update whichever
+side is older. The minor goes up every time a field is inserted; the free-text
+field is always last, so appending nothing ever moves.
+
+Every line is **space-separated positional tokens, with the one free-text
+field last** - so in mIRC it is `$1`, `$2`, ... and `$N-`. Numbers are raw
+bytes and seconds; you format them. Tabs and control characters in any field
+have been replaced with spaces.
+
+| line | fixed fields | free text (last) |
+|---|---|---|
+| `DCCORE HELLO 1.1 <botnick>` | protocol major.minor, nick | the version string |
+| `DCCORE REQUEST <nick> <channel> <file\|folder>` | | the name |
+| `DCCORE QUEUED <nick> <channel> <pos> <busy> <slots>` | position, slots busy / total | the name |
+| `DCCORE SENDING <nick> <channel> <slot> <slots> <bytes>` | slot n / m, size | the name |
+| `DCCORE RESUMED <nick> <channel> <at_bytes> <total_bytes>` | | the name |
+| `DCCORE SENT <nick> <channel> <bytes> <seconds> <bytes_per_s>` | | the name |
+| `DCCORE FAIL <nick> <channel> <acked_bytes> <total_bytes>` | what arrived, of what | the name, then ` :: `, then the reason |
+| `DCCORE SEARCH <nick> <channel> <results>` | count (the total, not the capped reply) | the term |
+| `DCCORE LOG <CATEGORY>` | JOIN, PART, QUIT, BAN, HARDBAN, MUTE, TBAN, INFO | the prose, as the plain console shows it |
+| `DCCORE OUT` | | one line of a console command's reply |
+| `DCCORE DROPPED <n>` | lines the bot had to drop for a slow client | |
+| `DCCORE TAKEN <ip>` | the address that took the console over | |
+| `DCCORE LISTFETCH <bot> <action>` | `auto` (asked again automatically), `arrived`, `unusable` | one line of prose that names the bot |
+| `DCCORE STATUS <used> <slots> <qfiles> <qusers> <sent_today> <bytes_today> <bps_now> <record_bps> <started> <failed> <searches>` | slots in use / total, files and users queued, today's sends and bytes, speed now, the record; then when the bot started (epoch) and the failures and searches it has seen since | |
+| `DCCORE SLOT <nick> <sent> <total> <bps>` | one per active transfer: bytes so far, size, speed from its own clock | the name |
+| `DCCORE QUEUE <pos> <nick> <files> <frozen_secs_left>` | one per queued user, the first 20 in the order they are served: position, files waiting, seconds until a frozen queue is dropped (0 = not frozen) | |
+| `DCCORE TOKEN <name>` | the reply to `pair` | the token, shown once |
+| `DCCORE PING` | stands in for a status burst the bot could not compute in time; a client treats it as any other line and shows nothing | |
+
+`<channel>` is always exactly one token, straight after the nick: the channel
+the request or search was made in, or `-` when there is none (a request by
+private message, a resume, or a transfer that no longer knows where it was
+asked for) - so a client can count on the position of everything after it and
+print nothing for `-`.
+
+Whatever you did not tick in **Settings → Console feed** is not sent in either
+mode. A session that never says `hello` is the console described above,
+unchanged.
+
+### The live picture
+
+`STATUS`, then a `SLOT` line per transfer, then a `QUEUE` line per waiting
+user, is one **burst**, and it is what a client's title bar and side panel are
+drawn from. It arrives:
+
+- right after `HELLO`, so the window is filled before the first event;
+- after any event that moved a slot or the queue (`SENDING`, `SENT`, `FAIL`,
+  `QUEUED`, `RESUMED`), so the picture never waits for the timer;
+- every 30 seconds while the session is quiet. That is also the heartbeat: a
+  client that has heard nothing for a minute or so knows the link is dead,
+  not merely idle. The figures are read on a helper thread with a two-second
+  deadline; if they are not in by then (a queue lock or a stats database held
+  for that long by some slow disk operation) the bot sends `DCCORE PING`
+  instead, so a busy-but-alive bot is still heard from, and the feed keeps
+  flowing behind it. The burst follows once the figures can be read.
+
+The timer fills silence only. A client that is behind is already receiving
+lines, and a burst on top of a backlog would only push more of them off the
+500-line outbox, so the writer drains what is queued before the timer speaks.
+`bps_now` is the daemon's own live speed; a `SLOT` line's `bps` is that
+transfer's bytes over its own elapsed time, and reads `0` for the first half
+second. Today's figures are the rolled ones, the same the advert shows.
+
+### Pairing: a credential that is not the password
+
+A script has to log in without a person typing, which means a credential
+stored on disk. That should not be the admin password: the same string opens
+the dashboard, and a `.mrc` file is not where it belongs. So a script is
+**paired** instead:
+
+```
+pair dccore.mrc 1.0
+```
+
+The bot mints a random token (43 characters), stores only its PBKDF2 hash in
+`data/adminchat_tokens.json` under the client's name, and sends the token back
+once - as `DCCORE TOKEN dccore.mrc <token>` on a structured session, as a
+plain line otherwise. Paste it into the script's settings; it is not shown
+again. From then on the script answers `Enter Your Password:` with the token
+and is logged in exactly as with the password: the same hostmask check
+first, the same three attempts, the same IP block.
+
+**The script only sends the token to the bot it paired with.** It dials the
+bot's nick by itself, and on Undernet anyone can take a nick while the bot is
+away, so before answering `Enter Your Password:` it compares the host the nick
+has now with the one the bot had when the token was stored (`bothost` in
+`dccore.ini`, learned when the token arrives). A different host is not sent the
+token: the window says so and the script stops reconnecting by itself. If the bot
+really has moved, `/dccore trust` accepts its current host. A script paired
+before this check learns the host the first time the bot's is known; if it is
+not known yet (you share no channel with it) the token waits for `/dccore trust`.
+
+The same check guards the password prompt in a chat the script opened by itself.
+With no token to send (you never paired, ran `unpair`, or are pairing while the
+bot is away) the script used to put "Type the admin password here" in the window
+for whoever held the nick. Now a chat you opened yourself with `/dccore connect`
+or `/dccore pair` asks as before - that is your own act - but one the script
+dialled after a JOIN, an IRC connect or a retry asks only if the nick is at the
+host the bot is known to have (`bothost`); otherwise the window says so and the
+script stops reconnecting until you `/dccore connect`. A script with no
+`bothost` yet learns the host the first time it is known, as for the token.
+
+What a token does **not** do is open the dashboard. The web login checks the
+admin password hash and nothing else - the token store is never read there -
+so a stolen token costs you a console session and nothing more, and one
+`unpair` ends even that. For `dccore.mrc` the file that holds it is
+`dccore.ini` beside the script, and it is clear text: mIRC's hash-table save
+writes the token readable. The `.mrc` itself carries nothing. Keep `dccore.ini`
+as you would a password file - a copied mIRC folder or a shared PC is where it
+travels - and `/dccore unpair` the moment you think it has. Pairing the same name again replaces the old token -
+which is why the script does not pair as the literal `dccore.mrc`: it pairs as
+`dccore.mrc-<8 hex>`, the tail derived from the mIRC folder it is loaded from,
+so a second machine (or a second mIRC on the same one) gets a name and a token
+of its own instead of silently revoking the first. The same copy pairing again
+still replaces its own token, which is how a lost one is rotated.
+
+The web login also refuses a password sent by a page on another site: a
+browser names the sending page in the `Origin` (or `Referer`) header, and when
+that is not the address the dashboard was opened at, the attempt is answered
+403 and not counted. Without this, any website open in the same browser could
+post three wrong passwords to `127.0.0.1:8420` and lock you out of your own
+dashboard for fifteen minutes, again and again. If you reach the dashboard
+through a reverse proxy, the proxy must pass the `Host` header through
+unchanged (`proxy_set_header Host $host;` in nginx), or every login is refused
+with "This login was sent by another site".
+
+```
+unpair                    list the paired clients and when they were paired
+unpair dccore.mrc-3f9a12c0   revoke one; its next login is a wrong password
+```
+
+`pair` and `unpair` are console commands: you have to be logged in - with
+the password or with a token - to mint or revoke one. The file lives where
+**Settings → Advanced → Paired console scripts file** points.
+
+## The window, in mIRC
+
+`scripts/mirc/dccore.mrc` is the client the feed above was designed for:
+the bot's whole life in one mIRC window, so that running DCCore feels no
+different from running a script inside mIRC. It needs **mIRC 6.10 or
+later** - everything it uses dates from mIRC 6.x - and a bot that answers
+`hello`: the DCCore this script ships with, or a later one. On an older bot
+it still works as a plain console, without the panel.
+
+### First time
+
+Save the file anywhere (your mIRC folder is fine) and, in mIRC:
+
+```
+/load -rs dccore.mrc
+/dccore pair MusicBot
+```
+
+with your bot's nick in place of `MusicBot`. The `@DCCore` window opens,
+the chat is offered exactly as `/dcc chat` would (path 1 or 2 above, as
+the bot decides), and when the bot asks for the password you **type it in
+the window, once**. The script then sends `pair dccore.mrc-<id> 1.1` - the
+id is this mIRC install's own, see "What a token does not do" above - keeps the
+token the bot answers with in `dccore.ini` beside the script (in clear
+text - see "What a token does not do" above), and from then on connects
+and logs in without you: on `/dccore connect`, when mIRC connects to IRC,
+and whenever the bot's nick joins a channel you share. The token opens the
+console and nothing else; the password never touches the disk.
+
+If your client cannot be dialled and the bot offers the chat back (path
+2), mIRC shows its usual incoming-chat dialog the first time - accept it,
+or add the bot with `/dcc trust <botnick>` and set **Options → DCC → On
+Chat request** to auto-accept so it never asks again.
+
+### What you see
+
+| where | what |
+|---|---|
+| the text | one line per event, mIRC's own timestamp, a bold coloured tag - `[REQUEST]`, `[SENDING]`, `[SENT]`, `[FAILED]`, `[QUEUED]`, `[SEARCH]`, `[JOIN]`, `[BAN]`... - then the event in plain words, the file name in its own colour |
+| the side panel | **Sending n/m**: each running transfer with its size, percentage and speed; **Queue n**: who is waiting, in order, with `frozen m:ss` on a queue that is counting down; **Today**: files and bytes sent, the speed record; and what this window has seen since it opened |
+| the title bar | `MusicBot on Undernet · slots 2/3 · queue 14 · today 38 files / 12.4GB · 1.5MB/s`, updated with every status burst |
+| the editbox | anything you type is a console command - `status`, `queue helen`, `clearqueue ivan`, `ban *!*@bad.host` - and the reply comes back as `[CONSOLE]` lines, or into a second `@DCCore-console` window if you prefer |
+| right-click | the common commands; on a panel line, that user's queue or clearing it; in any channel's nick list, **DCCore → Queue of / Clear the queue of** that nick |
+| a beep | on a failed transfer, if you leave that on |
+
+Every five minutes a `[STATUS]` line summarises the numbers in the text
+too, so scrolling back shows how the day went. A bot that goes quiet for
+90 seconds is treated as gone and the chat is reopened; a chat that
+cannot be opened is retried after 5 s, 15 s, 60 s and then every two
+minutes. An offer the bot never answers - mIRC's own `Waiting for
+acknowledgement...` never gives up - is closed after 75 seconds and
+retried the same way. Closing the window closes the chat and stops the
+retries; `/dccore connect` starts them again.
+
+### Options
+
+`/dccore options` (or right-click → Options...):
+
+- a tickbox and a colour for each kind of event - requests, queue
+  positions, sends, failures, searches, joins/parts/quits, bans, other log
+  lines - plus the colour of file names, of console replies and of the side
+  panel's headings, and how
+  often the `[STATUS]` line is written (0 = never);
+- the side panel, the title bar figures, console replies in a separate
+  window, the beep, the fixed-width font and its size (the Status window's
+  size until you set one - on a high-resolution screen you may want a
+  bigger number), and the window's background colour (one of mIRC's sixteen,
+  or "none" to leave the window as mIRC has it). mIRC has no per-window
+  colour setting, so the script writes a one-pixel picture of the colour
+  beside itself (`dccore-bg-<n>.bmp`) and tiles it behind the text;
+- the bot's nick, whether the script reconnects by itself, the pairing
+  state with **Pair again...** and **Forget token**.
+
+These are the script's own filters, kept by mIRC in `dccore.ini`. The
+bot's **Settings → Console feed** tickboxes remain the ceiling on what is
+sent at all: what is off there never reaches the script.
+
+### Commands
+
+```
+/dccore pair <botnick>       first time: connect, log in once by hand, keep a token
+/dccore connect [botnick]    open the window and the chat (logs in with the token)
+/dccore disconnect           close the chat and stop reconnecting
+/dccore unpair               forget the token here and revoke it on the bot
+/dccore trust                accept the bot's current host as the one to send the token to
+/dccore options              what to show, colours, panel, title bar, beep
+/dccore window               open or focus @DCCore
+/dccore status               ask the bot for its status
+/dccore lists                the bots' lists we hold, and which have changed
+/dccore fetch [bot]          ask the bots whose lists changed, or one bot
+/dccore raw <command>        send any console command
+/dccore panel on|off         the side panel
+/dccore font <size>          the window's font size, e.g. /dccore font 14
+```
+
+### Updating the script
+
+A newer bot may send a line with a field the loaded script does not know
+about. Save the new `dccore.mrc` over the old one, then in mIRC:
+
+```
+/reload -rs dccore.mrc
+/dccore connect
+```
+
+`/reload` re-reads the file in place and keeps your settings and the stored
+token (they live in `dccore.ini` beside it); `/load` would add a second copy.
+The window says so itself when the two sides disagree: *"speaks feed 1.2 and
+this script was written for 1.1"* means update the script; the same line the
+other way round means update the bot. The bot checks in the other direction
+too: a script older than the one its lines were written for is told
+*"Update the script"* right after `hello`.
+
+### If something is off
+
+- **Channel names or nonsense numbers where the position, slot or size
+  should be** - the bot and the script disagree on where a field sits; the
+  script and the bot ship together, and one of them is older. The window
+  says which when it connects (see "Updating the script" above). A script
+  from before the channel field was added does not say so: it just shows
+  the channel as the next number - update it.
+- **Non-ASCII file names look garbled** - mIRC 6 shows text in your
+  Windows code page and the bot sends UTF-8. mIRC 7 decodes the chat as
+  UTF-8 and shows them correctly; the script is the same file on both.
+- **"Plain mode" in the window** - the bot is from before `hello` and
+  does not answer it; the window shows the chat as it comes, with no
+  panel. Or the bot speaks a newer protocol than the script - a script
+  from before the version carried a minor refuses `1.1` this way and says
+  "Update the script": do that (see "Updating the script" above).
+- **The stored token is refused** - it was revoked on the bot (`unpair`),
+  replaced by pairing the same name again (the same mIRC install; another
+  machine pairs under its own name and leaves this one alone), or the token
+  file was moved; `/dccore pair` again, typing the password once. The script does
+  not send a refused token again and does not redial by itself until you
+  log in or pair again: a refusal counts as a wrong password, three of them
+  block your address for 15 minutes, and left to itself the redial would
+  reach that in about two minutes.
+- **You are on more than one network** - the script remembers which
+  network the bot is on from the moment you type `/dccore connect` or
+  `/dccore pair` there (or from the bot's own join), and every later dial -
+  on connect, on the bot's join, on a retry, or `/dccore connect` typed in
+  a window on another network - goes to that network. Pairing again from
+  another network moves it. `/dccore version` says which network it holds.
+- **Two people with the script** - the console is one session, and a
+  login replaces the one before it. The client that was replaced says so
+  and does not reconnect by itself, so the two of you take turns rather
+  than trading it every few seconds.
+- **"No answer from <bot> in 75 seconds"** - the bot got the offer and
+  said nothing back. It refuses in silence when your host is not in
+  `ADMIN_HOSTMASKS`, when your address is blocked for 15 minutes after
+  three wrong passwords, or when it could not reach your client and its
+  own offer back was dropped (see `ADMIN_CHAT_MODE`); the bot's own log
+  says which. The script keeps retrying with the usual backoff.
 
 ## Limits and timeouts
 
@@ -430,6 +788,8 @@ no longer on a nick. The user commands — `!list`, `!ping`, `!debugnames`,
 | IP block after failed attempts | 15 minutes |
 | Idle timeout once logged in | none — the console stays open until you close it, log in again from elsewhere, or the connection drops |
 | Sessions at once | 1 |
+| Lines queued for a slow client | 500, then the oldest are dropped (a structured session is told how many) |
+| Structured status burst | every 30 seconds while quiet, and after any slot or queue change |
 
 **A second login replaces the first.** If you left a session open on another
 machine, or your client froze and the server has not timed the nick out yet, just
@@ -451,7 +811,9 @@ looks identical to a broken bot. Check the daemon log:
 ```
 
 That line tells you the host the server actually saw. Usually it means `+x` is not
-set, or `ADMIN_HOSTMASKS` has a typo.
+set, or `ADMIN_HOSTMASKS` has a typo - or was never set at all: `configure.py`'s
+services-host question is optional, and an install where it was left blank at
+setup is still missing step 3.
 
 **The log says the password is not set.**
 
@@ -485,7 +847,16 @@ moment is testing something else — usually a forwarding rule rather than a liv
 listener.
 
 You do not have to work out which it is. Set `ADMIN_CHAT_MODE = "listen"` and the
-bot stops dialling you altogether.
+bot stops dialling you altogether. The listener it opens answers only a connection
+from the address your client advertised in its CTCP, or from any private-network
+address (#881) - if you and the bot share one home router, your client advertises
+that router's public IP, but your own connection can arrive at the bot with a
+private LAN address instead (a NAT hairpin), which the exact match alone would
+reject as a stranger. Anything else that reaches the port during the window - a
+public address that is neither one - is dropped without a banner, logged as
+`Dropped a connection from <ip> ... Still waiting.`, and the port stays open for
+you. (A passive request advertises no address, so there the first connection is
+taken.)
 
 **The log says it could not connect to you at `0.0.0.0`.**
 
@@ -520,8 +891,8 @@ Three wrong passwords from that IP. Wait 15 minutes, or restart the daemon — t
 block lives in memory only.
 
 **Locked out entirely.**
-Edit `admin_config.py` and restart. Until phase 2 flips the switch, the channel
-commands still work, so you are never without a way in.
+Edit `admin_config.py` and restart. While `ADMIN_CHANNEL_COMMANDS` is on (it
+ships on), the channel commands still work, so you are never without a way in.
 
 ---
 
@@ -542,4 +913,3 @@ depth behind it. Optional TLS is on the list for a later phase.
 
 Optional, and not built: TLS on the chat (Python's `ssl` is stdlib, and iroffer
 supports it), and iroffer's second restricted admin tier (`hadminhost`).
-- **Phase 4, optional** — TLS on the chat, and a second restricted admin tier.

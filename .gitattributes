@@ -29,6 +29,10 @@
 # ever run on Windows, so they are the one exception to the LF rule above.
 *.bat   text eol=crlf
 
+# mIRC script. mIRC 6.x reads its script files line by line with CRLF
+# endings and shows an LF-only file as one very long line in its editor.
+*.mrc   text eol=crlf
+
 # Binary: never touch the bytes. Newline conversion inside an archive or
 # an audio file would corrupt it silently and permanently.
 *.zip   binary

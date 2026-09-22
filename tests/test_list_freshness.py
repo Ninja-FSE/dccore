@@ -282,17 +282,21 @@ class AskingAgainWithoutBeingAsked(DCCoreTestCase):
         """Read out of oserve.py: driving startup() needs a live socket, and
         the one thing that matters is that the loop is reached at all.
 
-        Asserted as a SEQUENCE - the guard and the thread together - because a
-        thread started unconditionally and a guard with nothing behind it are
-        both wrong, and either alone passes a check for the other."""
+        Boot goes through ensure_auto_refetch_worker() (#625), the same
+        guarded call the rehash makes, so the setting-gate and the
+        once-only guard are evaluated in tests/test_turning_auto_refetch_
+        on_live_starts_the_worker.py rather than read out of here; what
+        startup() has to do is call it."""
         with io.open(os.path.join(REPO_ROOT, "oserve.py"), encoding="utf-8") as handle:
-            code = handle.read()
-        block = code.split('if getattr(config, "AUTO_REFETCH_LISTS", False):', 1)
+            code = chr(10).join(line.split("#", 1)[0]
+                                for line in handle.read().splitlines())
+        body = code.split("def startup(", 1)[1]
 
-        self.assertEqual(len(block), 2,
-                         "oserve.py does not gate the refresh worker on the setting")
-        self.assertIn("list_fetch.auto_refetch_worker", block[1][:400],
-                      "the setting is checked but no worker follows it")
+        self.assertIn("list_fetch.ensure_auto_refetch_worker()", body,
+                      "startup() no longer starts the refresh worker")
+        self.assertNotIn("list_fetch.auto_refetch_worker", body,
+                         "startup() starts the loop directly, bypassing the "
+                         "once-only guard the rehash shares")
 
     def test_the_loop_itself_runs_a_sweep_and_then_waits(self):
         """The worker is an endless loop, so it takes its sleep as an argument

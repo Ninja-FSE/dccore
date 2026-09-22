@@ -12,32 +12,64 @@ round-tripped, DCC listener bound, WinRAR found at its install path.
 
 ---
 
-## The seven steps
+## The two steps
 
-The whole install, in order. Each one is covered in detail below - this is
-here because the sequence is one thing an operator does once, and it was split
-across two separately numbered sections.
+1. **Download and extract DCCore.**
+2. **Double-click `scripts\windows\start-dccore.bat`.** If there is no Python on
+   the machine it offers to install it (below). On the first run it opens the
+   setup page in your browser - nick, server, channels, your nick, the
+   password, the music folder, the dashboard - with an explanation beside each,
+   and starts the bot the moment you save. It offers to install Flask first
+   (the page and the dashboard need it); say no and the same questions are
+   asked in the black window instead. Every answer can be changed later on the
+   dashboard's Settings page.
 
-1. **Install Python.** [Python 3.10.0 (64-bit)](https://www.python.org/ftp/python/3.10.0/python-3.10.0-amd64.exe),
-   or any later 3.10+.
-2. **Tick both boxes in the installer:** *Add Python to PATH* and *py launcher*.
-3. **Check it took**, in a NEW Command Prompt:
-   `python --version`, `py --version`, `where python`, `where py`.
-4. **Only if you want the web dashboard:** `py -3 -m pip install -r requirements-web.txt`
-5. **Configure:** `py configure.py`
-6. **Check the setup:** `scripts\windows\start-dccore.bat check`
-7. **Start it, and read the first few lines:** `scripts\windows\start-dccore.bat`
+**No Python yet?** The launcher says so and asks:
 
-Steps 4 and 7 are the two that catch people out, and step 7 is how you find
-out about step 4 - see below.
+```
+  Python was not found.
+
+  DCCore can download Python 3.14.7 from python.org and install it
+  for you: about 32 MB, for your user only (no administrator prompt),
+  with "Add python.exe to PATH" and "py launcher" both ticked. The
+  download is checked against a fingerprint before it is run.
+
+  Download and install Python now? [Y/N]
+```
+
+`Y` fetches python.org's own installer, checks its SHA-256 against the one
+written in the launcher, runs it with a progress bar and no questions, and
+carries on to the setup questions. A file that does not match the
+fingerprint is deleted and not run. `N` - or a 32-bit Windows, or a machine
+without `curl` - opens the python.org download page instead; install from
+there with **both boxes ticked**, then double-click the launcher again.
+(Missed the PATH box? The launcher looks where the installer puts Python
+anyway.)
+
+No Command Prompt needed. The window that opens **is** the bot: closing it
+stops the bot, so leave it open or minimise it. `Ctrl-C` in it stops the bot
+on purpose.
+
+The setup page is `http://127.0.0.1:8420/setup` and answers only to this
+PC, only until the form is saved, and only with the one-time code in the
+link the window prints and opens - so nothing else on your PC or in your
+browser can fill it in for you. If the browser did not open, copy the link
+from the window. If the page could not be opened at all because the port is
+taken - another DCCore still running in a minimised window, say - the window
+says so and asks the questions itself.
+
+If you would rather do the steps by hand - or need to re-run one - they are
+still there: `py configure.py` asks the questions, `py -3 -m pip install -r
+requirements-web.txt` installs the dashboard's one dependency,
+`scripts\windows\start-dccore.bat check` checks the setup and stops.
 
 ---
 
 ## Did it actually start?
 
-Step 7 prints a lot. Three lines tell you whether the **web dashboard** came
-up, and they are worth knowing apart because they send you to different
-places.
+The launcher's window prints a lot. Three lines tell you whether the **web
+dashboard** came up, and they are worth knowing apart because they send you to
+different places.
 
 **It is running:**
 
@@ -54,8 +86,14 @@ The host and port are your own `WEBUI_HOST`/`WEBUI_PORT`. Open that address.
 ```
 
 The dashboard is opt-in - it is a network listener, so a missing switch is
-never read as consent to open one. Set `WEBUI_ENABLED = True` in
-`admin_config.py` or `settings.conf`. `py configure.py` asks you this.
+never read as consent to open one. Set `WEBUI_ENABLED = true` in
+`settings.conf` and restart. That is the file to edit: `py configure.py`
+writes your answer to the dashboard question there (`false` if you declined
+it), and where `settings.conf` and `admin_config.py` both set a name,
+`settings.conf` wins - so a `WEBUI_ENABLED = True` added to `admin_config.py`
+changes nothing while `settings.conf` still says `false`, and the daemon
+tells you so at startup (`[CONFIG] settings.conf overrides WEBUI_ENABLED
+...`). Running `py configure.py` again and answering yes does the same edit.
 
 **Flask is not installed:**
 
@@ -63,8 +101,10 @@ never read as consent to open one. Set `WEBUI_ENABLED = True` in
 [WEBUI] Flask not installed; dashboard disabled.
 ```
 
-That is step 4. The daemon itself needs nothing beyond the standard library
-and carries on serving files perfectly well - only the dashboard is
+That is the optional Flask install - the launcher offers it, or
+`py -3 -m pip install -r requirements-web.txt` by hand (item 4 under "Before
+you start", below). The daemon itself needs nothing beyond the standard
+library and carries on serving files perfectly well - only the dashboard is
 unavailable, which is why a missing Flask is a message rather than a failure.
 
 (A different line, `[WEBUI] Could not import webserver: ...`, means
@@ -93,6 +133,7 @@ suite are stdlib-only, which is why they run on a bare machine with no
 
 1. **Download Python.** [Python 3.10.0 (64-bit)](https://www.python.org/ftp/python/3.10.0/python-3.10.0-amd64.exe),
    or any later 3.10+ from [python.org](https://www.python.org/downloads/windows/).
+   (Or let the launcher do it - see *The two steps* above.)
 
 2. **Tick both boxes in the installer:** *Add Python to PATH* and *py launcher*.
    They are what make steps 3 onwards work from any directory — see the note on
@@ -178,9 +219,12 @@ on PATH, because WinRAR does not add itself to PATH.
 
 Asks nickname, IRC server, channel(s), admin nick, the admin console
 password, the music directory (optional - easier to set from the web
-dashboard once the daemon is running, if you would rather do it there),
-and whether to enable the web dashboard - and writes them to
-`settings.conf` and `admin_config.py` itself. Covers everything below;
+dashboard once the daemon is running, if you would rather do it there)
+and whether to enable the web dashboard, then offers to build the file
+list and to import OmenServe totals - the full list, in the order asked,
+is in [INSTALL.md](INSTALL.md#what-configure-asks) - and writes them to
+`settings.conf` itself, with the password hash (and nothing else) in
+`admin_config.py`. Covers everything below;
 skip to step 2 if you use it. The rest of this section is the manual
 equivalent, for anyone who would rather edit the files by hand.
 
@@ -247,8 +291,8 @@ Ctrl-C in that window stops it. The launcher runs the setup check first and
 refuses to start if it fails.
 
 Then read the first few lines it prints - see [Did it actually
-start?](#did-it-actually-start) above for the four that tell you whether the
-dashboard came up, and which of them means you skipped step 4.
+start?](#did-it-actually-start) above for the lines that tell you whether the
+dashboard came up, and which of them means Flask was never installed.
 
 ---
 
@@ -263,8 +307,21 @@ no list.
 `start-dccore.bat` does `cd /d "%~dp0..\.."` before anything else, so it is
 correct from a double-click, a shortcut, or any other directory.
 
-**This is also why there is no Windows service yet.** A service starts in
-`C:\Windows\System32`, and no launcher is involved to correct it. Making that
+**How the launcher installs Python, when it has to.** The version and the
+installer's SHA-256 (one per processor, amd64 and arm64) are written at the
+top of `start-dccore.bat`, copied from the release page on python.org. The
+launcher downloads with the `curl` that ships with Windows 10 1803 and later,
+hashes the file with `certutil`, refuses it on any mismatch, and runs it with
+python.org's documented unattended options (`/passive InstallAllUsers=0
+PrependPath=1 Include_launcher=1 Include_test=0`) - per user, so no
+administrator prompt. The launcher then looks for Python where the installer
+puts it, since its own window's PATH predates the install. Moving the pin to a
+newer Python is three lines: the version and the two hashes.
+
+**This is also why there is no Windows service yet** - and why
+`install-autostart.bat` schedules the launcher rather than `oserve.py`. A
+service starts in `C:\Windows\System32`, and no launcher is involved to
+correct it. Making that
 work means anchoring the paths to the code's own location rather than the
 working directory — a change worth doing deliberately, not as a side effect of
 adding a service wrapper.
@@ -273,9 +330,49 @@ adding a service wrapper.
 
 ## Networking
 
+Two things stand between the bot's ports and the people downloading, and
+neither is DCCore's to fix - only to name. `start-dccore.bat check` prints
+both with your actual port range.
+
+### The Windows firewall
+
+The first time the bot listens for a DCC send, Windows Defender Firewall
+asks whether to allow it. **Cancel there means every send from then on times
+out with no hint why.** If that happened, or to settle it up front:
+
+```bat
+scripts\windows\allow-firewall.bat
+```
+
+It adds one inbound rule for TCP `DCC_PORT_START`–`DCC_PORT_END` (55000–55010
+unless you changed them) and, if the dashboard is on, one for its port; both
+read from your settings, not typed in. Adding a firewall rule needs an
+administrator's yes, so the script re-opens itself elevated - the usual
+prompt. The ports and the interpreter are worked out before that, as you, and
+handed to the elevated copy, so it works when the account that answers the
+prompt is not yours (a standard user with a parent's password) and has no
+Python of its own. `remove-firewall.bat` takes both rules out again.
+
+Cancel does more than decline: Windows also creates an inbound **Block** rule
+for that `python.exe`, and a Block rule wins over any Allow rule, so a port rule
+alone would not fix it. The script therefore removes any inbound Block rule for
+the interpreter the bot runs on before it adds its own rules, and says so when
+it did. It touches no other program's rules and leaves an Allow rule the dialog
+made alone.
+
+### Port forwarding
+
 **Forward TCP 55000–55010** to this machine for anyone to download from you.
-That range is `DCC_PORT_START`–`DCC_PORT_END` in `defaults.py`, and the admin
+That range is `DCC_PORT_START`–`DCC_PORT_END` in your settings, and the admin
 console borrows a port from it too when it has to listen.
+
+What that means: behind a home router, a connection from the internet reaches
+the router, not this PC, until the router is told where to send it. In the
+router's admin page (usually `http://192.168.1.1` or `http://192.168.0.1`,
+under "Port forwarding" or "Virtual server"), forward that TCP range to this
+PC's LAN address (`ipconfig` shows it as *IPv4 Address*). DCCore cannot do
+this for you - there is no UPnP in Python's standard library, and the bot
+does not know your router's password.
 
 ### Testing a download from your own machine will probably fail
 
@@ -291,6 +388,27 @@ than failing to connect. The symptom is the daemon declining to send at all,
 which looks like a different fault entirely.
 
 ---
+
+## Starting with Windows
+
+Once the bot runs from a double-click, it can start by itself at logon:
+
+```bat
+scripts\windows\install-autostart.bat
+```
+
+That creates a Task Scheduler entry, "DCCore", that runs `start-dccore.bat`
+when you log on - the launcher, so the working directory is right, and so the
+bot's window opens as usual (closing it still stops the bot). For your user
+only: no administrator, no stored password. `remove-autostart.bat` deletes
+the entry. It refuses a tree that has never been set up, since the setup
+questions need someone at the keyboard - run the launcher once first.
+
+Only one bot runs from a folder: a second start - the task and a
+double-click, or two logon sessions - is refused with "DCCore is already
+running from this folder", and does nothing. Under the task the launcher
+does not ask questions (the Flask offer prints its command instead), so a
+window nobody is watching never waits for a key.
 
 ## The admin console
 

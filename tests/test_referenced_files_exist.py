@@ -33,9 +33,13 @@ FileNotFoundError; a name passed to os.path.join can.
 import ast
 import io
 import os
+import sys
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from exported_tree import _this_is_an_export  # noqa: E402
 
 SKIP_DIRS = {".git", "__pycache__", ".claude", "node_modules"}
 
@@ -53,6 +57,19 @@ MAY_BE_ABSENT = {
                  "tests/test_rehash_end_to_end.py, which runs a real !rehash "
                  "in a separate interpreter - it is a name being CREATED, "
                  "not one expected to already exist",
+}
+
+# Absent by design too, but only on one side of the development/public
+# split (docs/PUBLIC-REPO-WORKFLOW.md) - present and required here, in the
+# development repository, and deliberately stripped at extraction along
+# with the file it names. A plain MAY_BE_ABSENT entry would defeat its own
+# "does not rot" check, since this name is never absent in THIS repository.
+STRIPPED_AT_EXPORT_ONLY = {
+    "preflight.py": "dev-only tooling, stripped at extraction "
+                    "(docs/PUBLIC-REPO-WORKFLOW.md); "
+                    "test_a_filename_your_code_page_cannot_spell.py names "
+                    "it in a list shared with commands.py/dcc.py/"
+                    "update_list.py, which do ship",
 }
 
 
@@ -98,8 +115,10 @@ class EveryFilenameTheCodeOpensExists(unittest.TestCase):
 
     def test_no_opened_filename_is_missing(self):
         here = present()
+        exported = _this_is_an_export(self)
         missing = {name: where for name, where in opened_filenames().items()
-                   if name not in here and name not in MAY_BE_ABSENT}
+                   if name not in here and name not in MAY_BE_ABSENT
+                   and not (exported and name in STRIPPED_AT_EXPORT_ONLY)}
 
         self.assertEqual(
             missing, {},
@@ -115,6 +134,22 @@ class EveryFilenameTheCodeOpensExists(unittest.TestCase):
 
         self.assertEqual(resurrected, [],
                          "these exist again and should not be excused any more")
+
+    def test_the_export_only_allowlist_does_not_rot_either(self):
+        """The opposite direction: outside an export, every one of these
+        must still be present. If it is not, either the file was removed
+        for real (fix the reference or restore the file) or extraction
+        already stripped it here by mistake - either way this entry is
+        no longer describing an export-only absence."""
+        if _this_is_an_export(self):
+            self.skipTest("only meaningful in the development repository, "
+                          "where every STRIPPED_AT_EXPORT_ONLY name is "
+                          "expected to exist")
+        here = present()
+        vanished = sorted(name for name in STRIPPED_AT_EXPORT_ONLY if name not in here)
+
+        self.assertEqual(vanished, [],
+                         "these are missing here too, not just at export")
 
     def test_the_scan_finds_the_calls_it_is_looking_for(self):
         """Control. A scan that matched nothing would pass on any tree."""

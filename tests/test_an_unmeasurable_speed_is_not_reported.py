@@ -111,7 +111,7 @@ class TheSendPathDecidesIt(unittest.TestCase):
             return handle.read()
 
     def test_the_reported_figure_is_gated(self):
-        self.assertIn("speed_is_measurable(acute_duration)", self.source())
+        self.assertIn("speed_is_measurable(acute_duration, file_size)", self.source())
 
     def test_the_channel_gets_the_gated_one(self):
         """Not final_calc_speed, which is the raw division and is what

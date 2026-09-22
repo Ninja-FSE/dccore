@@ -23,6 +23,7 @@ that something merely looked wrong.
 import io
 import os
 import socket
+import struct
 import sys
 import tempfile
 import threading
@@ -132,17 +133,34 @@ class TheTransferRowCarriesItsOwnSize(DCCoreTestCase):
                         "no DCC SEND handshake was ever sent")
         self.client = socket.create_connection(("127.0.0.1", self.irc.port()), timeout=20)
         self.client.settimeout(20)
+        self.held = 0
         return self.client
 
+    def take(self, chunk):
+        """Count a chunk and ack it - the 4-byte big-endian running total a
+        real DCC receiver sends after every packet (#641).
+
+        Since #526 the sender waits for the receiver's final ack to reach
+        the file size before it closes. This fixture read to EOF and never
+        acked, so every test here ended on the client's 20 s recv timeout
+        (60 s per full run, deterministic) with the sender reporting "never
+        acknowledged a single byte" on a green test - the same blind spot
+        tests/test_dcc_resume_end_to_end.py's receiver was fixed for."""
+        self.held += len(chunk)
+        self.client.sendall(struct.pack("!I", self.held & 0xFFFFFFFF))
+
     def drain(self):
-        """Read to EOF so the sender thread's loop ends and it cleans up."""
+        """Read and ack to EOF, then make sure the sender actually finished:
+        the join must return because the transfer completed, not because
+        a timeout gave up on it."""
         while True:
-            try:
-                chunk = self.client.recv(65536)
-            except socket.timeout:
-                break
+            chunk = self.client.recv(65536)
             if not chunk:
                 break
+            self.take(chunk)
+        self.assertEqual(self.held, len(CONTENT), "the receiver did not get the whole file")
+        self.sender.join(30)
+        self.assertFalse(self.sender.is_alive(), "the sender never finished after the final ack")
 
     def test_the_size_is_recorded_before_any_byte_is_read(self):
         self.dial()
@@ -184,6 +202,7 @@ class TheTransferRowCarriesItsOwnSize(DCCoreTestCase):
             if not chunk:
                 break
             received += len(chunk)
+            self.take(chunk)
             if sample():
                 return True
         return False
