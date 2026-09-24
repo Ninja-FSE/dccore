@@ -49,6 +49,7 @@ class ListFormatCase(DCCoreTestCase):
                         LOCAL_LIST_DIR=self.tree.lists,
                         LIST_BASE_NAME="DCCoreTest",
                         NICKNAME="DCCoreTest",
+                        ORIGINAL_NICK="DCCoreTest",  # the configured nick the list names (#376)
                         RAR_ENABLED=True,
                         LIST_FORMAT="zip")
 

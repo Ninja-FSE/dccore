@@ -50,6 +50,27 @@ import commands  # noqa: E402
 LOCK_FACTORIES = {"Lock", "RLock", "Condition", "Semaphore", "BoundedSemaphore"}
 
 
+def constructs_a_lock(value):
+    """True when a lock factory is CALLED anywhere in an assignment's value.
+
+    Not only as the whole right-hand side (#749). The shape this missed was
+    `x = globals().get("x") or threading.Lock()` - the call sits inside a
+    BoolOp, so a scan that looked only at the top node read it as a plain
+    expression. Two of them were in dcc.py, rebuilt by `or` on any reload
+    whose globals().get came back empty, and every lock test stayed green.
+    Walking the value finds a factory call however it is wrapped: `or`,
+    a conditional, an argument.
+    """
+    for node in ast.walk(value):
+        if isinstance(node, ast.Call):
+            func = node.func
+            name = (func.attr if isinstance(func, ast.Attribute)
+                    else getattr(func, "id", None))
+            if name in LOCK_FACTORIES:
+                return True
+    return False
+
+
 def module_level_locks():
     """(module, line, name) for every module-level lock object constructed."""
     found = []
@@ -68,12 +89,7 @@ def module_level_locks():
                 targets, value = [node.target], node.value
             else:
                 continue
-            if not isinstance(value, ast.Call):
-                continue
-            func = value.func
-            name = (func.attr if isinstance(func, ast.Attribute)
-                    else getattr(func, "id", None))
-            if name not in LOCK_FACTORIES:
+            if not constructs_a_lock(value):
                 continue
             for target in targets:
                 if isinstance(target, ast.Name):
@@ -132,6 +148,10 @@ class NoReloadedModuleConstructsItsOwnLock(unittest.TestCase):
                   "c = threading.RLock()\n"
                   "d: object = threading.Condition()\n"
                   "e = 5\n"
+                  "g = globals().get('g') or threading.Lock()\n"
+                  "h = globals().get('h') or threading.BoundedSemaphore(2)\n"
+                  "i = threading.Lock() if e else None\n"
+                  "j = globals().get('j') or {}\n"
                   "def f():\n"
                   "    local = threading.Lock()\n")
         import tempfile
@@ -145,7 +165,7 @@ class NoReloadedModuleConstructsItsOwnLock(unittest.TestCase):
         mine = sorted(name for module, _line, name in module_level_locks()
                       if module == os.path.basename(path)[:-3])
 
-        self.assertEqual(mine, ["a", "b", "c", "d"],
+        self.assertEqual(mine, ["a", "b", "c", "d", "g", "h", "i"],
                          "a lock spelling is unrecognised, or a function-local "
                          "one is being reported")
 
@@ -162,6 +182,28 @@ class NoReloadedModuleConstructsItsOwnLock(unittest.TestCase):
                         "a lock added to a reloaded module is not recognised "
                         "as a problem, so this guard would not catch one")
 
+
+
+class TheLookupLocksAreBoundFromRuntime(unittest.TestCase):
+    """#749: dcc.py's scan semaphore and lookup-memory lock were the two the
+    or-form hid. Bound by name now, like list_mod._count_lock."""
+
+    def test_they_are_runtimes_objects(self):
+        import dcc
+        import runtime
+        self.assertIs(dcc._library_scans, runtime.library_scans)
+        self.assertIs(dcc._lookup_misses_lock, runtime.lookup_memory_lock)
+
+    def test_the_semaphore_admits_exactly_the_scans_dcc_says(self):
+        import dcc
+        held = 0
+        try:
+            while held <= dcc.MAX_CONCURRENT_LIBRARY_SCANS and dcc._library_scans.acquire(blocking=False):
+                held += 1
+            self.assertEqual(held, dcc.MAX_CONCURRENT_LIBRARY_SCANS)
+        finally:
+            for _ in range(held):
+                dcc._library_scans.release()
 
 if __name__ == "__main__":
     unittest.main()

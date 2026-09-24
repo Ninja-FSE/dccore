@@ -734,6 +734,13 @@ def _hours_to_seconds(hours):
         return 0.0
 
 
+# A list whose bot gives no evidence of change - no date in its advert, or no
+# advert seen - is refreshed once it is this old (#926 item 6), the way
+# AutoGet expired lists after N days. Age is the only evidence such a bot
+# leaves; a bot that does publish a date is still refreshed on that alone.
+UNKNOWN_LIST_MAX_AGE_DAYS = 14
+
+
 def lists_worth_refetching(now=None):
     """The bots whose held list their own advert says has moved on.
 
@@ -751,6 +758,9 @@ def lists_worth_refetching(now=None):
     "unknown" is not "changed". A bot that publishes no date, or one whose
     advert we have not seen since starting, gives no evidence either way, and
     acting on no evidence is what makes an automatic feature untrustworthy.
+    EXCEPT AGE (#926): such a list is refreshed once it is older than
+    UNKNOWN_LIST_MAX_AGE_DAYS - otherwise it is never refreshed at all, which
+    is the one thing sure to be wrong about it.
     """
     import webserver
 
@@ -787,12 +797,34 @@ def lists_worth_refetching(now=None):
 
         rows = [row for row in webserver.build_fetched_bot_list_summaries()
                 if str(row.get("bot", "")).strip().lower() == bot.lower()]
-        if not rows or rows[0].get("freshness") != "changed":
+        if not rows:
+            continue
+        freshness = rows[0].get("freshness")
+        too_old = (freshness == "unknown"
+                   and now - float(fetched_at or 0) >= UNKNOWN_LIST_MAX_AGE_DAYS * 86400)
+        if freshness != "changed" and not too_old:
             continue
         due.append((float(fetched_at or 0), bot))
 
     due.sort()
     return [bot for _when, bot in due]
+
+
+def mark_seen(bot):
+    """The operator opened this bot's list (#926 item 6): it is no longer
+    new. Returns whether anything changed."""
+    key = str(bot or "").strip().lower()
+    with _lock():
+        store = _ensure_fetched_bot_lists()
+        entry = store.get(key)
+        if not isinstance(entry, dict) or "seen_at" not in entry:
+            return False
+        if float(entry.get("seen_at") or 0) >= float(entry.get("fetched_at") or 0):
+            return False
+        entry["seen_at"] = time.time()
+        snapshot = dict(store)
+    db.save_fetched_bot_lists(snapshot)
+    return True
 
 
 def _tell_the_console(bot, action, text):
@@ -823,6 +855,16 @@ def _note_auto_attempt(bot, when):
         entry["last_attempt"] = when
         snapshot = dict(store)
     db.save_fetched_bot_lists(snapshot)
+
+
+def _freshness_of(bot):
+    """The List Browser's freshness for `bot`'s held list, or None."""
+    import webserver
+
+    for row in webserver.build_fetched_bot_list_summaries():
+        if str(row.get("bot", "")).strip().lower() == str(bot).strip().lower():
+            return row.get("freshness")
+    return None
 
 
 def refetch_due_lists(log=print, now=None):
@@ -880,9 +922,16 @@ def refetch_due_lists(log=print, now=None):
         if status == 200:
             started.append(bot)
             _note_auto_attempt(bot, time.time() if now is None else now)
-            log(f"[LIST-FETCH] {bot}'s list has changed since we took our copy "
-                f"- asking again automatically.")
-            _tell_the_console(bot, "auto", f"{bot}'s list has changed - asking again automatically")
+            if _freshness_of(bot) != "changed":
+                # #926: no date to compare, so age was the reason.
+                why = f"{bot}'s list is over {UNKNOWN_LIST_MAX_AGE_DAYS} days old"
+                log(f"[LIST-FETCH] {why} and its advert shows no date "
+                    f"- asking again automatically.")
+            else:
+                why = f"{bot}'s list has changed"
+                log(f"[LIST-FETCH] {why} since we took our copy "
+                    f"- asking again automatically.")
+            _tell_the_console(bot, "auto", f"{why} - asking again automatically")
         else:
             # Not an error worth stopping for: the usual reason is that a
             # fetch for that bot is already outstanding, which is the right
@@ -1310,6 +1359,11 @@ def _install_fetched_list(bot, zip_path, extract_dir):
         # absence is the honest answer rather than a zero - see
         # _advert_snapshot().
         "advert_when_fetched": _advert_snapshot(bot),
+        # Not looked at yet (#926 item 6): the List Browser marks it "New"
+        # until the operator opens it - mark_seen(). Set on EVERY fetch, so a
+        # refreshed list is new again. An entry from before this has no
+        # seen_at at all and is not marked: nothing says it is new.
+        "seen_at": 0,
         # EVERY LIST THE ARCHIVE HELD, keyed by a short stable marker. The
         # main one keeps the empty marker and is also mirrored in list_path
         # and entry_count above - which is what every reader written before an
@@ -1569,6 +1623,12 @@ def purge_fetched_list(source):
 
     if not forget_bot(nick):
         return False, f"Nothing is held from {nick}."
+
+    # Removed by hand: automatic list grabbing (#926) must not fetch it
+    # straight back. The bulk purge of offline bots does not do this - that
+    # is tidying, not an answer about the bot.
+    import list_grab
+    list_grab.note_removed_by_hand(nick)
 
     # forget_bot() answers a bool and logs the detail, which is right for the
     # bulk purge that calls it in a loop. A per-list purge has one status line

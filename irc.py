@@ -1562,6 +1562,18 @@ _ADVERT_DATE_RE = re.compile(
     r"(?:List:|Date:|created)\s*([A-Za-z]{3,9}\s*\d{1,2}(?:st|nd|rd|th)?)",
     re.IGNORECASE)
 
+# The live figures an advert carries (#926 item 8), read the way AutoGet's
+# "slots" page read them: "Slots: 3/10 <> Queued: 12 <> Speed: 45000cps <>
+# Mode: Normal". OmenServe's slots are FREE/total - the same sense
+# parse_search_header() gives them.
+_ADVERT_SLOTS_RE = re.compile(r"Slots:\s*(\d+)\s*/\s*(\d+)", re.IGNORECASE)
+_ADVERT_QUEUED_RE = re.compile(r"Queued:\s*([\d,]+)", re.IGNORECASE)
+_ADVERT_SPEED_RE = re.compile(r"Speed:\s*([\d,.]+\s*(?:cps|[KMG]?B/?s)?)", re.IGNORECASE)
+_ADVERT_MODE_RE = re.compile(r"Mode:\s*(Normal|Servers?\s+Only|Servers?\s+Priority)", re.IGNORECASE)
+# SPQR's "[(0/7) Slots (0/216) Ques Taken]" - slots IN USE, and queues taken.
+_SPQR_SLOTS_RE = re.compile(r"\(\s*(\d+)\s*/\s*(\d+)\s*\)\s*Slots", re.IGNORECASE)
+_SPQR_QUEUES_RE = re.compile(r"\(\s*(\d+)\s*/\s*(\d+)\s*\)\s*Ques\s+Taken", re.IGNORECASE)
+
 # SPQR: "For My List(19527files:163812MB) ... type @LoadBot and @LoadBot-stats."
 _SPQR_LIST_RE = re.compile(
     r"For\s+My\s+List\s*\(\s*([\d,]+)\s*files\s*:\s*([\d,.]+\s*[KMGT]?B)\s*\)", re.IGNORECASE)
@@ -1630,6 +1642,21 @@ def _parse_omenserve_advert(clean):
     if date:
         advert["list_date"] = re.sub(r"\s+", " ", date.group(1)).strip()
 
+    # The live figures (#926), each only when the bot said it.
+    slots = _ADVERT_SLOTS_RE.search(clean)
+    if slots:
+        advert["slots_free"] = _as_int(slots.group(1))
+        advert["slots_total"] = _as_int(slots.group(2))
+    queued = _ADVERT_QUEUED_RE.search(clean)
+    if queued:
+        advert["queued"] = _as_int(queued.group(1).replace(",", ""))
+    speed = _ADVERT_SPEED_RE.search(clean)
+    if speed:
+        advert["speed"] = re.sub(r"\s+", "", speed.group(1))
+    mode = _ADVERT_MODE_RE.search(clean)
+    if mode:
+        advert["mode"] = re.sub(r"\s+", " ", mode.group(1)).title()
+
     return advert
 
 
@@ -1649,12 +1676,20 @@ def _parse_spqr_advert(clean):
     if not nick:
         return None
 
-    return {
+    advert = {
         "family": "spqr",
         "nick": nick.group(1),
         "files": _as_int(listing.group(1).replace(",", "")),
         "list_size": re.sub(r"\s+", "", listing.group(2)),
     }
+    slots = _SPQR_SLOTS_RE.search(clean)
+    if slots:
+        advert["slots_in_use"] = _as_int(slots.group(1))
+        advert["slots_total"] = _as_int(slots.group(2))
+    queues = _SPQR_QUEUES_RE.search(clean)
+    if queues:
+        advert["queued"] = _as_int(queues.group(1))
+    return advert
 
 
 def _parse_rar_folder_advert(clean):
@@ -1712,9 +1747,13 @@ _ADVERT_PARSERS = (_parse_omenserve_advert, _parse_spqr_advert, _parse_rar_folde
 # What each family is entitled to write into a registry entry. A bot's RAR
 # advert must not overwrite the count of its loose-file list, and the other way
 # round - they are two lists and PackBot publishes both.
+# The live figures (slots, queued, speed, mode) are kept beside the list's own
+# (#926) but never compared for freshness - list_fetch._advert_snapshot() reads
+# files and list_date only, since slots change with every send.
 _ADVERT_FIELDS = {
-    "omenserve": ("files", "list_date", "list_size"),
-    "spqr": ("files", "list_size"),
+    "omenserve": ("files", "list_date", "list_size",
+                  "slots_free", "slots_total", "queued", "speed", "mode"),
+    "spqr": ("files", "list_size", "slots_in_use", "slots_total", "queued"),
     "rar": ("rar_folders", "rar_size", "rar_trigger"),
 }
 
@@ -1874,6 +1913,13 @@ def _capture_channel_advert(user, target, msg, now=None):
     _advert_tails[key] = [started, stitched]
     _record_bot(key, user, target, merged, now)
     _flush_known_bots()
+
+
+@never_breaks_the_read_loop
+def _capture_list_ask(user, msg):
+    """Another user typed "@Bot" - see list_grab.note_someone_else_asked()."""
+    import list_grab
+    list_grab.note_someone_else_asked(user, msg)
 
 
 def _prune_known_bots(now):
@@ -3370,16 +3416,14 @@ def irc_loop():
                                 notice_user, notice_target, notice_text)
                             if notice_target.lower() == config.NICKNAME.lower():
                                 # A private NOTICE addressed to us, from
-                                # another bot - the shape a foreign bot's own
-                                # "!rar is disabled here" refusal takes (see
-                                # dcc_fetch.handle_refusal_notice()'s own
-                                # docstring). Read-only here too: this only
-                                # ever fails a "folder" row that would
-                                # otherwise sit "offered" for the full
-                                # FETCH_FOLDER_OFFER_TIMEOUT against one of
-                                # only MAX_FETCH_SLOTS fetch slots.
+                                # another bot - how file servers answer a
+                                # request: "queued at position 12", "I don't
+                                # have that", "queue full", "!rar is disabled
+                                # here" (#926, dcc_fetch.handle_bot_reply()).
+                                # It only ever moves a request we sent to
+                                # THAT bot, and nothing else.
                                 import dcc_fetch
-                                dcc_fetch.handle_refusal_notice(notice_user, notice_text)
+                                dcc_fetch.handle_bot_reply(notice_user, notice_text)
 
                     # See parse_privmsg()'s own docstring (top of this file)
                     # for why the anchoring matters, and what user_host is
@@ -3406,6 +3450,25 @@ def irc_loop():
                         # advertising in a channel we sit in is not subject to
                         # our ban list.
                         _capture_channel_advert(user, target_chan, msg)
+
+                        # Someone else asking a bot for its list (#926): the
+                        # automatic grab leaves that bot alone for a while.
+                        _capture_list_ask(user, msg)
+
+                        # A private message from a bot we asked for a file
+                        # (#926): some servers answer a request that way
+                        # rather than by NOTICE (SDFind's queue position,
+                        # BWI's "not found"). Not a CTCP - DCC SEND is those,
+                        # and has its own path. Same placement and reasoning
+                        # as the two above: observational, and only ever
+                        # moves a request we sent to this sender.
+                        if (target_chan.lower() == config.NICKNAME.lower()
+                                and not msg.startswith("\x01")):
+                            try:
+                                import dcc_fetch
+                                dcc_fetch.handle_bot_reply(user, msg)
+                            except Exception as reply_err:
+                                print(f"[FETCH] Could not read {user}'s reply: {reply_err}")
 
                         if not security.check_user_status(user, hostmask=user_host):
                             continue
@@ -3456,7 +3519,49 @@ def irc_loop():
                                 and msg.strip("\x01").strip().upper().startswith("DCC RESUME ")
                                 and target_chan.lower() == config.NICKNAME.lower())
                         )
-                        if is_bot_command and security.is_flooding(user):
+                        # ASKING FOR FILES IS NOT FLOODING (#888). Its own
+                        # expression, self-contained for the same reason the
+                        # one above is - tests/test_irc_dispatch.py lifts
+                        # each of them out of this file's source text and
+                        # evaluates it, so neither may lean on a local
+                        # computed outside itself.
+                        #
+                        # A user pasting fifteen rows from the list - one
+                        # album, the ordinary way these lists are used - sent
+                        # ten requests, was muted on the eleventh and BANNED
+                        # FOR AN HOUR on the twelfth. Undernet's own paste
+                        # pacing is the only reason that was rare rather than
+                        # routine; any client or bouncer that sends faster
+                        # turned asking for an album into a ban.
+                        #
+                        # So a file request never meters, never mutes, never
+                        # escalates a mute into a ban, and is served during a
+                        # mute earned by other commands. The operator's
+                        # decision (#888): "i dont care if they paste a lot
+                        # of lines at channel at once as long as the channel
+                        # accepts it. bot should just add them to queue one
+                        # by one as he requests."
+                        #
+                        # WHAT STILL BOUNDS IT, none of it the flood gate:
+                        # the queue caps (MAX_USER_QUEUE per person,
+                        # MAX_GLOBAL_QUEUE overall) are the real limit and
+                        # refuse past it; the library lookup each request
+                        # costs is bounded by #580/#886 (a few scans at a
+                        # time, and three memories so a pasted album is one
+                        # scan); packing is one at a time by the packer's own
+                        # interlock; and the server's own flood control
+                        # decides how fast the lines may arrive in the first
+                        # place, which is what the operator is relying on.
+                        #
+                        # Bans are untouched: check_user_status() runs above
+                        # and still refuses a banned user's requests. Every
+                        # other trigger in is_bot_command - searches, -que,
+                        # -remove, list requests, the CTCPs - is metered
+                        # exactly as before.
+                        is_file_request = (
+                            any(msg_lower.startswith(f"!{alias} ") for alias in bot_aliases)
+                        )
+                        if is_bot_command and not is_file_request and security.is_flooding(user):
                             continue
 
                         # SOMEBODY SPOKE TO THE BOT AND IT WILL SAY NOTHING

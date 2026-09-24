@@ -284,8 +284,14 @@ class WhatTheCaptureDecides(unittest.TestCase):
         with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as f:
             body = f.read()
         block = body.split("announce.record_private_message(user, msg)", 1)[0]
-        block = block.rsplit(
-            "if is_bot_command and security.is_flooding(user):", 1)[1]
+        # Anchored on the CALL, not on the whole `if` line. The condition
+        # around it grew a second term when #888 exempted file requests from
+        # metering, and an anchor that spelled the old condition out simply
+        # stopped matching - five guards here then failed with an IndexError
+        # rather than saying anything about what they guard. The call itself
+        # appears exactly once in irc.py and is what "after the flood check"
+        # actually means.
+        block = block.rsplit("security.is_flooding(user):", 1)[1]
         # chr(35) is "#": written this way so no editing tool can mangle
         # the escape out of the pattern, which has happened before.
         return _re.sub(chr(35) + "[^" + chr(10) + "]*", "", block)
@@ -311,7 +317,10 @@ class WhatTheCaptureDecides(unittest.TestCase):
         with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as f:
             body = f.read()
 
-        self.assertLess(body.index("if is_bot_command and security.is_flooding"),
+        # The call, not the whole condition: #888 added "not is_file_request"
+        # to it, and an anchor spelling the old condition out in full stops
+        # matching the moment the condition grows another term.
+        self.assertLess(body.index("security.is_flooding(user):"),
                         body.index("record_private_message("))
 
     def test_it_happens_after_the_ban_check(self):

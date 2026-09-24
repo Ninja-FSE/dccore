@@ -286,7 +286,9 @@ class TheWindow(unittest.TestCase):
         text = self.script()
         block = text[text.index("if (%type == LISTFETCH) {"):]
         block = block[:block.index("\n  }")]
-        self.assertIn("dccore.echo $dccore.tag(LISTS,search) $4-", block)
+        # dccore.msg since #892: a list fetch is activity, so it takes the
+        # window button's message colour. The tag and text are what this guards.
+        self.assertIn("dccore.msg $dccore.tag(LISTS,search) $4-", block)
 
     def test_the_help_lists_them(self):
         text = self.script()

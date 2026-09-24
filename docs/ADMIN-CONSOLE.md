@@ -208,7 +208,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.13.0 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.13.1 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -233,6 +233,7 @@ prefix.
 | `bans` | permanent and timed bans |
 | `uptime` | how long the daemon has been running |
 | `version` | build and platform |
+| `checkversion` | ask GitHub now whether a newer DCCore is out; works with `CHECK_FOR_UPDATES` off, once a minute |
 | `verify` | filenames that appear in two folders |
 
 ### What you can do
@@ -668,6 +669,7 @@ Chat request** to auto-accept so it never asks again.
 | the title bar | `MusicBot on Undernet · slots 2/3 · queue 14 · today 38 files / 12.4GB · 1.5MB/s`, updated with every status burst |
 | the editbox | anything you type is a console command - `status`, `queue helen`, `clearqueue ivan`, `ban *!*@bad.host` - and the reply comes back as `[CONSOLE]` lines, or into a second `@DCCore-console` window if you prefer |
 | right-click | the common commands; on a panel line, that user's queue or clearing it; in any channel's nick list, **DCCore → Queue of / Clear the queue of** that nick |
+| the window's button | on the switchbar or treebar, like any channel's: the **message** colour when there is new activity - a request, a queue position, a send, a search - and the **highlight** colour (the one mIRC uses when somebody says your nick) on a failed transfer or dropped lines, so a failure stands out. The `[STATUS]` line, joins, parts and bans do not light it, as they would not in a channel. mIRC 7 or later |
 | a beep | on a failed transfer, if you leave that on |
 
 Every five minutes a `[STATUS]` line summarises the numbers in the text

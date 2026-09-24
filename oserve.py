@@ -321,6 +321,12 @@ def startup(setup_page=None):
     # in-memory only until now, so a completed download and its Delete
     # button both silently vanished from the dashboard on every restart.
     config.fetch_queue.update(db.load_fetch_history())
+    # And the bots whose fetching is paused (#926), kept beside it.
+    try:
+        import dcc_fetch
+        dcc_fetch.load_paused_bots()
+    except Exception as paused_err:
+        print(f"[FETCH] Could not read the paused bots: {paused_err}")
     # The notices survive a restart, which is the whole point of them: an
     # event worth a badge is by definition one that happened while nobody was
     # looking, and a kick at three in the morning that is gone by nine is a
@@ -423,6 +429,34 @@ def startup(setup_page=None):
     except Exception as refetch_err:
         print(f"[LIST-FETCH] Could not start the automatic refresh: "
               f"{refetch_err}")
+    # Automatic list grabbing (#926), the same way.
+    try:
+        import list_grab
+        list_grab.ensure_worker()
+    except Exception as grab_err:
+        print(f"[LIST-GRAB] Could not start automatic list grabbing: {grab_err}")
+
+    # The list rebuild schedule (#776): started the same way, also re-armed by
+    # every rehash, so setting it on the dashboard needs no restart.
+    try:
+        import commands
+        commands.ensure_rebuild_schedule_worker()
+    except Exception as schedule_err:
+        print(f"[SCHEDULE] Could not start the rebuild schedule: {schedule_err}")
+
+    # The daily version check (#572). Said at EVERY start while it is on, so an
+    # install that upgraded into it - where nobody ticked a box - is told, and
+    # told how to turn it off. Started once, guarded in runtime.py; a rehash
+    # starts it too, when the setting is ticked on later.
+    try:
+        import version_check
+        if getattr(config, "CHECK_FOR_UPDATES", True):
+            print("[UPDATE] Checking once a day for a new version of DCCore (one request to "
+                  "GitHub; nothing about this bot is sent). CHECK_FOR_UPDATES = false, or "
+                  "the Settings page, turns it off.")
+        version_check.ensure_worker()
+    except Exception as update_err:
+        print(f"[UPDATE] Could not start the version check: {update_err}")
 
     # Optional web dashboard (mostly read-only status views, plus the
     # cross-bot search/fetch routes - see webserver.py's module docstring).

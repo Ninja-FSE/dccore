@@ -52,6 +52,12 @@ class FakeSession:
         if announce_text:
             self.lines.append(announce_text)
 
+    def send_status(self):
+        """A no-op: real Sessions compute and send a STATUS burst on the
+        writer thread (see Session.send_status's own docstring); nothing
+        this fake stands in for reads figures at all. Added for _cmd_hello,
+        which calls it unconditionally after HELLO."""
+
     def text(self):
         return "\n".join(self.lines)
 

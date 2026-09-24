@@ -38,6 +38,14 @@ class ARenameCarriesTheUsersState(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
+        # No queue sweep may run on this fixture (#920). It is present AND
+        # frozen, which dcc.check_queue_and_send()'s sweep thaws on sight -
+        # and dispatch threads from earlier tests outlive them (see
+        # tests/support.py), so one could sweep between here and the rename
+        # and leave it nothing to move: "None != 1234.0" on Windows 3.12, the
+        # #916 merge. The sweep is gated on bot_joined_channel; the rename
+        # does not read it.
+        self.set_config(bot_joined_channel=False)
         config.channel_users["#one"] = {"someuser", "somebot"}
         config.dcc_queue["someuser"] = ["Track.flac"]
         config.send_queue["someuser"] = ["a message"]
@@ -63,6 +71,16 @@ class ARenameCarriesTheUsersState(DCCoreTestCase):
 
         self.assertEqual(config.frozen_queues.get("someuser_"), 1234.0)
         self.assertNotIn("someuser", config.frozen_queues)
+
+    def test_a_queue_sweep_mid_test_leaves_the_fixture_alone(self):
+        """What a leaked dispatch thread does, done on purpose between the
+        fixture and the rename (#920)."""
+        from tests.support import RecordingSocket
+        dcc.check_queue_and_send(RecordingSocket(), "")
+        irc.note_nick_change("someuser", "someuser_")
+
+        self.assertEqual(config.frozen_queues.get("someuser_"), 1234.0)
+        self.assertEqual(config.dcc_queue.get("someuser_"), ["Track.flac"])
 
     def test_the_outbound_queue_still_follows_them(self):
         """The one thing the handler already did. Kept, and now in the same

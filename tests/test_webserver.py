@@ -695,12 +695,22 @@ class ListUpdateToolTests(DCCoreTestCase):
         self.assertEqual(status, 409)
         self.assertIn("already running", result["error"])
 
-    def test_a_paused_system_scan_is_rejected_when_pause_on_update_is_set(self):
+    def test_a_paused_system_scan_is_rejected_when_the_whole_rebuild_pauses(self):
         config.search_inprogress = True
         config.PAUSE_ON_UPDATE = True
+        config.PAUSE_FOR_WHOLE_UPDATE = True
+        self.addCleanup(setattr, config, "PAUSE_FOR_WHOLE_UPDATE", False)
         status, result = webserver.start_list_update()
         self.assertEqual(status, 409)
         self.assertIn("already in progress", result["error"])
+
+    def test_a_running_search_does_not_block_a_rebuild_that_pauses_only_the_swap(self):
+        """#923: by default searches run through the scan, so one running now
+        is no reason to refuse the rebuild."""
+        config.search_inprogress = True
+        config.PAUSE_ON_UPDATE = True
+        status, _result = webserver.start_list_update()
+        self.assertEqual(status, 200)
 
     def test_a_system_scan_does_not_block_when_pause_on_update_is_off(self):
         """PAUSE_ON_UPDATE=False means commands.handle_list_update_request()

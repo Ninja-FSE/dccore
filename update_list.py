@@ -13,6 +13,7 @@ import json
 import defaults as config
 import library
 import platform_compat
+import audio_info
 
 # BEFORE ANYTHING PRINTS A FILENAME. This runs as its own process - the daemon
 # starts it with subprocess.run() and configure.py runs it directly - so
@@ -135,7 +136,7 @@ def pack_size_over(path, cap):
     return False, measured
 
 
-def walk_with_sizes(top, onerror=None):
+def walk_with_sizes(top, onerror=None, workers=None):
     """Every file under `top`, with the size the directory entry already knew.
 
     WHY THIS EXISTS. os.walk is built on os.scandir, which gets each entry's
@@ -184,17 +185,33 @@ def walk_with_sizes(top, onerror=None):
     `onerror` is called with the OSError, matching os.walk's parameter of the
     same name, so an unreadable subtree is reported the way it always was
     rather than ending the scan.
+
+    SEVERAL DIRECTORIES AT ONCE (#922). On a network mount every scandir()
+    and every entry.stat() is a round trip - Linux's d_type gives the type
+    but not the size - and one directory at a time, none of them overlap: a
+    64,136-file NFS library spent about 80 s here, with every search paused.
+    `workers` directories (LIST_SCAN_THREADS unless given) are listed and
+    stat'd at once, the way QuickList - OmenServe's list maker - walks. Each
+    directory is classified exactly as below whichever thread lists it; only
+    the order directories come back in changes, and the caller sorts before
+    writing anything (#443). onerror is called here, on the caller's thread,
+    never from a worker. One worker is the walk as it always was.
     """
-    pending = [top]
-    while pending:
-        current = pending.pop()
+    if workers is None:
+        workers = scan_workers()
+    workers = max(1, int(workers))
+
+    def list_one(current):
+        """(files, subdirs, errors) for one directory, or None for files when
+        it could not be listed at all. Run by whichever thread gets it; says
+        nothing itself - the errors go back to the caller's thread."""
+        errors = []
+        subdirs = []
         try:
             with os.scandir(current) as scanning:
                 entries = list(scanning)
         except OSError as err:
-            if onerror is not None:
-                onerror(err)
-            continue
+            return None, subdirs, [err]
 
         files = []
         for entry in entries:
@@ -216,20 +233,63 @@ def walk_with_sizes(top, onerror=None):
                 # that wrote it.
                 if entry.is_dir():
                     if not entry.is_symlink():
-                        pending.append(entry.path)
+                        subdirs.append(entry.path)
                     continue
             except OSError as err:
                 # A directory entry that cannot even be classified. Report it
                 # like an unreadable subtree - it is one - rather than
                 # guessing it is a file and failing again on the stat.
-                if onerror is not None:
-                    onerror(err)
+                errors.append(err)
                 continue
             try:
                 files.append((entry.name, entry.stat().st_size))
             except OSError:
                 files.append((entry.name, None))
-        yield current, files
+        return files, subdirs, errors
+
+    def report(errors):
+        if onerror is not None:
+            for err in errors:
+                onerror(err)
+
+    if workers == 1:
+        pending = [top]
+        while pending:
+            current = pending.pop()
+            files, subdirs, errors = list_one(current)
+            report(errors)
+            pending.extend(subdirs)
+            if files is not None:
+                yield current, files
+        return
+
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="list-scan")
+    try:
+        running = {pool.submit(list_one, top): top}
+        while running:
+            finished, _ = wait(running, return_when=FIRST_COMPLETED)
+            for future in finished:
+                current = running.pop(future)
+                files, subdirs, errors = future.result()
+                report(errors)
+                for subdir in subdirs:
+                    running[pool.submit(list_one, subdir)] = subdir
+                if files is not None:
+                    yield current, files
+    finally:
+        # A caller that stops early - an exception mid-scan - must not leave
+        # workers listing a library nobody is reading any more.
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def scan_workers():
+    """LIST_SCAN_THREADS, held to 1..64."""
+    try:
+        wanted = int(getattr(config, "LIST_SCAN_THREADS", 16) or 1)
+    except (TypeError, ValueError):
+        wanted = 1
+    return max(1, min(64, wanted))
 
 
 def _has_extension(name, extensions):
@@ -382,6 +442,14 @@ def _discard_temp_lists(*paths):
             print(f"[LIST-CLEAN ERROR] Could not remove {path}: {err}")
 
 
+# How patient the swap is with a reader holding a list open (#923). Searches
+# now run during the scan; the swap refuses new ones, but one that started a
+# moment before may still be reading the list - a second or two on a very
+# large one - and on Windows the rename waits for it. Ten attempts back off to
+# about ten seconds in all; POSIX never retries at all.
+PUBLISH_REPLACE_ATTEMPTS = 10
+
+
 def _publish_artifacts(swaps):
     """Move every (temporary, destination) pair into place, or none of them.
 
@@ -419,8 +487,10 @@ def _publish_artifacts(swaps):
             backup = None
             if os.path.exists(platform_compat.long_path(destination)):
                 backup = destination + ".previous"
-                platform_compat.replace_with_retry(destination, backup)
-            platform_compat.replace_with_retry(temporary, destination)
+                platform_compat.replace_with_retry(destination, backup,
+                                                   attempts=PUBLISH_REPLACE_ATTEMPTS)
+            platform_compat.replace_with_retry(temporary, destination,
+                                               attempts=PUBLISH_REPLACE_ATTEMPTS)
             done.append((destination, backup))
     except Exception:
         # Reverse order because that is the convention for undoing a
@@ -883,6 +953,25 @@ def write_progress(phase, folder="", folder_index=0, folder_count=0,
         pass
 
 
+# The phases in which the published list is untouched (#923): the scan, the
+# audio-info reading and the writing all work on temporary names. Anything
+# else - "publishing", which covers the swap and the prune after it, or no
+# phase at all - is a moment searches and file requests wait out.
+PHASES_BEFORE_THE_SWAP = ("scanning", "audio", "writing")
+
+
+def read_phase():
+    """The phase the running rebuild last reported, or None when it reported
+    nothing readable. The daemon asks this; the rebuild is another process."""
+    try:
+        with io.open(platform_compat.long_path(progress_path()), encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        phase = loaded.get("phase") if isinstance(loaded, dict) else None
+        return str(phase) if phase else None
+    except (OSError, ValueError):
+        return None
+
+
 def clear_progress():
     """Drop the progress file once a run is over.
 
@@ -1027,6 +1116,26 @@ def build_list_artifact(fmt, members, date_str, directory=None):
     return fmt, tmp, final
 
 
+def list_nick():
+    """The nick every request line in the list names: the CONFIGURED one.
+
+    A list outlives the connection it was built on - people save it and paste
+    from it days later - so it must name the nick the bot comes back to, not
+    whichever one it happens to hold (#376). On its alternate nick the bot is
+    config.NICKNAME = the alternate; irc.py keeps what was configured in
+    ORIGINAL_NICK, answers "!<ORIGINAL_NICK> <file>" all the same
+    (get_bot_aliases()), and takes the name back as soon as it is free.
+
+    Every rebuild today runs this module as a subprocess, which reads the
+    configured nick fresh and never sees the daemon's live one - so this held
+    by accident of how the rebuild is launched. Built in-process, the list was
+    stamped with the alternate. ORIGINAL_NICK first makes it hold either way;
+    a subprocess, where irc.py never ran, has no ORIGINAL_NICK and takes
+    NICKNAME, which there is the configured value.
+    """
+    return str(getattr(config, "ORIGINAL_NICK", None) or getattr(config, "NICKNAME", "") or "")
+
+
 def list_identity_line(nickname=None):
     """"Served by <nick> - <version> - <url>", with absent parts left out.
 
@@ -1042,7 +1151,7 @@ def list_identity_line(nickname=None):
     that. An empty fallback declines to have an opinion instead.
     """
     if nickname is None:
-        nickname = getattr(config, "NICKNAME", "")
+        nickname = list_nick()
 
     parts = [str(getattr(config, "SCRIPT_VERSION", "") or "").strip(),
              str(getattr(config, "PROJECT_URL", "") or "").strip()]
@@ -1249,7 +1358,8 @@ def generate_master_list(list_name=None):
 
     scan_folders = library.folders(list_name)
     print("[LIST-GEN] Scanning the library in "
-          + ", ".join(f"{f.path} ({f.name})" for f in scan_folders) + "...")
+          + ", ".join(f"{f.path} ({f.name})" for f in scan_folders)
+          + f", {scan_workers()} folder(s) at a time...")
 
     all_files_data = []
     # The music list, the film-and-series list, and which folders !rar may
@@ -1336,6 +1446,13 @@ def generate_master_list(list_name=None):
         print("[LIST-GEN] One combined list - SEPARATE_VIDEO_LIST is off.")
 
     write_progress("scanning", folder_count=len(scan_folders), force=True)
+
+    # Duration and quality on the file rows (#567), when asked for. The cache
+    # is what keeps it affordable: only files new or changed since the last
+    # rebuild are opened. Unopenable, it says so and the list is size-only.
+    audio = None
+    if getattr(config, "LIST_SHOW_AUDIO_INFO", False):
+        audio = audio_info.Cache.open(scope=list_name or "")
 
     for folder_number, scan_folder in enumerate(scan_folders, start=1):
         # Reported per folder because the folder COUNT is the one total known
@@ -1480,11 +1597,38 @@ def generate_master_list(list_name=None):
                         video_files_data.append((rel_dir, file, file_bytes))
                     else:
                         all_files_data.append((rel_dir, file, file_bytes))
+                        if audio is not None and audio_info.is_audio(file):
+                            # No request here: an unchanged file is answered
+                            # from the cache by its size, the rest are read
+                            # after the walk, many at once (#914).
+                            audio.note(audio_info.row_key(rel_dir, file),
+                                       os.path.join(root, file), file_bytes)
 
     if walk_errors:
         print(f"[LIST-GEN ERROR] {len(walk_errors)} part(s) of the library could not be "
               "read - keeping the previous index rather than publishing a truncated one.")
+        if audio is not None:
+            audio.close()
         return False
+
+    # The audio files new or changed since the last rebuild (#567, #914).
+    # After the walk rather than inside it: read several at once, where on a
+    # network mount the time is round trips, and within LIST_AUDIO_INFO_MINUTES
+    # - the rebuild is pausing every search and request meanwhile.
+    if audio is not None and audio.pending:
+        workers = max(1, min(128, int(getattr(config, "LIST_AUDIO_INFO_THREADS", 64) or 1)))
+        minutes = max(0, int(getattr(config, "LIST_AUDIO_INFO_MINUTES", 5) or 0))
+        listed = len(all_files_data) + len(video_files_data)
+        print(f"[LIST-GEN] Reading the length and quality of {len(audio.pending):,} new or changed "
+              f"audio file(s), {workers} at a time"
+              f"{f', for at most {minutes} minute(s)' if minutes else ''}...")
+        audio.read_pending(workers=workers, budget=minutes * 60,
+                           progress=lambda done, total: write_progress(
+                               "audio", folder_index=done, folder_count=total, files=listed))
+        if audio.left_count:
+            print(f"[LIST-GEN] {audio.left_count:,} audio file(s) not read within "
+                  f"LIST_AUDIO_INFO_MINUTES = {minutes}: they show their size alone this "
+                  f"time, and the next rebuild reads them.")
 
     if denied_dirs:
         # Said once, with the count, because it is a standing condition rather
@@ -1597,7 +1741,7 @@ def generate_master_list(list_name=None):
              open(tmp_rar_path, "w", encoding="utf-8") as f_rar:
                  
             f.write(f"List of {total_files_count:,} Files ({formatted_music_size}) generated on {date_header_str} in {duration_str} ( {files_per_second:,} Files Per Second )\n")
-            f.write(f"To request a file, copy/paste to the channel... !{config.NICKNAME} FILENAME eg. !{config.NICKNAME} Songname.flac\n")
+            f.write(f"To request a file, copy/paste to the channel... !{list_nick()} FILENAME eg. !{list_nick()} Songname.flac\n")
 
             # The operator's banner and the bot's identity go BELOW the two
             # lines above and above the first folder - not at the very top.
@@ -1627,9 +1771,9 @@ def generate_master_list(list_name=None):
             f.write("\n")
 
             if serve_albums:
-                f_rar.write(f"List of Entire Album Folders (!rar) for !{config.NICKNAME} generated on {date_header_str}\n")
+                f_rar.write(f"List of Entire Album Folders (!rar) for !{list_nick()} generated on {date_header_str}\n")
                 f_rar.write(f"To request an entire album, copy/paste the line... eg. "
-                            f"!{config.NICKNAME} !rar {list_mod.LIST_FOLDER_PREFIX}Album\\\n")
+                            f"!{list_nick()} !rar {list_mod.LIST_FOLDER_PREFIX}Album\\\n")
                 # Same order as the .txt above, and for the same reason. The
                 # !rar list is a separate download that travels on its own, so
                 # it carries its own copy rather than inheriting one.
@@ -1790,10 +1934,17 @@ def generate_master_list(list_name=None):
                         # (*.mp3 and *.rar), not the tail. See defaults.py's note
                         # above LIST_IGNORED_EXTENSIONS for the quoted source.
                         if display_rar_folder not in written_rar_folders:
-                            f_rar.write(f"!{config.NICKNAME} !rar {_one_line(display_rar_folder)}\n")
+                            f_rar.write(f"!{list_nick()} !rar {_one_line(display_rar_folder)}\n")
                             written_rar_folders.add(display_rar_folder)
                 single_file_size = format_size_human(bytes_size)
-                f.write(f"!{config.NICKNAME} {_one_line(filename)}  ::INFO:: {single_file_size}\n")
+                # "4m31s 320/44.1/JS" after the size (#567), or nothing. After
+                # the size, where AutoQ never looks (see the !rar note above)
+                # and where other servers' lists already put it.
+                if audio is not None:
+                    tail = audio.suffix(audio_info.row_key(folder, filename))
+                    if tail:
+                        single_file_size = f"{single_file_size} {tail}"
+                f.write(f"!{list_nick()} {_one_line(filename)}  ::INFO:: {single_file_size}\n")
 
         # The film and series list. Written after the music one and from the
         # same walk, exactly as the album list is - a separate file with its
@@ -1816,7 +1967,7 @@ def generate_master_list(list_name=None):
                     f"{date_header_str}\n")
                 f_video.write(
                     f"To request one, copy/paste to the channel... "
-                    f"!{config.NICKNAME} FILENAME eg. !{config.NICKNAME} "
+                    f"!{list_nick()} FILENAME eg. !{list_nick()} "
                     f"Some.Film.2021.mkv\n")
                 # Same order as the .txt above, and for the same reason: this
                 # file travels on its own once it is out of the archive, so it
@@ -1838,7 +1989,7 @@ def generate_master_list(list_name=None):
                         f_video.write(f"\n{rule}\n{line}\n{rule}\n")
                         f_video.write(folder_summary_line(*video_totals[folder], format_size_human) + "\n")
                     f_video.write(
-                        f"!{config.NICKNAME} {_one_line(filename)}"
+                        f"!{list_nick()} {_one_line(filename)}"
                         f"  ::INFO:: {format_size_human(bytes_size)}\n")
             print(f"[LIST-GEN] Film & series list created: {tmp_video_path}")
 
@@ -1929,6 +2080,11 @@ def generate_master_list(list_name=None):
             swaps.append((tmp_video_path, video_path))
         if serve_albums:
             swaps.append((tmp_rar_path, rar_path))
+        # Said BEFORE the swap (#923): from here until this list is done -
+        # the swap and the prune of what it replaced - the daemon refuses new
+        # searches and file requests, since on Windows a file somebody is
+        # reading cannot be renamed or removed.
+        write_progress("publishing", force=True)
         _publish_artifacts(swaps)
 
         # THE POINT OF NO RETURN (#442). Everything from here to the except is
@@ -2032,6 +2188,15 @@ def generate_master_list(list_name=None):
         # left beside a fresh .rar would go on being handed out to somebody the
         # day the operator switched formats and the build failed.
         _prune_superseded_lists(keep=keep, directory=directory)
+        if audio is not None:
+            # Only a PUBLISHED rebuild forgets the files it did not see; a
+            # failed one may have seen half the library.
+            audio.publish()
+            rate = audio.rate()
+            print(f"[LIST-GEN] Audio info: {audio.read_count:,} file(s) read, "
+                  f"{audio.reused_count:,} unchanged since the last rebuild"
+                  f"{f', {audio.left_count:,} left for the next one' if audio.left_count else ''}."
+                  f"{f' Read at {rate:,.0f} files a second, {audio.workers} at a time.' if rate else ''}")
         return True
             
     except Exception as e:
@@ -2050,6 +2215,9 @@ def generate_master_list(list_name=None):
             print("[LIST-GEN] The previous list was left untouched and is still in use.")
         _discard_temp_lists(*tmp_all_paths)
         return False
+    finally:
+        if audio is not None:
+            audio.close()
 
 def generate_all_lists(log=print):
     """Build every configured list. True only if every one of them succeeded.

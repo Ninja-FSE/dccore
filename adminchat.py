@@ -943,6 +943,83 @@ def _cmd_version(session, args):
     session.send(platform_compat.describe())
 
 
+def _cmd_checkversion(session, args):
+    """Ask GitHub now whether a newer DCCore exists (#572), whatever
+    CHECK_FOR_UPDATES says. On a thread, so the console is not held for the
+    request's timeout; the answer comes back into this session - success or
+    failure, never silence."""
+    import threading
+
+    def run():
+        import version_check
+        result = version_check.manual_check()
+        if result.get("cooldown"):
+            session.send(f"Checked moments ago - try again in {result['cooldown']}s. "
+                         f"Version: {version_check.describe()}")
+        else:
+            session.send(f"Version check: {version_check.describe()}")
+
+    session.send("Asking GitHub for the latest release...")
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _checkupdates_reply(session, on):
+    """The setting, said to whoever asked: the DCCORE line dccore.mrc reads
+    to a structured session, a sentence to a person - a plain DCC chat, or
+    the dashboard's Console (_WebConsoleSession.structured is False). A
+    person used to be shown the protocol line itself; `pair` made the same
+    choice for the same reason (#581)."""
+    if getattr(session, "structured", False):
+        return f"DCCORE CHECKUPDATES {'on' if on else 'off'}"
+    return (f"The daily update check is {'on' if on else 'off'}"
+            f"{'' if on else ' - checkversion still asks GitHub by hand'}.")
+
+
+def _cmd_checkupdates(session, args):
+    """Turn CHECK_FOR_UPDATES on or off, or report it with no argument.
+
+    Written through settings_file.save() and a rehash - the same path the
+    dashboard's own Settings save uses - not by poking config directly:
+    a rehash re-reads settings.conf, so the change is real rather than
+    live-only-until-restart, and commands._handle_rehash_request() already
+    calls version_check.ensure_worker() after every rehash (wired in for
+    #776's rebuild-schedule worker, the identical need), so turning it on
+    here really starts the daily check rather than waiting for one.
+
+    The `DCCORE CHECKUPDATES on|off` reply is read by dccore.mrc's options
+    dialog (mIRC checkbox follow-up to #572) - a plain prose reply would
+    have meant either parsing prose or a second, structured-only command,
+    and every other piece of state the script keeps in sync with the bot
+    already arrives as a DCCORE line.
+    """
+    import threading
+
+    arg = args.strip().lower()
+    if arg not in ("", "on", "off"):
+        session.send("Usage: checkupdates [on|off]")
+        return
+    if not arg:
+        session.send(_checkupdates_reply(session, getattr(config, "CHECK_FOR_UPDATES", True)))
+        return
+    wanted = arg == "on"
+
+    def apply():
+        import settings_file
+        settings_file.save(vars(config), {"CHECK_FOR_UPDATES": wanted})
+        import commands
+        commands.handle_rehash_request(session.nick, CONSOLE_SOURCE, authorised=True)
+        # `wanted`, not a re-read of config: the rehash just triggered reloads
+        # it from the file this save() just wrote, so it is not in doubt -
+        # and reading it back here would make this line's correctness depend
+        # on that reload having actually finished, which is exactly the
+        # coupling test_rehash_returns_only_the_acknowledgement's own
+        # rehash-mocking convention exists to avoid.
+        session.send(_checkupdates_reply(session, wanted))
+
+    session.send(f"Turning the daily update check {'on' if wanted else 'off'} ...")
+    _run_detached(session, "checkupdates", apply)
+
+
 def _cmd_uptime(session, args):
     session.send(f"Running {format_uptime(_uptime_seconds())}")
 
@@ -1014,6 +1091,16 @@ def _cmd_status(session, args):
         session.send(f"MasterList  : {count:,} files, {size_str}, dated {date_str}")
     except Exception as err:
         session.send(f"MasterList  : unavailable ({err})")
+    try:
+        import commands as _commands
+        session.send(f"Rebuild     : {_commands.describe_rebuild_schedule()}")
+    except Exception as err:
+        session.send(f"Rebuild     : unavailable ({err})")
+    try:
+        import version_check
+        session.send(f"Version     : {version_check.describe()}")
+    except Exception as err:
+        session.send(f"Version     : unavailable ({err})")
 
 
 # --------------------------------------------------------------------------
@@ -1270,6 +1357,10 @@ def _cmd_hello(session, args):
                      f"read a field wrong.")
         print(f"[ADMINCHAT] {session.nick}'s {session.client} is {version or 'unknown'}; "
               f"{MIN_SCRIPT_VERSION} or later reads this bot's lines. Told them.")
+    # So the options dialog's checkbox (#572 follow-up) shows the real state
+    # the moment it is opened, rather than "unknown" until the operator
+    # happens to run checkupdates themselves.
+    session.send(f"DCCORE CHECKUPDATES {'on' if getattr(config, 'CHECK_FOR_UPDATES', True) else 'off'}")
     session.send_status()
     print(f"[ADMINCHAT] {session.nick}'s session switched to the structured feed "
           f"({session.client} {' '.join(parts[1:]) or '?'}).")
@@ -1359,6 +1450,8 @@ COMMANDS = {
     "bans":       (_cmd_bans,       "permanent and timed bans",          "bans"),
     "uptime":     (_cmd_uptime,     "how long the daemon has run",       "uptime"),
     "version":    (_cmd_version,    "build and platform",                "version"),
+    "checkversion": (_cmd_checkversion, "ask GitHub whether a newer DCCore is out", "checkversion"),
+    "checkupdates": (_cmd_checkupdates, "turn the daily update check on/off, or report it", "checkupdates [on|off]"),
     "ban":        (_cmd_ban,        "add a permanent wildcard ban",      "ban <pattern>"),
     "unban":      (_cmd_unban,      "remove a permanent wildcard ban",   "unban <pattern>"),
     "clearqueue": (_cmd_clearqueue, "force-clear another user's queue",  "clearqueue <nick>"),

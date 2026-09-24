@@ -198,17 +198,17 @@ class TheFallbacksThatMustPointTheSafeWay(unittest.TestCase):
                          "PAUSE_ON_UPDATE falls back to not pausing at: "
                          + ", ".join(offenders))
 
-    def test_all_four_call_sites_are_still_there(self):
+    def test_the_call_sites_are_still_there(self):
         """Fixture invariant: the test above passes trivially if the scan stops
-        finding them. webserver.py's own PAUSE_ON_UPDATE check (added
-        alongside the dashboard's "Update list" tool, in start_list_update())
-        is the fourth - it decides whether an already-running system scan
-        should block a dashboard-triggered rebuild the same way
-        commands.handle_list_update_request() itself would."""
-        sites = [s for _l, _n, s, _v in fallbacks() if s == "PAUSE_ON_UPDATE"]
+        finding them. There were four - commands.py, dcc.py, list.py and
+        webserver.py each asked. Since #923 the search gate, the request gate
+        and the dashboard's start_list_update() all ask list.py's
+        rebuild_pauses_requests() / rebuild_pauses_everything(), which read
+        it twice between them, and commands.py reads it once more to say what
+        a starting rebuild will pause."""
+        sites = sorted(label for label, _n, s, _v in fallbacks() if s == "PAUSE_ON_UPDATE")
 
-        self.assertEqual(len(sites), 4,
-                         "expected commands.py, dcc.py, list.py and webserver.py")
+        self.assertEqual(sites, ["commands.py", "list.py", "list.py"])
 
 
 class AnAuthorisationCheckRefusesWhenItDoesNotKnow(DCCoreTestCase):

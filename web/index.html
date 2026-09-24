@@ -88,6 +88,13 @@
         <span class="status-label" data-i18n="sidebar.queued">Queued</span>
         <span class="status-value" id="status-queued">&mdash;</span>
       </div>
+      <!-- #572: this bot's version, and whether a newer one is out. -->
+      <div class="status-row status-version">
+        <span class="status-label" data-i18n="sidebar.version">Version</span>
+        <button type="button" class="version-check-btn" id="version-check-btn"
+                data-i18n="sidebar.checkNow">Check now</button>
+      </div>
+      <div class="version-text" id="version-text">&mdash;</div>
       <!-- Nothing at all when there is nothing unread, so it means something
            when it appears. See renderNoticeBadge() for what decides that. -->
       <div class="status-row status-notices" id="status-notices" hidden>
@@ -250,6 +257,11 @@
                    autocomplete="off" aria-describedby="filelists-filter-status">
             <button type="button" class="btn btn-small" id="filelists-filter-clear"
                     data-i18n="common.clear" hidden>Clear</button>
+            <!-- #926: only the lists of bots in a channel right now. -->
+            <label class="filelists-online-only">
+              <input type="checkbox" id="filelists-online-only">
+              <span data-i18n="filelists.onlineOnly">Online only</span>
+            </label>
           </div>
           <p class="filelists-filter-status" id="filelists-filter-status" hidden></p>
           <div class="filelists-filter-actions" id="filelists-filter-actions" hidden>
@@ -446,6 +458,7 @@
           directory from the Settings page, since nothing else prompts for
           it automatically.
         </p>
+        <p class="tool-status" id="update-list-schedule"></p>
         <p class="tool-status" id="update-list-status"></p>
           <div class="progress-bar" id="update-list-bar" style="display:none;">
             <div class="progress-bar-fill" id="update-list-bar-fill"></div>

@@ -69,27 +69,34 @@ def _one_elif_condition(fragment):
     return matches[0]
 
 
-def _flood_gate_source():
-    """The ``is_bot_command = (...)`` expression, read out of irc.py."""
+def _bracketed_expression(name):
+    """A ``<name> = (...)`` expression, read out of irc.py.
+
+    Two of them are read this way now (#888): the dispatch set and the
+    file-request exemption from metering. Each is self-contained in irc.py
+    precisely so it can be lifted out here and evaluated on its own.
+    """
+    opener = f"{name} = ("
     start = None
     for index, raw in enumerate(IRC_LINES):
-        if raw.strip() == "is_bot_command = (":
+        if raw.strip() == opener:
             start = index
             break
     if start is None:
-        raise AssertionError("could not find the 'is_bot_command = (' gate in irc.py")
+        raise AssertionError(f"could not find the '{opener}' expression in irc.py")
     body = []
     for raw in IRC_LINES[start + 1:]:
         stripped = raw.strip()
         if stripped == ")":
             return "(\n" + "\n".join(body) + "\n)"
         body.append(stripped)
-    raise AssertionError("unterminated 'is_bot_command' expression in irc.py")
+    raise AssertionError(f"unterminated '{name}' expression in irc.py")
 
 
 ALIAS_LINE, ALIAS_CONDITION = _one_elif_condition(ALIAS_FRAGMENT)
 LIVE_NICK_LINE, LIVE_NICK_CONDITION = _one_elif_condition(LIVE_NICK_FRAGMENT)
-FLOOD_GATE_SOURCE = _flood_gate_source()
+FLOOD_GATE_SOURCE = _bracketed_expression("is_bot_command")
+FILE_REQUEST_SOURCE = _bracketed_expression("is_file_request")
 
 
 def _evaluate(source, msg, target_chan=None):
@@ -336,15 +343,33 @@ class TriggerExpressionTests(DCCoreTestCase):
 
 
 class FloodGateCoverageTests(DCCoreTestCase):
-    """The is_bot_command gate must meter every request trigger it dispatches."""
+    """Every request trigger is dispatched through is_bot_command, and every
+    one of them is metered EXCEPT the file requests #888 exempted.
+
+    The contract this class guards changed shape with #888 but not in
+    strength. It used to be "the gate is never narrower than the dispatch",
+    because a gate narrower than the dispatch is an unmetered command path.
+    There is now exactly one unmetered command path, deliberately, and the
+    assertions below pin it: a message is metered unless it is a file
+    request, the exemption covers the file requests, and it covers nothing
+    else. A second unmetered path added later still fails here."""
 
     def _gate(self, msg):
         return _evaluate(FLOOD_GATE_SOURCE, msg)
 
+    def _exempt(self, msg):
+        return _evaluate(FILE_REQUEST_SOURCE, msg)
+
+    def _metered(self, msg):
+        """What irc.py actually does: gated, and not exempt."""
+        return self._gate(msg) and not self._exempt(msg)
+
     def test_gate_covers_every_public_request_trigger(self):
         """Defect guard: a gate narrower than the dispatch is an unmetered
         command path - which is what pre-fix fallback traffic was, neither
-        dispatched nor even seen by the flood counter."""
+        dispatched nor even seen by the flood counter. File requests are
+        still in the gate; what changed is that they are then exempted from
+        metering, which the tests below cover on their own."""
         for nickname, original in (("DCCore", "DCCore"), ("DCCore_", "DCCore")):
             reset_config(NICKNAME=nickname, ORIGINAL_NICK=original)
             for msg in ("@" + nickname, "@find metallica", "@locator metallica",
@@ -357,9 +382,54 @@ class FloodGateCoverageTests(DCCoreTestCase):
                 with self.subTest(nick=nickname, msg=msg):
                     self.assertTrue(self._gate(msg))
 
+    def test_everything_still_metered_is_metered(self):
+        """The searches and the rest keep the meter they have always had.
+        #888 moved one kind of request out, not the rule."""
+        reset_config(NICKNAME="DCCore", ORIGINAL_NICK="DCCore")
+        for msg in ("@DCCore", "@find metallica", "@locator metallica",
+                    "@DCCore-que", "@DCCore-remove", "@DCCore-help",
+                    "!list", "!ping", "@DCCore  ::AutoQ::"):
+            with self.subTest(msg=msg):
+                self.assertTrue(self._metered(msg), "stopped being metered")
+
+    def test_a_file_request_is_not_metered(self):
+        """#888, the whole point. A user pasting an album sent ten requests,
+        was muted on the eleventh and banned for an hour on the twelfth."""
+        for nickname, original in (("DCCore", "DCCore"), ("DCCore_", "DCCore")):
+            reset_config(NICKNAME=nickname, ORIGINAL_NICK=original)
+            for msg in ("!" + nickname + " Song.flac", "!DCCore Song.flac",
+                        "!" + nickname + " !rar Artist/Album",
+                        "!dccore Song.flac"):
+                with self.subTest(nick=nickname, msg=msg):
+                    self.assertTrue(self._gate(msg), "no longer dispatched")
+                    self.assertTrue(self._exempt(msg), "not exempted")
+                    self.assertFalse(self._metered(msg), "still metered")
+
+    def test_the_exemption_is_no_wider_than_the_file_requests(self):
+        """Defect guard, and the one that keeps this class's teeth: the
+        exemption must not quietly grow to cover a trigger that costs real
+        work per message. Everything here is dispatched and must stay
+        metered."""
+        reset_config(NICKNAME="DCCore", ORIGINAL_NICK="DCCore")
+        for msg in ("@DCCore", "@find x", "@locator x", "!list", "!ping",
+                    "!debugnames", "@DCCore-que", "@DCCore-remove",
+                    "@DCCore  ::AutoQ::", "hello world", "!DCCoreX Song.flac"):
+            with self.subTest(msg=msg):
+                self.assertFalse(self._exempt(msg), "wrongly exempted from metering")
+
+    def test_a_dcc_send_ctcp_is_never_exempted(self):
+        """#219's clause is the expensive one - a thread and a fetch-queue
+        scan per message - and nothing about #888 touches it."""
+        reset_config(NICKNAME="DCCore", ORIGINAL_NICK="DCCore")
+        offer = "\x01DCC SEND Track.flac 3232235521 5001 12345\x01"
+
+        self.assertFalse(_evaluate(FILE_REQUEST_SOURCE, offer, target_chan="DCCore"))
+        self.assertTrue(_evaluate(FLOOD_GATE_SOURCE, offer, target_chan="DCCore"))
+
     def test_gate_is_never_narrower_than_the_dispatch(self):
         """Defect guard: every message the alias or list-request branch would
-        dispatch must first have passed through the flood meter."""
+        dispatch must first have passed through the gate - and then be either
+        metered or the one documented exemption, never neither by accident."""
         corpus = ["!DCCore Song.flac", "!DCCore_ Song.flac", "!dccore x",
                   "!DCCore !rar Artist/Album", "!DCCoreX Song.flac",
                   "!DCCore2 Song.flac", "@DCCore", "@DCCore_", "@DCCore2",
@@ -377,8 +447,10 @@ class FloodGateCoverageTests(DCCoreTestCase):
                 with self.subTest(nick=nickname, msg=msg):
                     if _evaluate(ALIAS_CONDITION, msg):
                         self.assertTrue(self._gate(msg))
+                        self.assertTrue(self._metered(msg) or self._exempt(msg))
                     if _evaluate(LIVE_NICK_CONDITION, msg):
                         self.assertTrue(self._gate(msg))
+                        self.assertTrue(self._metered(msg))
 
     def test_gate_is_not_wider_than_the_dispatch(self):
         """Defect guard: a gate wider than the dispatch charges users flood points

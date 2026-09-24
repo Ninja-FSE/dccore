@@ -184,37 +184,43 @@ class TheReloadWindowIsNotObservable(unittest.TestCase):
     def test_the_reload_actually_holds_the_lock(self):
         """The guard above passes trivially if the reload never takes the lock -
         a reader would then simply never contend. Assert the reload really is
-        holding it, by watching from another thread."""
-        held = []
-        ready = threading.Event()
-        done = threading.Event()
+        holding it, by asking from another thread WHILE a module reloads.
 
-        def watcher():
-            ready.set()
-            # acquire(False) fails only while another thread holds it.
-            while not done.is_set():
-                if not runtime.config_reload_lock.acquire(blocking=False):
-                    held.append(True)
-                    return
-                runtime.config_reload_lock.release()
+        Asked from inside the reload, not raced (#915). This used to spin a
+        watcher thread and hope the scheduler ran it during one of 30 reloads;
+        reloading `defaults` is quicker than CPython's 5 ms switch interval, so
+        on a slow runner every reload could finish between switches and the
+        test failed with the lock held all along (macOS 3.14, the #904 merge).
+        Now the probe runs at a moment the reload is known to be in progress,
+        and is joined before the reload goes on: refused if and only if the
+        lock is held around it."""
+        import importlib
 
-        worker = threading.Thread(target=watcher, daemon=True)
-        worker.start()
-        ready.wait(2)
+        refused = []
+        real_reload = importlib.reload
+
+        def probing_reload(module):
+            def probe():
+                got = runtime.config_reload_lock.acquire(blocking=False)
+                if got:
+                    runtime.config_reload_lock.release()
+                refused.append(not got)
+
+            prober = threading.Thread(target=probe, daemon=True)
+            prober.start()
+            prober.join(5)
+            return real_reload(module)
+
+        importlib.reload = probing_reload
         try:
-            for _ in range(30):
-                commands.reload_modules_in_order(modules=('defaults',),
-                                                 reload_self=False)
-                if held:
-                    break
+            commands.reload_modules_in_order(modules=('defaults',), reload_self=False)
         finally:
-            done.set()
-            worker.join(5)
+            importlib.reload = real_reload
 
-        self.assertTrue(held, "no other thread was ever blocked by the reload - "
-                              "reload_modules_in_order() is not holding "
-                              "runtime.config_reload_lock")
-
+        self.assertEqual(refused, [True],
+                         "a thread asking during the reload was not refused - "
+                         "reload_modules_in_order() is not holding "
+                         "runtime.config_reload_lock")
 
 class ARequiredSettingThatComesBackBlankIsKept(DCCoreTestCase):
     """The backstop, for when the window does not close cleanly.

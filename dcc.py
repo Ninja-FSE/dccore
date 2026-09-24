@@ -73,12 +73,35 @@ def names_a_remote_or_absolute_path(name, windows=None):
 # is busy, at once, without touching the disk), and a name that just missed is
 # answered "not found" from memory for a minute - the same stale row pasted ten
 # times costs one scan, not ten.
-MAX_CONCURRENT_LIBRARY_SCANS = 2
+MAX_CONCURRENT_LIBRARY_SCANS = runtime.MAX_CONCURRENT_LIBRARY_SCANS
 LOOKUP_MISS_TTL_SECONDS = 60.0
 LOOKUP_MISS_MEMORY = 512
-_library_scans = globals().get("_library_scans") or threading.BoundedSemaphore(MAX_CONCURRENT_LIBRARY_SCANS)
+# WHAT A PASTE OF NINE ROWS COSTS (#886). Only misses were remembered, so
+# every request for a file that exists paid the scan again - and a user
+# pasting nine rows out of the list, which is how these lists are meant to
+# be used, started nine scans, of which MAX_CONCURRENT_LIBRARY_SCANS - 1
+# ran and the rest were refused outright with "busy ... try again in a
+# moment", advice that points a novice straight at the flood gate.
+#
+# Three memories now, each cheap and each verified before it is trusted:
+# the name that was found (repeats), the FOLDERS recent lookups resolved
+# into (a batch is nearly always siblings in one album, so the second row
+# onwards is an os.path.exists rather than a scan), and a short wait for a
+# scan slot instead of an instant refusal. Nothing here decides what may
+# be sent: is_safe_path() still checks the resolved path against every
+# configured root afterwards, unchanged.
+LOOKUP_HIT_TTL_SECONDS = 300.0
+LOOKUP_HIT_MEMORY = 512
+LOOKUP_FOLDER_MEMORY = 32
+LOOKUP_SCAN_WAIT_SECONDS = 5.0
+# Owned by runtime.py, which nothing reloads (#749) - bound by name, the way
+# queue_lock is, so a !rehash re-runs these lines and picks the same live
+# objects back up. The memories themselves are this module's own cache.
+_library_scans = runtime.library_scans
 _lookup_misses = globals().get("_lookup_misses") or {}
-_lookup_misses_lock = globals().get("_lookup_misses_lock") or threading.Lock()
+_lookup_misses_lock = runtime.lookup_memory_lock
+_lookup_hits = globals().get("_lookup_hits") or {}
+_lookup_folders = globals().get("_lookup_folders") or {}
 
 
 def _lookup_missed_recently(key):
@@ -100,6 +123,72 @@ def _note_lookup_miss(key):
         if excess > 0:
             for stale in list(_lookup_misses)[:excess]:
                 _lookup_misses.pop(stale, None)
+
+
+def _remembered_path(key):
+    """The path a recent lookup resolved `key` to, if it is still there.
+
+    A hint, never an authority: the entry is dropped and None returned when
+    the file has gone, so a library reorganised between two requests costs
+    one stale check rather than a wrong answer. The caller puts the result
+    through is_safe_path() exactly as it does a freshly scanned one.
+    """
+    with _lookup_misses_lock:
+        remembered = _lookup_hits.get(key)
+        if remembered is None:
+            return None
+        path, when = remembered
+        if time.monotonic() - when >= LOOKUP_HIT_TTL_SECONDS:
+            _lookup_hits.pop(key, None)
+            return None
+    if not os.path.exists(platform_compat.long_path(path)):
+        with _lookup_misses_lock:
+            _lookup_hits.pop(key, None)
+        return None
+    return path
+
+
+def _note_lookup_hit(key, path):
+    """Remember where a scan found this name, and the folder it was in."""
+    folder = os.path.dirname(path)
+    with _lookup_misses_lock:
+        _lookup_hits.pop(key, None)            # re-noted: newest again
+        _lookup_hits[key] = (path, time.monotonic())
+        excess = len(_lookup_hits) - LOOKUP_HIT_MEMORY
+        if excess > 0:
+            for stale in list(_lookup_hits)[:excess]:
+                _lookup_hits.pop(stale, None)
+        if folder:
+            folders = _lookup_folders.setdefault(key[0], [])
+            if folder in folders:
+                folders.remove(folder)
+            folders.append(folder)             # newest last
+            del folders[:-LOOKUP_FOLDER_MEMORY]
+
+
+def _in_a_recent_folder(list_name, file_name):
+    """`<folder>/<name>` for the folders recent lookups resolved into.
+
+    The reported case (#886): a user pastes nine rows from one album. The
+    first costs a scan and names the folder; the other eight are one
+    os.path.exists each, in the folder their sibling was just found in -
+    newest folder first, because a batch arrives together.
+    """
+    with _lookup_misses_lock:
+        folders = list(reversed(_lookup_folders.get(list_name, [])))
+    for folder in folders:
+        candidate = os.path.join(folder, file_name)
+        if os.path.exists(platform_compat.long_path(candidate)):
+            return candidate
+    return None
+
+
+def forget_library_lookups():
+    """Drop every remembered lookup - for a rebuild, and for the tests."""
+    with _lookup_misses_lock:
+        _lookup_hits.clear()
+        _lookup_folders.clear()
+        _lookup_misses.clear()
 
 
 
@@ -541,6 +630,21 @@ def accept_timeout():
     return max(1.0, seconds)
 
 
+def never_connected_advice():
+    """What the person downloading can actually do about it.
+
+    The operator's line says the receiver never connected (#879). The
+    person on the other end was told only "transfer did not complete",
+    which names no cause and suggests no action - and the two things that
+    cause this are both theirs to fix: a DCC prompt nobody answered, and a
+    client set to ignore the file's type. Reported live by an operator
+    whose user could take a .jpg and never a .nfo and wrote "it says
+    active transfer started then gives error".
+    """
+    return ("your client never accepted it. Look for a DCC prompt and accept "
+            "it, and check your client is not set to ignore this kind of file")
+
+
 def never_connected_reason(seconds):
     """What a failed accept() is: nobody came, not a link that stopped.
 
@@ -732,11 +836,19 @@ def release_queue_entry(user, next_file, delivered, reason=""):
             dropped = next_file.get("file", "your file") if is_row else str(next_file)
             # "Removed from your queue" is only true of a row that was in one.
             tail = "Removed from your queue." if (in_a_queue or not is_row) else "Ask for it again when you are ready."
+            # Through fit_irc_line like the other notices that carry a
+            # filename (#162 finding #31): the name comes off the operator's
+            # own disk and a long one - plus a reason that is now a sentence
+            # of advice - pushes this past 512 bytes, where the server's cut
+            # lands mid-colour-code and the reader loses the tail that says
+            # what to do.
+            def _build(shown_name):
+                return ("NOTICE " + str(user) + " :" + config.C_BOLD + "Error" + config.C_RESET +
+                        ": Could not send " + shown_name + " - " + str(reason) + ". " + tail + "\r\n")
+
             if oserve_mod:
-                oserve_mod.queue_message(
-                    user,
-                    "NOTICE " + str(user) + " :" + config.C_BOLD + "Error" + config.C_RESET +
-                    ": Could not send " + str(dropped) + " (" + str(reason) + "). " + tail + "\r\n")
+                import announce as announce_mod
+                oserve_mod.queue_message(user, announce_mod.fit_irc_line(_build, str(dropped)))
         except Exception as notify_err:
             print("[DCC QUEUE] Could not notify " + str(user) + ": " + str(notify_err))
 
@@ -2190,10 +2302,14 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
         print(f"[MAINTENANCE] Queued a file request from {user} for after the "
               f"rehash: it is waiting for transfers to finish.")
 
-    if getattr(config, 'PAUSE_ON_UPDATE', True) is True and getattr(config, 'update_inprogress', False) is True:
+    # Only while the rebuilt list is swapped in (#923), unless the operator
+    # asked for the whole rebuild - and the notice says which it is.
+    if list_mod.rebuild_pauses_requests():
+        wait = ("Please wait 1-2 minutes." if list_mod.rebuild_pauses_everything()
+                else "Please try again in a few seconds.")
         oserve = sys.modules.get('oserve')
         if oserve:
-            oserve.queue_message(user, f"NOTICE {user} :{config.C_BOLD}System Message{config.C_RESET}: MasterList is currently rebuilding. File requests temporarily paused. Please wait 1-2 minutes.\r\n")
+            oserve.queue_message(user, f"NOTICE {user} :{config.C_BOLD}System Message{config.C_RESET}: MasterList is currently rebuilding. File requests temporarily paused. {wait}\r\n")
         print(f"[MAINTENANCE BLOCK] Refused a file request from {user}: an !update is running.")
         return
     # ---------------------------------------------------------------------
@@ -2495,6 +2611,34 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
 
         is_master_zip = list_mod.is_list_artifact_name(requested_file)
         if not is_master_zip and not os.path.exists(platform_compat.long_path(full_path)):
+            # Both memories first (#886), cheapest first: this exact name,
+            # then the folders recent lookups resolved into. Checked against
+            # search_roots - the CURRENT configuration, not whatever it was
+            # when the memory was made - right here rather than trusting the
+            # containment check further down to sort it out (#901).
+            #
+            # The dashboard's Folders and Lists pages change the library
+            # without a rehash: apply_folder_changes()/apply_list_changes()
+            # (webserver.py) save and return, and the folder set is re-read
+            # from disk on every call, so the new roots are live on the very
+            # next request. A path remembered under a folder just removed on
+            # that page is still on disk - the memory's own existence check
+            # cannot catch this, the file has not gone anywhere - so without
+            # this check it would reach the containment check below and be
+            # refused as "invalid path" for a file the new configuration
+            # serves perfectly well, until LOOKUP_HIT_TTL_SECONDS passes.
+            # #889's !rehash call stays; it frees the memory outright, which
+            # this does not need to wait for and does not replace - a scan
+            # still in flight across a rehash records its hit after the
+            # forget, and this is what keeps THAT entry honest too.
+            remembered_key = (str(wanted_list), str(requested_file).lower().strip())
+            for candidate in (_remembered_path(remembered_key),
+                              _in_a_recent_folder(str(wanted_list), requested_file)):
+                if candidate and any(is_safe_path(root, candidate) for root in search_roots):
+                    full_path = candidate
+                    break
+
+        if not is_master_zip and not os.path.exists(platform_compat.long_path(full_path)):
             # THE EXPENSIVE PART, BOUNDED (#580). A name that is not in the first
             # folder's root is looked up by streaming every published list and,
             # failing that, walking every configured folder - a full-library
@@ -2506,9 +2650,14 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
             if _lookup_missed_recently(miss_key):
                 announce.send_dcc_error(user, "file_not_found")
                 return
-            if not _library_scans.acquire(blocking=False):
+            # WAITS, briefly, rather than refusing at once (#886). Nine rows
+            # pasted together arrive within a second or two of each other;
+            # bouncing seven of them told the user to "try again in a
+            # moment", which is the one thing that risks the flood gate.
+            if not _library_scans.acquire(timeout=LOOKUP_SCAN_WAIT_SECONDS):
                 print(f"[DCC-LOOKUP] {user}'s request for {requested_file!r} refused: "
-                      f"{MAX_CONCURRENT_LIBRARY_SCANS} library scans are already running.")
+                      f"{MAX_CONCURRENT_LIBRARY_SCANS} library scans were still running after "
+                      f"{LOOKUP_SCAN_WAIT_SECONDS:.0f}s.")
                 announce.send_dcc_error(user, "busy")
                 return
             try:
@@ -2680,6 +2829,10 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
                 _library_scans.release()
             if not os.path.exists(platform_compat.long_path(full_path)):
                 _note_lookup_miss(miss_key)
+            else:
+                # What it cost to find this is what the next request for it -
+                # or for its siblings in the same folder - does not pay.
+                _note_lookup_hit(miss_key, full_path)
 
 
         # Against every legitimate root rather than one. is_safe_path() itself
@@ -3189,6 +3342,9 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
         return
 
     conn = None
+    # Set by the accept branch below and read by the finally, so the notice
+    # the user gets can say what happened rather than "did not complete".
+    never_connected = False
     try:
         # settimeout() and listen() USED TO SIT ABOVE this try - the one whose
         # finally is the only thing that releases the slot and closes this
@@ -3268,6 +3424,7 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
             # any other failure.
             report_failure(user, file_name, never_connected_reason(accept_window),
                            acked=0, total=file_size)
+            never_connected = True
             oserve = sys.modules.get('oserve')
             if oserve: oserve.send_fails_count += 1
             return
@@ -3632,9 +3789,15 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file):
         #    below keeps the archive for a row that was kept.
         row_retained = False
         try:
+            if transfer_completed:
+                settled_reason = "transfer complete"
+            elif never_connected:
+                settled_reason = never_connected_advice()
+            else:
+                settled_reason = "transfer did not complete"
             row_retained = release_queue_entry(
                 user, next_file, delivered=transfer_completed,
-                reason="transfer complete" if transfer_completed else "transfer did not complete")
+                reason=settled_reason)
         except Exception as pop_err:
             print("[DCC CLEANUP ERROR] Could not settle the queue row: " + str(pop_err))
 

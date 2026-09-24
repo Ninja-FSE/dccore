@@ -139,6 +139,7 @@
     filelistsBody:document.getElementById("filelists-body"),
     filelistsFilterInput: document.getElementById("filelists-filter-input"),
     filelistsFilterClear: document.getElementById("filelists-filter-clear"),
+    filelistsOnlineOnly: document.getElementById("filelists-online-only"),
     filelistsFilterStatus: document.getElementById("filelists-filter-status"),
     filelistsFilterActions: document.getElementById("filelists-filter-actions"),
     filelistsFilterAll: document.getElementById("filelists-filter-all"),
@@ -158,6 +159,8 @@
     connText:     document.getElementById("conn-text"),
     statusSlots:  document.getElementById("status-slots"),
     statusQueued: document.getElementById("status-queued"),
+    versionText:     document.getElementById("version-text"),
+    versionCheckBtn: document.getElementById("version-check-btn"),
     broadcastBtn:        document.getElementById("broadcast-btn"),
     broadcastStatus:     document.getElementById("broadcast-status"),
     broadcastWrap:       document.getElementById("broadcast-wrap"),
@@ -234,6 +237,7 @@
     langSelect:   document.getElementById("lang-select"),
     updateListRunBtn:     document.getElementById("update-list-run-btn"),
     updateListStatus:     document.getElementById("update-list-status"),
+    updateListSchedule:   document.getElementById("update-list-schedule"),
     updateListBar:        document.getElementById("update-list-bar"),
     updateListBarFill:    document.getElementById("update-list-bar-fill"),
     verifyRunBtn:         document.getElementById("verify-run-btn"),
@@ -341,6 +345,7 @@
     }
     if (name === "settings" && !state.settingsLoaded) { loadSettings(); }
     if (name === "stats") { loadStats(); }
+    if (name === "tools") { loadUpdateListSchedule(); }
     // Loaded here rather than in the badge's own handler, so every way into
     // this view draws it - the badge is the usual one, not the only one.
     if (name === "notices") { loadNotices(true); }
@@ -755,9 +760,17 @@
   // views{} above.
   var DOWNLOAD_STATE_LABELS = {
     pending: "download.state.pending", offered: "download.state.requested",
+    queued: "download.state.queued",
     listening: "download.state.listening", receiving: "download.state.receiving",
     complete: "download.state.complete", failed: "download.state.failed",
     rejected: "download.state.rejected"
+  };
+  // #926: why a pending request has not gone out - dcc_fetch sets row.waiting.
+  var DOWNLOAD_WAITING_LABELS = {
+    offline: "download.waiting.offline", "just-back": "download.waiting.justBack",
+    retry: "download.waiting.retry", "their-turn": "download.waiting.theirTurn",
+    slots: "download.waiting.slots", paused: "download.waiting.paused",
+    "disk-full": "download.waiting.diskFull"
   };
 
   function loadDownloads() {
@@ -771,6 +784,20 @@
       state.downloads = rows || [];
       renderDownloads(rows);
     }).catch(function () { markConnection(false); });
+  }
+
+  // #926: resume a paused bot from one of its waiting rows. The bot comes
+  // from the held row, looked up by id - never from an attribute.
+  function resumeFetchBot(button) {
+    var requestId = decodeURIComponent(button.dataset.requestId);
+    var row = (state.downloads || []).filter(function (candidate) {
+      return String(candidate.id) === requestId;
+    })[0];
+    if (!row) { return; }
+    button.disabled = true;
+    postJson("/api/fetch/resume", { bot: row.bot }).then(function () {
+      loadDownloads();
+    }).catch(function () { button.disabled = false; });
   }
 
   function redownloadFetchRow(button) {
@@ -824,6 +851,11 @@
       redownloadFetchRow(retry);
       return;
     }
+    var resume = evt.target.closest ? evt.target.closest(".fetch-resume-btn") : null;
+    if (resume) {
+      resumeFetchBot(resume);
+      return;
+    }
 
     var btn = evt.target.closest ? evt.target.closest(".fetch-delete-btn") : null;
     if (!btn) { return; }
@@ -864,6 +896,15 @@
       var rejected = !!row.list_processing_error;
       var displayState = rejected ? "rejected" : state;
       var label = t(DOWNLOAD_STATE_LABELS[displayState] || displayState);
+      // #926: the other bot said where our request is in its queue.
+      if (state === "queued" && row.queue_position) {
+        label = t("download.state.queuedAt").replace("{position}", row.queue_position);
+      }
+      // #926: why a request has not gone out yet - its bot is away or just
+      // back, it has enough of ours, it was busy, or every slot is taken.
+      if (state === "pending" && DOWNLOAD_WAITING_LABELS[row.waiting]) {
+        label = t(DOWNLOAD_WAITING_LABELS[row.waiting]).replace("{bot}", row.bot || "");
+      }
       var progress = row.total_size
         ? Math.round(100 * (row.bytes_received || 0) / row.total_size) + "%"
         : (row.bytes_received ? row.bytes_received + " B" : "—");
@@ -876,7 +917,10 @@
       // cancellation path for a transfer thread already running.
       // Without this the server-side fix would be invisible: the queue would
       // be clearable by API and not by the dashboard that filled it.
-      var deletable = (state === "complete" || state === "failed" || state === "pending");
+      // A request the other bot queued (#926) can be let go as well: nothing
+      // is moving yet, and forgetting it is all there is to do.
+      var deletable = (state === "complete" || state === "failed" || state === "pending" ||
+                       state === "queued");
       // "Cancel" for a row that has not started - calling it Delete would
       // suggest a downloaded file is being thrown away when none exists.
       var deleteBtn = deletable
@@ -910,8 +954,15 @@
         action = "<span class=\"col-dim\">" + t("download.browseInListBrowser") + "</span> " + deleteBtn;
       } else if (state === "failed") {
         action = "<span class=\"col-dim\">" + escapeHtml(row.reason || "") + "</span> " + retryBtn + deleteBtn;
+      } else if (state === "pending" && row.waiting === "paused") {
+        // #926: a paused bot's requests wait here; one click resumes it.
+        action = "<button type=\"button\" class=\"btn btn-small fetch-resume-btn\" data-request-id=\"" +
+          encodeURIComponent(row.id) + "\">" + t("download.resumeBot") + "</button> " + deleteBtn;
       } else if (state === "pending") {
         action = deleteBtn;
+      } else if (state === "queued") {
+        // #926: what the other bot said, and a way to let the request go.
+        action = (row.reply ? "<span class=\"col-dim\">" + escapeHtml(row.reply) + "</span> " : "") + deleteBtn;
       } else {
         action = "";
       }
@@ -1176,6 +1227,60 @@
     var totalFiles = rows.reduce(function (sum, r) { return sum + (r.count || 0); }, 0);
     el.statusSlots.textContent = sending;
     el.statusQueued.textContent = totalFiles;
+  }
+
+  // #572: this bot's version, and what the version check last found. A
+  // failure is written out, not hidden: the reason stays here until a check
+  // succeeds. The release link is only ever a github.com address.
+  function renderVersion(info) {
+    if (!el.versionText || !info) { return; }
+    el.versionText.classList.remove("is-news", "is-error");
+    el.versionText.textContent = "";
+    if (info.error) {
+      el.versionText.classList.add("is-error");
+      el.versionText.textContent = t("version.couldNotCheck").replace("{reason}", info.error);
+    } else if (info.newer && info.latest) {
+      el.versionText.classList.add("is-news");
+      var label = t("version.available").replace("{version}", info.latest);
+      if (String(info.url || "").indexOf("https://github.com/") === 0) {
+        var link = document.createElement("a");
+        link.href = info.url;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = label;
+        el.versionText.appendChild(link);
+      } else {
+        el.versionText.textContent = label;
+      }
+    } else if (info.checked_at) {
+      el.versionText.textContent = t("version.upToDate").replace("{version}", info.current);
+    } else {
+      el.versionText.textContent = info.current || "";
+    }
+    if (info.cooldown) {
+      el.versionText.appendChild(document.createTextNode(
+        " " + t("version.cooldown").replace("{seconds}", info.cooldown)));
+    }
+  }
+
+  function loadVersion() {
+    fetchJson("/api/version-check").then(renderVersion).catch(function () {});
+  }
+
+  if (el.versionCheckBtn) {
+    el.versionCheckBtn.addEventListener("click", function () {
+      el.versionCheckBtn.disabled = true;
+      el.versionText.classList.remove("is-news", "is-error");
+      el.versionText.textContent = t("version.checking");
+      postJson("/api/version-check", {}).then(function (res) {
+        renderVersion(res.data);
+      }).catch(function () {
+        el.versionText.classList.add("is-error");
+        el.versionText.textContent = t("version.couldNotCheck").replace("{reason}", t("version.noAnswer"));
+      }).then(function () {
+        el.versionCheckBtn.disabled = false;
+      });
+    });
   }
 
   function markConnection(ok) {
@@ -1450,6 +1555,14 @@
     rerenderFromFilterPayload();
   });
 
+  // #926: search only the lists of bots that are in a channel right now.
+  if (el.filelistsOnlineOnly) {
+    el.filelistsOnlineOnly.addEventListener("change", function () {
+      state.filelistsOnlineOnly = el.filelistsOnlineOnly.checked;
+      runFilelistsFilter();
+    });
+  }
+
   el.filelistsFilterClear.addEventListener("click", function () {
     el.filelistsFilterInput.value = "";
     state.filelistsFilter = "";
@@ -1643,12 +1756,31 @@
       button.appendChild(hand);
     }
 
+    // #926: fetched and not opened yet.
+    if (primary.unseen) {
+      var fresh = document.createElement("span");
+      fresh.className = "bot-row-new";
+      fresh.textContent = t("filelists.newBadge");
+      fresh.title = t("filelists.newBadgeTitle");
+      button.appendChild(fresh);
+    }
+
     if (grouped) {
       var badge = document.createElement("span");
       badge.className = "bot-row-lists-badge";
       badge.textContent = String(group.entries.length);
       badge.title = t("filelists.listsBadgeTitle").replace("{count}", group.entries.length);
       button.appendChild(badge);
+    }
+
+    // #926: what the bot last advertised about itself - free slots, queue,
+    // speed, "servers only" - AutoGet's slots page, one short line.
+    var live = describeAdvertLive(primary.advert_live || {});
+    if (live) {
+      var stats = document.createElement("span");
+      stats.className = "bot-row-live";
+      stats.textContent = live;
+      button.appendChild(stats);
     }
 
     var count = document.createElement("span");
@@ -1768,6 +1900,25 @@
   // Set as a PROPERTY, never concatenated into an attribute: these strings
   // come off another bot's advert, and escapeHtml() encodes & < > and leaves
   // a double quote alone. Same rule as the nick beside it.
+  // #926: "3/10 free · 12 queued · 45000cps · Servers Only". Text only, and
+  // set as textContent: every piece comes off another bot's advert.
+  function describeAdvertLive(live) {
+    var parts = [];
+    if (live.slots_free !== undefined && live.slots_total !== undefined) {
+      parts.push(t("filelists.liveSlotsFree").replace("{free}", live.slots_free)
+        .replace("{total}", live.slots_total));
+    } else if (live.slots_in_use !== undefined && live.slots_total !== undefined) {
+      parts.push(t("filelists.liveSlotsBusy").replace("{busy}", live.slots_in_use)
+        .replace("{total}", live.slots_total));
+    }
+    if (live.queued !== undefined) {
+      parts.push(t("filelists.liveQueued").replace("{count}", live.queued));
+    }
+    if (live.speed) { parts.push(String(live.speed)); }
+    if (live.mode && String(live.mode).toLowerCase() !== "normal") { parts.push(String(live.mode)); }
+    return parts.join(" \u00b7 ");
+  }
+
   function ledTitle(row) {
     var freshness = row.freshness;
     if (freshness === "changed") {
@@ -2878,7 +3029,8 @@
         // spans every list held, so "which bot am I looking at" stops being
         // the question while a term is set. The sidebar still shows which
         // bots have matches - see applyFilterHighlight().
-        url = "/api/filelists/search?q=" + encodeURIComponent(filter);
+        url = "/api/filelists/search?q=" + encodeURIComponent(filter) +
+          (state.filelistsOnlineOnly ? "&online=1" : "");
       } else {
         var base;
         if (isOwnSource(source)) {
@@ -3196,6 +3348,12 @@
     var parts = [];
     if (progress.phase === "writing") {
       parts.push(t("tools.writingList"));
+    } else if (progress.phase === "audio") {
+      // #914: reading length and quality - folder_index/folder_count carry
+      // files read / files to read, so the bar below follows it too.
+      parts.push(t("tools.readingAudioInfo")
+        .replace("{done}", (progress.folder_index || 0).toLocaleString())
+        .replace("{total}", (progress.folder_count || 0).toLocaleString()));
     } else if (progress.folder_count) {
       parts.push(t("tools.scanningFolder")
         .replace("{index}", progress.folder_index).replace("{total}", progress.folder_count));
@@ -3229,6 +3387,28 @@
     el.updateListBar.style.display = "block";
     el.updateListBar.classList.toggle("is-indeterminate", !known);
     el.updateListBarFill.style.width = known ? (progress.percent + "%") : "";
+  }
+
+  // #776: when LIST_REBUILD_SCHEDULE will next rebuild, or that none is set.
+  // Read each time the Tools view opens - the same status payload the Run
+  // button polls, which carries the schedule and its next time.
+  function loadUpdateListSchedule() {
+    if (!el.updateListSchedule) { return; }
+    fetchJson("/api/tools/update-list/status").then(function (payload) {
+      var schedule = payload && payload.schedule;
+      var text;
+      if (!schedule) {
+        text = t("tools.scheduleOff");
+      } else if (!payload.next_scheduled || payload.next_scheduled * 1000 <= Date.now()) {
+        text = t("tools.scheduleDue").replace("{schedule}", schedule);
+      } else {
+        text = t("tools.scheduleOn").replace("{schedule}", schedule)
+          .replace("{when}", new Date(payload.next_scheduled * 1000).toLocaleString());
+      }
+      el.updateListSchedule.textContent = text;
+    }).catch(function () {
+      el.updateListSchedule.textContent = "";
+    });
   }
 
   function startUpdateListPolling() {
@@ -3692,7 +3872,10 @@
     "sharing": "settings.category.sharing",
     "transfers": "settings.category.transfers",
     "your-list": "settings.category.yourList",
+    "list-rebuild": "settings.category.listRebuild",
+    "list-grab": "settings.category.listGrab",
     "fetching": "settings.category.fetching",
+    "fetch-queue": "settings.category.fetchQueue",
     "advertising": "settings.category.advertising",
     "appearance": "settings.category.appearance",
     "anti-flood": "settings.category.antiFlood",
@@ -3731,8 +3914,14 @@
     AUTO_REFETCH_LISTS: "settings.field.AUTO_REFETCH_LISTS",
     AUTO_REFETCH_INTERVAL_HOURS: "settings.field.AUTO_REFETCH_INTERVAL_HOURS",
     AUTO_REFETCH_MAX_PER_RUN: "settings.field.AUTO_REFETCH_MAX_PER_RUN",
+    AUTO_GRAB_LISTS: "settings.field.AUTO_GRAB_LISTS",
+    AUTO_GRAB_EVERY_MINUTES: "settings.field.AUTO_GRAB_EVERY_MINUTES",
+    AUTO_GRAB_MIN_FILES: "settings.field.AUTO_GRAB_MIN_FILES",
+    AUTO_GRAB_MIN_SPEED_KB: "settings.field.AUTO_GRAB_MIN_SPEED_KB",
     FETCH_TRANSFER_TIMEOUT: "settings.field.FETCH_TRANSFER_TIMEOUT",
     FETCH_OFFER_TIMEOUT: "settings.field.FETCH_OFFER_TIMEOUT",
+    FETCH_QUEUED_TIMEOUT: "settings.field.FETCH_QUEUED_TIMEOUT",
+    FETCH_MAX_PER_BOT: "settings.field.FETCH_MAX_PER_BOT",
     FETCH_FOLDER_OFFER_TIMEOUT: "settings.field.FETCH_FOLDER_OFFER_TIMEOUT",
     FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED: "settings.field.FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED",
     MAX_FETCH_FOLDER_FILE_SIZE: "settings.field.MAX_FETCH_FOLDER_FILE_SIZE",
@@ -3740,6 +3929,7 @@
     FETCH_FOLDER_TRANSFER_TIMEOUT: "settings.field.FETCH_FOLDER_TRANSFER_TIMEOUT",
     LIST_BASE_NAME: "settings.field.LIST_BASE_NAME",
     PAUSE_ON_UPDATE: "settings.field.PAUSE_ON_UPDATE",
+    PAUSE_FOR_WHOLE_UPDATE: "settings.field.PAUSE_FOR_WHOLE_UPDATE",
     FILE_DIRECTORY: "settings.field.FILE_DIRECTORY",
     LIST_FORMAT: "settings.field.LIST_FORMAT",
     LIST_IGNORED_EXTENSIONS: "settings.field.LIST_IGNORED_EXTENSIONS",
@@ -3759,6 +3949,11 @@
     DCC_QUEUE_FILE: "settings.field.DCC_QUEUE_FILE",
     KNOWN_BOTS_FILE: "settings.field.KNOWN_BOTS_FILE",
     LIST_INDEX_FILE: "settings.field.LIST_INDEX_FILE",
+    LIST_AUDIO_INFO_CACHE: "settings.field.LIST_AUDIO_INFO_CACHE",
+    LIST_SHOW_AUDIO_INFO: "settings.field.LIST_SHOW_AUDIO_INFO",
+    LIST_AUDIO_INFO_MINUTES: "settings.field.LIST_AUDIO_INFO_MINUTES",
+    LIST_AUDIO_INFO_THREADS: "settings.field.LIST_AUDIO_INFO_THREADS",
+    LIST_SCAN_THREADS: "settings.field.LIST_SCAN_THREADS",
     DOWNLOAD_COUNTS_FILE: "settings.field.DOWNLOAD_COUNTS_FILE",
     FETCHED_BOT_LISTS_FILE: "settings.field.FETCHED_BOT_LISTS_FILE",
     FETCH_HISTORY_FILE: "settings.field.FETCH_HISTORY_FILE",
@@ -3798,9 +3993,11 @@
     FLOOD_BAN_SECONDS: "settings.field.FLOOD_BAN_SECONDS",
     DCC_ACCEPT_TIMEOUT: "settings.field.DCC_ACCEPT_TIMEOUT",
     MAX_SEND_FAILS: "settings.field.MAX_SEND_FAILS",
+    CHECK_FOR_UPDATES: "settings.field.CHECK_FOR_UPDATES",
     RAR_TIMEOUT: "settings.field.RAR_TIMEOUT",
     LIST_UPDATE_TIMEOUT: "settings.field.LIST_UPDATE_TIMEOUT",
     LIST_UPDATE_STALL_SECONDS: "settings.field.LIST_UPDATE_STALL_SECONDS",
+    LIST_REBUILD_SCHEDULE: "settings.field.LIST_REBUILD_SCHEDULE",
     ADMIN_HOSTMASKS: "settings.field.ADMIN_HOSTMASKS",
     ADMIN_CHAT_MODE: "settings.field.ADMIN_CHAT_MODE",
     ADMIN_CHANNEL_COMMANDS: "settings.field.ADMIN_CHANNEL_COMMANDS",
@@ -5101,6 +5298,9 @@
   loadQueue();
   loadNotices(false);
   loadMessages(false);
+  loadVersion();
+  // The check itself runs at most daily; ten minutes is plenty to show it.
+  setInterval(loadVersion, 10 * 60 * 1000);
   setInterval(function () {
     // Keep the sidebar status fresh always; refresh the visible table only
     // when it is the one showing, so a search result is never clobbered by a

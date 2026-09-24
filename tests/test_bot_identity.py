@@ -140,7 +140,9 @@ class TheIdentityLine(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
-        self.set_config(NICKNAME="SomeBot",
+        # Both names: the list is stamped with the CONFIGURED nick (#376),
+        # which irc.py keeps in ORIGINAL_NICK once connected.
+        self.set_config(NICKNAME="SomeBot", ORIGINAL_NICK="SomeBot",
                         SCRIPT_VERSION="DCCore v9.9.9",
                         PROJECT_URL="https://github.com/Ninja-FSE/dccore")
 

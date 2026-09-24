@@ -45,8 +45,22 @@ class TheSetupReallyDoesOfferStepThreeNowOptionally(unittest.TestCase):
         self.assertIn('changes["ADMIN_HOSTMASKS"]', between)
 
     def test_a_blank_answer_writes_nothing(self):
+        """#891: a blank answer used to fall back to the first existing
+        entry and rewrite ADMIN_HOSTMASKS from it - collapsing a multi-host
+        list to just that one. The prompt's raw answer must reach
+        `if admin_host:` unchanged, with no `or default_host`/similar
+        fallback between the input() call and the write it guards."""
         code = read("configure.py")
-        self.assertIn('if admin_host:\n        changes["ADMIN_HOSTMASKS"]', code)
+        # The prompt text is a variable since #911; the first read is the ask.
+        prompt_at = code.index("admin_host = input(prompt).strip()")
+        line_end = code.index("\n", prompt_at)
+        prompt_line = code[prompt_at:line_end]
+
+        self.assertNotIn(" or ", prompt_line,
+                         "a blank answer falls back to something instead of staying blank")
+        write_at = code.index('changes["ADMIN_HOSTMASKS"] = [f"*!*@{admin_host}"]')
+        guard = code[line_end:write_at]
+        self.assertIn("if admin_host:", guard)
 
 
 class TheGuideSaysSo(unittest.TestCase):

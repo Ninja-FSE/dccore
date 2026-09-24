@@ -362,8 +362,11 @@ class AskingAgainWithoutBeingAsked(DCCoreTestCase):
     def test_unknown_is_not_changed(self):
         """A bot that publishes no date gives no evidence either way, and
         acting on no evidence is what makes an automatic feature
-        untrustworthy."""
-        self.hold("ReelBot", {})
+        untrustworthy. Until the list is old (#926): past
+        UNKNOWN_LIST_MAX_AGE_DAYS age is the evidence, covered in
+        test_an_old_list_is_refreshed_and_a_new_one_is_marked."""
+        fetched = 10 ** 9 - 3 * 86400
+        self.hold("ReelBot", {}, fetched_at=fetched)
         self.advertise("ReelBot", {"files": 250})
 
         self.assertEqual(list_fetch.lists_worth_refetching(now=10 ** 9), [])

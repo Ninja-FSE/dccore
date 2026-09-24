@@ -93,7 +93,11 @@ class Validation(DCCoreTestCase):
         self.assertEqual(errors, [])
         self.assertEqual(changes, {"NICKNAME": "MusicBot", "SERVER": "irc.example.net",
                                    "CHANNEL": "#example,#other", "ADMIN_NICK": "SysOp",
-                                   "WEBUI_ENABLED": True, "WEBUI_HOST": "127.0.0.1"})
+                                   "WEBUI_ENABLED": True, "WEBUI_HOST": "127.0.0.1",
+                                   # This form does not send the version-check
+                                   # box, which is how a browser sends it
+                                   # unticked (#572).
+                                   "CHECK_FOR_UPDATES": False})
         self.assertTrue(adminchat.verify_password(password_hash, "correct horse"))
 
     def test_what_was_left_blank_is_not_written(self):

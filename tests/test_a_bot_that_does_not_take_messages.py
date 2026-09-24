@@ -242,7 +242,11 @@ class WhichOneHappens(unittest.TestCase):
         with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as f:
             body = f.read()
         block = body.split("announce.decline_private_message(user)", 1)[0]
-        block = block.rsplit("if is_bot_command and security.is_flooding(user):", 1)[1]
+        # The call, not the whole `if` line: #888 added "not is_file_request"
+        # to the condition, and an anchor spelling it out in full stops
+        # matching the moment the condition grows another term. The call
+        # itself appears exactly once in irc.py.
+        block = block.rsplit("security.is_flooding(user):", 1)[1]
         return _re.sub(chr(35) + "[^" + chr(10) + "]*", "", block)
 
     def test_the_setting_is_what_decides(self):

@@ -100,13 +100,13 @@ class ThePublishIsAllOrNothing(DCCoreTestCase):
         real = platform_compat.replace_with_retry
         calls = []
 
-        def failing(src, dst):
+        def failing(src, dst, **kwargs):
             calls.append(dst)
             # Fail while moving the SECOND destination aside, which is what a
             # file held open by a DCC send actually does on Windows.
             if dst == live[1] + ".previous":
                 raise PermissionError(13, "used by another process")
-            return real(src, dst)
+            return real(src, dst, **kwargs)
 
         platform_compat.replace_with_retry = failing
         self.addCleanup(setattr, platform_compat, "replace_with_retry", real)
@@ -122,10 +122,10 @@ class ThePublishIsAllOrNothing(DCCoreTestCase):
         swaps, live = self.three_swaps()
         real = platform_compat.replace_with_retry
 
-        def failing(src, dst):
+        def failing(src, dst, **kwargs):
             if dst == live[2] + ".previous":
                 raise PermissionError(13, "used by another process")
-            return real(src, dst)
+            return real(src, dst, **kwargs)
 
         platform_compat.replace_with_retry = failing
         self.addCleanup(setattr, platform_compat, "replace_with_retry", real)
@@ -146,10 +146,10 @@ class ThePublishIsAllOrNothing(DCCoreTestCase):
                  (self.write("tmpB.txt", "newB"), existing)]
         real = platform_compat.replace_with_retry
 
-        def failing(src, dst):
+        def failing(src, dst, **kwargs):
             if dst == existing + ".previous":
                 raise PermissionError(13, "used by another process")
-            return real(src, dst)
+            return real(src, dst, **kwargs)
 
         platform_compat.replace_with_retry = failing
         self.addCleanup(setattr, platform_compat, "replace_with_retry", real)
