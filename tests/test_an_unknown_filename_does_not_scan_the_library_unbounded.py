@@ -31,8 +31,8 @@ class LookupBase(PathSecurityBase):
 
     def setUp(self):
         super().setUp()
-        dcc._lookup_misses.clear()
-        self.addCleanup(dcc._lookup_misses.clear)
+        dcc.forget_library_lookups()           # misses, hits and folders (#886)
+        self.addCleanup(dcc.forget_library_lookups)
         self.walks = []
         real_walk = os.walk
 
@@ -104,6 +104,18 @@ class AMissIsRememberedForAMinute(LookupBase):
 
 
 class OnlyAFewScansRunAtOnce(LookupBase):
+    """Since #886 a request WAITS LOOKUP_SCAN_WAIT_SECONDS for a slot before
+    being refused, so these shorten the wait rather than sit through it. The
+    bound itself - only MAX_CONCURRENT_LIBRARY_SCANS scans at a time, and the
+    rest told the bot is busy without touching the disk - is unchanged."""
+
+    def setUp(self):
+        super().setUp()
+        patch = mock.patch.object(dcc, "LOOKUP_SCAN_WAIT_SECONDS", 0.05)
+        patch.start()
+        self.addCleanup(patch.stop)
+        dcc.forget_library_lookups()
+        self.addCleanup(dcc.forget_library_lookups)
 
     def hold_every_slot(self):
         held = 0
@@ -113,6 +125,7 @@ class OnlyAFewScansRunAtOnce(LookupBase):
         self.assertEqual(held, dcc.MAX_CONCURRENT_LIBRARY_SCANS)
 
     def test_a_request_beyond_the_limit_is_told_the_bot_is_busy_and_scans_nothing(self):
+        """Once the wait has run out, that is."""
         self.hold_every_slot()
         self.ask("Something Else.flac")
         self.assertEqual(self.errors(), ["busy"])

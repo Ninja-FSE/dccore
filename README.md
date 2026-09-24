@@ -1,6 +1,6 @@
 # DCCore
 
-**v1.13.0** · Python 3.10+ · Linux, Windows and macOS
+**v1.13.1** · Python 3.10+ · Linux, Windows and macOS
 
 An IRC DCC file-sharing daemon — a modern reimplementation of OmenServe, the mIRC script that has run these channels for twenty years.
 
@@ -12,7 +12,7 @@ It sits in a channel, advertises a catalogue, and serves files over DCC to whoev
 
 - **Serves files over DCC** — per-user and global queues, configurable slots, `!rar` album packing on demand, and DCC RESUME so an interrupted download continues instead of starting over
 - **Keeps a searchable master list** in `.txt`, `.zip` and `.rar`, rebuilt atomically so a failed scan never overwrites a good one
-- **Fetches from other bots** — request a file or a whole list, or broadcast one `@find` and collect every reply
+- **Fetches from other bots** — request a file or a whole list, or broadcast one `@find` and collect every reply. In this bot's own search, words in quotes must appear together: `@find "metal church"`
 - **Remembers people** — a user who disconnects keeps their queue for five minutes and resumes on rejoin
 - **Defends itself** — rolling flood windows, escalating mutes, hostmask bans, and every other bot treated as untrusted
 - **Is operable** — an authenticated DCC CHAT console, an optional web dashboard, live `!rehash`, and statistics that survive a restart
@@ -65,6 +65,14 @@ python3 -m unittest discover -s tests -t .
 ```
 
 Thousands of them - the count is kept in [docs/FUTURE.md](docs/FUTURE.md) - stdlib-only, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14 in CI.
+
+## Responsible use
+
+DCCore is a tool for sharing files **you have the right to share**: your own recordings and creations, public-domain and Creative Commons works, and anything else whose licence allows it to be passed on. It comes with no content, points to none, and is not made for distributing material you have no right to distribute.
+
+As the operator, you decide what goes into your shared folders, and you are responsible for it: the bot offers everything in them to anyone who asks. Before you share a folder, make sure you are allowed to - copyright and related laws differ from country to country, and the ones where you live are the ones that apply to you.
+
+The DCCore contributors do not host, control, monitor or endorse anything any bot shares, and accept no liability for how the software is used. See also the "no warranty" terms of the licence below.
 
 ## License
 

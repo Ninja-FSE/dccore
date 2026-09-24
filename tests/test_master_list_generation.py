@@ -1671,16 +1671,26 @@ class TheRequestTriggerIsStable(MasterListCase):
         config.ALT_NICKNAME = "DCCore_"
         self.assertNotIn("dccore_", irc.get_bot_aliases())
 
-    def test_in_process_generation_stamps_whatever_nick_is_live(self):
-        """Documents the hazard rather than asserting it is fine.
-
-        If this ever becomes the production path, every line of the published
-        list is stamped with a trigger the bot stops answering to on recovery.
-        """
+    def test_in_process_generation_names_the_configured_nick_not_the_live_one(self):
+        """This test used to document the hazard: built in-process while the
+        bot was on its alternate nick, every line of the list was stamped with
+        a trigger the bot stops answering to on recovery - only the subprocess
+        kept it away. The list now names ORIGINAL_NICK, the configured nick,
+        wherever it is built (#376)."""
+        config.ORIGINAL_NICK = "DCCore"
         config.NICKNAME = "DCCore_"
         self.assertTrue(self.generate())
-        self.assertTrue(all(line.startswith("!DCCore_ ") for line in self.request_lines()),
-                        "in-process generation follows the live nick - hence the subprocess")
+        lines = self.request_lines()
+        self.assertTrue(lines)
+        self.assertTrue(all(line.startswith("!DCCore ") for line in lines), lines[:3])
+
+    def test_a_subprocess_with_no_original_nick_names_nickname(self):
+        """In the subprocess irc.py never ran, so there is no ORIGINAL_NICK and
+        NICKNAME is the configured value, read fresh from the settings."""
+        del config.ORIGINAL_NICK
+        config.NICKNAME = "DCCore"
+        self.assertTrue(self.generate())
+        self.assertTrue(all(line.startswith("!DCCore ") for line in self.request_lines()))
 
 
 class TheAlbumList(MasterListCase):

@@ -539,6 +539,65 @@ def admin_host_problem(value):
     return None
 
 
+# LIST_REBUILD_SCHEDULE (#776). Four shapes, and nothing else - a schedule
+# that silently meant something other than what was typed is worse than one
+# refused at save time with the four written out.
+REBUILD_SCHEDULE_FORMS = ("daily 04:00", "weekly sun 04:00", "monthly 1 03:30", "every 12h")
+_WEEKDAY_NAMES = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def _rebuild_clock(text):
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text)
+    if not match or int(match.group(1)) > 23 or int(match.group(2)) > 59:
+        raise ValueError(f"{text!r} is not a time of day like 04:00")
+    return int(match.group(1)), int(match.group(2))
+
+
+def parse_rebuild_schedule(text):
+    """The schedule `text` describes, or None when it is empty (off).
+
+    ("daily", hour, minute), ("weekly", weekday 0=Monday, hour, minute),
+    ("monthly", day 1-31, hour, minute) or ("every", hours). Raises
+    ValueError naming the four forms for anything else. Local time, the
+    bot's own clock.
+    """
+    words = str(text or "").strip().lower().split()
+    if not words:
+        return None
+    kind, rest = words[0], words[1:]
+    try:
+        if kind == "daily" and len(rest) == 1:
+            return ("daily",) + _rebuild_clock(rest[0])
+        if kind == "weekly" and len(rest) == 2:
+            day = rest[0]
+            for index, name in enumerate(_WEEKDAY_NAMES):
+                if day in (name, name[:3]):
+                    return ("weekly", index) + _rebuild_clock(rest[1])
+            raise ValueError(f"{day!r} is not a day of the week like sun")
+        if kind == "monthly" and len(rest) == 2:
+            if not rest[0].isdigit() or not 1 <= int(rest[0]) <= 31:
+                raise ValueError(f"{rest[0]!r} is not a day of the month from 1 to 31")
+            return ("monthly", int(rest[0])) + _rebuild_clock(rest[1])
+        if kind == "every":
+            match = re.fullmatch(r"(\d+)(h|hours?)", "".join(rest))
+            if match and 1 <= int(match.group(1)) <= 24 * 366:
+                return ("every", int(match.group(1)))
+    except ValueError as err:
+        raise ValueError(f"{err}. Use one of: {', '.join(REBUILD_SCHEDULE_FORMS)}, "
+                         f"or leave it empty to turn it off") from None
+    raise ValueError(f"{text.strip()!r} is not a schedule. Use one of: "
+                     f"{', '.join(REBUILD_SCHEDULE_FORMS)}, or leave it empty to turn it off")
+
+
+def rebuild_schedule_problem(value):
+    """Why `value` is not a rebuild schedule, or None if it is one (or empty)."""
+    try:
+        parse_rebuild_schedule(value)
+    except ValueError as err:
+        return str(err)
+    return None
+
+
 def nicks_problem(value):
     """The same for a comma-separated list (ADMIN_NICK)."""
     parts = [part.strip() for part in str(value).split(",")]
@@ -600,6 +659,12 @@ def coerce(name, raw, default, declared=None):
         problem = server_problem(text)
         if problem:
             raise ValueError(f"not a server name: {problem}")
+
+    if name == "LIST_REBUILD_SCHEDULE":
+        problem = rebuild_schedule_problem(text)
+        if problem:
+            raise ValueError(problem)
+        return text
 
     if default is None and not text:
         # A setting whose default is None is "unset unless you say otherwise"

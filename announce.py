@@ -474,6 +474,9 @@ def send_dcc_sending_notice(user, file_name, path=None, channel=None):
     import defaults as config
     oserve = sys.modules.get('oserve')
 
+    # Something of theirs went through, so a later refusal is news (#888).
+    forget_queue_full_notice(user)
+
     # The console feed (#528): every dispatch path calls this the moment a
     # slot is taken, so it is the one place a "transfer started" line can
     # come from without a copy per path. The slot figure is what the
@@ -802,9 +805,78 @@ def send_search_result_header(user, search_term, match_count, channel):
         oserve.queue_message(user, msg)
     print(f"[SEARCH RESULTS] Found {match_count} sending {sending_count} to {user} in {channel} for '{search_term}'")
 
+# TOLD ONCE, NOT ONCE PER LINE (#888). File requests stopped being flood
+# metered, so a paste no longer stops at the tenth line - and a user who
+# pastes 150 rows against a 100-file cap would be sent fifty identical
+# "your queue is full" notices, one per refused row, each one costing the
+# outbound pace everybody else's replies are waiting on.
+#
+# Only these two. Every other error names something about THAT request -
+# a path, a missing file, a disabled feature - so repeating it is the
+# answer to a different question. These two name a standing condition
+# that a whole batch meets at once.
+QUEUE_FULL_KINDS = ("user_full", "global_full")
+# A backstop, not the mechanism: the memory is normally dropped the moment
+# one of this user's requests succeeds (below), which is what stops a
+# refusal going silent once their queue drains.
+QUEUE_FULL_REPEAT_SECONDS = 120.0
+QUEUE_FULL_MEMORY = 256
+_told_queue_full = {}
+# Bound to runtime.py's object, not constructed here (test_no_reloaded_
+# module_owns_a_lock.py): announce.py is reloaded on every !rehash, and a
+# lock built at module level would be REBOUND by that reload while a
+# thread already inside the critical section below kept holding the old
+# object - the same fix as dcc.queue_lock, generalised.
+_told_queue_full_lock = runtime.told_queue_full_lock
+
+
+def _already_told_queue_full(user, error_type):
+    """True if this user has just been told this, and should not be again.
+
+    Bounded like every other memory on this path: oldest out at the cap,
+    expired entries dropped as they are met, so a busy channel cannot
+    grow this without limit.
+    """
+    key = (str(user).lower(), error_type)
+    now = time.monotonic()
+    with _told_queue_full_lock:
+        when = _told_queue_full.get(key)
+        if when is not None and now - when < QUEUE_FULL_REPEAT_SECONDS:
+            return True
+        _told_queue_full.pop(key, None)
+        _told_queue_full[key] = now
+        excess = len(_told_queue_full) - QUEUE_FULL_MEMORY
+        if excess > 0:
+            # A comprehension, not list(). announce.py imports the project's
+            # own list module, which shadows the builtin here - list(...)
+            # calls the MODULE. Same trap as _debug_sinks[:] above.
+            oldest = [key for key in _told_queue_full][:excess]
+            for stale in oldest:
+                _told_queue_full.pop(stale, None)
+    return False
+
+
+def forget_queue_full_notice(user):
+    """This user's queue took something, so the next refusal is news again.
+
+    Without this the suppression above would be a timer: a user refused at
+    the cap, whose queue then drains and who asks for something that does
+    NOT fit, would be refused in silence for the rest of the window. A
+    silent refusal is worse than a repeated one - it reads as the bot
+    ignoring them, which is what #888's misleading mute notice already
+    taught them to expect.
+    """
+    prefix = str(user).lower()
+    with _told_queue_full_lock:
+        for key in [k for k in _told_queue_full if k[0] == prefix]:
+            _told_queue_full.pop(key, None)
+
+
 def send_dcc_error(user, error_type):
     """Send the standard DCC error messages to the user."""
     oserve = sys.modules.get('oserve')
+    if error_type in QUEUE_FULL_KINDS and _already_told_queue_full(user, error_type):
+        return
     errors = {
         "invalid_path": "Error: Invalid path.",
         "file_not_found": "Error: File not found.",
@@ -825,6 +897,9 @@ def send_dcc_queue_notice(user, file_name, position, channel=None):
     import sys
     import defaults as config
     oserve = sys.modules.get('oserve')
+
+    # Something of theirs went through, so a later refusal is news (#888).
+    forget_queue_full_notice(user)
 
     # The console feed (#528): both request paths (a file, a !rar folder)
     # come through here when the request queues rather than sends.

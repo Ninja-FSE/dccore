@@ -41,6 +41,20 @@
 # to find out what produced it.
 #PROJECT_URL = https://github.com/Ninja-FSE/dccore
 
+# Once a day, ask GitHub whether a newer DCCore has been released, and say so
+# on the dashboard, in the console and in the mIRC window. Only the version
+# numbers are compared; nothing about your bot is sent. Turn it off on a
+# machine that should not go out.
+#
+# Tell the operator when a newer DCCore is out (#572). Once a day the bot asks
+# the latest release of the repository PROJECT_URL names - one request to
+# GitHub, carrying nothing about this bot - and says so on the dashboard, in the
+# console's `status` and in the mIRC window. On by default, and said at every
+# startup while it is on; a check that fails says why, never silently. The
+# dashboard's Check now and the console's `checkversion` work with it off.
+# Check once a day whether a newer DCCore has been released
+#CHECK_FOR_UPDATES = true
+
 # Answer when somebody asks the bot what software it runs (a CTCP VERSION
 # request). The answer goes only to the person who asked. Turn off to stay
 # quiet about it.
@@ -154,13 +168,27 @@
 # setting it explicitly, here or in admin_config.py, still wins.
 #BROADCAST_SEARCH_CHANNEL = 
 
-
-[filesystem, paths and text stores]
-# While the list is being rebuilt (!update), stop serving and searching until
-# it is done. Keeps the bot from handing out a half-built list.
+# While a rebuilt list is being swapped in - a few seconds at the end of
+# !update - refuse searches and file requests. The rest of the rebuild, they
+# are answered from the current list, which stays complete until the swap.
 #
-# MAINTENANCE SWITCH: when True the bot pauses ALL sharing and searching during !update
+# While the list is rebuilt, searches and file requests are refused while the
+# new list is SWAPPED IN - a few seconds at the end - and answered from the
+# current list the rest of the time (#923). The new list is built under
+# temporary names and the current one is complete and unchanged until the
+# swap, so the scan (and the audio-info reading) no longer takes the bot off
+# the air for its whole length. False: never pause at all.
+# MAINTENANCE SWITCH: pause searching and sharing while a rebuilt list is swapped in
 #PAUSE_ON_UPDATE = true
+
+# The old behaviour: refuse searches and file requests for the whole rebuild,
+# not only while the new list is swapped in. Only needs Pause sharing during
+# !update on too.
+#
+# The old behaviour: pause searching and sharing for the WHOLE rebuild, not
+# only the swap. For an operator who wants it back; nothing else needs it.
+# Pause searching and sharing for the whole rebuild, not only the swap
+#PAUSE_FOR_WHOLE_UPDATE = false
 
 # The folder with the files you share. Used only if you have not added folders
 # on the Library page - if you have, those are used instead and this is
@@ -475,6 +503,74 @@
 # reads it. A damaged one is moved aside as list_index.db.corrupt-<timestamp>
 # and rebuilt from the lists on disk (#628); the copy can be deleted.
 #LIST_INDEX_FILE = ./data/list_index.db
+
+# Add each MP3 and FLAC file's length and quality after its size in your list,
+# e.g. 10.3MB 4m31s 320/44.1/JS. Every audio file has to be read once: on a
+# large library, or one on a network drive, that takes several rebuilds, each
+# limited by the reading time set under List rebuild. After that only new
+# files are read.
+#
+# Duration and quality after the size on the list's MP3 and FLAC rows (#567):
+# "::INFO:: 10.3MB 4m31s 320/44.1/JS" - the spelling other servers' lists use.
+# Off by default because it OPENS every audio file, where the scan otherwise
+# asks for nothing but sizes: the first rebuild with it on takes noticeably
+# longer. What it read is kept in LIST_AUDIO_INFO_CACHE, checked against each
+# file's size and modification time, so later rebuilds open only new or changed
+# files. Read with the standard library (audio_info.py); a file it cannot read
+# keeps its size and nothing more.
+# Put duration and bitrate after the size on MP3 and FLAC rows
+#LIST_SHOW_AUDIO_INFO = false
+
+# Where the length and quality read from your audio files are kept between
+# rebuilds. Safe to delete; the next rebuild reads every file again.
+#
+# One row per audio file in the lists (about 150 bytes each). Safe to delete:
+# the next rebuild reads every file again.
+#LIST_AUDIO_INFO_CACHE = ./data/audio_info.db
+
+# How many audio files are read at once for their length and quality. On a
+# network drive most of the time is waiting, so this is 64 by default; lower
+# it only if a slow or small setup does not benefit. The rebuild says the rate
+# it got, to compare. 1 to 128.
+#
+# How many audio files are read at once (#914). On a network mount (NFS, SMB)
+# the time goes into round trips, which overlap. Measured on a real 64,136-file
+# NFS library: one at a time 9.8 files a second, 16 about 73, 64 about 236 (the
+# last partly on a cache warmed by the run before). 64 by default - a plain
+# disk answers 64 requests as readily as it answers 16; on a very old drive
+# or a very small library, lower it. The rebuild's last line says the rate it
+# got, to compare. 1 to 128.
+# Audio files read at once for length and quality
+#LIST_AUDIO_INFO_THREADS = 64
+
+
+[on a local disk it makes no]
+# How many folders are listed at once while the list is rebuilt. On a network
+# drive most of the time is waiting, so more at once makes every rebuild
+# shorter - and searches wait while it runs. 1 lists one folder at a time. 1
+# to 64.
+#
+# How many folders the rebuild lists at once (#922). On a network mount every
+# directory listing and every file's size is a round trip, and one folder at a
+# time none of them overlap - about 80 s of every rebuild on a 64,136-file NFS
+# library, with searches paused. With 2 ms of simulated latency per request,
+# 16 at a time scanned 15 times as fast as one. On a local disk it makes no
+# difference worth measuring (a fraction of a second either way). 1 is the
+# scan as it always was. 1 to 64.
+# Folders listed at once while the list is rebuilt
+#LIST_SCAN_THREADS = 16
+
+# The longest one rebuild spends reading audio files it has not read before,
+# since searches wait while it runs. Past it, the list is published and the
+# rest are read by the next rebuild. 0 means no limit.
+#
+# The most time one rebuild spends reading audio files it has not read before
+# (#914). A rebuild pauses searches and requests, and the first one with
+# LIST_AUDIO_INFO on has the whole library to read: past this, the list
+# publishes with what was read and the rest wait for the next rebuild. 0 = no
+# limit.
+# Minutes one rebuild may spend reading new audio files; 0 = no limit
+#LIST_AUDIO_INFO_MINUTES = 5
 
 # Where the count of how often each file was sent is kept, for the Most
 # downloaded table.
@@ -963,8 +1059,9 @@
 #MAX_FETCH_SLOTS = 3
 
 # When another bot advertises that its list has changed, fetch the new list
-# automatically. Off by default because it uses the other bot's bandwidth
-# without you asking each time.
+# automatically. A list from a bot whose advert shows no date is fetched again
+# once it is 14 days old. Off by default because it uses the other bot's
+# bandwidth without you asking each time.
 #
 # How long a finished (complete/failed) cross-bot fetch stays in the Downloads
 # table. Age is the primary rule because that table is a recent record of what
@@ -977,7 +1074,9 @@
 # one to inherit.
 # 
 # The ADVERT decides, not a timer - #286 already worked out what "moved on"
-# means. A timer alone would re-ask every bot for a list we already have.
+# means. A timer alone would re-ask every bot for a list we already have. The
+# one exception is a bot whose advert gives no date to compare (#926): its
+# list is re-asked for once it is 14 days old, or it would never be refreshed.
 #AUTO_REFETCH_LISTS = false
 
 # The least time between two automatic asks for the same bot's list, in hours.
@@ -1000,6 +1099,36 @@
 # lot of stale lists, and asking for all of them at once is a burst of
 # outbound requests nobody asked for. The rest go next sweep, oldest first.
 #AUTO_REFETCH_MAX_PER_RUN = 3
+
+# Fetch the list of each bot that advertises one you do not have, one at a
+# time: after a random wait, not if someone else just asked that bot, and at
+# most 3 tries per bot. A list you remove is not fetched again. Off by
+# default: it uses other bots' bandwidth without you asking.
+#
+# Ask for the list of a bot that advertises one and whose list is not held yet
+# (#926), on AutoGet's rules: one grab at a time, a random 5-360 second wait
+# first, dropped if someone else asks that bot meanwhile, three tries 30
+# minutes apart, then it stops. A list removed by hand is not grabbed back.
+# OFF by default, for the same reason as AUTO_REFETCH_LISTS.
+#AUTO_GRAB_LISTS = false
+
+# The least time between two automatic list grabs, in minutes.
+#
+# The least time between two automatic grabs, in minutes.
+#AUTO_GRAB_EVERY_MINUTES = 10
+
+# Do not grab the list of a bot that advertises fewer files than this. 0 grabs
+# any size.
+#
+# Skip bots advertising fewer files than this. 0 grabs any size.
+#AUTO_GRAB_MIN_FILES = 0
+
+# Do not grab the list of a bot that advertises a speed below this, in KB/s. A
+# bot that shows no speed is not skipped. 0 turns this off.
+#
+# Skip bots advertising a speed below this, in KB/s. A bot that advertises no
+# speed is not skipped. 0 turns it off.
+#AUTO_GRAB_MIN_SPEED_KB = 0
 
 # When you rehash (reload settings), how many seconds the bot waits for
 # running transfers to finish first before reloading anyway. 0 reloads
@@ -1104,6 +1233,28 @@
 # Seconds an "offered" row waits for a DCC SEND before it's marked failed
 #FETCH_OFFER_TIMEOUT = 60
 
+# How many files to ask one bot for at once. The next one is asked when one
+# arrives. Servers allow each person only a few; asking for more gets "queue
+# full". 0 means no limit.
+#
+# How long a request the other bot has QUEUED waits for its file (#926). When
+# a bot answers "you are number 12 in my queue", the request stops counting
+# against MAX_FETCH_SLOTS and waits for its turn - hours, on a busy server.
+# Past this it fails: a bot that restarted or dropped its queue never says so.
+# 0 = wait for ever.
+# How many of our requests one bot may hold at once - asked, queued there or
+# arriving (#926). A server allows each user only so many; the rest would be
+# answered "queue full". The next file goes out when one finishes, the way
+# AutoGet's "active" mode did it. 0 = no limit.
+# Files asked of one bot at once; the next goes when one finishes
+#FETCH_MAX_PER_BOT = 3
+
+# When another bot puts your request in its queue, how long to wait for your
+# turn before giving up. Busy servers take hours. 0 waits for ever.
+#
+# Seconds a request queued at another bot waits for the file (12 h); 0 = no limit
+#FETCH_QUEUED_TIMEOUT = 43200
+
 # When you request a whole folder (.rar) from another bot, how many seconds to
 # wait for its offer. Much longer than for a single file, because the other
 # bot has to pack the folder first.
@@ -1178,10 +1329,11 @@
 
 
 [anti-flood and automatic protection]
-# How many commands (searches or file requests) one person may send within the
-# time window below before they are muted.
+# How many commands - searches, queue checks and the like - one person may
+# send within the time window below before they are muted. File requests are
+# not counted: a pasted list is taken one by one, up to the queue limits.
 #
-# Most commands (search or file) per time window
+# Most commands (searches and the like - not file requests) per time window
 #MAX_REQUESTS = 10
 
 # The length of that time window, in seconds.
@@ -1274,6 +1426,23 @@
 # commands.handle_list_update_request().
 #LIST_UPDATE_STALL_SECONDS = 900
 
+# Rebuild the list by itself, the same way !update does. Write daily 04:00,
+# weekly sun 04:00, monthly 1 03:30 or every 12h (hours since the last
+# rebuild, including yours). Empty: only when you ask. The bot's own clock; if
+# it was off at that time, it rebuilds when it starts again.
+#
+# REBUILD THE LIST ON A SCHEDULE (#776), with exactly what !update runs - so
+# PAUSE_ON_UPDATE, the one-scan-at-a-time guard and the atomic publish all
+# apply. One of four shapes, local time on the bot's clock: "daily 04:00",
+# "weekly sun 04:00", "monthly 1 03:30" (a day past the month's end means its
+# last day) or "every 12h" (hours since the last rebuild of any kind, manual
+# included). Empty is off. A bot that was down at the scheduled time rebuilds
+# when it comes back, once; a rebuild that fails is reported like a manual
+# one and tried again at the next scheduled time, not every minute. Turned on
+# with a list older than the last scheduled time, it rebuilds within a minute.
+# When to rebuild the list by itself - daily 04:00 / weekly sun 04:00 / monthly 1 03:30 / every 12h, empty = never
+#LIST_REBUILD_SCHEDULE = 
+
 # The colour scheme for everything the bot says in the channel - the advert,
 # the notices, the search results. Pick one you like; it is how people tell
 # your bot apart from the others.
@@ -1337,6 +1506,8 @@
 # Timestamps and secondary text
 #CUSTOM_THEME_ACCENT = 
 
+
+[py.]
 # Turn the web dashboard on. Off by default so nothing opens a web page just
 # because the bot was updated. Needs the Flask package installed.
 #

@@ -2398,12 +2398,22 @@ class FetchHistoryPersistenceTests(DCCoreTestCase):
         self.assertIn(rid, history)
         self.assertEqual(history[rid]["state"], "failed")
 
-    def test_in_flight_rows_are_never_persisted(self):
-        rid = dcc_fetch.enqueue_fetch("goodbot", "Song.flac")  # stays "pending"
+    def test_unfinished_rows_are_persisted_in_the_form_they_restart_in(self):
+        """Since #926 an unfinished request survives a restart. A waiting one
+        comes back as it was; one that was mid-flight - its socket and thread
+        die with the process - comes back pending, to be asked again, and is
+        written that way so a transfer's byte count does not rewrite the file
+        every tick."""
+        waiting = dcc_fetch.enqueue_fetch("goodbot", "Song.flac")  # stays "pending"
+        moving = dcc_fetch.enqueue_fetch("goodbot", "Other.flac")
+        config.fetch_queue[moving].update(state="receiving", offered_at=1.0, bytes_received=5000)
 
         dcc_fetch.check_fetch_queue()
 
-        self.assertEqual(db.load_fetch_history(), {})
+        saved = db.load_fetch_history()
+        self.assertEqual(saved[waiting]["state"], "pending")
+        self.assertEqual(saved[moving]["state"], "pending")
+        self.assertEqual(saved[moving]["bytes_received"], 0)
 
     def test_an_unchanged_terminal_set_does_not_rewrite_the_file(self):
         """Runs forever, every 2s, from fetch_dispatcher_worker() - rewriting
@@ -2944,8 +2954,12 @@ class AWholeAlbumSelectedAtOnce(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
+        # FETCH_MAX_PER_BOT off: these are about MAX_FETCH_SLOTS, with every
+        # row from one bot - the per-bot limit (#926) would be what they
+        # measured instead.
         self.set_config(fetch_queue={}, MAX_FETCH_SLOTS=3,
-                        fetch_feature_disabled=False, CHANNEL="#chan")
+                        fetch_feature_disabled=False, CHANNEL="#chan",
+                        FETCH_MAX_PER_BOT=0)
 
     def lines_sent(self):
         return [msg for _user, msg, _vip in self.oserve.queued]

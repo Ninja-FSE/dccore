@@ -79,7 +79,7 @@
 
 alias dccore.ini { return $qt($+($scriptdir,dccore.ini)) }
 alias dccore.bot { return $hget(dccore,bot) }
-alias dccore.ver { return 1.1 }
+alias dccore.ver { return 1.5 }
 ;  The feed's protocol minor this script was written for. The bot says
 ;  its own in HELLO as major.minor; a different minor means a field was
 ;  inserted on one side and the lines would read wrong - see HELLO below.
@@ -559,13 +559,19 @@ alias dccore.structured {
   ; PING: the bot could not read its figures in time and sent this so the
   ; link is heard from; the heartbeat timer above was reset by it already
   if (%type == PING) { return }
+  ; The bot's own CHECK_FOR_UPDATES, sent after every HELLO and after
+  ; `checkupdates on|off` completes (#572 follow-up). Kept in dccore.live,
+  ; not dccore - it is the bot's state, not a local preference, and would
+  ; read stale (from a different bot, or a setting changed elsewhere) if
+  ; saved into dccore.ini.
+  if (%type == CHECKUPDATES) { hadd dccore.live checkupdates $2 | return }
   if (%type == SLOT) { hadd dccore.live slot. $+ $dccore.st(nslots) $2- | hinc dccore.live nslots | dccore.panel.soon | return }
   if (%type == QUEUE) { hadd dccore.live queue. $+ $2 $3- | dccore.panel.soon | return }
   if (%type == OUT) { dccore.out $2- | return }
   if (%type == LISTFETCH) {
     ; <bot> <auto|arrived|unusable> <text>: a held bot list asked for again,
     ; arrived, or not usable. The text already names the bot.
-    dccore.echo $dccore.tag(LISTS,search) $4-
+    dccore.msg $dccore.tag(LISTS,search) $4-
     return
   }
   if (%type == TAKEN) {
@@ -574,7 +580,7 @@ alias dccore.structured {
     return
   }
   if (%type == DROPPED) {
-    dccore.echo $dccore.tag(DROPPED,fail) $2 line(s) were dropped by the bot: this client fell behind.
+    dccore.alert $dccore.tag(DROPPED,fail) $2 line(s) were dropped by the bot: this client fell behind.
     return
   }
   if (%type == TOKEN) {
@@ -589,27 +595,27 @@ alias dccore.structured {
   }
   if (%type == REQUEST) {
     if (!$dccore.opt(show.request)) { return }
-    dccore.echo $dccore.tag(REQUEST,request) $2 $+ $dccore.in($3) asked for $iif($4 == folder,the folder) $dccore.name($5-)
+    dccore.msg $dccore.tag(REQUEST,request) $2 $+ $dccore.in($3) asked for $iif($4 == folder,the folder) $dccore.name($5-)
     return
   }
   if (%type == QUEUED) {
     if (!$dccore.opt(show.queued)) { return }
-    dccore.echo $dccore.tag(QUEUED,queued) $dccore.name($7-) for $2 $+ $dccore.in($3) at # $+ $4 ( $+ $5 $+ / $+ $6 slots busy)
+    dccore.msg $dccore.tag(QUEUED,queued) $dccore.name($7-) for $2 $+ $dccore.in($3) at # $+ $4 ( $+ $5 $+ / $+ $6 slots busy)
     return
   }
   if (%type == SENDING) {
     if (!$dccore.opt(show.sends)) { return }
-    dccore.echo $dccore.tag(SENDING,sends) $dccore.name($7-) to $2 $+ $dccore.in($3) (slot $4 $+ / $+ $5 $+ , $dccore.bytes($6) $+ )
+    dccore.msg $dccore.tag(SENDING,sends) $dccore.name($7-) to $2 $+ $dccore.in($3) (slot $4 $+ / $+ $5 $+ , $dccore.bytes($6) $+ )
     return
   }
   if (%type == RESUMED) {
     if (!$dccore.opt(show.sends)) { return }
-    dccore.echo $dccore.tag(RESUMED,sends) $dccore.name($6-) for $2 $+ $dccore.in($3) at $dccore.bytes($4) of $dccore.bytes($5)
+    dccore.msg $dccore.tag(RESUMED,sends) $dccore.name($6-) for $2 $+ $dccore.in($3) at $dccore.bytes($4) of $dccore.bytes($5)
     return
   }
   if (%type == SENT) {
     if (!$dccore.opt(show.sends)) { return }
-    dccore.echo $dccore.tag(SENT,sends) $dccore.name($7-) to $2 $+ $dccore.in($3) $+ : $dccore.bytes($4) in $dccore.dur($5) $iif($6 > 0,at $dccore.speed($6),at n/a)
+    dccore.msg $dccore.tag(SENT,sends) $dccore.name($7-) to $2 $+ $dccore.in($3) $+ : $dccore.bytes($4) in $dccore.dur($5) $iif($6 > 0,at $dccore.speed($6),at n/a)
     return
   }
   if (%type == FAIL) {
@@ -623,14 +629,14 @@ alias dccore.structured {
       %name = $left(%rest,$calc(%p - 1))
       %why = $mid(%rest,$calc(%p + 4))
     }
-    dccore.echo $dccore.tag(FAILED,fail) $dccore.name(%name) to $2 $+ $dccore.in($3) - %why ( $+ $dccore.bytes($4) of $dccore.bytes($5) arrived)
+    dccore.alert $dccore.tag(FAILED,fail) $dccore.name(%name) to $2 $+ $dccore.in($3) - %why ( $+ $dccore.bytes($4) of $dccore.bytes($5) arrived)
     if ($dccore.opt(beep)) { beep 2 200 }
     return
   }
   if (%type == SEARCH) {
     hinc dccore.live searches
     if (!$dccore.opt(show.search)) { return }
-    dccore.echo $dccore.tag(SEARCH,search) $2 $+ $dccore.in($3) searched $dccore.name($5-) -> $4 result(s)
+    dccore.msg $dccore.tag(SEARCH,search) $2 $+ $dccore.in($3) searched $dccore.name($5-) -> $4 result(s)
     return
   }
   if (%type == LOG) {
@@ -805,6 +811,29 @@ alias dccore.rfit { return $right($+($str($dccore.nbsp,$2),$1),$2) }
 alias dccore.echo {
   dccore.window
   echo -ti2 $dccore.win $iif($1- == $null,$dccore.nbsp,$1-)
+}
+; Activity - somebody asked for, got or searched for something. The
+; window's button takes the MESSAGE colour, as a channel's does when
+; somebody speaks (#892). A plain /echo is an EVENT line, which is why
+; @DCCore never turned red however much happened in it; -m makes it a
+; message. dccore.echo above stays the event line, for what a channel
+; would also treat as one: the STATUS heartbeat (every few minutes -
+; red for that would mean red always), joins, parts and bans.
+; mIRC's help does not date -m or /window -g, so both are gated on mIRC 7
+; per the note at the top: an older mIRC shows the line exactly as before.
+alias dccore.msg {
+  dccore.window
+  if ($version >= 7) { echo -mti2 $dccore.win $iif($1- == $null,$dccore.nbsp,$1-) }
+  else { echo -ti2 $dccore.win $iif($1- == $null,$dccore.nbsp,$1-) }
+}
+; A failure: the same, and the button in the HIGHLIGHT colour - the one a
+; channel takes when somebody says your nick - so it stands out from
+; ordinary activity (/window -g2). Not while you are looking at the
+; window: mIRC does not colour the active window's button, and setting it
+; there would leave it lit after you had already read the line.
+alias dccore.alert {
+  dccore.msg $1-
+  if (($version >= 7) && ($active != $dccore.win)) { window -g2 $dccore.win }
 }
 ; the script's own remarks, in grey
 alias dccore.sys {
@@ -981,6 +1010,8 @@ menu @DCCore {
   Bans:dccore.send bans
   Uptime:dccore.send uptime
   Version:dccore.send version
+  Check for a new version:dccore.send checkversion
+  Daily update check $iif($dccore.st(checkupdates) == on,off,on):dccore.send checkupdates $iif($dccore.st(checkupdates) == on,off,on)
   -
   $iif($dccore.selq,Queue of $dccore.selq):dccore.send queue $dccore.selq
   $iif($dccore.selq,Clear the queue of $dccore.selq):dccore.send clearqueue $dccore.selq
@@ -1041,7 +1072,7 @@ alias dccore.options {
 
 dialog dccore.opt {
   title "DCCore window - options"
-  size -1 -1 322 236
+  size -1 -1 322 247
   option dbu
   box "Show in @DCCore", 100, 5 3 312 102
   check "Requests (who asked for what)", 101, 10 13 170 10
@@ -1078,16 +1109,17 @@ dialog dccore.opt {
   edit "", 306, 294 128 18 11, autohs
   text "Background", 307, 192 142 48 8
   combo 308, 242 140 56 70, drop
-  box "Connection", 400, 5 161 312 52
+  box "Connection", 400, 5 161 312 63
   text "Bot nick", 401, 10 173 36 8
   edit "", 402, 48 171 56 11, autohs
   text "", 403, 110 173 204 8
   check "Reconnect and log in by itself when the bot comes back", 404, 10 186 300 10
   text "The bot's own Settings > Console feed is the ceiling on what is sent at all.", 405, 10 198 300 8
-  button "OK", 1, 232 218 40 12, ok default
-  button "Cancel", 2, 276 218 40 12, cancel
-  button "Pair again...", 501, 5 218 46 12
-  button "Forget token", 502, 54 218 46 12
+  check "Check GitHub for a new DCCore version", 406, 10 210 260 10
+  button "OK", 1, 232 229 40 12, ok default
+  button "Cancel", 2, 276 229 40 12, cancel
+  button "Pair again...", 501, 5 229 46 12
+  button "Forget token", 502, 54 229 46 12
 }
 
 alias dccore.colours { return 00 white,01 black,02 navy,03 green,04 red,05 maroon,06 purple,07 orange,08 yellow,09 lime,10 teal,11 cyan,12 blue,13 pink,14 grey,15 silver }
@@ -1115,6 +1147,12 @@ on *:dialog:dccore.opt:init:0: {
   if ($dccore.bot) { did -ra dccore.opt 402 $dccore.bot }
   did -ra dccore.opt 403 $iif($dccore.opt(token),Paired $dccore.opt(paired) (token in dccore.ini),Not paired: the bot will ask for the password)
   if ($dccore.opt(auto)) { did -c dccore.opt 404 }
+  ; The bot's own setting, not a local pref (#572 follow-up) - nothing is
+  ; saved for it in dccore.ini, it lives only in dccore.live, refreshed
+  ; every time the bot says HELLO. Unknown (never told yet - a dialog
+  ; opened in the instant after connecting) leaves it unchecked rather
+  ; than guessing either way.
+  if ($dccore.st(checkupdates) == on) { did -c dccore.opt 406 }
 }
 ; "none" first, then the sixteen colours: the selected line is the colour + 2
 alias dccore.fillbg {
@@ -1152,6 +1190,14 @@ on *:dialog:dccore.opt:sclick:1: {
   hadd dccore auto $did(dccore.opt,404).state
   if ($did(dccore.opt,402).text != $null) { hadd dccore bot $did(dccore.opt,402).text }
   dccore.save
+  ; checkupdates is the bot's own setting (#572 follow-up): sent only when
+  ; the checkbox actually disagrees with what the bot last told us, so
+  ; opening and closing the dialog untouched does not trigger a rehash.
+  ; And only once the bot HAS told us: before its first CHECKUPDATES line
+  ; the state is empty, the box shows unticked, and an empty state never
+  ; equals "off" - so OK pressed in that moment used to turn the check off.
+  var %checkupdates = $iif($did(dccore.opt,406).state == 1,on,off)
+  if ($dccore.st(checkupdates) != $null && %checkupdates != $dccore.st(checkupdates)) { dccore.send checkupdates %checkupdates }
   if ($window($dccore.win)) {
     if (%panel != $dccore.opt(panel)) { dccore.rebuild }
     if ($dccore.opt(font)) { font $dccore.win $dccore.fontsize Lucida Console }

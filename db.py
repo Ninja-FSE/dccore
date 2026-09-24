@@ -33,6 +33,8 @@ NOTICES_FILE = getattr(config, "NOTICES_FILE",
                        os.path.join("data", "notices.json"))
 PRIVATE_MESSAGES_FILE = getattr(config, "PRIVATE_MESSAGES_FILE",
                                 os.path.join("data", "private_messages.json"))
+LIST_GRABS_FILE = getattr(config, "LIST_GRABS_FILE",
+                          os.path.join("data", "list_grabs.json"))
 
 
 # The temp file's name, and how it is swapped in (#692, audit L28). One
@@ -1004,6 +1006,31 @@ def save_admin_tokens(tokens):
                           mode=0o600)
     except Exception as err:
         print(f"[DB ERROR] Could not save the console token store: {err}")
+
+
+def load_list_grabs():
+    """Automatic list grabbing's per-bot record (#926), or {} if there is none.
+    An unreadable file costs the tries count and nothing else."""
+    if not os.path.exists(LIST_GRABS_FILE):
+        return {}
+    try:
+        with io.open(LIST_GRABS_FILE, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception as err:
+        print(f"[DB ERROR] Could not read {LIST_GRABS_FILE}: {err}")
+        return {}
+
+
+def save_list_grabs(record):
+    """Write it, atomically. False when it did not land."""
+    try:
+        with _disk_lock:
+            _atomic_write(LIST_GRABS_FILE, json.dumps(record, indent=1, sort_keys=True))
+        return True
+    except Exception as err:
+        print(f"[DB ERROR] Could not save {LIST_GRABS_FILE}: {err}")
+        return False
 
 
 def save_known_bots(registry):

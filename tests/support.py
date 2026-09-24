@@ -83,6 +83,9 @@ RUNTIME_CONTAINERS = {
     # full run. test_runtime_state.py now derives the comparison rather than
     # leaving the next one to be found the same way.
     "known_bots": dict,
+    # #926: who else asked which bot for its list. A leftover is a bot the
+    # next test's automatic grab leaves alone for no reason it can see.
+    "list_grab_others_asked": dict,
     # Offers in flight. A leftover here is not inert: it is keyed by (nick,
     # port), the DCC port range is small and reused, and a stale entry would
     # hand the next test's send an offset agreed for a different file.
@@ -157,6 +160,11 @@ SETTINGS_DEFAULTS = {
     # a guard reads defaults.py to keep these two the shipped ones.
     "MSG_DELAY": 5.0,
     "DEBUG_MSG_DELAY": 0.0,
+    # The daily version check (#572) ships ON, and a test that boots the
+    # daemon would start its worker - which one day asks GitHub. Off here,
+    # so no test ever holds that thread; the ones that exercise the check
+    # turn it on themselves and give it a fake GitHub.
+    "CHECK_FOR_UPDATES": False,
 }
 
 RUNTIME_FLAGS = {
@@ -243,6 +251,31 @@ def reset_config(**overrides):
         setattr(config, name, value)
     for name, value in RUNTIME_FLAGS.items():
         setattr(config, name, value)
+
+    # Which bots the fetch dispatcher saw leave, and when each came back
+    # (#926). Process-long in dcc_fetch; one test's absent bot would give the
+    # next test's a "just back" delay, depending only on test order.
+    fetch_module = sys.modules.get("dcc_fetch")
+    if fetch_module is not None:
+        fetch_module._seen_absent.clear()
+        fetch_module._back_since.clear()
+        fetch_module._paused.clear()
+        fetch_module._connect_failures.clear()
+        fetch_module._disk_was_low[0] = False
+
+    # What the version check (#572) last found. Read from runtime.py itself,
+    # not through config, so reset there: a release "found" by one test would
+    # otherwise be the next test's `status` line.
+    for name, value in (("update_check_started", False), ("update_check_last_attempt", None),
+                        ("update_check_last_manual", None), ("update_check_at", None),
+                        ("update_check_error", None), ("update_check_error_at", None),
+                        ("update_check_latest", None), ("update_check_url", None),
+                        ("update_check_newer", False), ("update_check_announced", None),
+                        # #926: automatic list grabbing's wait, last grab and
+                        # per-bot record - reloaded from the test's own file.
+                        ("list_grab_started", False), ("list_grab_plan", None),
+                        ("list_grab_last", None), ("list_grab_state", None)):
+        setattr(runtime, name, value)
 
     # A FRESH OUTBOUND CLOCK PER TEST. runtime.outbound_pacer is a
     # process-wide singleton holding "the earliest moment the next line may
@@ -598,6 +631,8 @@ class DCCoreTestCase(unittest.TestCase):
         self._real_known_bots_file = db.KNOWN_BOTS_FILE
         db.KNOWN_BOTS_FILE = os.path.join(self._fetch_history_dir,
                                           "known_bots.json")
+        self._real_list_grabs_file = db.LIST_GRABS_FILE
+        db.LIST_GRABS_FILE = os.path.join(self._fetch_history_dir, "list_grabs.json")
 
         # The console's token store (#704, audit L40). Every password check
         # goes through db.load_admin_tokens() on this path, so every login
@@ -683,7 +718,8 @@ class DCCoreTestCase(unittest.TestCase):
         self.set_config(
             BANS_FILE=os.path.join(self._fetch_history_dir, "bans.txt"),
             STATS_FILE=os.path.join(self._fetch_history_dir, "stats.txt"),
-            LIST_INDEX_FILE=os.path.join(self._fetch_history_dir, "list_index.db"))
+            LIST_INDEX_FILE=os.path.join(self._fetch_history_dir, "list_index.db"),
+            LIST_AUDIO_INFO_CACHE=os.path.join(self._fetch_history_dir, "audio_info.db"))
 
     def tearDown(self):
         restore_daemon_functions()
@@ -717,6 +753,7 @@ class DCCoreTestCase(unittest.TestCase):
         db.NOTICES_FILE = self._real_notices_file
         db.PRIVATE_MESSAGES_FILE = self._real_pm_file
         db.KNOWN_BOTS_FILE = self._real_known_bots_file
+        db.LIST_GRABS_FILE = self._real_list_grabs_file
         db.ADMIN_TOKENS_FILE = self._real_admin_tokens_file
         # NOT self._real_download_counts_file / self._real_speed_record_file
         # / self._real_dcc_queue_file - see the three _ORPHANED_*_SINK

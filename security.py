@@ -458,7 +458,17 @@ def format_ban_duration(seconds):
 
 
 def is_flooding(user):
-    """Flood protection: clears the queue on a ban, applies the escalation ban, and logs it all."""
+    """Flood protection: mutes, escalates a mute to a ban, and logs it all.
+
+    What both branches drop is `config.send_queue` - the user's pending
+    outbound REPLIES. `config.dcc_queue`, their queued files, is not
+    touched here by either one (#888).
+
+    File requests do not reach this at all since #888: irc.py meters
+    every other trigger and exempts `!<bot> <file>` / `!<bot> !rar
+    <folder>`, so a pasted album cannot mute anybody and cannot turn a
+    mute into a ban. The bound on those is the queue cap, not this.
+    """
     import time
     import sys
     import defaults as config
@@ -526,16 +536,25 @@ def is_flooding(user):
         if user_key in config.send_queue:
             del config.send_queue[user_key]
             
-        print(f"[FLOOD CONTROL] Temporarily muted {user} for {config.MUTE_TIME} seconds. Queue cleared.")
-        
+        # WHAT IS ACTUALLY DROPPED IS send_queue (#888): the user's pending
+        # outbound REPLIES, not config.dcc_queue, which is their file queue
+        # and is untouched here and still sent. Saying "queue cleared" to
+        # somebody whose files are queued and fine was not merely wrong, it
+        # was the thing that earned them the ban: told their queue had gone,
+        # they asked again, and asking again during a mute is the one action
+        # that escalates to FLOOD_BAN_SECONDS.
+        print(f"[FLOOD CONTROL] Temporarily muted {user} for {config.MUTE_TIME} seconds. "
+              f"Dropped their pending replies; their file queue is untouched.")
+
         # VIP log: send the warning notice straight out, with no queue delay
         announce.send_debug(
-            f"User {user} moving too fast! Triggered temporary mute for {config.MUTE_TIME} seconds. Queue cleared.", 
+            f"User {user} moving too fast! Triggered temporary mute for {config.MUTE_TIME} seconds. "
+            f"Pending replies dropped; file queue untouched.",
             category="MUTE"
         )
-        
+
         if oserve:
-            oserve.queue_message(user, f"NOTICE {user} :{config.C_BOLD}[WARNING]{config.C_RESET} You are moving too fast! Ignored and queue cleared for {config.MUTE_TIME} seconds.\r\n")
+            oserve.queue_message(user, f"NOTICE {user} :{config.C_BOLD}[WARNING]{config.C_RESET} You are moving too fast! Other commands are ignored for {config.MUTE_TIME} seconds - any files you have queued are safe and still on their way.\r\n")
         return True
         
     return False

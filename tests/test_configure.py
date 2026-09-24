@@ -205,7 +205,9 @@ class CollectAnswersEndToEndTests(DCCoreTestCase):
         try:
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
-                return configure.collect_answers()
+                result = configure.collect_answers()
+            self._last_output = buffer.getvalue()   # #891: what was printed
+            return result
         finally:
             builtins.input = real_input
 
@@ -250,6 +252,49 @@ class CollectAnswersEndToEndTests(DCCoreTestCase):
         ])
 
         self.assertEqual(answers["ADMIN_HOSTMASKS"], ["*!*@myaccount.users.undernet.org"])
+
+    def test_a_blank_answer_does_not_collapse_multiple_existing_hosts(self):
+        """#891: a re-run with two hosts already configured (home and phone,
+        say) and a blank answer at the prompt must write NOTHING - the old
+        code rewrote ADMIN_HOSTMASKS from the first entry alone, silently
+        dropping the second."""
+        self.set_config(ADMIN_HOSTMASKS=["*!*@home.users.undernet.org",
+                                         "*!*@phone.example.net"])
+        answers, _hash = self._run_with_answers([
+            "MyBot", "", "#my-channel", "MyAdmin",
+            "",                               # blank: keep both, unchanged
+            self.tree.music, "n",
+        ])
+
+        self.assertNotIn("ADMIN_HOSTMASKS", answers)
+
+    def test_replacing_more_than_one_host_is_said_before_it_happens(self):
+        self.set_config(ADMIN_HOSTMASKS=["*!*@home.users.undernet.org",
+                                         "*!*@phone.example.net"])
+        answers, _hash = self._run_with_answers([
+            "MyBot", "", "#my-channel", "MyAdmin",
+            "newaccount.users.undernet.org",  # a real answer this time
+            self.tree.music, "n",
+        ])
+
+        self.assertEqual(answers["ADMIN_HOSTMASKS"], ["*!*@newaccount.users.undernet.org"])
+        self.assertIn("replaces the 2 services hosts", self._last_output)
+
+    def test_a_wildcard_first_entry_is_not_offered_as_the_default(self):
+        """The smaller oddity in the same report: offering an invalid value
+        as the default meant pressing Enter tried to validate a string the
+        operator never typed, and printed a confusing refusal about it."""
+        self.set_config(ADMIN_HOSTMASKS=["*!*@*.home.net"])
+        answers, _hash = self._run_with_answers([
+            "MyBot", "", "#my-channel", "MyAdmin",
+            "",                               # blank: nothing to fall back to
+            self.tree.music, "n",
+        ])
+
+        self.assertNotIn("ADMIN_HOSTMASKS", answers)
+        self.assertNotIn("will not do", self._last_output)
+        self.assertNotIn("*.home.net]", self._last_output,
+                         "the invalid pattern was offered as the default")
 
     def test_a_blank_required_field_is_reprompted_not_accepted(self):
         """A genuinely fresh install (NICKNAME still unset - DCCoreTestCase's

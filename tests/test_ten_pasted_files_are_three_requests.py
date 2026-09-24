@@ -46,6 +46,8 @@ class TenPastedFilesAreThreeRequests(DCCoreTestCase):
         sys.modules["oserve"] = stub
         self.addCleanup(sys.modules.pop, "oserve", None)
 
+        # About MAX_FETCH_SLOTS, one bot: the per-bot limit (#926) stays out of it.
+        self.set_config(FETCH_MAX_PER_BOT=0)
         self.set_config(MAX_FETCH_SLOTS=3, CHANNEL="#somechannel",
                         transfers_paused=False, fetch_feature_disabled=False)
         config.fetch_queue.clear()

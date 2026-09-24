@@ -178,19 +178,43 @@ def collect_answers():
     print("your nick, which anyone can take while you are offline. Log into")
     print("services and set +x, then /whois yourself - you want the host it")
     print("shows, ending in something like .users.undernet.org.")
-    current_hostmasks = _current("ADMIN_HOSTMASKS")
-    default_host = (current_hostmasks[0].rsplit("@", 1)[-1]
-                    if current_hostmasks and current_hostmasks[0] else "")
-    suffix = f" [{default_host}]" if default_host else ""
-    admin_host = input(f"Your services host (blank to skip){suffix}: ").strip() or default_host
+    # READ AS THE CONSOLE READS THEM (#911): either form - a list, or the
+    # comma-separated string admin_config.py may hold, which indexing the
+    # value directly read as characters ("replaces the 13 services hosts") -
+    # host part only, deduplicated. All of them are shown, so the operator
+    # sees what a typed answer would change; a blank answer is never
+    # substituted with any of them (#891), and a wildcard entry is shown
+    # rather than offered, so Enter never runs the validator on it.
+    current_hosts = adminchat.admin_host_patterns()
+    if current_hosts:
+        print(f"  Configured now: {', '.join(current_hosts)}")
+        prompt = "Your services host (blank keeps what is configured): "
+    else:
+        prompt = "Your services host (blank to skip): "
+    admin_host = input(prompt).strip()
     while admin_host:
         problem = settings_file.admin_host_problem(admin_host)
         if not problem:
             break
         print(f"  That will not do: {problem}.")
-        admin_host = input("Your services host (blank to skip): ").strip()
-    if admin_host:
+        admin_host = input(prompt).strip()
+    if admin_host and admin_host.lower() in current_hosts:
+        # A host that is already there, retyped - out of habit, or because
+        # the prompt no longer offers it as a default. Writing [just this one]
+        # dropped every other configured host, the loss #891 was about,
+        # reached by typing instead of by Enter (#911). Nothing to change.
+        print("  Already configured - nothing changed.")
+    elif admin_host:
+        # More than one already configured (home and phone, say) - said
+        # before replacing them, not after: a re-run that collapsed the list
+        # to just this one used to do it silently (#891).
+        if len(current_hosts) > 1:
+            print(f"  This replaces the {len(current_hosts)} services hosts "
+                 f"already configured with just this one.")
         changes["ADMIN_HOSTMASKS"] = [f"*!*@{admin_host}"]
+    # A blank answer leaves ADMIN_HOSTMASKS exactly as it is - nothing is
+    # written - rather than rewriting it from the first entry shown above,
+    # which is what silently dropped every host after the first (#891).
 
     print()
     print("Admin console password (for the DCC CHAT console - see")

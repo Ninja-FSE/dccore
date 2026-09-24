@@ -13,13 +13,13 @@ What DCCore does today, and what it does not do yet.
 - **DCC SEND over IRC**, with a per-user and global queue, configurable slot limits, and a DCC port range you control.
 - **Album packing** — `!rar <folder>` builds an archive on demand and cleans it up afterwards, bounded by `MAX_RAR_FOLDER_SIZE` so a request cannot ask for an unbounded pack.
 - **Freeze box** — a user who parts or quits keeps their queue for five minutes; rejoining thaws it instantly rather than losing their place.
-- **Anti-flood** — a rolling request window, temporary mutes, and escalation to a timed ban (`FLOOD_BAN_SECONDS`, one hour by default) for anyone who keeps going while muted.
+- **Anti-flood** — a rolling window on searches and other commands, temporary mutes, and escalation to a timed ban (`FLOOD_BAN_SECONDS`, one hour by default) for anyone who keeps going while muted. File requests are not metered: a pasted list is taken one by one, bounded by the queue limits instead.
 - **Ban list** — hard bans by hostmask pattern, timed bans, and a guard that refuses a pattern matching everyone.
 - **Long paths and non-ASCII filenames** work on both platforms: Windows `MAX_PATH` is handled throughout, and Greek, Cyrillic and CJK filenames survive both ends of the IRC connection.
 
 ### The file list
 
-- **One master list**, rebuilt by `!update` or on a schedule, published atomically so a failed scan never overwrites a good index.
+- **One master list**, rebuilt by `!update`, from the dashboard, or by itself on a schedule (`LIST_REBUILD_SCHEDULE`: daily, weekly, monthly or every N hours), published atomically so a failed scan never overwrites a good index.
 - **Three formats** — `.txt`, `.zip` and `.rar`, all built every time; `LIST_FORMAT` picks which one is offered.
 - **Search** — `@find <words>` against the master list, with results fitted to the IRC line limit.
 - **Every folder heading says what it holds** — `14 files, 1.20GB` on its own line under the heading, placed so that every program that reads these lists (other DCCore bots, AutoQ, DCCore's own request handling) ignores it. Companion files (`.srt`, `.nfo`, `.sfv`…) travel with the film they belong to when the video list is split out, and stay with an album otherwise.
@@ -86,7 +86,7 @@ Two pieces were worth doing carefully rather than quickly, and one of them turne
 
 ### Quality
 
-- **6378 tests**, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14, in CI on every push and pull request — and a preflight script that runs the whole suite twice, the second time with the host's own tooling hidden, so a test that only passes on a developer's machine fails before it is pushed.
+- **6661 tests**, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14, in CI on every push and pull request — and a preflight script that runs the whole suite twice, the second time with the host's own tooling hidden, so a test that only passes on a developer's machine fails before it is pushed.
 - **Stdlib-only** — the daemon and its test suite need no third-party packages; Flask is required only for the optional dashboard.
 - **No reloaded module owns a lock** — `!rehash` re-executes a module body, so a module-level `threading.Lock()` is rebound while a thread is still inside it. Every lock in a reloaded module is allocated in `runtime.py` and bound by name, and `tests/test_no_reloaded_module_owns_a_lock.py` fails if a new one appears — the class, not the four instances that prompted it.
 - **A cross-list search index** — SQLite FTS5, built as each bot list is fetched, so the dashboard can filter every held list live rather than re-reading them at 2-11 seconds a keystroke.
@@ -138,13 +138,18 @@ fetched list is `!nickname <track>`, written by that bot when it built the
 list, so it still names whichever nick was current at build time. Copying that
 line into the channel sends the request to a nick that may not be there.
 
-We have the same problem in the other direction, and it is not hypothetical:
-`update_list.py` writes `!{config.NICKNAME}` into every line of our own list at
-build time, and `irc.py` rebinds `config.NICKNAME` to the alt nick on a 433.
-A rebuild while we are on the alt nick therefore ships a list whose every line
-names the alt nick.
+We had the same problem in the other direction, and it was not hypothetical:
+`update_list.py` wrote `!{config.NICKNAME}` into every line of our own list at
+build time, and `irc.py` rebinds `config.NICKNAME` to the alt nick on a 433, so
+a rebuild while we were on the alt nick shipped a list whose every line named
+the alt nick. **This half is fixed (#376):** the list now names the configured
+nick (`ORIGINAL_NICK`, falling back to `NICKNAME`) however it is built, live or
+from a subprocess, so it survives the bot being on its alt nick at rebuild
+time.
 
-Open: what is the stable identity — the services account, the host, an operator
+The sidebar half is still open: a bot that reconnects under its alt nick still
+shows there as a second bot, since nothing merges the two adverts. What is the
+stable identity to merge them on — the services account, the host, an operator
 mapping in settings? And is the fix to normalise at fetch time, to rewrite the
 request lines on the way out, or only to merge the two rows in the sidebar?
 

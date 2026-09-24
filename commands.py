@@ -115,6 +115,14 @@ def handle_help_request(s, user, target):
         f"{bold}{red}@{nick}-remove{reset} to cancel it. "
         f"To search every bot at once, type: {bold}{red}@find <words>{reset}")
 
+    # #774: a band or title made of common words - "Metal Church" matched
+    # every file with both words anywhere. Said as this bot's own rule: the
+    # same @find reaches every bot, and one that does not know quotes simply
+    # answers nothing to a quoted term.
+    lines.append(
+        f"Words in quotes must appear together, in that order, in my list: "
+        f'{bold}{red}@find "metal church"{reset}')
+
     for line in lines:
         # #426: NOT is_vip=True. The VIP lane is strict-priority with no
         # aging - a channel advert waiting behind it is the reason it
@@ -438,7 +446,10 @@ PRESERVE_RUNTIME = (
     'nick_aliases',       # the merges already inferred. Losing this un-merges
                           # every bot the List Browser had already combined,
                           # for no reason connected to the setting that changed
-    'private_messages',   # somebody spoke to the bot and it said nothing back. A
+    'list_grab_others_asked',  # #926: who just asked which bot for its list.
+                          # Losing it lets the automatic grab ask a bot that is
+                          # busy sending someone else's list
+    'private_messages',  # somebody spoke to the bot and it said nothing back. A
                           # rehash is not a reply, and losing these would drop the
                           # only record that anybody tried
     'private_message_state',
@@ -1279,6 +1290,30 @@ def _handle_rehash_request(user, target_chan):
         except Exception as refetch_err:
             print(f"[REHASH] Could not start the automatic list refresh: "
                   f"{refetch_err}")
+        # Automatic list grabbing (#926), for the same reason.
+        try:
+            import list_grab as _list_grab
+            if _list_grab.ensure_worker():
+                print("[REHASH] AUTO_GRAB_LISTS is on: automatic list grabbing has started.")
+        except Exception as grab_err:
+            print(f"[REHASH] Could not start automatic list grabbing: {grab_err}")
+
+        # The list rebuild schedule (#776), the same way and for the same
+        # reason: a dashboard save that sets one lands here.
+        try:
+            if ensure_rebuild_schedule_worker():
+                print("[REHASH] LIST_REBUILD_SCHEDULE is set: the rebuild schedule has started.")
+        except Exception as schedule_err:
+            print(f"[REHASH] Could not start the rebuild schedule: {schedule_err}")
+
+        # The daily version check (#572), for the same reason: a Settings save
+        # that ticks CHECK_FOR_UPDATES on lands here.
+        try:
+            import version_check as _version_check
+            if _version_check.ensure_worker():
+                print("[REHASH] CHECK_FOR_UPDATES is on: the daily version check has started.")
+        except Exception as update_err:
+            print(f"[REHASH] Could not start the version check: {update_err}")
 
         # ---------------------------------------------------------------------
         # 4. FULLY AUTOMATIC CHANNEL SYNC (JOIN NEW / PART REMOVED)
@@ -1321,6 +1356,23 @@ def _handle_rehash_request(user, target_chan):
         import dcc as _dcc_pack
         clear_or_keep_pack_interlocks(
             config, _pack_still_running and _dcc_pack.a_pack_is_running(), _packing_for)
+
+        # WHERE FILES WERE IS ONLY TRUE FOR THE ROOTS THAT WERE CONFIGURED
+        # WHEN IT WAS LEARNED (#886). The lookup memories are hints, and each
+        # one re-checks the file on disk before it is trusted - which is
+        # exactly why a rehash has to be told. A path remembered under a
+        # folder the operator has just removed from the library is STILL
+        # THERE on disk, so that check passes, and the request is then
+        # refused by is_safe_path() against the new roots: "invalid path"
+        # for a name that the new configuration can serve perfectly well.
+        # Self-healing does not reach this one, because nothing about the
+        # entry is stale - the library moved out from under it. Without this
+        # the wrong answer lasts LOOKUP_HIT_TTL_SECONDS.
+        #
+        # A rebuild (!update) needs no such call: it changes the lists, not
+        # where the files are, and anything it does move fails the on-disk
+        # check and is dropped on the spot.
+        _dcc_pack.forget_library_lookups()
 
         # ADMIN_HOSTMASKS may have just changed; a very broad entry is
         # accepted but said out loud, here as at boot (#669).
@@ -1738,6 +1790,209 @@ def describe_duration(seconds):
     return f"{total // 3600}h {(total % 3600) // 60:02d}m"
 
 
+# ---------------------------------------------------------------------------
+# THE LIST REBUILD SCHEDULE (#776). Nothing rebuilt the list on a timer:
+# !update, the dashboard's Update list and the console's `update` each run it
+# once, and FUTURE.md's "on a schedule" meant the operator's own cron - which a
+# novice never sets up, and which bypassed PAUSE_ON_UPDATE and the in-progress
+# guard. LIST_REBUILD_SCHEDULE runs exactly what !update runs, from a worker
+# that checks once a minute.
+#
+# WHEN IT IS DUE. A time-of-day schedule is due when the last rebuild (the
+# newer of the list file's age and the schedule's own last attempt) is older
+# than the most recent slot - so a bot that was down at 04:00 rebuilds when it
+# comes back, once, and one restarted at 23:00 after a 04:00 rebuild does not
+# rebuild again. "every Nh" is due N hours after the last rebuild of any kind,
+# manual included: it means "never older than N hours". The attempt is what
+# keeps a FAILING rebuild from starting again every minute - it waits for the
+# next slot, and its failure is reported the way a manual one's is.
+# ---------------------------------------------------------------------------
+
+def _rebuild_slot_before(spec, now):
+    """The most recent scheduled moment at or before `now` (local datetimes)."""
+    import calendar
+    from datetime import datetime, timedelta
+
+    kind = spec[0]
+    if kind == "daily":
+        slot = now.replace(hour=spec[1], minute=spec[2], second=0, microsecond=0)
+        return slot - timedelta(days=1) if slot > now else slot
+    if kind == "weekly":
+        weekday, hour, minute = spec[1:]
+        slot = (now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                - timedelta(days=(now.weekday() - weekday) % 7))
+        return slot - timedelta(days=7) if slot > now else slot
+    day, hour, minute = spec[1:]
+
+    def in_month(year, month):
+        return datetime(year, month, min(day, calendar.monthrange(year, month)[1]), hour, minute)
+
+    slot = in_month(now.year, now.month)
+    if slot > now:
+        slot = in_month(now.year - 1, 12) if now.month == 1 else in_month(now.year, now.month - 1)
+    return slot
+
+
+def _rebuild_slot_after(spec, now):
+    """The first scheduled moment after `now` (local datetimes)."""
+    import calendar
+    from datetime import datetime, timedelta
+
+    kind = spec[0]
+    if kind == "daily":
+        slot = now.replace(hour=spec[1], minute=spec[2], second=0, microsecond=0)
+        return slot + timedelta(days=1) if slot <= now else slot
+    if kind == "weekly":
+        weekday, hour, minute = spec[1:]
+        slot = (now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                + timedelta(days=(weekday - now.weekday()) % 7))
+        return slot + timedelta(days=7) if slot <= now else slot
+    day, hour, minute = spec[1:]
+
+    def in_month(year, month):
+        return datetime(year, month, min(day, calendar.monthrange(year, month)[1]), hour, minute)
+
+    slot = in_month(now.year, now.month)
+    if slot <= now:
+        slot = in_month(now.year + 1, 1) if now.month == 12 else in_month(now.year, now.month + 1)
+    return slot
+
+
+def rebuild_is_due(spec, now, last):
+    """Whether schedule `spec` wants a rebuild at `now`, the last having been
+    at `last` (timestamps; `last` None for never)."""
+    from datetime import datetime
+
+    if spec is None:
+        return False
+    if last is None:
+        return True
+    if spec[0] == "every":
+        return now - last >= spec[1] * 3600
+    return last < _rebuild_slot_before(spec, datetime.fromtimestamp(now)).timestamp()
+
+
+def last_list_rebuild():
+    """The newer of when the published list was last written and when the
+    schedule last started a rebuild, or None for neither."""
+    import os
+    import list as list_mod
+
+    stamps = []
+    for path in list_mod.all_list_paths():
+        try:
+            stamps.append(os.path.getmtime(path))
+        except OSError:
+            pass
+    if runtime.rebuild_schedule_last_attempt:
+        stamps.append(runtime.rebuild_schedule_last_attempt)
+    return max(stamps) if stamps else None
+
+
+def _rebuild_schedule():
+    """(text, spec) for the configured schedule; spec None when off or unreadable.
+
+    An unreadable value cannot normally get here - settings_file.coerce()
+    refuses it at load and at save - so it is treated as off rather than
+    guessed at."""
+    import settings_file
+
+    text = str(getattr(config, "LIST_REBUILD_SCHEDULE", "") or "").strip()
+    try:
+        return text, settings_file.parse_rebuild_schedule(text)
+    except ValueError:
+        return text, None
+
+
+def next_scheduled_rebuild(now=None):
+    """When the schedule will next start a rebuild (a timestamp), `now` if it
+    is due already, or None when there is no schedule."""
+    import time as time_mod
+    from datetime import datetime
+
+    now = time_mod.time() if now is None else now
+    _text, spec = _rebuild_schedule()
+    if spec is None:
+        return None
+    last = last_list_rebuild()
+    if rebuild_is_due(spec, now, last):
+        return now
+    if spec[0] == "every":
+        return last + spec[1] * 3600
+    return _rebuild_slot_after(spec, datetime.fromtimestamp(now)).timestamp()
+
+
+def describe_rebuild_schedule(now=None):
+    """One line for the console's `status`: off, or the schedule and when next."""
+    import time as time_mod
+    from datetime import datetime
+
+    now = time_mod.time() if now is None else now
+    text, spec = _rebuild_schedule()
+    if spec is None:
+        return "off"
+    when = next_scheduled_rebuild(now)
+    if when is None or when <= now:
+        return f"{text} - due now"
+    return f"{text} - next {datetime.fromtimestamp(when).strftime('%a %d %b %H:%M')}"
+
+
+def scheduled_rebuild_tick(now=None):
+    """One check: start the rebuild when it is due. Returns True if it did."""
+    import time as time_mod
+    import announce
+
+    now = time_mod.time() if now is None else now
+    text, spec = _rebuild_schedule()
+    if spec is None or getattr(config, "update_inprogress", False):
+        return False
+    if not rebuild_is_due(spec, now, last_list_rebuild()):
+        return False
+    runtime.rebuild_schedule_last_attempt = now
+    announce.send_debug(f"Scheduled list rebuild starting (LIST_REBUILD_SCHEDULE = {text}).",
+                        category="INFO")
+    handle_list_update_request("the rebuild schedule", text, authorised=True)
+    return True
+
+
+def rebuild_schedule_worker(sleep=None):
+    """The loop: a minute's wait, then one check, for as long as the process
+    lives. Turning the setting off needs no stop - the check reads it every
+    time and does nothing while it is empty."""
+    import time as time_mod
+
+    naptime = sleep or (lambda seconds: time_mod.sleep(seconds))
+    print("[SCHEDULE] The list rebuild schedule is on.")
+    while True:
+        # The wait comes FIRST, so a bot just started connects before a due
+        # rebuild pauses its sharing.
+        naptime(60.0)
+        try:
+            scheduled_rebuild_tick()
+        except Exception as err:
+            print(f"[SCHEDULE] The scheduled rebuild check failed: {err}")
+
+
+def ensure_rebuild_schedule_worker(start=None):
+    """Start the loop above if a schedule is set and it is not running yet.
+    Returns True only when this call started it. From oserve.startup() and
+    from every rehash, so setting a schedule on the dashboard starts it live;
+    ONCE, guarded in runtime.py - see ensure_auto_refetch_worker(), the same
+    pattern for the same reasons. `start` is injectable for tests."""
+    import threading
+
+    if not str(getattr(config, "LIST_REBUILD_SCHEDULE", "") or "").strip():
+        return False
+    with runtime.rebuild_schedule_guard:
+        if runtime.rebuild_schedule_started:
+            return False
+        starter = start or (lambda: threading.Thread(
+            target=rebuild_schedule_worker, daemon=True).start())
+        starter()
+        runtime.rebuild_schedule_started = True
+    return True
+
+
 def handle_list_update_request(user, target_chan, authorised=False, user_host=None):
     """Run update_list.py, wait for it, and read the file count from line 1 of the list."""
     import subprocess
@@ -1784,8 +2039,13 @@ def handle_list_update_request(user, target_chan, authorised=False, user_host=No
             return
         config.update_inprogress = True
 
-        # The global maintenance lock is only taken if the switch is True in config
-        if getattr(config, 'PAUSE_ON_UPDATE', True) is True:
+        # The global maintenance lock is only taken for the old whole-rebuild
+        # pause (#923). By default searches run through the scan, answered
+        # from the current list, and only the swap at the end pauses them -
+        # list.rebuild_pauses_requests() - so a search running now is no
+        # reason to refuse the rebuild, and the rebuild holds no search lock.
+        import list as list_mod
+        if list_mod.rebuild_pauses_everything():
             if getattr(config, 'search_inprogress', False) is True:
                 announce.send_debug(f"List update request from {user} denied: Another system scan is already running.", category="INFO")
                 # The flag was raised by the gate above and this request is not
@@ -1799,6 +2059,11 @@ def handle_list_update_request(user, target_chan, authorised=False, user_host=No
     if paused_searches:
         print(f"[MAINTENANCE START] {user} ran !update. Searching and sharing are now PAUSED.")
         announce.send_debug(f"System maintenance initiated by {user}. MasterList is rebuilding, file requests temporarily paused...", category="INFO")
+    elif getattr(config, 'PAUSE_ON_UPDATE', True) is True:
+        print(f"[UPDATE START] {user} ran !update. Searching and sharing continue from the current "
+              f"list and pause only while the new one is swapped in.")
+        announce.send_debug(f"List update triggered by {user} from {target_chan}. Searches and file "
+                            f"requests continue meanwhile.", category="INFO")
     else:
         print(f"[UPDATE START] {user} ran !update. The pause switch is False, so sharing continues meanwhile.")
         announce.send_debug(f"List update triggered by {user} from {target_chan}. Indexing the music directory...", category="INFO")

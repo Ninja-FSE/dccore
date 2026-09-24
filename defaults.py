@@ -21,13 +21,20 @@ import runtime
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
-SCRIPT_VERSION: str = "DCCore v1.13.0"
+SCRIPT_VERSION: str = "DCCore v1.13.1"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
 # no project URL anywhere in the tree, so anyone who received a list had no way
 # to find out what produced it.
 PROJECT_URL: str = "https://github.com/Ninja-FSE/dccore"
+# Tell the operator when a newer DCCore is out (#572). Once a day the bot asks
+# the latest release of the repository PROJECT_URL names - one request to
+# GitHub, carrying nothing about this bot - and says so on the dashboard, in the
+# console's `status` and in the mIRC window. On by default, and said at every
+# startup while it is on; a check that fails says why, never silently. The
+# dashboard's Check now and the console's `checkversion` work with it off.
+CHECK_FOR_UPDATES: bool = True  # Check once a day whether a newer DCCore has been released
 
 # Answer CTCP VERSION with SCRIPT_VERSION and PROJECT_URL. Operators who would
 # rather not advertise a version can turn this off; the bot then ignores the
@@ -98,7 +105,16 @@ BROADCAST_SEARCH_CHANNEL: str = None
 # ---------------------------------------------------------------------
 # 3. FILESYSTEM, PATHS AND TEXT STORES
 # ---------------------------------------------------------------------
-PAUSE_ON_UPDATE: bool = True  # MAINTENANCE SWITCH: when True the bot pauses ALL sharing and searching during !update
+# While the list is rebuilt, searches and file requests are refused while the
+# new list is SWAPPED IN - a few seconds at the end - and answered from the
+# current list the rest of the time (#923). The new list is built under
+# temporary names and the current one is complete and unchanged until the
+# swap, so the scan (and the audio-info reading) no longer takes the bot off
+# the air for its whole length. False: never pause at all.
+PAUSE_ON_UPDATE: bool = True  # MAINTENANCE SWITCH: pause searching and sharing while a rebuilt list is swapped in
+# The old behaviour: pause searching and sharing for the WHOLE rebuild, not
+# only the swap. For an operator who wants it back; nothing else needs it.
+PAUSE_FOR_WHOLE_UPDATE: bool = False  # Pause searching and sharing for the whole rebuild, not only the swap
 # None, not a real path - a shipped literal path would let a copy-paste
 # install silently inherit somebody else's actual music folder path. Unlike
 # NICKNAME/CHANNEL/ADMIN_NICK, FILE_DIRECTORY is NOT in settings_file.
@@ -333,6 +349,41 @@ KNOWN_BOTS_FILE: str = "./data/known_bots.json"
 # reads it. A damaged one is moved aside as list_index.db.corrupt-<timestamp>
 # and rebuilt from the lists on disk (#628); the copy can be deleted.
 LIST_INDEX_FILE: str = "./data/list_index.db"
+
+# Duration and quality after the size on the list's MP3 and FLAC rows (#567):
+# "::INFO:: 10.3MB 4m31s 320/44.1/JS" - the spelling other servers' lists use.
+# Off by default because it OPENS every audio file, where the scan otherwise
+# asks for nothing but sizes: the first rebuild with it on takes noticeably
+# longer. What it read is kept in LIST_AUDIO_INFO_CACHE, checked against each
+# file's size and modification time, so later rebuilds open only new or changed
+# files. Read with the standard library (audio_info.py); a file it cannot read
+# keeps its size and nothing more.
+LIST_SHOW_AUDIO_INFO: bool = False  # Put duration and bitrate after the size on MP3 and FLAC rows
+# One row per audio file in the lists (about 150 bytes each). Safe to delete:
+# the next rebuild reads every file again.
+LIST_AUDIO_INFO_CACHE: str = "./data/audio_info.db"
+# How many audio files are read at once (#914). On a network mount (NFS, SMB)
+# the time goes into round trips, which overlap. Measured on a real 64,136-file
+# NFS library: one at a time 9.8 files a second, 16 about 73, 64 about 236 (the
+# last partly on a cache warmed by the run before). 64 by default - a plain
+# disk answers 64 requests as readily as it answers 16; on a very old drive
+# or a very small library, lower it. The rebuild's last line says the rate it
+# got, to compare. 1 to 128.
+LIST_AUDIO_INFO_THREADS: int = 64  # Audio files read at once for length and quality
+# How many folders the rebuild lists at once (#922). On a network mount every
+# directory listing and every file's size is a round trip, and one folder at a
+# time none of them overlap - about 80 s of every rebuild on a 64,136-file NFS
+# library, with searches paused. With 2 ms of simulated latency per request,
+# 16 at a time scanned 15 times as fast as one. On a local disk it makes no
+# difference worth measuring (a fraction of a second either way). 1 is the
+# scan as it always was. 1 to 64.
+LIST_SCAN_THREADS: int = 16  # Folders listed at once while the list is rebuilt
+# The most time one rebuild spends reading audio files it has not read before
+# (#914). A rebuild pauses searches and requests, and the first one with
+# LIST_AUDIO_INFO on has the whole library to read: past this, the list
+# publishes with what was read and the rest wait for the next rebuild. 0 = no
+# limit.
+LIST_AUDIO_INFO_MINUTES: int = 5  # Minutes one rebuild may spend reading new audio files; 0 = no limit
 
 # One row per thing this bot has ever sent, {relative path or archive name ->
 # {name, kind, count}}. Feeds the Stats page's "Most downloaded" table. Not
@@ -672,7 +723,9 @@ MAX_FETCH_SLOTS: int        = 3        # Max simultaneous in-flight/offered fetc
 # one to inherit.
 #
 # The ADVERT decides, not a timer - #286 already worked out what "moved on"
-# means. A timer alone would re-ask every bot for a list we already have.
+# means. A timer alone would re-ask every bot for a list we already have. The
+# one exception is a bot whose advert gives no date to compare (#926): its
+# list is re-asked for once it is 14 days old, or it would never be refreshed.
 AUTO_REFETCH_LISTS: bool = False
 # How stale a held list may get before it is re-asked for, in hours. Not how
 # often the check runs (that is hourly); this is the floor on how often any one
@@ -685,6 +738,19 @@ AUTO_REFETCH_INTERVAL_HOURS: int = 24
 # lot of stale lists, and asking for all of them at once is a burst of
 # outbound requests nobody asked for. The rest go next sweep, oldest first.
 AUTO_REFETCH_MAX_PER_RUN: int = 3
+# Ask for the list of a bot that advertises one and whose list is not held yet
+# (#926), on AutoGet's rules: one grab at a time, a random 5-360 second wait
+# first, dropped if someone else asks that bot meanwhile, three tries 30
+# minutes apart, then it stops. A list removed by hand is not grabbed back.
+# OFF by default, for the same reason as AUTO_REFETCH_LISTS.
+AUTO_GRAB_LISTS: bool = False
+# The least time between two automatic grabs, in minutes.
+AUTO_GRAB_EVERY_MINUTES: int = 10
+# Skip bots advertising fewer files than this. 0 grabs any size.
+AUTO_GRAB_MIN_FILES: int = 0
+# Skip bots advertising a speed below this, in KB/s. A bot that advertises no
+# speed is not skipped. 0 turns it off.
+AUTO_GRAB_MIN_SPEED_KB: int = 0
 # How long a rehash waits for transfers in flight to finish before reloading
 # anyway, in seconds (#310). A transfer can sit idle for as long as the far
 # end keeps its socket open, so this cannot be unbounded: a bot that cannot
@@ -743,6 +809,17 @@ MAX_RAR_FOLDER_SIZE: int = 10 * 1024 * 1024 * 1024   # 10 GB - refuse to pack mo
 MAX_FETCH_LIST_FILE_SIZE: int = 64 * 1024 * 1024  # 64 MB - the archive, not the text inside it; 0 = no limit
 FETCH_TRANSFER_TIMEOUT: int = 600      # Seconds - total wall-clock per transfer (against a slow "drip" that keeps resetting the idle timeout)
 FETCH_OFFER_TIMEOUT: int    = 60       # Seconds an "offered" row waits for a DCC SEND before it's marked failed
+# How long a request the other bot has QUEUED waits for its file (#926). When
+# a bot answers "you are number 12 in my queue", the request stops counting
+# against MAX_FETCH_SLOTS and waits for its turn - hours, on a busy server.
+# Past this it fails: a bot that restarted or dropped its queue never says so.
+# 0 = wait for ever.
+# How many of our requests one bot may hold at once - asked, queued there or
+# arriving (#926). A server allows each user only so many; the rest would be
+# answered "queue full". The next file goes out when one finishes, the way
+# AutoGet's "active" mode did it. 0 = no limit.
+FETCH_MAX_PER_BOT: int = 3  # Files asked of one bot at once; the next goes when one finishes
+FETCH_QUEUED_TIMEOUT: int = 43200  # Seconds a request queued at another bot waits for the file (12 h); 0 = no limit
 
 # A "folder" request_type row (dcc_fetch.py) asks another bot to pack a whole
 # folder/album as .rar via its own "!rar" convention and shares the same
@@ -798,7 +875,7 @@ BROADCAST_SEARCH_COOLDOWN: int = 30     # Seconds
 # ---------------------------------------------------------------------
 # 6. ANTI-FLOOD AND AUTOMATIC PROTECTION
 # ---------------------------------------------------------------------
-MAX_REQUESTS: int   = 10       # Most commands (search or file) per time window
+MAX_REQUESTS: int   = 10       # Most commands (searches and the like - not file requests) per time window
 REQUEST_WINDOW: int = 5       # Size of the rolling time window, in seconds
 MUTE_TIME: int      = 30       # Mute in seconds on the first flood violation
 # Escalation ban, in seconds, for someone who keeps flooding while already
@@ -849,6 +926,16 @@ LIST_UPDATE_TIMEOUT: int = 0  # Absolute cap on a !update run, in seconds. 0 = n
 # of a rebuild that is stuck, so it is never killed for it - see
 # commands.handle_list_update_request().
 LIST_UPDATE_STALL_SECONDS: int = 900
+# REBUILD THE LIST ON A SCHEDULE (#776), with exactly what !update runs - so
+# PAUSE_ON_UPDATE, the one-scan-at-a-time guard and the atomic publish all
+# apply. One of four shapes, local time on the bot's clock: "daily 04:00",
+# "weekly sun 04:00", "monthly 1 03:30" (a day past the month's end means its
+# last day) or "every 12h" (hours since the last rebuild of any kind, manual
+# included). Empty is off. A bot that was down at the scheduled time rebuilds
+# when it comes back, once; a rebuild that fails is reported like a manual
+# one and tried again at the next scheduled time, not every minute. Turned on
+# with a list older than the last scheduled time, it rebuilds within a minute.
+LIST_REBUILD_SCHEDULE: str = ""  # When to rebuild the list by itself - daily 04:00 / weekly sun 04:00 / monthly 1 03:30 / every 12h, empty = never
 
 # ---------------------------------------------------------------------
 # 7. MIRC COLOUR CODES AND CONTROL CHARACTERS (IRC STANDARD)
@@ -1017,6 +1104,8 @@ feed_counts = runtime.feed_counts          # FAIL and SEARCH events since the pr
 # download counter. Bound from runtime.py for the same reason as everything
 # above it.
 recent_departures = runtime.recent_departures
+# #926: who else asked which bot for its list - list_grab.py.
+list_grab_others_asked = runtime.list_grab_others_asked
 nick_aliases = runtime.nick_aliases
 
 # ---------------------------------------------------------------------

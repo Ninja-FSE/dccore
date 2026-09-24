@@ -78,7 +78,9 @@ it) is readable with `ps`, nobody else can open the page after you have; if
 you are told the link was already opened elsewhere, stop DCCore and start it
 again for a fresh code. Save, and
 the bot starts in the same window; if you left the dashboard on, the page
-takes you to its login with the password you just chose. The dashboard box
+takes you to its login with the password you just chose. The box that tells
+you when a new version of DCCore is out starts ticked too (see
+[Upgrading](#upgrading)). The dashboard box
 starts ticked (reachable from this machine only, unless you tick the
 network box too): the music folder is optional on this page because the
 Settings page can take it later - untick the dashboard and the folder has
@@ -106,7 +108,7 @@ On Windows that command is **`py configure.py`**. A python.org install gives you
 2. **IRC server** (`irc.undernet.org` unless you say otherwise).
 3. **Channel(s)**, comma-separated.
 4. **Admin nick** - who may run `!ban`, `!rehash`, `!update`, `!clearqueue`.
-5. **Your services host**, optional - blank skips it. Locks the admin console (and the in-channel admin commands, once this is set) to your account rather than just your nick, which anyone can take while you are offline; see [ADMIN-CONSOLE.md](ADMIN-CONSOLE.md#how-the-host-proves-your-login) for how to read it off `/whois`.
+5. **Your services host**, optional - blank skips it. On a re-run the hosts already configured are shown; blank keeps them all, and typing one you already have changes nothing. Locks the admin console (and the in-channel admin commands, once this is set) to your account rather than just your nick, which anyone can take while you are offline; see [ADMIN-CONSOLE.md](ADMIN-CONSOLE.md#how-the-host-proves-your-login) for how to read it off `/whois`.
 6. **Admin console password**, typed twice and never shown; only its hash is written.
 7. **Music directory** - optional here (see below); if the folder does not exist it offers to create it.
 8. **Web dashboard, yes or no** (off unless you say yes). A yes asks two more: whether it should be reachable from other devices on your LAN, and - if Flask is not installed - whether to install it now.
@@ -237,7 +239,7 @@ The bot has nothing to serve until its library has been scanned:
 python3 update_list.py
 ```
 
-or `!update` from IRC, or the dashboard's **Update list** button. On a large library this takes a while; the advert will report the real file count once it finishes.
+or `!update` from IRC, or the dashboard's **Update list** button. On a large library this takes a while; the advert will report the real file count once it finishes. The scan lists several folders at once (`LIST_SCAN_THREADS`, 16), which is what makes it bearable on a network drive. Searches and downloads go on while it runs, answered from the list people already have; they pause only for the few seconds the new list takes to swap in (`PAUSE_ON_UPDATE`). `PAUSE_FOR_WHOLE_UPDATE` brings back the old pause for the whole rebuild.
 
 **Everything under `FILE_DIRECTORY` goes into the list** — every format, and files with no extension at all. `LIST_IGNORED_EXTENSIONS` names what to leave out; write it however you like, since dots and spacing are optional and case does not matter (`db,ini,tmp` and `.DB, .INI, .TMP` are the same list). It ships skipping only what is never a real file: `.db`, `.ini`, `.lnk`, `.url`, and the `.tmp`/`.part`/`.crdownload`/`.!ut` suffixes of downloads still in flight. The scan prints what it is skipping before it starts.
 
@@ -247,6 +249,16 @@ Two settings decide how the result is split up:
 
 - **`SEPARATE_VIDEO_LIST`** — publishes film and series as their own list rather than mixing them in with the music. Both travel in the same archive people get by typing your bot's name, so there is no second command to learn. `LIST_VIDEO_EXTENSIONS` says which formats count, and `LIST_VIDEO_COMPANION_EXTENSIONS` (subtitles, `.nfo`, `.sfv`) says which files follow a film into its list when they sit in the same folder - so a release travels whole, while an album's `.nfo` stays with the album. Turn it off if your films and music are already in separate folders and you would rather split by folder.
 - **`RAR_EXTENSIONS`** — which formats make a folder packable with `!rar`. A folder needs one of these to get a row in the album list. Everything else stays listed and directly requestable; this only decides what can be packed. **`MAX_RAR_FOLDER_SIZE`** bounds how large a folder `!rar` will pack — 10 GB by default, which passes a large box set and refuses the folder somebody names hoping it is a library. Set it to 0 for no limit.
+
+**`LIST_SHOW_AUDIO_INFO`** (off by default) adds each MP3 and FLAC file's length and quality after its size -
+`::INFO:: 10.3MB 4m31s 320/44.1/JS`, the way other servers' lists show it (`~245` is a VBR average). Every audio
+file has to be read once. The files are read several at a time (`LIST_AUDIO_INFO_THREADS`, 64), and each rebuild
+spends at most `LIST_AUDIO_INFO_MINUTES` (5) on it, so a first pass never holds a rebuild for long: on a large library,
+or one on a network drive, the first few rebuilds each publish with part of the library read and the rest showing
+its size alone, until everything has been read once. After that only new files are read, and a rebuild costs what
+it did without the setting. What was read is kept in `data/audio_info.db`; deleting it is safe - the files are
+read again. The rebuild's last line says how fast the files were read; if raising `LIST_AUDIO_INFO_THREADS`
+further does not raise that number, you have found the server's own limit rather than the setting's.
 
 ### If your users queue with AutoQ
 
@@ -353,6 +365,12 @@ out"* points at a cap you set.
 
 ## Upgrading
 
+**How you hear about one.** Once a day the bot asks GitHub whether a newer release is out - one request, carrying
+nothing about your bot - and says so in the dashboard's sidebar (with a **Check now** button), in the console's
+`status` and in the mIRC window; `checkversion` in the console asks straight away. If GitHub cannot be reached it
+says why instead. It is on by default and says so at every start: untick *Tell me when a new version is out* on the
+Settings page, or set `CHECK_FOR_UPDATES = false`, on a machine that should not go out.
+
 Your settings and data are never touched by an upgrade: `settings.conf`, `admin_config.py` and everything under `data/` are gitignored, so updating the code cannot overwrite them. That is also the one thing to watch — see step 4.
 
 **1. Stop the daemon.** A transfer in progress will be cut off, so a quiet moment is kinder than mid-queue.
@@ -381,6 +399,8 @@ comm -23 <(grep -oE '^#?[A-Z_]+ *=' settings.conf.sample | tr -d '# =' | sort) \
 That lists every setting the sample knows about and your file does not. Most of them will be settings you were happy to leave at their defaults, so read it as "what exists", not as a to-do list.
 
 Nothing breaks if you skip this — every setting has a working default and the daemon runs fine without any of them being present. You simply will not know what became available. The changelog is the readable version of the same information.
+
+That diff only catches settings that are new. **`PAUSE_ON_UPDATE` is not new in v1.13.1, but its meaning changed**: it now pauses searching and sharing only for the few seconds a rebuilt list is being swapped in, not for the whole rebuild. If you were relying on the old whole-rebuild pause, turn on the new `PAUSE_FOR_WHOLE_UPDATE` setting to keep it.
 
 **5. Read the changelog.** [UPDATES.md](UPDATES.md) says what changed and, where it matters, what you have to do about it.
 

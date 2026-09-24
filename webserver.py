@@ -696,11 +696,10 @@ def split_list_search_words(query):
     results, not the whole list) - so each caller decides what to do with an
     empty return rather than this function guessing for all of them.
     """
-    import re
-
-    raw_clean = str(query or "")
-    clean_term = re.sub(r'[-*_.]', ' ', raw_clean)
-    return [w.strip().lower() for w in clean_term.split() if w.strip()]
+    # One rule, not a copy of it (#774): a "quoted phrase" means the same
+    # here as in @find, and the two cannot drift apart.
+    import list as list_mod
+    return list_mod.split_search_term(query)
 
 
 def build_search_payload(query):
@@ -1066,7 +1065,7 @@ def mark_rows_with_fetch_state(rows, marks, bot=None):
     return rows
 
 
-def build_crosslist_search_payload(term, limit=None):
+def build_crosslist_search_payload(term, limit=None, online_only=False):
     """GET /api/filelists/search: one term against every list we hold.
 
     Returns the SAME shape as GET /api/filelists - {"folders": [...]} of
@@ -1091,6 +1090,10 @@ def build_crosslist_search_payload(term, limit=None):
     Scoped to the lists actually held, never to whatever is in the index. The
     two can drift - a list file removed by hand, a reset store - and a row for
     a list we no longer have offers a file that cannot be requested.
+
+    `online_only` (#926, AutoGet's "Online Only"): only the lists of bots in
+    one of our channels right now - the ones a request can reach today. The
+    others are reported with the empty ones, so the sidebar dims them.
     """
     import list as list_mod
     import list_index
@@ -1131,6 +1134,14 @@ def build_crosslist_search_payload(term, limit=None):
             source = list_fetch.index_key(name, marker)
             held[source.lower()] = source
 
+    offline = []
+    if online_only:
+        import dcc
+        for key, source in list(held.items()):
+            if not dcc.user_is_present_in_ram(source.split("/", 1)[0]):
+                offline.append(key)
+                del held[key]
+
     empty_payload = {
         "term": str(term or ""),
         "terms": terms,
@@ -1140,7 +1151,7 @@ def build_crosslist_search_payload(term, limit=None):
         "returned": 0,
         "truncated": False,
         "matched": [],
-        "empty": sorted(held),
+        "empty": sorted(list(held) + offline),
     }
     if not terms or not held:
         return empty_payload
@@ -1148,6 +1159,7 @@ def build_crosslist_search_payload(term, limit=None):
     names = list(held.values())
     rows = list_index.search(terms, limit=limit, bots=names)
     matched, empty = list_index.bots_with_a_match(terms, names)
+    empty = list(empty) + offline
 
     # One group per (bot, folder), in the order the index returned them so
     # that a bot's own list order survives rather than being re-sorted into
@@ -1430,6 +1442,11 @@ def build_fetched_bot_list_summaries():
                 "freshness": freshness,
                 "advert_then": then,
                 "advert_now": now,
+                "advert_live": _advert_live(known, bot, present),
+                # Fetched and not opened since (#926 item 6). Only an entry
+                # that carries seen_at - one fetched since this existed.
+                "unseen": ("seen_at" in entry
+                           and float(entry.get("seen_at") or 0) < float(entry.get("fetched_at") or 0)),
             })
 
     # AND THE BOTS WE HAVE ONLY SEEN ADVERTISING. #133's colour rule makes
@@ -1455,6 +1472,7 @@ def build_fetched_bot_list_summaries():
             # Named by the operator rather than seen advertising (#376):
             # the page marks it, and offers to forget it.
             "hand_entered": bool(entry.get("hand_entered")),
+            "advert_live": _advert_live(known, bot, present),
             "online": (bot.lower() in present) if present else None,
             "fetched_at": 0,
             "count": now.get("files"),
@@ -1652,6 +1670,29 @@ def build_purge_offline_fetched_lists_result():
 # JavaScript's Number.MAX_SAFE_INTEGER. Past this a JSON number no longer
 # survives the trip into the page unchanged.
 _MAX_SAFE_JS_INT = 2 ** 53 - 1
+
+
+_ADVERT_LIVE_FIELDS = ("slots_free", "slots_in_use", "slots_total", "queued", "speed", "mode")
+
+
+def _advert_live(known, bot, present):
+    """The live figures `bot` last advertised - slots, queue, speed, mode -
+    or {} (#926 item 8). Only for a bot that is online now: figures from a bot
+    that left are about a moment that is over. Numbers too large to carry
+    faithfully to JavaScript are left out, like _advert_now()'s."""
+    if not present or str(bot).strip().lower() not in present:
+        return {}
+    entry = known.get(str(bot).strip().lower())
+    entry = entry if isinstance(entry, dict) else {}
+    live = {}
+    for field in _ADVERT_LIVE_FIELDS:
+        value = entry.get(field)
+        if value in (None, ""):
+            continue
+        if isinstance(value, int) and abs(value) > 2 ** 53:
+            continue
+        live[field] = value if isinstance(value, int) else str(value)[:24]
+    return live
 
 
 def _advert_now(known, bot):
@@ -1984,8 +2025,11 @@ def build_fetch_enqueue_result(payload):
         # once, and one of them having signed off is no reason to refuse the
         # rest. It joins `errors`, which this route already reports beside
         # whatever it did manage to queue.
+        # A bot we know may be away (#926): its request waits for it and goes
+        # out when it is back. One we have never seen is still refused - a
+        # typo in a pasted nick would otherwise wait for ever.
         absent = bot_not_here_error(bot)
-        if absent:
+        if absent and not dcc_fetch.bot_is_known(bot):
             errors.append({"error": absent, "item": raw})
             continue
         request_id = dcc_fetch.enqueue_fetch(bot, filename)
@@ -2038,6 +2082,25 @@ def build_fetch_status_payload():
     return rows
 
 
+def build_fetch_pause_result(payload, pause):
+    """POST /api/fetch/pause and /api/fetch/resume (#926): stop or restart
+    fetching from one bot. Its requests stay in the queue - paused ones wait,
+    "Paused", and go out again once it is resumed."""
+    import dcc_fetch
+    bot = str((payload or {}).get("bot") or "").strip() if isinstance(payload, dict) else ""
+    if not bot:
+        return 400, {"error": "Which bot?"}
+    unsafe = reject_if_unsafe_for_irc_line(bot, "bot")
+    if unsafe:
+        return 400, {"error": unsafe}
+    if pause:
+        dcc_fetch.pause_bot(bot, "paused from the Downloads page")
+        return 200, {"paused": bot}
+    if not dcc_fetch.resume_bot(bot):
+        return 404, {"error": f"{bot} is not paused."}
+    return 200, {"resumed": bot}
+
+
 def build_fetch_delete_result(request_id):
     """DELETE /api/fetch/<request_id>: forget a finished fetch and remove its
     file from FETCHED_FILES_DIR, if it has one.
@@ -2087,7 +2150,9 @@ def build_fetch_delete_result(request_id):
         row = getattr(config, "fetch_queue", {}).get(request_id)
         if row is None:
             return 404, {"error": "Unknown fetch request."}
-        if row.get("state") not in ("complete", "failed", "pending"):
+        # "queued" too (#926): the other bot holds our request in its queue
+        # and nothing is moving yet - letting it go is only forgetting it.
+        if row.get("state") not in ("complete", "failed", "pending", "queued"):
             return 409, {"error": "A fetch already in progress cannot be deleted."}
         stored_filename = row.get("stored_filename")
         del config.fetch_queue[request_id]
@@ -2211,6 +2276,13 @@ def build_update_list_status_payload():
         # claim about the last run" rule `ok` follows just above.
         "seconds": getattr(config, "last_list_update_seconds", None),
     }
+    # #776: the Tools page says when the schedule next rebuilds.
+    try:
+        import commands as _commands
+        payload["schedule"] = str(getattr(config, "LIST_REBUILD_SCHEDULE", "") or "").strip()
+        payload["next_scheduled"] = _commands.next_scheduled_rebuild()
+    except Exception:
+        payload["schedule"], payload["next_scheduled"] = "", None
     progress = read_list_progress()
     if progress:
         payload["progress"] = progress
@@ -2308,8 +2380,11 @@ def start_list_update():
     """
     if bool(getattr(config, "update_inprogress", False)):
         return 409, {"error": "A list update is already running."}
+    # A running search only stands in the way of the old whole-rebuild pause
+    # (#923): by default the rebuild runs alongside searches.
+    import list as list_mod
     if (bool(getattr(config, "search_inprogress", False))
-            and bool(getattr(config, "PAUSE_ON_UPDATE", True))):
+            and list_mod.rebuild_pauses_everything()):
         return 409, {"error": "Another system scan is already in progress."}
 
     import commands
@@ -2363,10 +2438,12 @@ def start_list_update():
 # slotted in fails a test instead of silently never showing up.
 SETTINGS_CATEGORIES = (
     ("identity",      "Identity & network",    ["SERVER", "PORT", "NICKNAME", "ALT_NICKNAME", "REJOIN_ATTEMPTS",
-                                                "ADMIN_NICK", "CHANNEL", "DEBUG_CHANNEL"]),
+                                                "ADMIN_NICK", "CHANNEL", "DEBUG_CHANNEL",
+                                                "CHECK_FOR_UPDATES"]),
     ("sharing",       "Sharing & queue",       ["MAX_DCC_SLOTS", "MAX_USER_QUEUE",
                                                 "MAX_GLOBAL_QUEUE", "MAX_SEARCH_RESULTS",
-                                                "PAUSE_ON_UPDATE", "REHASH_TRANSFER_WAIT"]),
+                                                "PAUSE_ON_UPDATE", "PAUSE_FOR_WHOLE_UPDATE",
+                                                "REHASH_TRANSFER_WAIT"]),
     # The transfer-tuning pair, together. Anyone reaching for one wants the
     # other in front of them.
     ("transfers",     "Transfers",             ["DCC_BLOCK_SIZE", "DCC_SEND_BUFFER",
@@ -2378,10 +2455,22 @@ SETTINGS_CATEGORIES = (
                                                 "LIST_VIDEO_COMPANION_EXTENSIONS",
                                                 "RAR_ENABLED", "RAR_EXTENSIONS", "RAR_BINARY",
                                                 "MAX_RAR_FOLDER_SIZE", "RAR_TIMEOUT",
+                                                "LIST_HEADER_FILE",
+                                                "LIST_HEADER_MAX_BYTES",
+                                                "LIST_SHOW_AUDIO_INFO"]),
+    # #776: when the list rebuilds by itself, beside the two limits every
+    # rebuild runs under. Its own category because "Your list" had reached
+    # the sixteen the grouping test allows before one becomes a dumping ground.
+    ("list-rebuild",  "List rebuild",          ["LIST_REBUILD_SCHEDULE",
                                                 "LIST_UPDATE_TIMEOUT",
                                                 "LIST_UPDATE_STALL_SECONDS",
-                                                "LIST_HEADER_FILE",
-                                                "LIST_HEADER_MAX_BYTES"]),
+                                                "LIST_AUDIO_INFO_MINUTES",
+                                                "LIST_AUDIO_INFO_THREADS",
+                                                "LIST_SCAN_THREADS"]),
+    # #926: fetching lists nobody asked for is its own decision, with its
+    # own rules - not four more lines at the end of "Fetching from bots".
+    ("list-grab",     "Grabbing lists",        ["AUTO_GRAB_LISTS", "AUTO_GRAB_EVERY_MINUTES",
+                                                "AUTO_GRAB_MIN_FILES", "AUTO_GRAB_MIN_SPEED_KB"]),
     ("fetching",      "Fetching from bots",    ["MAX_FETCH_SLOTS", "AUTO_REFETCH_LISTS",
                                                 "AUTO_REFETCH_INTERVAL_HOURS",
                                                 "AUTO_REFETCH_MAX_PER_RUN",
@@ -2396,6 +2485,8 @@ SETTINGS_CATEGORIES = (
                                                 "MAX_LIST_TEXT_SIZE",
                                                 "FETCH_HISTORY_DAYS",
                                                 "FETCH_HISTORY_MAX_ROWS"]),
+    # #926: how the fetch queue paces itself with another bot.
+    ("fetch-queue",   "Fetch queue",           ["FETCH_MAX_PER_BOT", "FETCH_QUEUED_TIMEOUT"]),
     ("advertising",   "Advertising & search",  ["ANNOUNCE_INTERVAL", "ANNOUNCE_TRANSFERS",
                                                 "BROADCAST_SEARCH_CHANNEL",
                                                 "BROADCAST_SEARCH_COOLDOWN", "CTCP_VERSION_REPLY",
@@ -2438,6 +2529,7 @@ SETTINGS_CATEGORIES = (
                                                 "FETCHED_FILES_DIR", "BANS_FILE", "HARD_BANS_FILE",
                                                 "STATS_FILE", "KNOWN_BOTS_FILE",
                                                 "FETCHED_BOT_LISTS_FILE", "LIST_INDEX_FILE",
+                                                "LIST_AUDIO_INFO_CACHE",
                                                 "FETCH_HISTORY_FILE", "DOWNLOAD_COUNTS_FILE",
                                                 "LIST_SIZE_FILE", "LIST_RAWBYTES_FILE",
                                                 "LIST_PROGRESS_FILE", "LIBRARY_FOLDERS_FILE",
@@ -2479,12 +2571,18 @@ SETTINGS_LABELS = {
     "DCC_SEND_BUFFER": "Socket send buffer (0 = the default for your platform)",
     "REHASH_TRANSFER_WAIT": "Seconds a rehash waits for transfers to finish",
     "AUTO_REFETCH_LISTS": "Re-fetch a held list when its bot advertises a new one",
+    "AUTO_GRAB_LISTS": "Grab the lists of bots you have no list from",
+    "AUTO_GRAB_EVERY_MINUTES": "Minutes between automatic grabs",
+    "AUTO_GRAB_MIN_FILES": "Skip bots with fewer files than",
+    "AUTO_GRAB_MIN_SPEED_KB": "Skip bots slower than (KB/s)",
     "AUTO_REFETCH_INTERVAL_HOURS": "Least time between re-fetches of one bot (hours)",
     "AUTO_REFETCH_MAX_PER_RUN": "Most lists to re-fetch in one sweep",
     "FETCH_TRANSFER_TIMEOUT": "Fetch transfer timeout (seconds)",
     # Named from the operator's side, like the pill in the Downloads table:
     # this is the wait AFTER we send a request, not a timeout on an offer
     # anybody made us.
+    "FETCH_QUEUED_TIMEOUT": "Wait for a queued request (s)",
+    "FETCH_MAX_PER_BOT": "Files asked of one bot at once",
     "FETCH_OFFER_TIMEOUT": "Wait for a reply to a fetch request (seconds)",
     "FETCH_FOLDER_OFFER_TIMEOUT": "Wait for a reply to a folder (.rar) request (seconds)",
     "FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED":
@@ -2495,6 +2593,7 @@ SETTINGS_LABELS = {
 
     "LIST_BASE_NAME": "List base name",
     "PAUSE_ON_UPDATE": "Pause sharing during !update",
+    "PAUSE_FOR_WHOLE_UPDATE": "Pause for the whole rebuild",
     # Named for what it now IS. From an operator: "under Paths & Storage, this is not
     # needed anymore" - not quite, it is still the fallback for an install
     # with no folder list, which is most of them. But presenting it as a
@@ -2519,6 +2618,11 @@ SETTINGS_LABELS = {
     "DCC_QUEUE_FILE": "DCC queue file",
     "KNOWN_BOTS_FILE": "Known bots file",
     "LIST_INDEX_FILE": "Cross-list search index",
+    "LIST_AUDIO_INFO_CACHE": "Audio info cache",
+    "LIST_SHOW_AUDIO_INFO": "Length and quality in the list",
+    "LIST_AUDIO_INFO_MINUTES": "Time limit for reading audio files",
+    "LIST_AUDIO_INFO_THREADS": "Audio files read at once",
+    "LIST_SCAN_THREADS": "Folders scanned at once",
     "DOWNLOAD_COUNTS_FILE": "Download counts file",
     "FETCHED_BOT_LISTS_FILE": "Fetched bot lists file",
     "FETCH_HISTORY_FILE": "Fetch history file",
@@ -2554,15 +2658,17 @@ SETTINGS_LABELS = {
     "BROADCAST_SEARCH_COOLDOWN": "Broadcast search cooldown (seconds)",
     "CTCP_VERSION_REPLY": "Answer CTCP VERSION",
 
-    "MAX_REQUESTS": "Max requests per window",
+    "MAX_REQUESTS": "Max commands per window",
     "REQUEST_WINDOW": "Request window (seconds)",
     "MUTE_TIME": "Mute duration (seconds)",
     "FLOOD_BAN_SECONDS": "Ban after flooding while muted (seconds)",
     "DCC_ACCEPT_TIMEOUT": "Wait for the receiver to connect (seconds)",
     "MAX_SEND_FAILS": "Max send failures",
+    "CHECK_FOR_UPDATES": "Tell me when a new version is out",
     "RAR_TIMEOUT": "RAR pack timeout (seconds)",
     "LIST_UPDATE_TIMEOUT": "List rebuild hard cap (seconds, 0 = none)",
     "LIST_UPDATE_STALL_SECONDS": "Give up if a rebuild reports nothing for (seconds)",
+    "LIST_REBUILD_SCHEDULE": "Rebuild the list automatically",
 
     "ADMIN_HOSTMASKS": "Admin hostmasks",
     "ADMIN_CHAT_MODE": "DCC chat connection mode",
@@ -4082,6 +4188,21 @@ if HAVE_FLASK:
         def api_fetch_status():
             return jsonify(build_fetch_status_payload())
 
+        @app.route("/api/fetch/paused")
+        def api_fetch_paused():
+            import dcc_fetch
+            return jsonify(dcc_fetch.paused_bots())
+
+        @app.route("/api/fetch/pause", methods=["POST"])
+        def api_fetch_pause():
+            status, result = build_fetch_pause_result(request.get_json(silent=True), True)
+            return jsonify(result), status
+
+        @app.route("/api/fetch/resume", methods=["POST"])
+        def api_fetch_resume():
+            status, result = build_fetch_pause_result(request.get_json(silent=True), False)
+            return jsonify(result), status
+
         @app.route("/api/tools/verify-list")
         def api_tools_verify_list():
             return jsonify(build_verify_list_payload())
@@ -4094,6 +4215,17 @@ if HAVE_FLASK:
         @app.route("/api/tools/update-list/status")
         def api_tools_update_list_status():
             return jsonify(build_update_list_status_payload())
+
+        # #572: what the version check last found, and a check on request.
+        @app.route("/api/version-check")
+        def api_version_check():
+            import version_check
+            return jsonify(version_check.state())
+
+        @app.route("/api/version-check", methods=["POST"])
+        def api_version_check_now():
+            import version_check
+            return jsonify(version_check.manual_check())
 
         @app.route("/api/filelists/fetch", methods=["POST"])
         def api_filelists_fetch():
@@ -4159,7 +4291,8 @@ if HAVE_FLASK:
             _offset, limit = parse_pagination_params(
                 None, request.args.get("limit"))
             return jsonify(build_crosslist_search_payload(
-                request.args.get("q", ""), limit))
+                request.args.get("q", ""), limit,
+                online_only=request.args.get("online", "") in ("1", "true")))
 
         @app.route("/api/filelists/bot/<nick>")
         def api_filelists_bot(nick):
@@ -4168,6 +4301,10 @@ if HAVE_FLASK:
             status, result = build_fetched_bot_list_payload(
                 nick, offset, limit, list_marker=request.args.get("list", ""),
                 q=request.args.get("q", ""))
+            if status == 200:
+                # Opened: no longer new (#926 item 6).
+                import list_fetch
+                list_fetch.mark_seen(nick)
             return jsonify(result), status
 
         @app.route("/api/fetch/<request_id>/download")
@@ -4390,7 +4527,7 @@ if HAVE_FLASK:
 # ---------------------------------------------------------------------------
 
 SETUP_FIELDS = ("NICKNAME", "SERVER", "CHANNEL", "ADMIN_NICK", "FILE_DIRECTORY",
-                "WEBUI_ENABLED", "WEBUI_HOST")
+                "WEBUI_ENABLED", "WEBUI_HOST", "CHECK_FOR_UPDATES")
 SETUP_LANGS = ("en", "fr", "es")
 _SETUP_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 
@@ -4441,8 +4578,13 @@ def build_setup_fields(lang="en", values=None):
     fields = []
     for name in SETUP_FIELDS:
         current = values.get(name, getattr(config, name, None))
-        if name == "WEBUI_ENABLED" and fresh:
-            current = True
+        if name in ("WEBUI_ENABLED", "CHECK_FOR_UPDATES"):
+            # Both start ticked: the operator sees the choice and can untick
+            # it (#572 - the daily version check is on by default, visibly).
+            # On a redisplay the box is what was sent - absent is unticked,
+            # never config's value: CHECK_FOR_UPDATES ships True, and falling
+            # back to it re-ticked a box the operator had just unticked.
+            current = True if fresh else str(values.get(name, "")).lower() in ("1", "on", "true", "yes")
         field = _settings_field(name, types.get(name, str), current)
         label = strings.get(f"settings.field.{name}")
         if label:
@@ -4568,6 +4710,9 @@ def validate_setup_form(form, lang="en"):
                                "Settings page.")))
 
     changes["WEBUI_ENABLED"] = enable_webui
+    # #572: ticked unless the operator unticked it; a box left unticked is
+    # not sent at all, which is the "off".
+    changes["CHECK_FOR_UPDATES"] = str(form.get("CHECK_FOR_UPDATES", "") or "").lower() in ("1", "on", "true", "yes")
     if enable_webui:
         lan = str(form.get("WEBUI_LAN", "") or "").lower() in ("1", "on", "true", "yes")
         changes["WEBUI_HOST"] = "0.0.0.0" if lan else "127.0.0.1"
@@ -4640,9 +4785,9 @@ def render_setup_page(fields, token, lang="en", errors=(), values=None, port=842
         error_html = (f'<div class="error">{_html(errors[name])}</div>'
                       if name in errors else "")
         value = values.get(name, field.get("value"))
-        if name == "WEBUI_ENABLED":
+        if name in ("WEBUI_ENABLED", "CHECK_FOR_UPDATES"):
             checked = " checked" if (value is None or value in (True, "on", "1", "true")) else ""
-            rows.append(f'<label class="check"><input type="checkbox" name="WEBUI_ENABLED" value="1"{checked}> '
+            rows.append(f'<label class="check"><input type="checkbox" name="{name}" value="1"{checked}> '
                         f'{label}{help_html}</label>')
             continue
         if name == "WEBUI_HOST":

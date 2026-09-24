@@ -130,6 +130,17 @@ queue_lock         = threading.Lock()  # dcc.py's transfer queue - see dcc.py's 
 debug_drain_guard  = threading.Lock()  # announce.py's single-drain-worker start guard
 debug_sinks_lock   = threading.Lock()  # announce.py's admin-console debug sink list
 disk_lock          = threading.Lock()  # db.py's serialised on-disk writes
+told_queue_full_lock = threading.Lock()  # announce.py's queue-full notice memory (#888)
+
+# dcc.py's library lookup (#580, #886), moved here in #749. They were built in
+# dcc.py as `x = globals().get("x") or threading.Lock()` - kept across a reload
+# only for as long as the old object is found - and the lock guard could not
+# see the `or` form (it now can). The memories they protect stay in dcc.py:
+# they are that module's own cache, not the configuration state the
+# containers in this file are.
+MAX_CONCURRENT_LIBRARY_SCANS = 2
+library_scans      = threading.BoundedSemaphore(MAX_CONCURRENT_LIBRARY_SCANS)  # library scans at once
+lookup_memory_lock = threading.Lock()  # dcc.py's lookup memories - misses, hits, folders
 
 # The reload window, which is not only about rebinding.
 #
@@ -218,6 +229,42 @@ list_count_lock = threading.Lock()
 # Settings save would then start one more worker.
 auto_refetch_guard   = threading.Lock()
 auto_refetch_started = False
+
+# The list rebuild schedule (#776), for the same reasons as the two above -
+# a start guard a rehash cannot reset - plus the time the schedule last
+# STARTED a rebuild. The list file's age says when one last finished; this is
+# what stops a rebuild that fails (a folder whose disk is not mounted) from
+# being started again every minute: it is retried at the next slot instead.
+rebuild_schedule_guard        = threading.Lock()
+rebuild_schedule_started      = False
+rebuild_schedule_last_attempt = None
+
+# Automatic list grabbing (#926 item 5), list_grab.py. Here for the same
+# reasons: a start guard a rehash cannot reset, and a wait in progress that a
+# reload of list_grab.py must not forget (or it would plan a second grab).
+# list_grab_plan: {"key", "nick", "planned", "at"} or None. list_grab_last:
+# when the last automatic grab was made. list_grab_state: the per-bot tries and
+# the removed-by-hand set, loaded from db.LIST_GRABS_FILE on first use.
+# list_grab_others_asked: bot key -> when someone else typed "@Bot".
+list_grab_guard        = threading.Lock()
+list_grab_started      = False
+list_grab_lock         = threading.Lock()
+list_grab_plan         = None
+list_grab_last         = None
+list_grab_state        = None
+list_grab_others_asked = {}
+
+update_check_guard        = threading.Lock()  # the version check's start guard (#572)
+update_check_started      = False
+update_check_last_attempt = None   # when the last check (daily or manual) began
+update_check_last_manual  = None   # for the manual check's cooldown
+update_check_at           = None   # when the last SUCCESSFUL check finished
+update_check_error        = None   # why the last check failed, until one succeeds
+update_check_error_at     = None
+update_check_latest       = None   # the latest full release's tag
+update_check_url          = None
+update_check_newer        = False
+update_check_announced    = None   # the release already said in the feed
 
 # Other bots advertising in our channels ------------------------------------
 # nick.lower() -> {"nick", "channel", "files", "list_date", "list_size",
