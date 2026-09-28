@@ -682,8 +682,9 @@ Chat request** to auto-accept so it never asks again.
 | the window's button | on the switchbar or treebar, like any channel's: the **message** colour when there is new activity - a request, a queue position, a send, a search - and the **highlight** colour (the one mIRC uses when somebody says your nick) on a failed transfer or dropped lines, so a failure stands out. The `[STATUS]` line, joins, parts and bans do not light it, as they would not in a channel. mIRC 7 or later |
 | a beep | on a failed transfer, if you leave that on |
 
-Every five minutes a `[STATUS]` line summarises the numbers in the text
-too, so scrolling back shows how the day went. A bot that goes quiet for
+Without the side panel, a `[STATUS]` line summarises the numbers in the
+text every five minutes, so they are somewhere to see. With the panel on
+there is none: the panel shows the same figures, live. A bot that goes quiet for
 90 seconds is treated as gone and the chat is reopened; a chat that
 cannot be opened is retried after 5 s, 15 s, 60 s and then every two
 minutes. An offer the bot never answers - mIRC's own `Waiting for
@@ -699,7 +700,7 @@ retries; `/dccore connect` starts them again.
   positions, sends, failures, searches, joins/parts/quits, bans, other log
   lines - plus the colour of file names, of console replies and of the side
   panel's headings, and how
-  often the `[STATUS]` line is written (0 = never);
+  often the `[STATUS]` line is written when the side panel is off (0 = never);
 - the side panel, the title bar figures, console replies in a separate
   window, the beep, the fixed-width font and its size (the Status window's
   size until you set one - on a high-resolution screen you may want a

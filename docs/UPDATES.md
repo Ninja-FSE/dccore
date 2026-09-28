@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Fixed: the DCCore window's button in mIRC now stays red (or blue, for a failure) until you look.** It went back to black within about half a minute, when the side panel refreshed, so new activity was easy to miss. And with the side panel on, the window no longer prints a `[STATUS]` line every few minutes - the panel already shows those numbers, live. Without the panel you still get them.
+
 ## v1.13.2 — The Bot Says What It's Doing
 
 - **Fixed: clearing the debug channel from the dashboard now leaves it right away, and asks first.** It used to stay in the old channel until the bot next reconnected, with nothing said about why - a deliberate safety choice, since a debug channel that comes back blank could mean the setting was cleared on purpose, or that the save briefly failed to read back. The dashboard now asks "Remove the debug channel, #x?" before saving; confirming it leaves the channel immediately. Whenever the bot does stay behind (any other way of clearing it), it now says so in the debug channel and admin console too, not just its own log.

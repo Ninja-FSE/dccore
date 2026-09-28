@@ -717,7 +717,11 @@ alias dccore.status {
   hadd dccore.live nslots 1
   dccore.title
   dccore.panel.soon
-  if ($dccore.opt(statusmin) > 0) && ($calc($ctime - $dccore.st(lastecho)) >= $calc($dccore.opt(statusmin) * 60)) {
+  ; Not while the side panel is shown (#1013): it carries the same figures,
+  ; live, and the text filled with identical lines while nothing happened.
+  ; A window without the panel keeps the line - there it is the only place
+  ; the numbers are.
+  if ($dccore.opt(statusmin) > 0) && (!$dccore.opt(panel)) && ($calc($ctime - $dccore.st(lastecho)) >= $calc($dccore.opt(statusmin) * 60)) {
     hadd dccore.live lastecho $ctime
     dccore.echo $dccore.tag(STATUS,info) slots $1 $+ / $+ $2 $dccore.dot queue $4 ( $+ $3 files) $dccore.dot today $5 files / $dccore.bytes($6) $dccore.dot $dccore.speed($7) now, record $dccore.speed($8)
   }
@@ -907,12 +911,36 @@ alias dccore.title {
 ; so the panel is redrawn a quarter of a second after the last of them.
 alias dccore.panel.soon { .timerdccorePanel -m 1 250 dccore.panel }
 
+; THE BUTTON KEEPS ITS COLOUR ACROSS A REDRAW (#1013). The panel is redrawn
+; after every status burst - about every 30 seconds - and it starts with
+; /clear -l, which in mIRC resets the window button's colour as well: a
+; new line lit it red, the next redraw put it out, before anybody looked.
+; So the colour is read before the redraw and set again after it
+; (dccore.lit, dccore.relight), in dccore.panel below.
+; What the button shows now, in /window -g's numbers: 2 the highlight colour,
+; 1 the message colour, 0 anything else (the event colour cannot be set
+; again, and is not what anybody watches for). mIRC's help says only that
+; .sbcolor "returns the switchbar highlight color", so both a name and a
+; number are understood. Nothing while the window is active: mIRC does not
+; colour the active window's button.
+alias dccore.lit {
+  if (($version < 7) || ($active == $dccore.win)) { return 0 }
+  var %c = $window($dccore.win).sbcolor
+  if ((%c == 2) || (hi isin %c)) { return 2 }
+  if ((%c == 1) || (mess isin %c)) { return 1 }
+  return 0
+}
+alias dccore.relight {
+  if (($1 isnum 1-2) && ($version >= 7) && ($active != $dccore.win)) { window -g $+ $1 $dccore.win }
+}
 alias dccore.panel {
   if (!$window($dccore.win)) { return }
   if (!$dccore.opt(panel)) { return }
+  var %lit = $dccore.lit
   clear -l $dccore.win
   if ($dccore.st(mode) != structured) {
     aline -l 14 $dccore.win $iif($dccore.st(state) == in,(no panel in plain mode),(not connected))
+    dccore.relight %lit
     return
   }
   var %head = $dccore.opt(col.head)
@@ -952,6 +980,7 @@ alias dccore.panel {
   aline -l %head $dccore.win Since $asctime(%since,%fmt)
   aline -l $dccore.win $dccore.nbsp failed $dccore.rfit(%failed,4)
   aline -l $dccore.win $dccore.nbsp searches $dccore.rfit(%searches,2)
+  dccore.relight %lit
 }
 
 ; the nick on the selected panel line, for the right-click menu.
