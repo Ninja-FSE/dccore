@@ -72,7 +72,7 @@ class ARawNoticeIsHiddenOnlyWhenItWillBeDrawn(unittest.TestCase):
                           "if (!$dccore.chat.relaying) { return }",
                           "if (!$dccore.here) { return }",
                           "if (!$istok($dccore.st(chat.chans),$chan,32)) { return }",
-                          "if (!$istok($hget(dccore.chatpeers,$lower($chan)),$nick,32)) { return }",
+                          "if ($nick != $dccore.bot) && (!$istok($hget(dccore.chatpeers,$lower($chan)),$nick,32)) { return }",
                           "if (!$dccore.chat.listens($chan)) { return }",
                           "if (!$window($dccore.chat.win)) && (!$dccore.opt(chat.popup)) { return }"):
             self.assertLess(self.handler.index(condition), halt, condition)
@@ -101,6 +101,20 @@ class ARawNoticeIsHiddenOnlyWhenItWillBeDrawn(unittest.TestCase):
         empty_check = self.handler.index("if ($2 == $null) { return }")
         halt = self.handler.index("haltdef")
         self.assertLess(empty_check, halt)
+
+    def test_the_bots_own_relayed_line_is_hidden_too(self):
+        """Seen live, right after the #982 audit fix shipped: the bot's own
+        line - the operator's own text, or another peer's, said back to the
+        channel - was no longer hidden, because dccore.chatpeers never
+        contains the bot's own nick (peers are OTHER DCCore bots by
+        definition - see serverschat.note_who_reply()'s self-exclusion).
+        $nick == $dccore.bot has to short-circuit the peer check, the same
+        nick comparison the reconnect-detection hooks already use."""
+        joined = "\n".join(self.handler)
+        self.assertIn("$nick != $dccore.bot", joined)
+        peer_check = self.handler.index(
+            "if ($nick != $dccore.bot) && (!$istok($hget(dccore.chatpeers,$lower($chan)),$nick,32)) { return }")
+        self.assertLess(peer_check, self.handler.index("haltdef"))
 
 
 class NothingAnswers(unittest.TestCase):
