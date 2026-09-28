@@ -1448,7 +1448,15 @@ on ^*:TEXT:*:#: {
   if (!$dccore.chat.relaying) { return }
   if (!$dccore.here) { return }
   if (!$istok($dccore.st(chat.chans),$chan,32)) { return }
-  if (!$istok($hget(dccore.chatpeers,$lower($chan)),$nick,32)) { return }
+  ; The bot's OWN relayed line is never in dccore.chatpeers - peers are
+  ; other DCCore bots by definition (the Python side excludes its own nick
+  ; from every PEERS line it ever sends, see serverschat.note_who_reply()).
+  ; The #982 audit's peer check above missed this: it made a tagged line
+  ; from an unknown sender correctly stay visible, but also un-hid every
+  ; line the operator's own bot said - seen live, right after that fix
+  ; shipped. $dccore.bot is checked first, same nick comparison the
+  ; reconnect-detection hooks already use elsewhere in this file.
+  if ($nick != $dccore.bot) && (!$istok($hget(dccore.chatpeers,$lower($chan)),$nick,32)) { return }
   if (!$dccore.chat.listens($chan)) { return }
   if (!$window($dccore.chat.win)) && (!$dccore.opt(chat.popup)) { return }
   haltdef
