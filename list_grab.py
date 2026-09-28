@@ -14,12 +14,15 @@ the ones AutoGet learned the hard way:
   what gets a client ignored;
 - 3 tries per bot, 30 minutes apart, then it stops: AutoGet's own counter
   says only about a third of list requests ever arrive, and a bot that has
-  not answered three times is not going to;
+  not answered three times is not going to. A try is a request that went
+  out - one the queue refused was not an ask (#967) - and a list that
+  arrives starts the count over;
 - bots below AUTO_GRAB_MIN_FILES files or AUTO_GRAB_MIN_SPEED_KB, and bots in
   "servers only" mode, are skipped - a servers-only bot would refuse us.
 
 A list the operator removed by hand is not grabbed again: removing it was the
-answer. Fetching it by hand is how to change that answer.
+answer. Fetching it by hand is how to change that answer: once it arrives it
+is an ordinary held list again (note_list_arrived()).
 
 The grab itself goes through webserver.build_list_fetch_enqueue_result(), the
 same path the List Browser's own button takes, so every slot limit and
@@ -104,6 +107,30 @@ def note_removed_by_hand(bot):
     with runtime.list_grab_lock:
         _state()["removed"].add(key)
         _save()
+
+
+def note_list_arrived(bot):
+    """`bot`'s list arrived (list_fetch.process_fetched_list_zip()), however it
+    was asked for (#967). Its tries start over, and a removal by hand is
+    undone - a removed list comes back only when the operator fetches it,
+    since neither sweep asks for one, and that fetch is how the module
+    docstring says the answer is changed.
+
+    Without this the tries counted for a bot's whole life: a list grabbed,
+    later cleared by the purge of offline bots (tidying, not an answer about
+    the bot), grabbed again and cleared again was "gave up" for ever after
+    the third time, though every one of those tries had been answered."""
+    key = str(bot or "").strip().lower()
+    if not key:
+        return
+    with runtime.list_grab_lock:
+        state = _state()
+        forgotten = state["tries"].pop(key, None) is not None
+        if key in state["removed"]:
+            state["removed"].discard(key)
+            forgotten = True
+        if forgotten:
+            _save()
 
 
 def note_someone_else_asked(user, msg, now=None):
@@ -216,20 +243,31 @@ def tick(now=None, log=print, pick_delay=None):
         if reason is not None:
             return f"skipped: {reason}"
 
-        record = _state()["tries"].setdefault(key, {"tries": 0})
-        record["tries"] = int(record.get("tries") or 0) + 1
-        record["last"] = now
+        # Spaced from this attempt whatever comes of it: the next grab waits
+        # AUTO_GRAB_EVERY_MINUTES and this bot GRAB_COOLDOWN_SECONDS, so a
+        # refusal is not tried again on the next tick.
+        _state()["tries"].setdefault(key, {"tries": 0})["last"] = now
         runtime.list_grab_last = now
         _save()
-        tries = record["tries"]
 
     # Off the lock: the enqueue takes the fetch queue's own.
     status, result = webserver.build_list_fetch_enqueue_result(nick)
-    if status == 200:
-        _log_both(nick, f"Asking {nick} for its list automatically (try {tries} of {GRAB_TRIES}).", log)
-        return "asked"
-    log(f"[LIST-GRAB] Did not ask {nick}: {result.get('error', 'refused')}")
-    return "refused"
+    if status != 200:
+        log(f"[LIST-GRAB] Did not ask {nick}: {result.get('error', 'refused')}")
+        return "refused"
+
+    # A TRY IS AN ASK (#967). Counted before the enqueue, a refusal was a
+    # try: with FETCHED_FILES_DIR missing at boot (503), or an operator's
+    # own fetch from that bot outstanding (409, and a queued one can last
+    # hours), three refusals wrote every candidate to disk as "gave up",
+    # and it stayed so after the cause was gone - though nothing was asked.
+    with runtime.list_grab_lock:
+        record = _state()["tries"].setdefault(key, {"tries": 0, "last": now})
+        record["tries"] = int(record.get("tries") or 0) + 1
+        tries = record["tries"]
+        _save()
+    _log_both(nick, f"Asking {nick} for its list automatically (try {tries} of {GRAB_TRIES}).", log)
+    return "asked"
 
 
 def ensure_worker(start=None):

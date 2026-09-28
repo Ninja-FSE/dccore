@@ -222,7 +222,7 @@ PLAIN_HELP = {
     'FETCH_FOLDER_OFFER_TIMEOUT': 'When you request a whole folder (.rar) from another bot, how many seconds to wait for its offer. Much longer than for a single file, because the other bot has to pack the folder first.',
     'FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED': 'The same wait, but for a bot that does not publish a folder list and probably cannot pack at all - shorter, so a slot is not held for half an hour waiting for nothing.',
     'FETCH_FOLDER_TRANSFER_TIMEOUT': 'The longest a folder (.rar) download from another bot may take in total, in seconds. Larger than the single-file limit because a packed discography is much bigger.',
-    'MAX_FETCH_FILE_SIZE': 'The biggest single file you will accept from another bot, in bytes. Anything larger is refused before the download starts. 0 means no limit.',
+    'MAX_FETCH_FILE_SIZE': 'The biggest single file you will accept from another bot, in bytes. Anything larger is refused before the download starts. 0 means no limit - except that a fetched list still may not unpack to more than 8 lists of the biggest size allowed, so a booby-trapped list cannot fill your disk.',
     'MAX_FETCH_FOLDER_FILE_SIZE': 'The biggest packed folder (.rar) you will accept from another bot, in bytes. 0 means no limit.',
     'MAX_FETCH_LIST_FILE_SIZE': 'The biggest list archive you will accept from another bot, in bytes. A real list is a few megabytes; this stops a bad offer sending you something huge. 0 means no limit.',
     'MAX_LIST_TEXT_SIZE': 'The biggest unpacked list you will read from another bot, in bytes. Every line of it is kept in memory, so this is a memory limit. 0 uses the default.',

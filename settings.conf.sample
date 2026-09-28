@@ -1098,6 +1098,9 @@
 # Most lists to ask for in one sweep. A bot back after a month offline has a
 # lot of stale lists, and asking for all of them at once is a burst of
 # outbound requests nobody asked for. The rest go next sweep, oldest first.
+# Only bots in one of your channels are asked - a list whose bot has left
+# waits until it is back - and a request that is refused does not use up a
+# place.
 #AUTO_REFETCH_MAX_PER_RUN = 3
 
 # Fetch the list of each bot that advertises one you do not have, one at a
@@ -1153,7 +1156,9 @@
 #FETCH_HISTORY_MAX_ROWS = 500
 
 # The biggest single file you will accept from another bot, in bytes. Anything
-# larger is refused before the download starts. 0 means no limit.
+# larger is refused before the download starts. 0 means no limit - except that
+# a fetched list still may not unpack to more than 8 lists of the biggest size
+# allowed, so a booby-trapped list cannot fill your disk.
 #
 # Interacts with flood protection: a bot's DCC SEND offers are metered like any
 # other command, so this must stay well below MAX_REQUESTS (per REQUEST_WINDOW)
@@ -1163,7 +1168,7 @@
 # taking the choice from everyone else. Defensible here because a fetch is
 # SOLICITED: only an offer matching a row this operator created is ever
 # accepted, so it is their own request landing on their own disk.
-# 200 MB - reject the offer before we even connect; 0 = no limit
+# 200 MB - reject the offer before we even connect; 0 = no limit (a list archive keeps a ceiling, #945)
 #MAX_FETCH_FILE_SIZE = 209715200
 
 # The biggest unpacked list you will read from another bot, in bytes. Every

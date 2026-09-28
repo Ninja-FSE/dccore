@@ -1,6 +1,6 @@
 # DCCore
 
-**v1.13.1** · Python 3.10+ · Linux, Windows and macOS
+**v1.13.2** · Python 3.10+ · Linux, Windows and macOS
 
 An IRC DCC file-sharing daemon — a modern reimplementation of OmenServe, the mIRC script that has run these channels for twenty years.
 
@@ -11,14 +11,14 @@ It sits in a channel, advertises a catalogue, and serves files over DCC to whoev
 ## What it does
 
 - **Serves files over DCC** — per-user and global queues, configurable slots, `!rar` album packing on demand, and DCC RESUME so an interrupted download continues instead of starting over
-- **Keeps a searchable master list** in `.txt`, `.zip` and `.rar`, rebuilt atomically so a failed scan never overwrites a good one
-- **Fetches from other bots** — request a file or a whole list, or broadcast one `@find` and collect every reply. In this bot's own search, words in quotes must appear together: `@find "metal church"`
+- **Keeps a searchable master list** in `.txt`, `.zip` and `.rar`, rebuilt atomically so a failed scan never overwrites a good one - and keeps answering from the current list while it rebuilds
+- **Fetches from other bots** — request a file or a whole list, or broadcast one `@find` and collect every reply. A queued request waits its turn, a bot that is offline is asked again when it returns, and the lists you hold can keep themselves up to date. In this bot's own search, words in quotes must appear together: `@find "metal church"`
 - **Remembers people** — a user who disconnects keeps their queue for five minutes and resumes on rejoin
 - **Defends itself** — rolling flood windows, escalating mutes, hostmask bans, and every other bot treated as untrusted
 - **Is operable** — an authenticated DCC CHAT console, an optional web dashboard, live `!rehash`, and statistics that survive a restart
 - **Runs where you run it** — long paths, non-ASCII filenames, and Linux, Windows and macOS all in CI on every commit
 
-See [docs/FUTURE.md](docs/FUTURE.md) for the full picture, including what is *not* built yet.
+**Every feature, in one place:** the *Implemented* section of [docs/FUTURE.md](docs/FUTURE.md), which also lists what is *not* built yet.
 
 ## Quick start
 

@@ -109,6 +109,19 @@ RUNTIME_CONTAINERS = {
     # behind and get merged with it in the List Browser.
     "recent_departures": dict,
     "nick_aliases": dict,
+    # #376 option B: a leftover ident or departure is a merge the next test
+    # never set up.
+    "bot_idents": dict,
+    "bot_departures": dict,
+    "recent_joins": dict,
+    # #371: one test's chat lines or limits are not the next one's.
+    "chat_recent": list,
+    "chat_rate": dict,
+    "chat_outbound": dict,
+    "chat_muted": dict,
+    "chat_peers": dict,
+    "chat_peers_meta": dict,
+    "chat_who_round": dict,
     # Same reasoning: a leftover is one test's message showing up in the next
     # test's panel.
     "private_messages": list,
@@ -274,7 +287,8 @@ def reset_config(**overrides):
                         # #926: automatic list grabbing's wait, last grab and
                         # per-bot record - reloaded from the test's own file.
                         ("list_grab_started", False), ("list_grab_plan", None),
-                        ("list_grab_last", None), ("list_grab_state", None)):
+                        ("list_grab_last", None), ("list_grab_state", None),
+                        ("chat_last_id", 0)):
         setattr(runtime, name, value)
 
     # A FRESH OUTBOUND CLOCK PER TEST. runtime.outbound_pacer is a
@@ -376,6 +390,14 @@ def install_fake_oserve(irc_connection=None):
     stub.queue_message = queue_message
     sys.modules["oserve"] = stub
     return stub
+
+
+def bots_in_the_channel(*nicks, channel="#chan"):
+    """We have joined, and `nicks` are in `channel`: what the fetch dispatcher
+    waits for before it asks anybody (#965). Lower-cased, as irc.py keeps
+    config.channel_users."""
+    config.bot_joined_channel = True
+    config.channel_users.setdefault(channel.lower(), set()).update(str(n).lower() for n in nicks)
 
 
 def silence_debug(announce_module):

@@ -372,15 +372,57 @@ def _note_connect_success(bot):
     _connect_failures.pop(str(bot or "").strip().lower(), None)
 
 
+def _free_bytes():
+    """What is free where fetched files go, or None when it cannot be measured."""
+    import shutil
+    folder = getattr(config, "FETCHED_FILES_DIR", "") or "."
+    try:
+        return shutil.disk_usage(platform_compat.long_path(os.path.abspath(folder))).free
+    except OSError:
+        return None
+
+
+def _room_left_locked(queue, free):
+    """What is free once the transfers already under way have written the rest
+    of what they declared - the room a new offer is weighed against (#964).
+    Two offers that each fit alone do not both fit together. None when the
+    disk cannot be measured. Caller holds _fetch_lock()."""
+    if free is None:
+        return None
+    for row in queue.values():
+        if row.get("state") in ("listening", "receiving"):
+            free -= max(0, int(row.get("total_size") or 0) - int(row.get("bytes_received") or 0))
+    return free
+
+
+def _has_room(size, room):
+    """Whether a file of `size` fits in `room` and still leaves MIN_FREE_BYTES.
+    Nothing to fit, or a disk that cannot be measured, is not held back - the
+    write itself still fails safely."""
+    return not size or room is None or room >= size + MIN_FREE_BYTES
+
+
+def _hold_for_space(row, size, reason):
+    """Back to pending until `size` fits (#964), asked for as it was asked
+    (#963). row["needs_bytes"] is what the dispatcher waits for: without it a
+    file bigger than the free space - but with more than MIN_FREE_BYTES free,
+    so the disk never counts as low - was asked for again on the next tick,
+    filled the disk to nothing, failed, and was asked for again, for ever."""
+    row.update(state="pending", offered_at=None, bytes_received=0,
+               reason=reason, waiting="disk-full", needs_bytes=int(size))
+    _as_asked(row)
+
+
+def _mb(size):
+    return f"{max(0, int(size)) // (1024 * 1024)} MB"
+
+
 def _disk_is_low():
     """Whether FETCHED_FILES_DIR has less than MIN_FREE_BYTES free. Said once
     when it becomes low and once when it recovers. A disk that cannot be
     measured is not called low - the write itself still fails safely."""
-    import shutil
-    folder = getattr(config, "FETCHED_FILES_DIR", "") or "."
-    try:
-        free = shutil.disk_usage(platform_compat.long_path(os.path.abspath(folder))).free
-    except OSError:
+    free = _free_bytes()
+    if free is None:
         return False
     low = free < MIN_FREE_BYTES
     if low != _disk_was_low[0]:
@@ -714,9 +756,10 @@ def _persist_fetch_history_locked(queue):
     # dict, so retention costs one comparison per row and no new machinery.
     prune_fetch_history_locked(queue)
     # THE UNFINISHED ROWS TOO (#926), in the form they take after a restart:
-    # a request still waiting or queued at another bot is kept, and one that
-    # was mid-flight - offered, listening, receiving; its socket and thread
-    # die with the process - is written as pending, to be asked again. Written
+    # a request still waiting here is kept, and one that was mid-flight -
+    # offered, listening, receiving; its socket and thread die with the
+    # process - or queued at another bot (#978) is written as pending, to be
+    # asked again. Written
     # in that form rather than as-is so a transfer's bytes_received ticking
     # up does not rewrite the file every two seconds.
     snapshot = {rid: _restart_form(row) for rid, row in queue.items()}
@@ -726,7 +769,31 @@ def _persist_fetch_history_locked(queue):
     db.save_fetch_history(snapshot)
 
 
-_ASKED_AGAIN_AFTER_A_RESTART = ("offered", "listening", "receiving")
+# QUEUED TOO (#978). A restart QUITs, and a file server drops the queue of a
+# user who quits - so a row kept as "queued" waited for a file that was never
+# coming, and counted toward FETCH_MAX_PER_BOT while it did: every other
+# request to that bot waited "their-turn" until FETCH_QUEUED_TIMEOUT (12 h)
+# failed it. Asked again, a server that did keep it says so ("already in my
+# queue"), and handle_bot_reply() puts the row straight back to queued.
+_ASKED_AGAIN_AFTER_A_RESTART = ("offered", "queued", "listening", "receiving")
+
+
+def _as_asked(row):
+    """Put back what a claimed offer overwrote, for a row about to be asked
+    again (#963). A "folder" or "list" row does not know the name the other
+    bot will give its file until the offer arrives, and
+    _claim_matching_offer_locked() then writes that name over row["filename"]
+    - "Artist_-_Album.rar" in place of "!rar Artist - Album". Asked again
+    with it, the other bot is sent "!Bot Artist_-_Album.rar", a request for a
+    file of that name, not the folder pack or the list: it answers "not
+    found" or nothing. requested_filename kept the original all along.
+    What the offer said about the file (its size, where it was going) is
+    dropped with it: the next offer says it again. A "file" row asked for its
+    own name, so there is nothing to put back."""
+    if row.get("request_type") in ("folder", "list"):
+        row["filename"] = row.get("requested_filename") or ""
+        row["total_size"] = None
+        row["stored_filename"] = None
 
 
 def _restart_form(row):
@@ -734,7 +801,9 @@ def _restart_form(row):
     row = dict(row)
     if row.get("state") in _ASKED_AGAIN_AFTER_A_RESTART:
         row.update(state="pending", offered_at=None, bytes_received=0)
-        for volatile in ("listening_since",):
+        _as_asked(row)
+        # Where it stood in the other bot's queue is theirs to say again.
+        for volatile in ("listening_since", "queued_at", "queue_position", "reply"):
             row.pop(volatile, None)
     return row
 
@@ -807,12 +876,28 @@ def handle_refusal_notice(bot, notice_text):
     return True
 
 
+def _match_name(row):
+    return _normalize_filename_for_match(row.get("requested_filename") or row.get("filename") or "")
+
+
 def _row_named_in(row, text):
     """Whether a reply names this row's file. Compared the way offers are,
     spaces and underscores alike, so "Some_Track.mp3" in a reply finds the row
     that asked for "Some Track.mp3"."""
-    name = _normalize_filename_for_match(row.get("requested_filename") or row.get("filename") or "")
+    name = _match_name(row)
     return bool(name) and name in _normalize_filename_for_match(text)
+
+
+def _the_longest_named(rows):
+    """Of the rows a reply names, the ones it is about (#974): a name that is
+    only part of a longer one it also carries does not count. "Sorry, but
+    Band - Intro.mp3 is not found" contains "Intro.mp3" too, and the older
+    request for that - named first - was failed in its place, while the one
+    it was about waited out its timeout. No word boundary could tell them
+    apart: "Intro.mp3" follows a space there."""
+    names = [_match_name(row) for row in rows]
+    return [row for row, name in zip(rows, names)
+            if not any(name != other and name in other for other in names)]
 
 
 def handle_bot_reply(bot, text):
@@ -842,6 +927,17 @@ def handle_bot_reply(bot, text):
     """
     if handle_refusal_notice(bot, text):
         return "refused"
+    # Nothing waiting on this sender, nothing to read (audit of 2026-09-27):
+    # every private line from anybody reaches here on the IRC read loop, and
+    # classifying a stranger's text is work for nobody. Checked again under
+    # the lock below, since the answer can change in between.
+    wanted_bot = str(bot).strip().lower()
+    with _fetch_lock():
+        waiting = any(row.get("state") in _AWAITING_OFFER_STATES
+                      and str(row.get("bot", "")).strip().lower() == wanted_bot
+                      for row in _ensure_fetch_queue().values())
+    if not waiting:
+        return None
     import fetch_replies
     reply = fetch_replies.classify(text)
     if reply is None:
@@ -857,7 +953,12 @@ def handle_bot_reply(bot, text):
             key=lambda r: r.get("requested_at", 0))
         if not candidates:
             return None
-        named = [row for row in candidates if _row_named_in(row, reply.text)]
+        named = _the_longest_named([row for row in candidates if _row_named_in(row, reply.text)])
+        if len({_match_name(row) for row in named}) > 1:
+            # Two different names, neither part of the other: which one it
+            # is about is a guess, and the same rule as an unnamed reply to
+            # several requests applies - among these.
+            candidates, named = named, []
         if named:
             row = named[0]
         elif len(candidates) == 1:
@@ -883,6 +984,7 @@ def handle_bot_reply(bot, text):
             # Asked again later (#926): back to pending with a time, so the
             # dispatcher leaves it until then and it keeps its place.
             row["busy_retries"] = int(row.get("busy_retries", 0)) + 1
+            _as_asked(row)
             row.update(state="pending", offered_at=None, retry_at=now + BUSY_RETRY_SECONDS,
                        reason=f"busy: {reply.text}", waiting="retry")
             row.pop("queued_at", None)
@@ -910,20 +1012,30 @@ def bot_is_known(bot):
 
 
 def _bot_readiness(bots, now):
-    """{bot (lowercased): "" when we may ask it now, else why not ("offline",
-    "just-back")}, for the bots with rows waiting. Read OUTSIDE the fetch lock:
-    presence has its own lock, and holding both is an ordering to get wrong.
+    """{bot (lowercased): "" when we may ask it now, else why not ("joining",
+    "offline", "just-back")}, for the bots with rows waiting. Read OUTSIDE the
+    fetch lock: presence has its own lock, and holding both is an ordering to
+    get wrong.
 
-    No channel membership at all means we are still joining - "wait" is not
-    known yet, and the old behaviour (ask) stands, as it does for
-    webserver.bot_not_here_error()."""
+    NOBODY IS ASKED BEFORE THE CHANNELS ARE JOINED (#965). Until
+    config.bot_joined_channel - at startup and after every reconnect, which
+    empties channel_users - nothing can tell a bot that is gone from one not
+    heard from yet. Asking anyway used to be harmless: a request made then
+    was one just clicked. Since rows persist across a restart and wait for an
+    offline bot (#926), it promoted every restored or waiting row at once,
+    sent each to the first configured channel through a queue that holds it
+    until the join, and FETCH_OFFER_TIMEOUT failed them as "no response" -
+    on every reconnect. list_fetch.refetch_due_lists() waits for the same
+    flag, for the same reason."""
     import dcc
-    with runtime.channel_users_lock():
-        joined = any(users for users in (getattr(config, "channel_users", {}) or {}).values())
+    joined = bool(getattr(config, "bot_joined_channel", False))
+    if joined:
+        with runtime.channel_users_lock():
+            joined = any(users for users in (getattr(config, "channel_users", {}) or {}).values())
     ready = {}
     for bot in bots:
         if not joined:
-            ready[bot] = ""
+            ready[bot] = "joining"
             continue
         if not dcc.user_is_present_in_ram(bot):
             _seen_absent.add(bot)
@@ -988,6 +1100,10 @@ def check_fetch_queue():
     with _fetch_lock():
         waiting_bots = {str(row.get("bot", "")).strip().lower()
                         for row in queue.values() if row.get("state") == "pending"}
+        held_for_space = any(row.get("needs_bytes") for row in queue.values()
+                             if row.get("state") == "pending")
+    # Measured only while a row waits for room of its own (#964).
+    free = _free_bytes() if held_for_space else None
     readiness = _bot_readiness(waiting_bots, now)
     for bot in waiting_bots:
         if bot in _paused:
@@ -1064,11 +1180,25 @@ def check_fetch_queue():
                 key = str(row.get("bot", "")).strip().lower()
                 load[key] = load.get(key, 0) + 1
         promoted = 0
+        room = _room_left_locked(queue, free)
         for rid in pending_ids:
             row = queue[rid]
             key = str(row.get("bot", "")).strip().lower()
-            why = readiness.get(key, "")
+            # ONLY WHAT THIS TICK LOOKED AT (#970). Presence, pauses and the
+            # disk were read for the bots with rows pending at the snapshot
+            # above, outside the lock; a row enqueued since is not in it, and
+            # taking it as ready sent it to a bot just paused, or onto a
+            # nearly full disk when nothing else had been pending. It is
+            # looked at properly on the next tick, a couple of seconds away.
+            if key not in readiness:
+                continue
+            why = readiness[key] or ("paused" if key in _paused else "")
             if not why and disk_low:
+                why = "disk-full"
+            # A file already known not to fit waits until it does (#964),
+            # weighed exactly as handle_incoming_offer() weighs the offer -
+            # asked for sooner, its offer would only be held again.
+            if not why and not _has_room(row.get("needs_bytes"), room):
                 why = "disk-full"
             if not why and (row.get("retry_at") or 0) > now:
                 why = "retry"
@@ -1080,6 +1210,11 @@ def check_fetch_queue():
                 row["waiting"] = why
                 continue
             row.pop("waiting", None)
+            needed = row.pop("needs_bytes", None)
+            if needed and room is not None:
+                # Spoken for until its offer arrives, so a second held row
+                # is not let go on the same room in this tick.
+                room -= int(needed)
             row["state"] = "offered"
             row["offered_at"] = now
             load[key] = load.get(key, 0) + 1
@@ -1673,6 +1808,22 @@ def handle_incoming_offer(irc_sock, from_nick, ctcp_payload):
                   f"Set {cap_name} to 0 for no limit.")
             return
 
+        # ROOM FOR IT (#964), before connecting - as the size cap is. An offer
+        # bigger than the free space was accepted, filled the disk to
+        # nothing, failed, and was asked for again: with more than
+        # MIN_FREE_BYTES back once the partial file went, the disk did not
+        # count as low, and the loop never ended. Now it waits, pending,
+        # until what it declared fits with MIN_FREE_BYTES to spare.
+        room = _room_left_locked(queue, _free_bytes())
+        if not _has_room(offer["size"], room):
+            _hold_for_space(row, offer["size"],
+                            f"needs {_mb(offer['size'])} free and {_mb(room)} is - "
+                            f"asking again once there is space")
+            print(f"[FETCH] Not taking {offer['filename']} from {from_nick} yet: "
+                  f"{offer['size']} bytes, {room} free. Never connected. "
+                  f"It is asked for again once there is space.")
+            return
+
         dest_dir, stored_name = _resolve_destination_path(request_id, offer["filename"])
         if stored_name is None:
             _mark_failed_locked(row, "unsafe destination path")
@@ -2179,9 +2330,10 @@ def _run_transfer(row, offer, dest_dir, stored_name, sock=None):
     if disk_full:
         # Not this request's fault (#926): it goes back to pending, and the
         # dispatcher holds everything until there is space again.
-        row.update(state="pending", offered_at=None, bytes_received=0,
-                   reason="the disk filled up - asking again once there is space",
-                   waiting="disk-full")
+        # Held until the whole file fits (#964): the disk counting as low
+        # again is not enough, because the partial file is about to go.
+        _hold_for_space(row, total_size,
+                        "the disk filled up - asking again once there is space")
         _disk_was_low[0] = False  # so the next check says it
         print(f"[FETCH] The disk filled up receiving {stored_name}; it will be asked again.")
     else:

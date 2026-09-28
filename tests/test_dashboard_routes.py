@@ -38,6 +38,7 @@ The state-mutating route is driven with its worker replaced, because
 import io
 import os
 import sys
+import time
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -47,6 +48,7 @@ if REPO_ROOT not in sys.path:
 import adminchat
 import announce  # noqa: E402
 import defaults as config  # noqa: E402
+import stats_mgr  # noqa: E402
 import webserver  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
@@ -96,10 +98,17 @@ class DashboardRouteCase(DCCoreTestCase):
 
 class TheReadOnlyRoutesAnswer(DashboardRouteCase):
 
-    def test_each_one_returns_the_payload_its_builder_produces(self):
-        """The wiring, not the contents. A route pointed at the wrong builder
-        is exactly the defect nothing could previously catch."""
-        self.log_in()
+    def hold_the_uptime_still(self):
+        """/api/stats carries the uptime in whole seconds, read from the live
+        clock. The route is called, then the builder, and a second that ticks
+        between the two made them differ by 1 - a failure about the clock,
+        not the wiring (#941, ubuntu 3.12 on the #934 merge). Held still here,
+        since the question is which builder answers, not what time it is."""
+        real = stats_mgr.get_uptime_seconds
+        stats_mgr.get_uptime_seconds = lambda: 4321
+        self.addCleanup(setattr, stats_mgr, "get_uptime_seconds", real)
+
+    def compare_every_route(self):
         for path, builder in READ_ONLY_ROUTES:
             with self.subTest(route=path):
                 resp = self.client.get(path)
@@ -107,6 +116,39 @@ class TheReadOnlyRoutesAnswer(DashboardRouteCase):
                 self.assertEqual(resp.status_code, 200)
                 self.assertEqual(resp.get_json(),
                                  getattr(webserver, builder)())
+
+    def test_each_one_returns_the_payload_its_builder_produces(self):
+        """The wiring, not the contents. A route pointed at the wrong builder
+        is exactly the defect nothing could previously catch."""
+        self.log_in()
+        self.hold_the_uptime_still()
+        self.compare_every_route()
+
+    def test_a_second_ticking_between_the_two_calls_cannot_fail_it(self):
+        """#941's reproduction: a clock that moves a whole second on every
+        read - the worst case of a second boundary falling between the route
+        and the builder. Without the uptime held still, /api/stats differs."""
+        self.log_in()
+
+        class TickingClock:
+            def __init__(self):
+                self.now = 1_000_000.0
+
+            def time(self):
+                self.now += 1.0
+                return self.now
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        clock = TickingClock()
+        stats_mgr.time = clock
+        self.addCleanup(setattr, stats_mgr, "time", time)
+        self.assertNotEqual(stats_mgr.get_uptime_seconds(), stats_mgr.get_uptime_seconds(),
+                            "the clock ticks - otherwise this proves nothing")
+
+        self.hold_the_uptime_still()
+        self.compare_every_route()
 
     def test_each_one_refuses_an_unauthenticated_caller(self):
         """An API caller gets a JSON 401, not a redirect to an HTML page."""

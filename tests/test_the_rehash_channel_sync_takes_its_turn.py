@@ -225,7 +225,8 @@ class ASettingThatCameBackBlank(ChannelSyncCase):
     the reload, so it worked whenever DEBUG_CHANNEL survived and did nothing
     in the one case it exists for."""
 
-    def sync_across_reload(self, old_debug, new_debug, channel="#mainchan"):
+    def sync_across_reload(self, old_debug, new_debug, channel="#mainchan",
+                          confirmed_debug_removal=False):
         """One rehash, with DEBUG_CHANNEL reading one way before the reload and
         another way after - which is the whole of what this is about."""
         self.set_config(CHANNEL=channel, DEBUG_CHANNEL=old_debug)
@@ -237,7 +238,8 @@ class ASettingThatCameBackBlank(ChannelSyncCase):
         self.said = []
         return commands.sync_channels(self.oserve, before, after,
                                       log=self.said.append,
-                                      previous_debug_channel=old_debug)
+                                      previous_debug_channel=old_debug,
+                                      confirmed_debug_removal=confirmed_debug_removal)
 
     def test_a_blank_from_the_reload_does_not_part_it(self):
         """The bug. The dashboard fires a rehash on every settings save, so a
@@ -259,6 +261,26 @@ class ASettingThatCameBackBlank(ChannelSyncCase):
         self.assertTrue(any("came back blank" in line for line in self.said),
                         self.said)
 
+    def test_it_also_reaches_the_debug_channel_and_console(self):
+        """#1008 follow-up: log() alone reached stdout only - whoever cleared
+        the setting, from the dashboard, the console or a channel command,
+        never saw why the bot was still there. announce.send_debug() is what
+        actually reaches the debug channel, the admin console and dccore.mrc's
+        window; a plain print() reaches none of them."""
+        self.sync_across_reload("#somedebug", "")
+
+        self.assertTrue(any("came back blank" in msg for _cat, msg in self.debug),
+                        self.debug)
+
+    def test_an_ordinary_rehash_says_nothing_extra_on_the_debug_channel(self):
+        """The dashboard fires a rehash on every settings save, including a
+        theme change (#440) - this message is for the one rehash where the
+        setting genuinely went missing, not a line added to every one of
+        them."""
+        self.sync_across_reload("#somedebug", "#somedebug")
+
+        self.assertEqual([msg for _cat, msg in self.debug if "came back blank" in msg], [])
+
     def test_the_channel_is_left_in_the_membership_map(self):
         """dcc.py reads channel_users as proof a user is present. Not parting
         but forgetting who is there would be the worst of both."""
@@ -277,6 +299,39 @@ class ASettingThatCameBackBlank(ChannelSyncCase):
 
         self.assertIn("PART #somedebug :Removed from DCCore\r\n", lines)
         self.assertIn("JOIN #otherdebug\r\n", lines)
+
+    def test_a_confirmed_clear_parts_it_immediately(self):
+        """#1008 follow-up: the dashboard's own confirm() popup already
+        resolved the ambiguity this whole class is about, so a confirmed
+        clear is not protected at all - it falls through to the ordinary
+        `parting` computation, exactly like a deliberate change to a
+        different channel above."""
+        lines = self.sync_across_reload("#somedebug", "", confirmed_debug_removal=True)
+
+        self.assertIn("PART #somedebug :Removed from DCCore\r\n", lines)
+
+    def test_a_confirmed_clear_is_not_left_in_the_membership_map(self):
+        config.channel_users.clear()
+        config.channel_users["#somedebug"] = {"someone"}
+
+        self.sync_across_reload("#somedebug", "", confirmed_debug_removal=True)
+
+        self.assertNotIn("#somedebug", config.channel_users)
+
+    def test_a_confirmed_clear_says_so_but_not_the_blank_warning(self):
+        self.sync_across_reload("#somedebug", "", confirmed_debug_removal=True)
+
+        self.assertTrue(any("cleared and confirmed" in line for line in self.said), self.said)
+        self.assertFalse(any("came back blank" in line for line in self.said), self.said)
+
+    def test_confirmation_does_nothing_when_there_is_nothing_to_confirm(self):
+        """The flag only ever matters inside the one branch that reads it -
+        an unrelated rehash (or one where DEBUG_CHANNEL did not go blank)
+        must behave identically whether or not it is set."""
+        with_flag = self.sync_across_reload("#somedebug", "#somedebug", confirmed_debug_removal=True)
+        without_flag = self.sync_across_reload("#somedebug", "#somedebug", confirmed_debug_removal=False)
+
+        self.assertEqual(with_flag, without_flag)
 
     def test_an_install_that_never_had_one_says_nothing(self):
         """A line on every rehash is a line nobody reads. Asserted on THIS

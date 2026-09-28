@@ -126,9 +126,33 @@ class ItWaitsForTheBot(QueueCase):
         dcc_fetch.check_fetch_queue()
         self.assertEqual(self.states(rids), ["offered"])
 
-    def test_while_we_are_still_joining_nothing_is_held_back(self):
+    def test_while_we_are_still_joining_nobody_is_asked(self):
+        """#965: nobody can be told apart from a bot that has gone until the
+        channels are joined - asked then, restored rows went to the first
+        configured channel through a queue that held them past
+        FETCH_OFFER_TIMEOUT, and failed as "no response"."""
+        users = {channel: set(nicks) for channel, nicks in config.channel_users.items()}
         config.channel_users.clear()
         rids = self.queue_up(1)
+        dcc_fetch.check_fetch_queue()
+        self.assertEqual(self.states(rids), ["pending"])
+        self.assertEqual(config.fetch_queue[rids[0]]["waiting"], "joining")
+        self.assertEqual(self.asked(), [])
+
+        config.channel_users.update(users)
+        dcc_fetch.check_fetch_queue()
+        self.assertEqual(self.states(rids), ["offered"])
+
+    def test_after_a_reconnect_nobody_is_asked_until_we_are_back_in(self):
+        """The flag, not only the list: irc.py drops bot_joined_channel on a
+        disconnect and sets it again once NAMES has come in."""
+        config.bot_joined_channel = False
+        rids = self.queue_up(1)
+        dcc_fetch.check_fetch_queue()
+        self.assertEqual(config.fetch_queue[rids[0]]["waiting"], "joining")
+        self.assertEqual(self.asked(), [])
+
+        config.bot_joined_channel = True
         dcc_fetch.check_fetch_queue()
         self.assertEqual(self.states(rids), ["offered"])
 
@@ -143,7 +167,9 @@ class ItWaitsForTheBot(QueueCase):
 
 
 class ItSurvivesARestart(QueueCase):
-    def test_waiting_and_queued_come_back_as_they_were_and_mid_flight_is_asked_again(self):
+    def test_waiting_comes_back_as_it_was_and_queued_and_mid_flight_are_asked_again(self):
+        """Queued too since #978: the restart QUIT, and a server drops a
+        quitting user's queue - see test_a_queued_request_is_asked_again_after_a_restart."""
         config.channel_users["#chan"].discard("serverone")
         waiting, queued, moving = self.queue_up(3)
         config.fetch_queue[queued].update(state="queued", queued_at=time.time(), queue_position=4)
@@ -152,8 +178,8 @@ class ItSurvivesARestart(QueueCase):
 
         restored = db.load_fetch_history()
         self.assertEqual(restored[waiting]["state"], "pending")
-        self.assertEqual(restored[queued]["state"], "queued")
-        self.assertEqual(restored[queued]["queue_position"], 4)
+        self.assertEqual(restored[queued]["state"], "pending")
+        self.assertNotIn("queue_position", restored[queued])
         self.assertEqual(restored[moving]["state"], "pending")
         self.assertEqual(restored[moving]["bytes_received"], 0)
 

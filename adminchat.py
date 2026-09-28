@@ -670,6 +670,10 @@ class Session:
         self._status_sent_at = 0.0
         self._status_due = False      # set by event_sink, acted on by the writer
         self._status_job = None       # (thread, lines) while a burst is being computed
+        # The DCCORE CHANNELS line this session was last sent (#371): sent
+        # again with a status burst when the bot's channels change, so a
+        # chat window's channel list does not go stale (#958 review).
+        self._chat_channels = None
         self._outbox = collections.deque(maxlen=OUTBOX_MAX)
         self._wake = threading.Event()
         self._lock = threading.Lock()
@@ -729,6 +733,7 @@ class Session:
             return
         self._status_sent_at = time.time()
         self._status_due = False
+        self._send_chat_channels_if_changed()
         job = self._status_job
         if job is None or not job[0].is_alive():
             lines = []
@@ -748,6 +753,22 @@ class Session:
             return
         self._status_job = None
         for line in job[1]:
+            self.send(line)
+
+    def _send_chat_channels_if_changed(self):
+        """DCCORE CHANNELS again when the bot's channels have changed since
+        this session was told (#371). A chat window reads it to know which
+        channels the bot relays; stale, it would hide a raw NOTICE for a
+        channel the bot has left. At most one status interval late. Only to
+        a session told once already, at `hello` - anything else never asked
+        for the chat's channels."""
+        try:
+            import serverschat
+            line = serverschat.channels_line()
+        except Exception:
+            return
+        if self._chat_channels is not None and line != self._chat_channels:
+            self._chat_channels = line
             self.send(line)
 
     def request_status(self):
@@ -1018,6 +1039,52 @@ def _cmd_checkupdates(session, args):
 
     session.send(f"Turning the daily update check {'on' if wanted else 'off'} ...")
     _run_detached(session, "checkupdates", apply)
+
+
+def _consolefeed_reply(session, on):
+    """The setting, said to whoever asked - same split as _checkupdates_reply
+    and for the same reason: dccore.mrc's options dialog reads the DCCORE
+    line, a person reads a sentence."""
+    if getattr(session, "structured", False):
+        return f"DCCORE CONSOLEFEED {'on' if on else 'off'}"
+    return (f"The console feed is {'on' if on else 'off'}"
+            f"{'' if on else ' - status still arrives, nothing else does'}.")
+
+
+def _cmd_consolefeed(session, args):
+    """Turn DEBUG_TO_CONSOLE on or off, or report it with no argument.
+
+    Found live (#1006 follow-up): an operator's dccore.mrc window kept
+    showing its STATUS burst - that one is unconditional once a session is
+    structured and authenticated - while REQUEST, SENDING, SENT and every
+    other feed line stayed silent, because DEBUG_TO_CONSOLE gates those in
+    announce.feed_event() and nothing said so. The window looking alive
+    while quietly missing everything else is a worse experience than the
+    window plainly saying why.
+
+    Written through settings_file.save() and a rehash, the same path
+    _cmd_checkupdates uses and for the same reason: a rehash re-reads
+    settings.conf, so the change survives a restart rather than holding
+    only until one.
+    """
+    arg = args.strip().lower()
+    if arg not in ("", "on", "off"):
+        session.send("Usage: consolefeed [on|off]")
+        return
+    if not arg:
+        session.send(_consolefeed_reply(session, getattr(config, "DEBUG_TO_CONSOLE", True)))
+        return
+    wanted = arg == "on"
+
+    def apply():
+        import settings_file
+        settings_file.save(vars(config), {"DEBUG_TO_CONSOLE": wanted})
+        import commands
+        commands.handle_rehash_request(session.nick, CONSOLE_SOURCE, authorised=True)
+        session.send(_consolefeed_reply(session, wanted))
+
+    session.send(f"Turning the console feed {'on' if wanted else 'off'} ...")
+    _run_detached(session, "consolefeed", apply)
 
 
 def _cmd_uptime(session, args):
@@ -1361,6 +1428,35 @@ def _cmd_hello(session, args):
     # the moment it is opened, rather than "unknown" until the operator
     # happens to run checkupdates themselves.
     session.send(f"DCCORE CHECKUPDATES {'on' if getattr(config, 'CHECK_FOR_UPDATES', True) else 'off'}")
+    # Same for the console feed itself (#1006 follow-up), and said again in
+    # plain text every time - not just once ever - because a window that
+    # only ever shows STATUS looks alive, not silenced, and an operator who
+    # never opens Options has no other way to learn why. This is the only
+    # `hello` line with a plain-text half: a checkbox no one has looked at
+    # yet is a quieter kind of "wrong" than an empty window is.
+    console_feed_on = getattr(config, "DEBUG_TO_CONSOLE", True)
+    session.send(f"DCCORE CONSOLEFEED {'on' if console_feed_on else 'off'}")
+    if not console_feed_on:
+        # The #1009 review: this used to point at "/dccore
+        # consolefeed on" (not a real /dccore subcommand - dccore.mrc's
+        # `alias dccore` had no branch for it, so it fell through to the
+        # help text) and "Settings > Console feed" (a different dashboard
+        # category - CONSOLE_SHOW_* and DEBUG_CHANNEL_FEED live there;
+        # DEBUG_TO_CONSOLE is under Debug & logging). Both now name
+        # something that actually works.
+        session.send("The console feed is off (Settings > Debug & logging > "
+                     "\"Send debug lines to admin console\", or /dccore consolefeed on): "
+                     "this window will keep showing STATUS, but no requests, sends, "
+                     "failures or searches until it is turned on.")
+    # DCCore Chat (#371): the channels it can chat in, and what was said
+    # while this window was away - from memory, never from disk.
+    import serverschat
+    session._chat_channels = serverschat.channels_line()
+    session.send(session._chat_channels)
+    for chan in serverschat.channels():
+        session.send(serverschat.peers_channel_line(chan))
+    for line in serverschat.recent_lines():
+        session.send(line)
     session.send_status()
     print(f"[ADMINCHAT] {session.nick}'s session switched to the structured feed "
           f"({session.client} {' '.join(parts[1:]) or '?'}).")
@@ -1426,6 +1522,38 @@ def _cmd_unpair(session, args):
     session.send(f"Revoked {name}. A client still logged in with it stays until it disconnects.")
 
 
+def _cmd_chat(session, args):
+    """`chat #channel <text>`, `chat * <text>` or `chat nick <text>`: say
+    something in DCCore Chat (#371), as the bot. `#channel`/`*` is a channel
+    message, public; `nick` is a private message to one known peer instead -
+    only ever a nick WHO has already found. `chat` alone: the channels it can
+    chat in. `chat peers` / `chat who`: the other DCCore bots seen, and ask
+    again."""
+    import serverschat
+    text = str(args or "").strip()
+    if text.lower() == "peers":
+        session.send(serverschat.peers_line())
+        return
+    if text.lower() == "who":
+        asked = serverschat.refresh_peers(force=True)
+        session.send(f"Asked WHO in {asked} channel(s); `chat peers` shows who answered.")
+        return
+    if not text:
+        if session.structured:
+            session.send(serverschat.channels_line())
+        else:
+            chans = serverschat.channels()
+            session.send("Chat channels: " + (" ".join(chans) if chans else "none yet")
+                         + ". Usage: chat #channel <text> (public: everyone there reads it).")
+        return
+    parts = text.split(None, 1)
+    ok, message = serverschat.say(session.nick, parts[0], parts[1] if len(parts) > 1 else "")
+    # A structured window sees its own line come back as a CHAT line; a
+    # person at a plain console is told it went.
+    if not ok or not session.structured:
+        session.send(message)
+
+
 def _cmd_help(session, args):
     session.send("Available commands:")
     for name in sorted(COMMANDS):
@@ -1452,6 +1580,7 @@ COMMANDS = {
     "version":    (_cmd_version,    "build and platform",                "version"),
     "checkversion": (_cmd_checkversion, "ask GitHub whether a newer DCCore is out", "checkversion"),
     "checkupdates": (_cmd_checkupdates, "turn the daily update check on/off, or report it", "checkupdates [on|off]"),
+    "consolefeed": (_cmd_consolefeed, "turn the console/dccore.mrc feed on/off, or report it", "consolefeed [on|off]"),
     "ban":        (_cmd_ban,        "add a permanent wildcard ban",      "ban <pattern>"),
     "unban":      (_cmd_unban,      "remove a permanent wildcard ban",   "unban <pattern>"),
     "clearqueue": (_cmd_clearqueue, "force-clear another user's queue",  "clearqueue <nick>"),
@@ -1460,6 +1589,7 @@ COMMANDS = {
     "verify":     (_cmd_verify,     "filenames listed in two folders",   "verify"),
     "lists":      (_cmd_lists,      "held bot lists, and which have changed", "lists"),
     "fetch":      (_cmd_fetch,      "ask the bots whose lists changed",  "fetch [bot]"),
+    "chat":       (_cmd_chat,       "public operator chat in a channel", "chat [#chan|*|nick text]"),
     "hello":      (_cmd_hello,      "switch to the structured feed (dccore.mrc)", "hello <client> <version>"),
     "pair":       (_cmd_pair,       "mint a login token for a script",   "pair <client> [version]"),
     "unpair":     (_cmd_unpair,     "list or revoke paired scripts",     "unpair [name]"),

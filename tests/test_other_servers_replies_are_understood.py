@@ -36,6 +36,8 @@ class WhatALineMeans(unittest.TestCase):
         ("Error: File not found.", "refused", None),
         ("Error: The server's global queue is full (200 max).", "busy", None),
         ("System Message: MasterList is currently rebuilding. File requests temporarily paused.", "busy", None),
+        ("System Message: The bot is reloading its configuration. Your request is queued and starts "
+         "when the reload is done.", "queued", None),
         # OmeNServE
         ("Request Accepted - File: Song One.mp3 - Position: 4 - Queued 1/3 OmeNServE v2.60", "queued", 4),
         ("Request Denied - I Don't Have Song One.mp3, Check Your Spelling Or Get My Newest List - OmenServE v2.60",

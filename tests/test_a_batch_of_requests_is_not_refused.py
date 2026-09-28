@@ -141,8 +141,10 @@ class WaitingForASlot(LookupBase):
         with mock.patch.object(dcc, "_library_scans", SlotThatFreesUp()):
             self.ask(os.path.basename(self.tree.tracks[0]))
 
-        self.assertEqual(asked.get("timeout"), dcc.LOOKUP_SCAN_WAIT_SECONDS,
-                         "the request bounced instead of waiting for a slot")
+        # What is left of the wait once this nick's own turn came (#969) -
+        # at once here, so very nearly all of it.
+        self.assertAlmostEqual(asked.get("timeout") or 0, dcc.LOOKUP_SCAN_WAIT_SECONDS, delta=0.5,
+                               msg="the request bounced instead of waiting for a slot")
         self.assertNotEqual(asked.get("blocking"), False)
         self.assertTrue(asked.get("released"), "the slot was not given back")
         self.assertEqual(self.errors(), [])

@@ -21,7 +21,7 @@ import runtime
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
-SCRIPT_VERSION: str = "DCCore v1.13.1"
+SCRIPT_VERSION: str = "DCCore v1.13.2"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
@@ -737,6 +737,9 @@ AUTO_REFETCH_INTERVAL_HOURS: int = 24
 # Most lists to ask for in one sweep. A bot back after a month offline has a
 # lot of stale lists, and asking for all of them at once is a burst of
 # outbound requests nobody asked for. The rest go next sweep, oldest first.
+# Only bots in one of your channels are asked - a list whose bot has left
+# waits until it is back - and a request that is refused does not use up a
+# place.
 AUTO_REFETCH_MAX_PER_RUN: int = 3
 # Ask for the list of a bot that advertises one and whose list is not held yet
 # (#926), on AutoGet's rules: one grab at a time, a random 5-360 second wait
@@ -767,7 +770,7 @@ FETCH_HISTORY_MAX_ROWS: int = 500      # Hard cap on finished rows, whatever the
 # taking the choice from everyone else. Defensible here because a fetch is
 # SOLICITED: only an offer matching a row this operator created is ever
 # accepted, so it is their own request landing on their own disk.
-MAX_FETCH_FILE_SIZE: int    = 200 * 1024 * 1024   # 200 MB - reject the offer before we even connect; 0 = no limit
+MAX_FETCH_FILE_SIZE: int    = 200 * 1024 * 1024   # 200 MB - reject the offer before we even connect; 0 = no limit (a list archive keeps a ceiling, #945)
 # The largest EXTRACTED list text this bot will parse from a peer, in bytes.
 # Every "!" line in it becomes a retained row, so this bounds memory rather
 # than disk. It was a fixed 20 MB, set from this operator's own 4 MB list -
@@ -1107,6 +1110,18 @@ recent_departures = runtime.recent_departures
 # #926: who else asked which bot for its list - list_grab.py.
 list_grab_others_asked = runtime.list_grab_others_asked
 nick_aliases = runtime.nick_aliases
+# #376 option B - see runtime.py.
+bot_idents = runtime.bot_idents
+bot_departures = runtime.bot_departures
+recent_joins = runtime.recent_joins
+# #371 DCCore Chat - see runtime.py.
+chat_recent = runtime.chat_recent
+chat_rate = runtime.chat_rate
+chat_outbound = runtime.chat_outbound
+chat_muted = runtime.chat_muted
+chat_peers = runtime.chat_peers
+chat_peers_meta = runtime.chat_peers_meta
+chat_who_round = runtime.chat_who_round
 
 # ---------------------------------------------------------------------
 # WEB DASHBOARD (read-only status page, see webserver.py)

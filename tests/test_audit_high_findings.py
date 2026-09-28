@@ -145,7 +145,7 @@ class OnlyOneRehashRunsAtATime(unittest.TestCase):
         depth = [0]
         gate = threading.Lock()
 
-        def body(_user, _target):
+        def body(_user, _target, confirmed_debug_removal=False):
             with gate:
                 depth[0] += 1
                 if depth[0] > 1:
@@ -172,7 +172,7 @@ class OnlyOneRehashRunsAtATime(unittest.TestCase):
         may have read the file before that write landed - so a dropped second
         rehash silently loses the operator's change."""
         ran = []
-        commands._handle_rehash_request = lambda user, _t: ran.append(user)
+        commands._handle_rehash_request = lambda user, _t, confirmed_debug_removal=False: ran.append(user)
 
         threads = [threading.Thread(target=commands.handle_rehash_request,
                                     args=(f"caller{i}", "#chan"),
@@ -188,7 +188,7 @@ class OnlyOneRehashRunsAtATime(unittest.TestCase):
     def test_the_lock_is_released_when_the_body_raises(self):
         """Otherwise one failed rehash wedges every rehash after it, which is
         worse than the bug this lock exists for."""
-        def boom(_user, _target):
+        def boom(_user, _target, confirmed_debug_removal=False):
             raise RuntimeError("bang")
 
         commands._handle_rehash_request = boom
@@ -202,7 +202,7 @@ class OnlyOneRehashRunsAtATime(unittest.TestCase):
         """The auth check runs first. A rejected rehash that still queued
         behind a running one would be a way to stall the daemon from a
         channel."""
-        commands._handle_rehash_request = lambda *_a: None
+        commands._handle_rehash_request = lambda *_a, **_kw: None
         runtime.rehash_lock.acquire()
         try:
             commands.handle_rehash_request("nobody", "#chan", authorised=False)
