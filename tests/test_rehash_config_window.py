@@ -52,7 +52,7 @@ import defaults as config  # noqa: E402
 import runtime  # noqa: E402
 import settings_file  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, bots_in_the_channel  # noqa: E402
 
 
 class TheDebugChannelIsSomewhereTheBotShouldBe(DCCoreTestCase):
@@ -674,6 +674,7 @@ class ARehashWaitsForTransfersToFinish(DCCoreTestCase):
 
         self.set_config(fetch_queue={}, MAX_FETCH_SLOTS=3,
                         fetch_feature_disabled=False, CHANNEL="#chan")
+        bots_in_the_channel("SomeBot")
         dcc_fetch.enqueue_fetch("SomeBot", "Track.flac")
         config.transfers_paused = True
         dcc_fetch.check_fetch_queue()

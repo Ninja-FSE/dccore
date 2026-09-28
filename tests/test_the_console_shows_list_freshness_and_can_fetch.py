@@ -25,7 +25,7 @@ import defaults as config  # noqa: E402
 import list_fetch  # noqa: E402
 import webserver  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, bots_in_the_channel  # noqa: E402
 
 
 class FakeSession:
@@ -228,6 +228,7 @@ class TheEvents(DCCoreTestCase):
 
     def test_the_sweep_tells_the_console_for_each_bot_it_asks(self):
         self.set_config(bot_joined_channel=True)
+        bots_in_the_channel("Alpha", "Bravo")
         with mock.patch.object(list_fetch, "lists_worth_refetching", lambda now=None: ["Alpha", "Bravo"]), \
                 mock.patch.object(webserver, "build_list_fetch_enqueue_result", lambda bot: (200, {})), \
                 mock.patch.object(list_fetch, "_note_auto_attempt", lambda bot, when: None):
@@ -238,6 +239,7 @@ class TheEvents(DCCoreTestCase):
 
     def test_a_refused_ask_is_not_announced_as_asked(self):
         self.set_config(bot_joined_channel=True)
+        bots_in_the_channel("Alpha")
         with mock.patch.object(list_fetch, "lists_worth_refetching", lambda now=None: ["Alpha"]), \
                 mock.patch.object(webserver, "build_list_fetch_enqueue_result", lambda bot: (409, {"error": "busy"})):
             self.assertEqual(list_fetch.refetch_due_lists(log=lambda *_: None, now=1000.0), [])

@@ -43,10 +43,60 @@ def plain(text):
     return " ".join(_FORMATTING.sub("", str(text or "")).split())
 
 
+# The most of a line that is ever looked at. An IRC line is at most 512 bytes
+# with its prefix; nothing a server answers is longer than that.
+MAX_REPLY_CHARS = 512
+
+
+def _is_word_char(ch):
+    """What `\\w` matches: letters and digits in any script, and "_"."""
+    return ch.isalnum() or ch == "_"
+
+
+class _Words:
+    """Words in order, anything between them - the way mIRC's wildcard events
+    matched these replies - and the first word starting a word.
+
+    NOT A REGEX, and on purpose (audit of 2026-09-27). This used to be
+    `(?<!\\w)w1.*?w2.*?...wN` compiled with re, and on a line that repeats the
+    first words without ever completing the rule the lazy gaps backtrack
+    polynomially: 450 characters took over 3 seconds, on the IRC read loop,
+    for a private message anybody can send. That is how one person could
+    stall the bot until the server dropped it for not answering PING.
+
+    Here each word is found with str.find() after the end of the one before,
+    earliest first - the earliest match of each word leaves the most room for
+    the rest, so this answers exactly what the regex did, in one pass.
+    Case-insensitive, as the regex was."""
+
+    __slots__ = ("words",)
+
+    def __init__(self, pattern):
+        self.words = [word.lower() for word in pattern.split()]
+
+    def search(self, line):
+        text = str(line or "").lower()
+        if not self.words:
+            return False
+        first = self.words[0]
+        at = text.find(first)
+        # The first word starts a word: not glued to a letter before it.
+        while at > 0 and _is_word_char(text[at - 1]):
+            at = text.find(first, at + 1)
+        if at < 0:
+            return False
+        at += len(first)
+        for word in self.words[1:]:
+            at = text.find(word, at)
+            if at < 0:
+                return False
+            at += len(word)
+        return True
+
+
 def _words(pattern):
-    """A compiled matcher for words in order, anything between them."""
-    parts = [re.escape(word) for word in pattern.split()]
-    return re.compile(r"(?<!\w)" + r".*?".join(parts), re.IGNORECASE | re.DOTALL)
+    """A matcher for words in order, anything between them."""
+    return _Words(pattern)
 
 
 # (outcome, words in order, where the queue position is, if anywhere)
@@ -66,7 +116,12 @@ _RULES = [
     ("busy", "Error: The server's global queue is full", None),
     ("busy", "Error: You have reached your personal queue limit", None),
     ("busy", "MasterList is currently rebuilding", None),
-    ("busy", "The bot is reloading its configuration", None),
+    # Not busy (#972): a DCCore mid-rehash KEEPS the request - "Your request
+    # is queued and starts when the reload is done" - and its "Added ... at
+    # position" follows. Taken as busy, the row went back to pending, the
+    # position line found nothing waiting, and the file that came once the
+    # reload was done was refused as unasked-for.
+    ("queued", "The bot is reloading its configuration", None),
 
     # --- OmeNServE 1.32 - 2.x ---------------------------------------------
     ("duplicate", "Request Denied You Already Have In My Queue Position OmenServE",
@@ -125,7 +180,7 @@ class Reply:
 def classify(text):
     """A Reply for a message another file server sends about our request, or
     None for anything that is not one."""
-    line = plain(text)
+    line = plain(str(text or "")[:MAX_REPLY_CHARS * 2])[:MAX_REPLY_CHARS]
     if not line:
         return None
     for outcome, matcher, position_rule in _COMPILED:

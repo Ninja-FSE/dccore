@@ -3205,6 +3205,66 @@ class SettingsPayloadTests(DCCoreTestCase):
         release.set()
         self.assertTrue(finished.wait(timeout=10), "the dispatched rehash never completed")
 
+    def test_confirm_debug_channel_removed_is_not_written_as_a_setting(self):
+        """#1008 follow-up: it is a signal to sync_channels(), popped out
+        before `changes` ever reaches settings_file.save() - never a literal
+        DEBUG_CHANNEL_CONFIRM-style entry in settings.conf, and never
+        rejected the way an actually-unknown setting name would be."""
+        status, result = webserver.apply_settings_changes(
+            {"MAX_DCC_SLOTS": "9", "confirm_debug_channel_removed": True})
+        self.assertEqual(status, 200)
+        self.assertNotIn("confirm_debug_channel_removed", result["written"])
+        with io.open(self.settings_path, encoding="utf-8") as handle:
+            self.assertNotIn("confirm_debug_channel_removed", handle.read().lower())
+
+    def test_a_flag_only_body_is_rejected_like_any_empty_save(self):
+        """The #1011 review: the flag is popped BEFORE the
+        emptiness check, not after - a body whose only key is the flag is
+        not a settings change and must 400 like {} would, not save nothing
+        and still start a rehash."""
+        status, result = webserver.apply_settings_changes(
+            {"confirm_debug_channel_removed": True})
+        self.assertEqual(status, 400)
+        self.assertIn("error", result)
+        self.assertFalse(os.path.exists(self.settings_path))
+
+    def test_the_flag_reaches_the_rehash_as_its_own_argument(self):
+        captured = {}
+        called = threading.Event()
+        real_rehash = commands.handle_rehash_request
+
+        def capture_rehash(*args, **kwargs):
+            captured["kwargs"] = kwargs
+            called.set()
+
+        commands.handle_rehash_request = capture_rehash
+        self.addCleanup(setattr, commands, "handle_rehash_request", real_rehash)
+
+        status, _result = webserver.apply_settings_changes(
+            {"DEBUG_CHANNEL": "", "confirm_debug_channel_removed": True})
+
+        self.assertEqual(status, 200)
+        self.assertTrue(called.wait(timeout=10), "the rehash thread never started")
+        self.assertEqual(captured["kwargs"].get("confirmed_debug_removal"), True)
+
+    def test_the_flag_defaults_to_false(self):
+        captured = {}
+        called = threading.Event()
+        real_rehash = commands.handle_rehash_request
+
+        def capture_rehash(*args, **kwargs):
+            captured["kwargs"] = kwargs
+            called.set()
+
+        commands.handle_rehash_request = capture_rehash
+        self.addCleanup(setattr, commands, "handle_rehash_request", real_rehash)
+
+        status, _result = webserver.apply_settings_changes({"MAX_DCC_SLOTS": "9"})
+
+        self.assertEqual(status, 200)
+        self.assertTrue(called.wait(timeout=10), "the rehash thread never started")
+        self.assertEqual(captured["kwargs"].get("confirmed_debug_removal"), False)
+
     def test_apply_settings_changes_rejects_the_password_hash_directly(self):
         status, result = webserver.apply_settings_changes({"ADMIN_PASSWORD_HASH": "x"})
         self.assertEqual(status, 400)
@@ -3400,6 +3460,38 @@ class SettingsPayloadTests(DCCoreTestCase):
         self.assertEqual(status, 200)
         self.assertTrue(done.wait(timeout=2), "the dispatched rehash never ran")
         self.assertTrue(adminchat.verify_password(config.ADMIN_PASSWORD_HASH, "newpass1"))
+
+
+class TheDebugChannelConfirmTextFillsInEveryPlaceholder(unittest.TestCase):
+    """The #1011 review: app.js filled {chan} into the confirm
+    popup's heading but not its detail paragraph, which then read literally
+    as "...leaves {chan} as soon as...". A source guard, not a DOM test -
+    there is no browser here - reading each t("settings.confirmDebugChannel
+    Removed*") call site and requiring a matching .replace("{chan}" right
+    after it, so the two cannot drift apart silently again."""
+
+    def test_every_confirm_text_call_replaces_chan(self):
+        with io.open(os.path.join(REPO_ROOT, "web", "app.js"), encoding="utf-8") as handle:
+            app_js = handle.read()
+
+        for key in ("settings.confirmDebugChannelRemovedHeading",
+                   "settings.confirmDebugChannelRemovedDetail"):
+            call = 't("' + key + '")'
+            at = app_js.index(call)
+            tail = app_js[at + len(call):at + len(call) + 40]
+            self.assertIn('.replace("{chan}"', tail, f"{key} never fills in {{chan}}")
+
+    def test_the_keys_actually_use_the_placeholder(self):
+        """Fixture invariant: if a future edit drops {chan} from the English
+        text, the test above would still pass on an unused .replace() call
+        that fills in nothing wrong - so also pin that the placeholder is
+        there to be filled."""
+        with io.open(os.path.join(REPO_ROOT, "web", "lang", "en.json"), encoding="utf-8") as handle:
+            import json
+            strings = json.load(handle)
+
+        self.assertIn("{chan}", strings["settings.confirmDebugChannelRemovedHeading"])
+        self.assertIn("{chan}", strings["settings.confirmDebugChannelRemovedDetail"])
 
 
 @unittest.skipUnless(webserver.HAVE_FLASK, "Flask not installed. CI installs "

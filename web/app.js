@@ -67,6 +67,9 @@
     // also langFallback) and the English dictionary every language falls
     // back to for a key it does not have yet. See the Language section.
     lang: {}, langFallback: {},
+    // The last version check and stats payload drawn, redrawn when a
+    // language finishes loading (#976).
+    lastVersionInfo: null, lastStats: null,
     // What the previewed OmenServe import would write, held between the
     // preview and the confirm so the button sends exactly what was shown -
     // not a second parse that could have moved on from it.
@@ -113,6 +116,16 @@
     // than asking again: the rows are already here, and a round trip per
     // click would be slower than the search that produced them.
     filelistsExcluded: {}, filelistsFilterPayload: null, filelistsMatchTerms: [],
+    // #948: the "Online only" box, and the rows the sidebar was last built
+    // from - kept so ticking the box redraws the sidebar at once instead of
+    // waiting for the next poll to hand it the same rows again.
+    filelistsOnlineOnly: false, filelistsBotRows: null,
+    // #943: the one bot (lowercased nick) whose slots/queue/speed line is
+    // open under its row. Set by a click on any sidebar row, so it is NOT the
+    // open list - a bot we only saw advertising can be clicked for its line
+    // without being switched to. Kept here because the rows are rebuilt on
+    // every poll and would otherwise forget it.
+    filelistsInfoNick: "",
     // Whether what is on screen has any folders in it - see listIsFlat().
     filelistsFlat: false,
     // Off for every new term. A row put back on screen while looking for one
@@ -210,10 +223,7 @@
     stSentTotalFiles:      document.getElementById("st-sent-total-files"),
     stSentTodayFiles:      document.getElementById("st-sent-today-files"),
     stSentYesterdayFiles:  document.getElementById("st-sent-yesterday-files"),
-    stFiles:               document.getElementById("st-files"),
-    stSize:                document.getElementById("st-size"),
-    stAlbums:              document.getElementById("st-albums"),
-    stBuilt:               document.getElementById("st-built"),
+    stLibrary:             document.getElementById("st-library"),
     stFoot:                document.getElementById("st-foot"),
     stTopFiles:            document.getElementById("st-top-files"),
     importFile:            document.getElementById("import-file"),
@@ -770,8 +780,16 @@
     offline: "download.waiting.offline", "just-back": "download.waiting.justBack",
     retry: "download.waiting.retry", "their-turn": "download.waiting.theirTurn",
     slots: "download.waiting.slots", paused: "download.waiting.paused",
-    "disk-full": "download.waiting.diskFull"
+    "disk-full": "download.waiting.diskFull", joining: "download.waiting.joining"
   };
+
+  // Nothing has been downloaded for it yet: waiting here, or waiting in the
+  // other bot's queue (#977). A queued row was given the "Delete this
+  // fetched file? This cannot be undone." warning, about a file that did
+  // not exist.
+  function fetchRowNotStarted(state) {
+    return state === "pending" || state === "queued";
+  }
 
   function loadDownloads() {
     fetchJson("/api/fetch/status").then(function (rows) {
@@ -923,10 +941,11 @@
                        state === "queued");
       // "Cancel" for a row that has not started - calling it Delete would
       // suggest a downloaded file is being thrown away when none exists.
+      var notStarted = fetchRowNotStarted(state);
       var deleteBtn = deletable
         ? "<button type=\"button\" class=\"btn btn-small btn-danger fetch-delete-btn\" data-request-id=\"" +
-          encodeURIComponent(row.id) + "\" data-pending=\"" + (state === "pending" ? "1" : "") + "\">" +
-          (state === "pending" ? t("common.cancel") : t("common.delete")) + "</button>"
+          encodeURIComponent(row.id) + "\" data-pending=\"" + (notStarted ? "1" : "") + "\">" +
+          (notStarted ? t("common.cancel") : t("common.delete")) + "</button>"
         : "";
       // ASK AGAIN, for a row that did not arrive. Requested: a failed or rejected
       // fetch is the one an operator most wants to retry, and the only way to
@@ -1234,6 +1253,8 @@
   // succeeds. The release link is only ever a github.com address.
   function renderVersion(info) {
     if (!el.versionText || !info) { return; }
+    // Kept, so a language that arrives later can redraw it (#976).
+    state.lastVersionInfo = info;
     el.versionText.classList.remove("is-news", "is-error");
     el.versionText.textContent = "";
     if (info.error) {
@@ -1429,6 +1450,15 @@
     var row = evt.target.closest ? evt.target.closest(".bot-row") : null;
     if (!row) { return; }
 
+    // #943: a click opens THAT bot's slots/queue/speed line under its row and
+    // closes whichever one was open; clicking the open one closes it again.
+    // Before the early returns below on purpose: a bot we only saw
+    // advertising has no list to switch to, and its line is exactly what is
+    // wanted before deciding whether to fetch one.
+    var infoNick = String(row.dataset.nick || "").toLowerCase();
+    state.filelistsInfoNick = state.filelistsInfoNick === infoNick ? "" : infoNick;
+    markFilelistsInfoBot();
+
     // A bot we have only seen advertising has no list to page through. Rather
     // than switching to a source that would come back empty, put its nick
     // where fetching one starts.
@@ -1557,8 +1587,15 @@
 
   // #926: search only the lists of bots that are in a channel right now.
   if (el.filelistsOnlineOnly) {
+    // A soft reload can hand the box back ticked; the state must start from
+    // what is on screen, not from false.
+    state.filelistsOnlineOnly = el.filelistsOnlineOnly.checked;
     el.filelistsOnlineOnly.addEventListener("change", function () {
       state.filelistsOnlineOnly = el.filelistsOnlineOnly.checked;
+      // #948: the sidebar too, and now - not only the search. With no term
+      // typed the search has nothing to ask, so this used to change nothing
+      // at all on screen.
+      if (state.filelistsBotRows) { renderFilelistsSwitcher(state.filelistsBotRows); }
       runFilelistsFilter();
     });
   }
@@ -1600,6 +1637,27 @@
       renderFilelistsSwitcher(rows);
       renderFilelistsFreshness();
     }).catch(function () { markConnection(false); });
+  }
+
+  // #948: whether "Online only" keeps this bot's row off the sidebar. Only a
+  // bot KNOWN to be away goes (`online === false`); `null` is a bot that has
+  // not finished joining, where the membership mirror is empty and every nick
+  // would read as gone (see presenceClass). Our own lists never go, and
+  // neither does the bot whose list is open - the table would be showing a
+  // list the sidebar no longer has a row for. Only the ROW is left out:
+  // state.filelistsBots still holds every bot, since the rest of the page
+  // looks bots up there.
+  function hiddenByOnlineOnly(group) {
+    if (!state.filelistsOnlineOnly) { return false; }
+    var primary = primaryEntry(group);
+    if (isOwnSource(primary.bot)) { return false; }
+    // #975: a row #376 merged is the bot under the nick it has NOW. Its
+    // primary entry is the list held under the old nick - offline by
+    // definition - so the open list is compared by the nick the row is shown
+    // under, and "online" is what the row's own dot says: any entry here.
+    var open = displayNickOfSource(state.filelistsSource || "__own__").toLowerCase();
+    if (String(group.nick || "").toLowerCase() === open) { return false; }
+    return groupOnline(group, primary) === false;
   }
 
   // BUILT WITH DOM APIs, not concatenated markup. A bot nick is remote input
@@ -1655,7 +1713,9 @@
       }
       group.entries.push(row);
     });
+    state.filelistsBotRows = rows;
     groupOrder.forEach(function (nickKey) {
+      if (hiddenByOnlineOnly(groupsByNick[nickKey])) { return; }
       list.appendChild(botRow(groupsByNick[nickKey]));
     });
 
@@ -1696,10 +1756,41 @@
   // own list, and every not-held advert-only row, always has exactly one
   // entry and IS that entry either way).
   function primaryEntry(group) {
+    // #376: a row merged from two nicks of one bot can hold a main list we
+    // HAVE (under the old nick) and an advert-only row (the new one) -
+    // the list we hold is what a click should open.
+    for (var h = 0; h < group.entries.length; h++) {
+      if (!group.entries[h].list && group.entries[h].held) { return group.entries[h]; }
+    }
     for (var i = 0; i < group.entries.length; i++) {
       if (!group.entries[i].list) { return group.entries[i]; }
     }
     return group.entries[0];
+  }
+
+  // #376: the other nicks a merged row stands for - the real nick of each
+  // entry, where it is not the one the row is shown under.
+  function otherNicks(group) {
+    var seen = {};
+    var others = [];
+    var shown = String(group.nick || "").toLowerCase();
+    group.entries.forEach(function (entry) {
+      var real = splitFetchedSource(entry.bot).nick;
+      var key = String(real || "").toLowerCase();
+      if (key && key !== shown && !seen[key]) {
+        seen[key] = true;
+        others.push(real);
+      }
+    });
+    return others;
+  }
+
+  // #376: the bot is HERE if it is here under any of its nicks.
+  function groupOnline(group, primary) {
+    for (var i = 0; i < group.entries.length; i++) {
+      if (group.entries[i].online === true) { return true; }
+    }
+    return primary.online;
   }
 
   function botRow(group) {
@@ -1728,9 +1819,10 @@
     //
     // The dot is now whether they are HERE, and the name's colour is what we
     // hold from them. Asked for exactly that way in the beta.
+    var online = groupOnline(group, primary);
     var led = document.createElement("span");
-    led.className = "led " + presenceClass(primary.online);
-    led.title = presenceTitle(primary.online);
+    led.className = "led " + presenceClass(online);
+    led.title = presenceTitle(online);
     button.appendChild(led);
 
     var name = document.createElement("span");
@@ -1743,6 +1835,11 @@
     // keeps its existing label untouched, own lists included ("Our own
     // list", or the list's own name).
     name.textContent = grouped ? group.nick : (primary.label || primary.bot);
+    // #376: one bot seen under two nicks - say which, where it is asked for.
+    var others = otherNicks(group);
+    if (others.length) {
+      name.title += " \u00b7 " + t("filelists.alsoSeenAs").replace("{nicks}", others.join(", "));
+    }
     button.appendChild(name);
 
     // Named by the operator rather than seen advertising (#376): say so on
@@ -1765,22 +1862,35 @@
       button.appendChild(fresh);
     }
 
-    if (grouped) {
+    // How many LISTS we hold for the row - not how many entries it groups:
+    // a bot merged from two nicks (#376) is two entries and may be one list.
+    var listCount = group.entries.filter(function (entry) { return entry.held; }).length;
+    if (listCount > 1) {
       var badge = document.createElement("span");
       badge.className = "bot-row-lists-badge";
-      badge.textContent = String(group.entries.length);
-      badge.title = t("filelists.listsBadgeTitle").replace("{count}", group.entries.length);
+      badge.textContent = String(listCount);
+      badge.title = t("filelists.listsBadgeTitle").replace("{count}", listCount);
       button.appendChild(badge);
     }
 
     // #926: what the bot last advertised about itself - free slots, queue,
     // speed, "servers only" - AutoGet's slots page, one short line.
+    //
+    // #943: on its own line UNDER the row, and only for the bot that was
+    // clicked (state.filelistsInfoNick, see the sidebar's click handler) -
+    // beside the name it squeezed the nick out on a narrow sidebar, and on
+    // every row at once it was a wall of small print. The class decides what
+    // is shown, so the text is always built and a click needs no rebuild.
     var live = describeAdvertLive(primary.advert_live || {});
     if (live) {
       var stats = document.createElement("span");
       stats.className = "bot-row-live";
       stats.textContent = live;
       button.appendChild(stats);
+      var opened = state.filelistsInfoNick !== ""
+        && state.filelistsInfoNick === String(group.nick || "").toLowerCase();
+      button.classList.toggle("is-info-open", opened);
+      button.setAttribute("aria-expanded", opened ? "true" : "false");
     }
 
     var count = document.createElement("span");
@@ -1832,6 +1942,15 @@
   // exactly what group.nick already carries for it (see renderFilelistsSwitcher).
   function nickOfSource(source) {
     return splitFetchedSource(source).nick;
+  }
+
+  // #376: the nick the sidebar SHOWS a source under - its real nick, unless
+  // the server merged that bot into another nick's row (row.nick). Rows are
+  // grouped by this, so what is open has to be compared by it too, or a
+  // merged bot's row is never marked open and its tabs never appear.
+  function displayNickOfSource(source) {
+    var row = state.filelistsBots[source];
+    return row && row.nick ? String(row.nick) : nickOfSource(source);
   }
 
   // Every row currently held for one bot, wherever state.filelistsBots put
@@ -1943,7 +2062,7 @@
     // VIDEO list, whose row shows the bot's PRIMARY key in dataset.bot - the
     // row still has to read as "active" for any of its own bot's lists, not
     // only its primary one.
-    var openNick = nickOfSource(state.filelistsSource).toLowerCase();
+    var openNick = displayNickOfSource(state.filelistsSource).toLowerCase();
     var rows = el.filelistsBotList.querySelectorAll(".bot-row");
     for (var i = 0; i < rows.length; i++) {
       var active = String(rows[i].dataset.nick || "").toLowerCase() === openNick;
@@ -1961,6 +2080,24 @@
     renderFilelistsTabs();
   }
 
+  // #943: which row shows its slots/queue/speed line. By NICK for the same
+  // reason markFilelistsActiveBot() is (a row stands for every list its bot
+  // has), and applied to the rows already on screen so a click does not wait
+  // for the next poll's redraw - botRow() applies the same state to rows it
+  // builds. Only rows that HAVE a line get aria-expanded: it would promise
+  // something to open on a row with nothing under it.
+  function markFilelistsInfoBot() {
+    var rows = el.filelistsBotList.querySelectorAll(".bot-row");
+    for (var i = 0; i < rows.length; i++) {
+      var opened = state.filelistsInfoNick !== ""
+        && String(rows[i].dataset.nick || "").toLowerCase() === state.filelistsInfoNick;
+      rows[i].classList.toggle("is-info-open", opened);
+      if (rows[i].querySelector(".bot-row-live")) {
+        rows[i].setAttribute("aria-expanded", opened ? "true" : "false");
+      }
+    }
+  }
+
   // ONE TAB PER LIST THE OPEN BOT PUBLISHES (#399), shown above the table in
   // place of the second, third sidebar row a bot with more than one list
   // used to need. Reads a list's own marker straight off `list` - "RAR",
@@ -1972,7 +2109,10 @@
     var container = el.filelistsListTabs;
     if (!container) { return; }
 
-    var entries = entriesForNick(nickOfSource(state.filelistsSource));
+    // Lists we HOLD: a merged row (#376) can also carry the new nick's
+    // advert-only entry, which is not a list to open.
+    var entries = entriesForNick(displayNickOfSource(state.filelistsSource))
+      .filter(function (entry) { return entry.held; });
     if (entries.length < 2) {
       container.hidden = true;
       container.innerHTML = "";
@@ -5261,12 +5401,35 @@
     var dirty = state.settingsDirty;
     if (!Object.keys(dirty).length) { return; }
 
+    // #1008 follow-up: the bot otherwise only ever leaves a cleared debug
+    // channel on the next reconnect - see sync_channels()'s own reasoning
+    // for why a blank DEBUG_CHANNEL alone cannot tell "on purpose" from
+    // "the reload glitched" apart. Asking here, once, in the moment the
+    // operator actually clicked Save, resolves that ambiguity for this one
+    // save the same way a human always could.
+    var oldDebugChan = String((state.settingsBaseline || {}).DEBUG_CHANNEL || "").trim();
+    var clearingDebugChannel = Object.prototype.hasOwnProperty.call(dirty, "DEBUG_CHANNEL")
+      && !String(dirty.DEBUG_CHANNEL || "").trim()
+      && !!oldDebugChan;
+    if (clearingDebugChannel && !window.confirm(
+        t("settings.confirmDebugChannelRemovedHeading").replace("{chan}", oldDebugChan) +
+        String.fromCharCode(10, 10) +
+        t("settings.confirmDebugChannelRemovedDetail").replace("{chan}", oldDebugChan))) {
+      return;
+    }
+
+    var payload = {};
+    for (var dirtyKey in dirty) {
+      if (Object.prototype.hasOwnProperty.call(dirty, dirtyKey)) { payload[dirtyKey] = dirty[dirtyKey]; }
+    }
+    if (clearingDebugChannel) { payload.confirm_debug_channel_removed = true; }
+
     el.settingsSaveBtn.disabled = true;
     el.settingsSaveStatus.style.display = "none";
     el.settingsRestartNote.style.display = "none";
     el.settingsSavebarText.textContent = t("settings.saving");
 
-    postJson("/api/settings", dirty)
+    postJson("/api/settings", payload)
       .then(function (res) {
         if (res.ok) {
           state.settingsDirty = {};
@@ -5393,6 +5556,8 @@
   }
 
   function renderStats(data) {
+    // Kept, so a language that arrives later can redraw it (#976).
+    state.lastStats = data;
     var tr = data.transfer || {};
     var s = data.sent || {};
     var lib = data.library || {};
@@ -5422,16 +5587,65 @@
     setStat(el.stSentYesterdayFiles, t("stats.labelledFileCount")
       .replace("{label}", t("common.yesterday")).replace("{count}", (s.yesterday_files || 0).toLocaleString()));
 
-    setStat(el.stFiles, (lib.files || 0).toLocaleString());
-    setStat(el.stSize, lib.size || "0B");
-    // null means "no RAR list has been built", which is not the same claim as
-    // "this bot offers no albums" - so it shows as unknown rather than zero.
-    setStat(el.stAlbums, lib.rar_folders === null || lib.rar_folders === undefined
-            ? "—" : lib.rar_folders.toLocaleString());
-    setStat(el.stBuilt, lib.list_date || "—");
+    renderLibrary(lib);
 
     renderTopDownloads(data.top);
     setStat(el.stFoot, data.version || "");
+  }
+
+  // #952: the Library cards, built rather than fixed because how many there are
+  // depends on how many lists this bot serves: the TOTAL, then one card per
+  // list when there is more than one, then when the list was built. Each
+  // follows the Sent row's shape above it - the size big, and under it a label
+  // with the file count ("Total \u00b7 71 278 files") - so the page reads one
+  // way. A list's card is labelled with the name the operator gave it. Built
+  // with DOM APIs and textContent, not concatenated markup: that name is
+  // whatever the operator typed on the Library page.
+  function libraryCard(value, label, small) {
+    var card = document.createElement("div");
+    card.className = "stat-card";
+    var big = document.createElement("div");
+    big.className = small ? "stat-value stat-value-sm" : "stat-value";
+    big.textContent = String(value);
+    var caption = document.createElement("div");
+    caption.className = "stat-label";
+    caption.textContent = String(label);
+    card.appendChild(big);
+    card.appendChild(caption);
+    return card;
+  }
+
+  // "Total \u00b7 71 278 files", plus the album count when there is one. Null
+  // means "no RAR list has been built", which is not the same claim as "this
+  // bot offers no albums" - so it is left out, never shown as zero.
+  function libraryLabel(name, files, albums) {
+    // The count first, and the name through a function: as a replacement STRING
+    // "$&", "$`" and "$'" in a list name are patterns, and a "{count}" inside it
+    // would be filled by the second replace.
+    var text = t("stats.labelledFileCount")
+      .replace("{count}", Number(files || 0).toLocaleString())
+      .replace("{label}", function () { return name; });
+    if (albums !== null && albums !== undefined) {
+      text += " \u00b7 " + t("stats.albumFoldersCount")
+        .replace("{count}", Number(albums).toLocaleString());
+    }
+    return text;
+  }
+
+  function renderLibrary(lib) {
+    if (!el.stLibrary) { return; }
+    lib = lib || {};
+    var lists = Array.isArray(lib.lists) ? lib.lists : [];
+    el.stLibrary.innerHTML = "";
+    el.stLibrary.appendChild(libraryCard(
+      lib.size || "0B", libraryLabel(t("common.total"), lib.files, lib.rar_folders)));
+    if (lists.length > 1) {
+      lists.forEach(function (row) {
+        el.stLibrary.appendChild(libraryCard(
+          row.size || "0B", libraryLabel(String(row.name), row.files, row.rar_folders)));
+      });
+    }
+    el.stLibrary.appendChild(libraryCard(lib.list_date || "\u2014", t("stats.listBuilt"), true));
   }
 
   function loadStats() {
@@ -5803,6 +6017,13 @@
     return Promise.all(fetches).then(function () {
       if (generation !== langGeneration) { return; }
       applyTranslations();
+      // WHAT IS BUILT FROM t(), NOT MARKED data-i18n (#976), drawn again
+      // in the language now loaded. The version check is asked for before
+      // the language file, and when it answered first the sidebar read
+      // "version.upToDate" - the key - until the next poll ten minutes on;
+      // a language switch left it, and the Stats cards, in the old one.
+      if (state.lastVersionInfo) { renderVersion(state.lastVersionInfo); }
+      if (state.lastStats) { renderStats(state.lastStats); }
     });
   }
 

@@ -49,17 +49,11 @@
 # `git archive` is how the public tree is extracted, and export-ignore is
 # the only thing that makes "internal only" mean anything to it. Without a
 # rule here, a file is internal by intention and public in fact.
-#
-# docs/PUBLIC-REPO-WORKFLOW.md documents the dccore-dev / dccore split
-# itself: it names this repository directly, by handle, and references
-# internal issue and PR numbers that resolve to nothing outside it. It
-# exists to be read by the two of us, not shipped - and it does not exist
-# in this repository at all, so this rule matches nothing here. It stays
-# anyway: tests/exported_tree.py uses its absence, explained by this exact
-# line, as the signal that this is the public repository rather than
-# dccore-dev - docs/UPDATES.md's own presence cannot serve that purpose,
-# since extraction renames a different, legitimate file onto that same
-# path for this repository.
+
+# docs/PUBLIC-REPO-WORKFLOW.md documents this split itself: it names this
+# repository directly, by handle, and references internal issue and PR
+# numbers that resolve to nothing outside it. It exists to be read by the
+# two of us, not shipped.
 docs/PUBLIC-REPO-WORKFLOW.md    export-ignore
 
 # The denylist, NOT the guard. tests/test_no_personal_identifiers_ship.py

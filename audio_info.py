@@ -265,8 +265,15 @@ def _read_flac(window, size):
 
 def read(path, size=None):
     """{"seconds", "kbps", "rate", "channels", "vbr"} for an MP3 or FLAC, or
-    None - for any other file, and for any file that cannot be read or makes
-    no sense. Never raises."""
+    None - for any other file, and for any file that makes no sense.
+
+    RAISES OSError when the file could not be read at all (#973): a network
+    mount's transient EIO or timeout, a sharing violation while another
+    program holds it on Windows. That is not an answer about the file, and
+    remembered as one it stayed without length and quality until the file
+    changed size - Cache.read_pending() reads it again next time instead.
+    A file that is no longer there, or anything else that goes wrong reading
+    it, None."""
     name = path.lower()
     try:
         if size is None:
@@ -279,6 +286,12 @@ def read(path, size=None):
             if name.endswith(".mp3"):
                 return _read_mp3(window, size)
             return _read_flac(window, size)
+    except FileNotFoundError:
+        # Gone since the walk listed it: an answer - the next walk will not
+        # list it either.
+        return None
+    except OSError:
+        raise
     except Exception:
         return None
     return None
@@ -322,6 +335,7 @@ class Cache:
         self.seen = {}       # key -> suffix, for every audio file this rebuild listed and knows
         self.sizes = {}      # key -> size, for the same
         self.fresh = {}      # key -> (size, suffix) read by this rebuild
+        self.unread = set()  # keys whose read failed with an I/O error: not remembered (#973)
         self.pending = []    # (key, path, size) still to read
         self.read_count = 0
         self.reused_count = 0
@@ -331,9 +345,11 @@ class Cache:
         self.published = False
 
     @classmethod
-    def open(cls, path=None, reader=None, log=print, scope=""):
+    def open(cls, path=None, reader=None, log=print, scope="", formerly=None):
         """`scope` is the list being built: each list prunes only its own
-        rows, so rebuilding one never empties another's."""
+        rows, so rebuilding one never empties another's. `formerly` is a scope
+        whose rows are this list's now (#979): taken over - where this scope
+        has no row for the same file - and the rest dropped."""
         path = path or cache_path()
         conn = None
         try:
@@ -345,6 +361,9 @@ class Cache:
             # nothing reads them now.
             conn.execute("CREATE TABLE IF NOT EXISTS audio (scope TEXT, key TEXT, size INTEGER, "
                          "mtime INTEGER, suffix TEXT, run INTEGER, PRIMARY KEY (scope, key))")
+            if formerly is not None and formerly != (scope or ""):
+                conn.execute("UPDATE OR IGNORE audio SET scope = ? WHERE scope = ?", (scope or "", formerly))
+                conn.execute("DELETE FROM audio WHERE scope = ?", (formerly,))
             conn.commit()
             return cls(conn, reader, scope or "")
         except (sqlite3.Error, OSError) as err:
@@ -370,7 +389,16 @@ class Cache:
         """Read what note() put aside, `workers` at a time. With `budget`
         (seconds), no read is STARTED after it runs out - the ones in flight
         finish - and the rest are left for the next rebuild. `progress(done,
-        total)` is called as reads complete, at least once a second."""
+        total)` is called once at the start and then only when a read has
+        completed (#968).
+
+        ONLY REAL PROGRESS IS REPORTED. The rebuild's watchdog stops a child
+        whose progress file has not moved for LIST_UPDATE_STALL_SECONDS.
+        Called every second whether anything finished or not, this kept it
+        moving while every read hung on a network mount that had stopped
+        answering: the budget only stops NEW reads, the pool waits for the
+        stuck ones, and the rebuild never ended - and every later !update
+        was refused as already running, until a restart."""
         total = len(self.pending)
         if not total:
             return
@@ -398,19 +426,29 @@ class Cache:
                     running[pool.submit(self.reader, path, size)] = (key, size)
 
             top_up()
+            reported = 0
+            if progress is not None:
+                progress(0, total)
             while running:
                 finished, _ = wait(running, timeout=1.0, return_when=FIRST_COMPLETED)
                 for future in finished:
                     key, size = running.pop(future)
                     try:
                         suffix = describe(future.result())
+                    except OSError:
+                        # Size alone this time, and not remembered: the
+                        # next rebuild reads it again (#973).
+                        suffix = ""
+                        self.unread.add(key)
                     except Exception:
                         suffix = ""
                     self.seen[key] = suffix
                     self.sizes[key] = size
-                    self.fresh[key] = (size, suffix)
+                    if key not in self.unread:
+                        self.fresh[key] = (size, suffix)
                     done += 1
-                if progress is not None:
+                if progress is not None and done != reported:
+                    reported = done
                     progress(done, total)
                 top_up()
 
@@ -439,7 +477,8 @@ class Cache:
         """This rebuild published: keep what it saw, forget the rest."""
         with self.conn:
             self.conn.execute("DELETE FROM audio WHERE scope = ?", (self.scope,))
-            self._save((key, (self.sizes[key], suffix)) for key, suffix in self.seen.items())
+            self._save((key, (self.sizes[key], suffix)) for key, suffix in self.seen.items()
+                       if key not in self.unread)
         self.published = True
 
     def close(self):

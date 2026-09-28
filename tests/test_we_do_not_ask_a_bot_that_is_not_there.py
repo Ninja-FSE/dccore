@@ -150,8 +150,19 @@ class EachSignalIsWiredToItsOwnQuestion(unittest.TestCase):
         # sidebar row, and the row's own signals now come from whichever of
         # that group's lists speaks for the collapsed row (see primaryEntry()
         # in app.js) - the wiring under test is unchanged, only its name.
-        self.assertIn('led.className = "led " + presenceClass(primary.online);',
-                      self.row())
+        #
+        # #376: through groupOnline(), since one bot seen under two nicks is
+        # one row, and it is here if it is here under either. That helper
+        # must read presence (`.online`) and nothing else.
+        row = self.row()
+        self.assertIn("var online = groupOnline(group, primary);", row)
+        self.assertIn('led.className = "led " + presenceClass(online);', row)
+        with open(os.path.join(REPO_ROOT, "web", "app.js"), encoding="utf-8") as handle:
+            code = handle.read()
+        helper = code.split("function groupOnline(", 1)[1].split("\n  }", 1)[0]
+        self.assertIn("group.entries[i].online === true", helper)
+        self.assertIn("return primary.online;", helper)
+        self.assertNotIn("freshness", helper)
 
     def test_the_name_is_fed_by_freshness(self):
         self.assertIn(

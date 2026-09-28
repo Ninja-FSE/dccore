@@ -68,8 +68,8 @@ def names_a_remote_or_absolute_path(name, windows=None):
 # A LIBRARY-WIDE LOOKUP IS THE EXPENSIVE THING A REQUEST CAN ASK FOR (#580).
 # A name that is not in the first folder's root makes handle_download_request()
 # read every published list and then walk every configured folder; each request
-# runs on its own thread and the flood gate allows ten a nick per five seconds.
-# Two bounds, both cheap: only a few scans at a time (the rest are told the bot
+# runs on its own thread, and file requests no longer pass the flood gate (#888).
+# Two bounds, both cheap, and a third per nick below (#969): only a few scans at a time (the rest are told the bot
 # is busy, at once, without touching the disk), and a name that just missed is
 # answered "not found" from memory for a minute - the same stale row pasted ten
 # times costs one scan, not ten.
@@ -94,6 +94,18 @@ LOOKUP_HIT_TTL_SECONDS = 300.0
 LOOKUP_HIT_MEMORY = 512
 LOOKUP_FOLDER_MEMORY = 32
 LOOKUP_SCAN_WAIT_SECONDS = 5.0
+# ONE NICK'S SHARE OF THE SCANS (#969). File requests stopped counting toward
+# the flood gate in #888 - a pasted batch muted the very user it was for - and
+# the "ten a nick per five seconds" the bounds above leaned on went with it.
+# One nick sending made-up names as fast as the server lets it kept both scan
+# slots busy, and everybody else was told "busy". So a nick's lookups take
+# turns - its next one waits for its last, then looks in the memories that
+# one just filled, which is how the rest of a pasted batch finds its siblings
+# - and a nick whose last LOOKUP_NICK_MISSES scans in a window found nothing
+# is told "busy" without another, until the window moves on. Only scans that
+# MISSED count: a user asking for files that exist is never held back.
+LOOKUP_NICK_MISSES = 10
+LOOKUP_NICK_MISS_WINDOW_SECONDS = 60.0
 # Owned by runtime.py, which nothing reloads (#749) - bound by name, the way
 # queue_lock is, so a !rehash re-runs these lines and picks the same live
 # objects back up. The memories themselves are this module's own cache.
@@ -102,6 +114,56 @@ _lookup_misses = globals().get("_lookup_misses") or {}
 _lookup_misses_lock = runtime.lookup_memory_lock
 _lookup_hits = globals().get("_lookup_hits") or {}
 _lookup_folders = globals().get("_lookup_folders") or {}
+_scan_turns = runtime.library_scan_turns
+_scanning_nicks = globals().get("_scanning_nicks") or set()
+_nick_misses = globals().get("_nick_misses") or {}
+
+
+def _nick_may_scan(nick, now=None):
+    """Whether `nick` has scans left (#969): fewer than LOOKUP_NICK_MISSES of
+    theirs found nothing in the last LOOKUP_NICK_MISS_WINDOW_SECONDS."""
+    now = time.monotonic() if now is None else now
+    with _lookup_misses_lock:
+        recent = [when for when in _nick_misses.get(nick, ())
+                  if now - when < LOOKUP_NICK_MISS_WINDOW_SECONDS]
+        if recent:
+            _nick_misses[nick] = recent
+        else:
+            _nick_misses.pop(nick, None)
+        return len(recent) < LOOKUP_NICK_MISSES
+
+
+def _note_nick_miss(nick, now=None):
+    """One of `nick`'s scans found nothing. Bounded like the other memories:
+    at most LOOKUP_NICK_MISSES times per nick, LOOKUP_MISS_MEMORY nicks."""
+    now = time.monotonic() if now is None else now
+    with _lookup_misses_lock:
+        misses = _nick_misses.pop(nick, [])       # re-noted: newest again
+        _nick_misses[nick] = (misses + [now])[-LOOKUP_NICK_MISSES:]
+        excess = len(_nick_misses) - LOOKUP_MISS_MEMORY
+        if excess > 0:
+            for stale in list(_nick_misses)[:excess]:
+                _nick_misses.pop(stale, None)
+
+
+def _take_a_scan_turn(nick, timeout):
+    """Wait, up to `timeout` seconds, until `nick` has no scan running, and
+    claim the turn. False when the wait ran out."""
+    deadline = time.monotonic() + timeout
+    with _scan_turns:
+        while nick in _scanning_nicks:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            _scan_turns.wait(left)
+        _scanning_nicks.add(nick)
+    return True
+
+
+def _end_scan_turn(nick):
+    with _scan_turns:
+        _scanning_nicks.discard(nick)
+        _scan_turns.notify_all()
 
 
 def _lookup_missed_recently(key):
@@ -166,19 +228,44 @@ def _note_lookup_hit(key, path):
             del folders[:-LOOKUP_FOLDER_MEMORY]
 
 
-def _in_a_recent_folder(list_name, file_name):
+def _matches_size_hint(path, size_hint):
+    """Whether the file at `path` is the size a pasted `::INFO::` hint says.
+
+    The hint is what the list wrote after the name: the size as
+    update_list.format_size_human() writes it ("7.3MB"), then - with audio
+    info on - its length and quality. Only the first word is a size. No hint
+    matches anything; a file that cannot be read matches nothing."""
+    words = str(size_hint or "").split()
+    if not words:
+        return True
+    try:
+        actual = update_list.format_size_human(os.path.getsize(platform_compat.long_path(path)))
+    except OSError:
+        return False
+    return actual.lower() == words[0].lower()
+
+
+def _in_a_recent_folder(list_name, file_name, size_hint=""):
     """`<folder>/<name>` for the folders recent lookups resolved into.
 
     The reported case (#886): a user pastes nine rows from one album. The
     first costs a scan and names the folder; the other eight are one
     os.path.exists each, in the folder their sibling was just found in -
     newest folder first, because a batch arrives together.
+
+    A request that carries a size (#962) only takes a copy of that size.
+    `cover.jpg`, `folder.jpg` and `01 - Intro.mp3` are in nearly every album
+    folder, so "the name exists in a folder somebody just asked in" is not
+    "the file this request names": the pasted size is what tells two copies
+    apart, and a copy of another size falls through to the list scan, which
+    picks by it.
     """
     with _lookup_misses_lock:
         folders = list(reversed(_lookup_folders.get(list_name, [])))
     for folder in folders:
         candidate = os.path.join(folder, file_name)
-        if os.path.exists(platform_compat.long_path(candidate)):
+        if (os.path.exists(platform_compat.long_path(candidate))
+                and _matches_size_hint(candidate, size_hint)):
             return candidate
     return None
 
@@ -189,6 +276,21 @@ def forget_library_lookups():
         _lookup_hits.clear()
         _lookup_folders.clear()
         _lookup_misses.clear()
+        _nick_misses.clear()
+
+
+def _recall(list_name, requested_file, size_hint, search_roots):
+    """A path the lookup memories give for this request, or None (#886): this
+    exact name, then the folders recent lookups resolved into. Checked against
+    search_roots - the CURRENT configuration, not whatever it was when the
+    memory was made (#901). The size hint is part of what is remembered
+    (#962)."""
+    remembered_key = (str(list_name), str(requested_file).lower().strip(), size_hint)
+    for candidate in (_remembered_path(remembered_key),
+                      _in_a_recent_folder(str(list_name), requested_file, size_hint)):
+        if candidate and any(is_safe_path(root, candidate) for root in search_roots):
+            return candidate
+    return None
 
 
 
@@ -2579,6 +2681,20 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
         # "Someone - DCCore Sessions.rar" would otherwise be looked for among
         # the lists and never found.
         if list_mod.is_list_artifact_name(requested_file):
+            # THE ARCHIVE WAITS FOR THE WHOLE REBUILD (#971), as "@nick" does
+            # in list.send_file_list(). Other files are served through the
+            # scan since #923 - the rebuild does not touch them - but this is
+            # the file the swap replaces. A slow send of a same-day archive
+            # (a second rebuild keeps its name) started mid-scan held it
+            # open, and on Windows the swap's replace gave up and the whole
+            # rebuild rolled back.
+            if getattr(config, 'update_inprogress', False) is True:
+                oserve = sys.modules.get('oserve')
+                if oserve:
+                    oserve.queue_message(user, f"NOTICE {user} :{config.C_BOLD}System Notice{config.C_RESET}: Master list is currently rebuilding. Please wait a few minutes and try again. \r\n")
+                print(f"[MAINTENANCE BLOCK] Refused {user}'s request for the list archive "
+                      f"{requested_file!r}: the list is being rebuilt.")
+                return
             # THIS REQUEST'S LIST directory, not LOCAL_LIST_DIR. Every list
             # writes its archive under the same name, and a non-primary list
             # writes it in its own subdirectory - so looking in the root would
@@ -2631,30 +2747,62 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
             # this does not need to wait for and does not replace - a scan
             # still in flight across a rehash records its hit after the
             # forget, and this is what keeps THAT entry honest too.
-            remembered_key = (str(wanted_list), str(requested_file).lower().strip())
-            for candidate in (_remembered_path(remembered_key),
-                              _in_a_recent_folder(str(wanted_list), requested_file)):
-                if candidate and any(is_safe_path(root, candidate) for root in search_roots):
-                    full_path = candidate
-                    break
+            #
+            # THE SIZE HINT IS PART OF WHAT IS REMEMBERED (#962). A scan picks
+            # between same-named copies by the pasted ::INFO:: size; a memory
+            # keyed on the name alone handed the next request the copy the
+            # LAST one wanted - album A's "01 - Intro.mp3" to somebody who
+            # pasted album B's. So an exact-name memory is only reused by a
+            # request carrying the same hint (or none, as before), and a
+            # folder candidate must be the hinted size.
+            full_path = (_recall(wanted_list, requested_file, requested_size_hint, search_roots)
+                         or full_path)
 
         if not is_master_zip and not os.path.exists(platform_compat.long_path(full_path)):
             # THE EXPENSIVE PART, BOUNDED (#580). A name that is not in the first
             # folder's root is looked up by streaming every published list and,
             # failing that, walking every configured folder - a full-library
             # metadata scan, on this request's own thread, for one ~40 byte line.
-            # Ten of those per five seconds is what the flood gate allows a nick,
-            # so the cost is bounded here instead: a name that just missed is
-            # answered from memory, and only a few scans run at once.
+            # The flood gate no longer counts file requests (#888), so the cost
+            # is bounded here instead: a name that just missed is answered
+            # from memory, only a few scans run at once, and one nick gets one
+            # at a time and a few misses a minute (#969).
             miss_key = (str(wanted_list), str(requested_file).lower().strip())
             if _lookup_missed_recently(miss_key):
                 announce.send_dcc_error(user, "file_not_found")
+                return
+            # This nick's share (#969): see LOOKUP_NICK_MISSES.
+            nick_key = str(user).strip().lower()
+            if not _nick_may_scan(nick_key):
+                print(f"[DCC-LOOKUP] {user}'s request for {requested_file!r} refused: their last "
+                      f"{LOOKUP_NICK_MISSES} lookups found nothing, within "
+                      f"{LOOKUP_NICK_MISS_WINDOW_SECONDS:.0f}s.")
+                announce.send_dcc_error(user, "busy")
                 return
             # WAITS, briefly, rather than refusing at once (#886). Nine rows
             # pasted together arrive within a second or two of each other;
             # bouncing seven of them told the user to "try again in a
             # moment", which is the one thing that risks the flood gate.
-            if not _library_scans.acquire(timeout=LOOKUP_SCAN_WAIT_SECONDS):
+            # The wait covers both: this nick's own turn, then a slot.
+            waited_from = time.monotonic()
+            if not _take_a_scan_turn(nick_key, LOOKUP_SCAN_WAIT_SECONDS):
+                print(f"[DCC-LOOKUP] {user}'s request for {requested_file!r} refused: their "
+                      f"previous lookup was still running after {LOOKUP_SCAN_WAIT_SECONDS:.0f}s.")
+                announce.send_dcc_error(user, "busy")
+                return
+            # What their previous lookup just learned - a sibling's folder,
+            # or that this name is not there - answers this one without a
+            # scan of its own.
+            if _lookup_missed_recently(miss_key):
+                _end_scan_turn(nick_key)
+                announce.send_dcc_error(user, "file_not_found")
+                return
+            recalled = _recall(wanted_list, requested_file, requested_size_hint, search_roots)
+            if recalled is not None:
+                full_path = recalled
+            elif not _library_scans.acquire(
+                    timeout=max(0.0, LOOKUP_SCAN_WAIT_SECONDS - (time.monotonic() - waited_from))):
+                _end_scan_turn(nick_key)
                 print(f"[DCC-LOOKUP] {user}'s request for {requested_file!r} refused: "
                       f"{MAX_CONCURRENT_LIBRARY_SCANS} library scans were still running after "
                       f"{LOOKUP_SCAN_WAIT_SECONDS:.0f}s.")
@@ -2677,7 +2825,8 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
                 # Resolved at the top of this function, so the list a name is
                 # looked up in and the folders it is then looked for in cannot
                 # disagree.
-                list_paths = list_mod.all_list_paths(wanted_list)
+                # Nothing to read when the memories answered it.
+                list_paths = list_mod.all_list_paths(wanted_list) if recalled is None else []
                 if list_paths:
                     try:
                         # STREAMED, NOT LOADED. This used to readlines() every
@@ -2826,13 +2975,17 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
                         if os.path.exists(platform_compat.long_path(full_path)):
                             break
             finally:
-                _library_scans.release()
+                if recalled is None:
+                    _library_scans.release()
+                _end_scan_turn(nick_key)
             if not os.path.exists(platform_compat.long_path(full_path)):
                 _note_lookup_miss(miss_key)
+                _note_nick_miss(nick_key)
             else:
                 # What it cost to find this is what the next request for it -
-                # or for its siblings in the same folder - does not pay.
-                _note_lookup_hit(miss_key, full_path)
+                # or for its siblings in the same folder - does not pay. Under
+                # the size hint too (#962): see remembered_key above.
+                _note_lookup_hit(miss_key + (requested_size_hint,), full_path)
 
 
         # Against every legitimate root rather than one. is_safe_path() itself

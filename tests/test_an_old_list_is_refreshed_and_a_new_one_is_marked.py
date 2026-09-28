@@ -22,7 +22,7 @@ import list_fetch  # noqa: E402
 import runtime  # noqa: E402
 import webserver  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, bots_in_the_channel  # noqa: E402
 
 DAY = 86400.0
 NOW = 100 * DAY
@@ -45,6 +45,7 @@ class ListCase(DCCoreTestCase):
     def hold(self, bot, fetched_at, advert_then=None, advert_now=None, **extra):
         self.store[bot.lower()] = dict({"bot": bot, "fetched_at": fetched_at, "entry_count": 10,
                                         "advert_when_fetched": advert_then or {}}, **extra)
+        bots_in_the_channel(bot)
         if advert_now is not None:
             runtime.known_bots[bot.lower()] = dict(advert_now, nick=bot)
 

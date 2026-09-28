@@ -262,7 +262,7 @@ def reject_if_unsafe_for_irc_line(value, field_name, max_len=IRC_LINE_FIELD_MAX_
 # Pure data-building functions - no Flask, unit tested directly.
 # ==========================================================================
 
-def count_rar_album_folders():
+def count_rar_album_folders(name=None):
     """How many album folders the RAR list offers, or None if there is no list.
 
     The file update_list.py writes opens with three lines of explanation and
@@ -273,10 +273,18 @@ def count_rar_album_folders():
     None rather than 0 when there is no list at all: a bot whose first list has
     not been built yet has an unknown album count, and zero is a different
     claim - it would read on the page as "this bot offers no albums".
+
+    `name` picks a served list (#952): a list's files live in its own
+    directory (list.list_dir()), and without a name this reads the primary's,
+    which is where every install's RAR list was before there were several.
     """
     import io
 
-    directory = getattr(config, "LOCAL_LIST_DIR", "./lists")
+    if name is None:
+        directory = getattr(config, "LOCAL_LIST_DIR", "./lists")
+    else:
+        import list as list_mod
+        directory = list_mod.list_dir(name)
     prefix = f"{getattr(config, 'LIST_BASE_NAME', 'DCCore')}-RAR-"
     try:
         names = sorted(name for name in os.listdir(directory)
@@ -292,6 +300,101 @@ def count_rar_album_folders():
             return sum(1 for line in handle if line.startswith("!"))
     except OSError:
         return None
+
+
+def _format_library_size(raw_bytes):
+    """A byte total the way a list's own size file writes it - two decimals,
+    "1.85TB" - so a total summed from several lists reads like the figures it
+    is made of and not in a second style (#952)."""
+    size = float(raw_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024.0:
+            return f"{size:.2f}{unit}"
+        size /= 1024.0
+    return f"{size:.2f}PB"
+
+
+def build_library_payload():
+    """The Library block of the Stats page: totals across EVERY served list,
+    and one row per list (#952).
+
+    It used to read the primary list alone - no name given, so the primary's
+    files, its side files for the size, and LOCAL_LIST_DIR's RAR list - and on
+    a bot serving music and film lists the page showed the music list's
+    numbers as though they were the library. The channel adverts already ask
+    per list, so the page and the advert disagreed.
+
+    The top-level keys are the ones the page has always had (files, size,
+    raw_bytes, list_date, rar_folders) and are now the totals; a single-list
+    install therefore reads exactly as before. `lists` holds each list's own
+    figures, in the operator's order.
+
+    Every list is read in its own guard, the way every source in this module
+    is: one list whose side file is unreadable costs its own row and nothing
+    else. The primary is asked for with NO name, not its own - that is the
+    path the page has always taken, and a single-list install has no reason to
+    be routed differently.
+
+    A folder that belongs to two lists is counted in both, and the totals do
+    not de-duplicate; the rows are there so that can be seen.
+    """
+    import library
+    import list as list_mod
+
+    try:
+        entries = [(str(entry.name), bool(entry.primary)) for entry in library.lists()]
+    except Exception:
+        entries = []
+    if not entries:
+        entries = [("", True)]
+
+    rows = []
+    newest_row, newest_when = None, None
+    for name, primary in entries:
+        row = {"name": name, "primary": primary, "files": 0, "size": None,
+               "raw_bytes": 0, "list_date": None, "rar_folders": None}
+        asked = None if primary else name
+        try:
+            files, list_date, size, raw_bytes = list_mod.get_file_count_date_size_and_raw_bytes(asked)
+            row.update({"files": int(files or 0), "list_date": list_date or None,
+                        "size": size or None, "raw_bytes": int(raw_bytes or 0)})
+        except Exception:
+            pass
+        try:
+            row["rar_folders"] = count_rar_album_folders(asked)
+        except Exception:
+            pass
+        try:
+            latest = list_mod.find_latest_list(asked)
+            when = os.path.getmtime(latest) if latest else None
+        except Exception:
+            when = None
+        if when is not None and (newest_when is None or when > newest_when):
+            newest_row, newest_when = row, when
+        rows.append(row)
+
+    primary_row = next((row for row in rows if row["primary"]), rows[0])
+    total_bytes = sum(row["raw_bytes"] for row in rows)
+    albums = [row["rar_folders"] for row in rows if row["rar_folders"] is not None]
+
+    if len(rows) == 1:
+        size = primary_row["size"]
+    else:
+        size = _format_library_size(total_bytes) if total_bytes else primary_row["size"]
+
+    return {
+        "files": sum(row["files"] for row in rows),
+        "size": size,
+        "raw_bytes": total_bytes,
+        # The newest build among the lists; when none has been built at all,
+        # what the primary says (a bot with no list yet says so).
+        "list_date": (newest_row or primary_row)["list_date"],
+        # None only when NO list has a RAR list: a total of the ones that do
+        # is a true count of the albums on offer, while a list with no RAR list
+        # simply has none to add.
+        "rar_folders": sum(albums) if albums else None,
+        "lists": rows,
+    }
 
 
 # The ceilings the import refuses beyond. A stray digit from a hand-edited
@@ -491,7 +594,6 @@ def build_stats_payload():
     # and db/list/stats_mgr are named in that test explicitly. Same reason the
     # File Lists payload imports `list` inside its own function.
     import db
-    import list as list_mod
     import stats_mgr
 
     active = list(getattr(config, "active_transfers", []))
@@ -531,18 +633,12 @@ def build_stats_payload():
     except Exception:
         pass
 
-    library = {"files": 0, "size": None, "raw_bytes": 0, "list_date": None,
-               "rar_folders": None}
+    # Every served list, not the primary alone (#952) - see the function.
     try:
-        files, list_date, size, raw_bytes = list_mod.get_file_count_date_size_and_raw_bytes()
-        library.update({"files": int(files or 0), "list_date": list_date or None,
-                        "size": size or None, "raw_bytes": int(raw_bytes or 0)})
+        library = build_library_payload()
     except Exception:
-        pass
-    try:
-        library["rar_folders"] = count_rar_album_folders()
-    except Exception:
-        pass
+        library = {"files": 0, "size": None, "raw_bytes": 0, "list_date": None,
+                   "rar_folders": None, "lists": []}
 
     for name in ("total", "today", "yesterday"):
         sent[name + "_text"] = stats_mgr.format_size_human(sent[name + "_bytes"])
@@ -1136,11 +1232,18 @@ def build_crosslist_search_payload(term, limit=None, online_only=False):
 
     offline = []
     if online_only:
-        import dcc
+        # PRESENT UNDER THE NICK ITS ROW IS SHOWN AS (#975). A bot #376 merged
+        # into its new nick keeps its list under the old one, which is not
+        # here by definition - asking about that nick alone left out exactly
+        # the renamed bots that are online and reachable.
+        present = present_nicks()
+        merges = _ident_merges(dict(getattr(runtime, "known_bots", {}) or {}), present)
         for key, source in list(held.items()):
-            if not dcc.user_is_present_in_ram(source.split("/", 1)[0]):
-                offline.append(key)
-                del held[key]
+            nick = source.split("/", 1)[0]
+            if nick.lower() in present or _display_nick(nick, present, merges).lower() in present:
+                continue
+            offline.append(key)
+            del held[key]
 
     empty_payload = {
         "term": str(term or ""),
@@ -1387,6 +1490,9 @@ def build_fetched_bot_list_summaries():
     # asking user_is_present_in_ram() per row would rescan every channel's
     # membership per row, per poll.
     present = present_nicks()
+    # #376 option B, also once per payload: which absent nicks are the same
+    # bot as one that is here, by ident.
+    merges = _ident_merges(known, present)
 
     for key, entry in store.items():
         bot = entry.get("bot", key)
@@ -1421,7 +1527,7 @@ def build_fetched_bot_list_summaries():
                 # sidebar row - see runtime.resolve_display_nick()'s own
                 # comment for why nothing else is allowed to change here.
                 "bot": list_fetch.index_key(bot, marker),
-                "nick": _display_nick(bot, present),
+                "nick": _display_nick(bot, present, merges),
                 "list": marker,
                 "label": f"{bot} - {marker}" if marker else bot,
                 "held": True,
@@ -1465,7 +1571,7 @@ def build_fetched_bot_list_summaries():
         now = _advert_now(known, bot)
         rows.append({
             "bot": bot,
-            "nick": _display_nick(bot, present),
+            "nick": _display_nick(bot, present, merges),
             "list": "",
             "label": bot,
             "held": False,
@@ -1485,7 +1591,73 @@ def build_fetched_bot_list_summaries():
     return rows
 
 
-def _display_nick(bot, present):
+def _ident_merges(known, present):
+    """{departed nick (lower): current nick} for a bot seen again under
+    another nick, by its ident (#376, option B). Display only.
+
+    All of these have to hold, and each one fails safe - no merge, the rows
+    stay two:
+
+      * the old nick's departure was OBSERVED (a QUIT, PART, KICK or NICK -
+        runtime.bot_departures), and it is not here now;
+      * the new nick is here now;
+      * both have the SAME IDENT, seen this session (runtime.bot_idents,
+        memory only - no host or IP is kept at all);
+      * both advertise the SAME FILE COUNT - two libraries almost never
+        match to the file;
+      * they were never ADVERTISING at the same time: the old nick's last
+        advert came before the new nick was first seen this session. A ghost
+        still sitting in the channel after its connection died cannot
+        advertise, so the ordinary alt-nick reconnect passes this, and two
+        live bots that happen to share an ident and a count do not;
+      * the departure and the new nick's first sighting are within
+        irc.IDENT_MERGE_WINDOW_SECONDS of each other, either way round - a
+        ghost pings out after its owner is back, a clean QUIT comes before.
+        Hours apart, the same ident and count are left as a coincidence;
+      * exactly one current nick matches. Two candidates is not an answer.
+    """
+    import irc
+
+    with runtime.bot_idents_lock:
+        idents = {key: dict(record) for key, record in runtime.bot_idents.items()}
+        departed = dict(runtime.bot_departures)
+    if not present or not departed:
+        return {}
+    window = irc.IDENT_MERGE_WINDOW_SECONDS
+
+    def files_of(key):
+        files = (known.get(key) or {}).get("files")
+        return files if isinstance(files, int) and not isinstance(files, bool) else None
+
+    here = {}
+    for key, record in idents.items():
+        files = files_of(key)
+        if key in present and files is not None:
+            nick = (known.get(key) or {}).get("nick") or key
+            here.setdefault((record.get("ident"), files), []).append(
+                (key, nick, float(record.get("first_seen") or 0)))
+
+    merges = {}
+    for key, left_at in departed.items():
+        record = idents.get(key)
+        files = files_of(key)
+        if key in present or record is None or files is None:
+            continue
+        # Never itself: a nick that came back matches its own record.
+        matches = [m for m in here.get((record.get("ident"), files), []) if m[0] != key]
+        if len(matches) != 1:
+            continue
+        _other, nick, first_seen = matches[0]
+        last_advert = float((known.get(key) or {}).get("last_seen") or 0)
+        if last_advert >= first_seen:
+            continue
+        if abs(first_seen - float(left_at or 0)) > window:
+            continue
+        merges[key] = nick
+    return merges
+
+
+def _display_nick(bot, present, merges=None):
     """resolve_display_nick(), minus any alias the network is CURRENTLY
     disproving.
 
@@ -1507,6 +1679,11 @@ def _display_nick(bot, present):
     known_bots, or a download counter.
     """
     primary = runtime.resolve_display_nick(bot)
+    # #376 option B: no alias from a NICK or a reconnect, but the same bot by
+    # ident - see _ident_merges(). Only ever maps a nick that is NOT here to
+    # one that is, so the presence check below never needs to undo it.
+    if primary == bot and merges:
+        return merges.get(str(bot).lower(), bot)
     if primary == bot or not present:
         return primary
     if primary.lower() in present and bot.lower() in present:
@@ -3522,7 +3699,7 @@ def apply_folder_changes(payload):
 
 
 
-def _save_settings_and_rehash(changes):
+def _save_settings_and_rehash(changes, confirmed_debug_removal=False):
     """Write `changes` to settings.conf and dispatch a rehash on its own
     daemon thread. The shared tail of apply_settings_changes() (POST
     /api/settings) and build_password_change_result() (POST
@@ -3565,7 +3742,7 @@ def _save_settings_and_rehash(changes):
     threading.Thread(
         target=commands.handle_rehash_request,
         args=(WEB_DASHBOARD_SOURCE, WEB_DASHBOARD_SOURCE),
-        kwargs={"authorised": True},
+        kwargs={"authorised": True, "confirmed_debug_removal": confirmed_debug_removal},
         daemon=True,
     ).start()
 
@@ -3579,15 +3756,34 @@ def apply_settings_changes(changes):
     value the same way settings.conf itself would be read), then hand off to
     _save_settings_and_rehash() for the actual write + dispatched rehash.
 
+    `confirm_debug_channel_removed` (#1008 follow-up) is not a setting - it
+    is popped out here, before `changes` ever reaches settings_file.save(),
+    and threaded through as its own argument instead. It means nothing on
+    its own: sync_channels() only ever reads it in the one case it exists
+    for (DEBUG_CHANNEL going from a real channel to blank), so a stray or
+    even malicious `true` sent on an unrelated save has no effect - there is
+    nothing there for it to gate.
+
     Returns (http_status, payload_dict).
     """
-    if not isinstance(changes, dict) or not changes:
+    if not isinstance(changes, dict):
+        return 400, {"error": "Expected a non-empty object of {SETTING: value}."}
+
+    # Popped before the emptiness check below (the #1011 review):
+    # a body whose only key is this flag is not a settings change, and used
+    # to pass the check, save nothing and still start a rehash - harmless in
+    # practice since the dashboard never sends the flag alone, but a body
+    # this empty should 400 like any other.
+    changes = dict(changes)
+    confirmed_debug_removal = bool(changes.pop("confirm_debug_channel_removed", False))
+
+    if not changes:
         return 400, {"error": "Expected a non-empty object of {SETTING: value}."}
     if "ADMIN_PASSWORD_HASH" in changes:
         return 400, {"error": "Use POST /api/settings/password to change the "
                                "admin password."}
 
-    return _save_settings_and_rehash(changes)
+    return _save_settings_and_rehash(changes, confirmed_debug_removal=confirmed_debug_removal)
 
 
 def build_password_change_result(new_password, confirm_password):

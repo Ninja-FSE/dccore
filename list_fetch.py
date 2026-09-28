@@ -217,6 +217,42 @@ def list_extract_dir(bot):
     return candidate
 
 
+def _fetch_file_size_budget():
+    """MAX_FETCH_FILE_SIZE, resolved the way dcc_fetch.py's own admission
+    check already reads it: 0 means no limit (#302), not a real zero-byte
+    ceiling. Read here rather than left as the raw setting because this
+    module uses the value twice - once as the zip-bomb sum cap in
+    _validate_zip_members(), once as the running extraction budget in
+    process_fetched_list_zip() - and a `budget` that starts at a literal 0
+    would fail the very first byte written, the same bug either call site
+    would have on its own (#937 was the sibling of this one, on
+    MAX_FETCH_LIST_FILE_SIZE).
+
+    BUT 0 IS NOT "NO BOUND" FOR A LIST ARCHIVE (#945). Here the value is the
+    zip-bomb guard: _validate_zip_members()'s sum of declared sizes is the
+    only thing bounding extraction (ZipExtFile truncates each member to what
+    it declares, and max_list_text_size() is checked after extraction). #940
+    returned float("inf"), so with the setting at 0 a small zip of zeros
+    unpacked without limit. An operator lifting the cap on FILES is not
+    asking for that. So 0 falls back to what real lists can hold -
+    max_list_text_size() per list, MAX_LISTS_PER_ARCHIVE of them: any list
+    bigger than that is refused after extraction anyway, so this refuses
+    nothing that would have been kept."""
+    raw = int(getattr(config, "MAX_FETCH_FILE_SIZE", 200 * 1024 * 1024))
+    if raw > 0:
+        return raw
+    return max_list_text_size() * MAX_LISTS_PER_ARCHIVE
+
+
+def _fetch_file_size_budget_name():
+    """Which ceiling _fetch_file_size_budget() applied, for the rejection
+    message - "MAX_FETCH_FILE_SIZE (0 bytes)" named a limit that is not
+    the one refusing the list."""
+    if int(getattr(config, "MAX_FETCH_FILE_SIZE", 200 * 1024 * 1024)) > 0:
+        return "MAX_FETCH_FILE_SIZE"
+    return f"the list archive ceiling (MAX_LIST_TEXT_SIZE x {MAX_LISTS_PER_ARCHIVE})"
+
+
 def _validate_zip_members(infolist, extract_dir):
     """Check EVERY member before anything is extracted. Returns a short
     rejection reason string, or None if the whole archive is clear to
@@ -229,7 +265,7 @@ def _validate_zip_members(infolist, extract_dir):
                 f"{MAX_LIST_ZIP_ENTRIES} a real master-list archive should "
                 f"ever need (zip-bomb-shaped guard)")
 
-    max_total = int(getattr(config, "MAX_FETCH_FILE_SIZE", 200 * 1024 * 1024))
+    max_total = _fetch_file_size_budget()
     total_uncompressed = 0
     for info in infolist:
         if info.is_dir():
@@ -237,8 +273,8 @@ def _validate_zip_members(infolist, extract_dir):
         total_uncompressed += info.file_size
         if total_uncompressed > max_total:
             return (f"zip's declared total uncompressed size exceeds "
-                     f"MAX_FETCH_FILE_SIZE ({max_total} bytes) - refusing to "
-                     f"extract (zip-bomb guard)")
+                     f"{_fetch_file_size_budget_name()} ({max_total} bytes) - "
+                     f"refusing to extract (zip-bomb guard)")
 
         member_name = info.filename.replace('\\', '/')
         # An absolute path (POSIX "/etc/..." or a Windows drive letter like
@@ -652,7 +688,11 @@ def _extract_and_locate_list_file(zip_path, extract_dir):
     except OSError as err:
         return None, f"could not stat the fetched zip: {err}"
     list_zip_cap = int(getattr(config, "MAX_FETCH_LIST_FILE_SIZE", 10 * 1024 * 1024))
-    if on_disk_size > list_zip_cap:
+    # 0 MEANS NO LIMIT, same as dcc_fetch.py's own admission check on this
+    # setting (#302) - missing here meant a fetch that setting explicitly
+    # allowed through was thrown away right after a successful download,
+    # since `on_disk_size > 0` is true of any real file (#937).
+    if list_zip_cap > 0 and on_disk_size > list_zip_cap:
         shutil.rmtree(platform_compat.long_path(extract_dir), ignore_errors=True)
         return None, (f"fetched zip is {on_disk_size} bytes, more than "
                        f"MAX_FETCH_LIST_FILE_SIZE ({list_zip_cap}) - refusing "
@@ -679,8 +719,7 @@ def _extract_and_locate_list_file(zip_path, extract_dir):
                 shutil.rmtree(platform_compat.long_path(extract_dir), ignore_errors=True)
                 return None, reason
 
-            max_total = int(getattr(config, "MAX_FETCH_FILE_SIZE", 200 * 1024 * 1024))
-            budget = max_total
+            budget = _fetch_file_size_budget()
             for info in infolist:
                 if info.is_dir():
                     continue
@@ -874,7 +913,8 @@ def refetch_due_lists(log=print, now=None):
     AUTO_REFETCH_MAX_PER_RUN: a bot that has been offline for a month comes
     back to thirty stale lists, and asking all thirty at once is a burst of
     outbound requests nobody asked for - the rest are picked up next time
-    round, oldest first.
+    round, oldest first. Only bots in one of our channels are asked, and only
+    the asks that went out count toward the bound (#966).
 
     Goes through the SAME enqueue the dashboard's own Refresh uses, so the
     slot limits, the duplicate guard and the queue ceiling all apply exactly
@@ -898,7 +938,15 @@ def refetch_due_lists(log=print, now=None):
 
     import webserver
 
-    due = lists_worth_refetching(now=now)
+    # ONLY BOTS THAT ARE HERE, and the cap counts only what was asked (#966).
+    # The oldest lists come first, and the oldest are the likeliest to belong
+    # to bots long gone: past UNKNOWN_LIST_MAX_AGE_DAYS with their adverts
+    # aged out, three of them took the three places of every sweep, were
+    # refused as "not here" - which is not an ask, so last_attempt never
+    # moved them back - and a bot online with a changed list was never
+    # reached. An absent bot is left for a sweep that finds it back.
+    here = webserver.present_nicks()
+    due = [bot for bot in lists_worth_refetching(now=now) if bot.lower() in here]
     if not due:
         return []
 
@@ -906,11 +954,11 @@ def refetch_due_lists(log=print, now=None):
         cap = int(getattr(config, "AUTO_REFETCH_MAX_PER_RUN", 3))
     except (TypeError, ValueError):
         cap = 3
-    if cap > 0:
-        due = due[:cap]
 
     started = []
     for bot in due:
+        if cap > 0 and len(started) >= cap:
+            break
         # build_list_fetch_enqueue_result(bot_raw) wants the nick ITSELF -
         # see its own docstring and the real HTTP route's call
         # (build_list_fetch_enqueue_result(body.get("bot", ""))) - not a
@@ -1065,6 +1113,13 @@ def process_fetched_list_zip(bot, zip_path):
         entry = (getattr(config, "fetched_bot_lists", {}) or {}).get(str(bot).strip().lower())
         count = int((entry or {}).get("entry_count") or 0) if isinstance(entry, dict) else 0
         _tell_the_console(bot, "arrived", f"{bot}'s list arrived: {count:,} files")
+        # Automatic grabbing starts this bot over (#967). Never raises into
+        # a list that has already been stored.
+        try:
+            import list_grab
+            list_grab.note_list_arrived(bot)
+        except Exception as err:
+            print(f"[LIST-FETCH] Could not reset {bot}'s automatic grab record: {err}")
     else:
         _tell_the_console(bot, "unusable",
                           f"{bot}'s list could not be used" + (f": {reason}" if reason else ""))

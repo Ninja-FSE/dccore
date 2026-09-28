@@ -70,36 +70,36 @@ class TheRegistration(DCCoreTestCase):
 
     def test_both_follow_the_configured_nickname(self):
         self.set_config(NICKNAME="jlnbln", ORIGINAL_NICK="jlnbln")
-        self.assertEqual(irc.registration_names(), ("jlnbln", "jlnbln"))
+        self.assertEqual(irc.registration_names(), ("jlnbln", "DCCore/sc jlnbln"))
 
     def test_changing_the_nickname_changes_both(self):
         self.set_config(NICKNAME="First", ORIGINAL_NICK="First")
-        self.assertEqual(irc.registration_names(), ("first", "First"))
+        self.assertEqual(irc.registration_names(), ("first", "DCCore/sc First"))
         self.set_config(NICKNAME="Second", ORIGINAL_NICK="Second")
-        self.assertEqual(irc.registration_names(), ("second", "Second"))
+        self.assertEqual(irc.registration_names(), ("second", "DCCore/sc Second"))
 
     def test_the_configured_nick_not_the_temporary_alternate(self):
         """First nick taken: NICKNAME is the alternate for a while, ORIGINAL_NICK
         is what was set. The identity does not flicker with that."""
         self.set_config(NICKNAME="DCCore_", ORIGINAL_NICK="jlnbln")
-        self.assertEqual(irc.registration_names(), ("jlnbln", "jlnbln"))
+        self.assertEqual(irc.registration_names(), ("jlnbln", "DCCore/sc jlnbln"))
 
     def test_without_an_original_the_nickname_is_used(self):
         self.set_config(NICKNAME="jlnbln", ORIGINAL_NICK=None)
-        self.assertEqual(irc.registration_names(), ("jlnbln", "jlnbln"))
+        self.assertEqual(irc.registration_names(), ("jlnbln", "DCCore/sc jlnbln"))
 
     def test_nothing_configured_falls_back_as_before(self):
         self.set_config(NICKNAME=None, ORIGINAL_NICK=None)
-        self.assertEqual(irc.registration_names(), ("dccore", "dccore"))
+        self.assertEqual(irc.registration_names(), ("dccore", "DCCore/sc dccore"))
 
-    def test_the_real_name_is_the_whole_nickname_unchanged(self):
+    def test_the_real_name_is_the_mark_and_the_whole_nickname_unchanged(self):
         self.set_config(NICKNAME="Music[Bot]", ORIGINAL_NICK="Music[Bot]")
-        self.assertEqual(irc.registration_names(), ("musicbot", "Music[Bot]"))
+        self.assertEqual(irc.registration_names(), ("musicbot", "DCCore/sc Music[Bot]"))
 
     def test_the_old_side_door_is_no_longer_read(self):
         """An IDENT or REALNAME attribute nobody documented is ignored now: one way."""
         self.set_config(NICKNAME="jlnbln", ORIGINAL_NICK="jlnbln", IDENT="other", REALNAME="another")
-        self.assertEqual(irc.registration_names(), ("jlnbln", "jlnbln"))
+        self.assertEqual(irc.registration_names(), ("jlnbln", "DCCore/sc jlnbln"))
 
 
 class TheUserLine(unittest.TestCase):

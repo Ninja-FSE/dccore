@@ -517,12 +517,10 @@
       </div>
 
       <div class="stat-group-label" data-i18n="stats.library">Library</div>
-      <div class="stat-row is-wide">
-        <div class="stat-card"><div class="stat-value" id="st-files">&mdash;</div><div class="stat-label" data-i18n="stats.filesShared">Files shared</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-size">&mdash;</div><div class="stat-label" data-i18n="common.size">Size</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-albums">&mdash;</div><div class="stat-label" data-i18n="stats.albumFolders">Album folders (!rar)</div></div>
-        <div class="stat-card"><div class="stat-value stat-value-sm" id="st-built">&mdash;</div><div class="stat-label" data-i18n="stats.listBuilt">List built</div></div>
-      </div>
+      <!-- #952: the cards are BUILT by renderLibrary(), because how many there
+           are depends on how many lists this bot serves - the total, one per
+           list when there is more than one, and when the list was built. -->
+      <div class="stat-row is-wide" id="st-library"></div>
 
 
       <!-- SIDE BY SIDE: two "most downloaded" tables that used to stack full

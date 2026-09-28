@@ -4,6 +4,7 @@ import io
 import re
 import sys
 import shutil
+import sqlite3
 import datetime
 import subprocess
 import tempfile
@@ -1452,7 +1453,16 @@ def generate_master_list(list_name=None):
     # rebuild are opened. Unopenable, it says so and the list is size-only.
     audio = None
     if getattr(config, "LIST_SHOW_AUDIO_INFO", False):
-        audio = audio_info.Cache.open(scope=list_name or "")
+        # THE LIST'S OWN NAME, however the rebuild was asked for (#979). A
+        # lone list is built with no name and each of several by its name, so
+        # the primary's scope was "" until a second list was added and its
+        # name after: its whole cache missed at once - re-read within
+        # LIST_AUDIO_INFO_MINUTES, the rest size-only for rebuilds - and the
+        # "" rows were never pruned. Only the primary was ever built as "",
+        # so it takes those rows over.
+        primary = library.primary_list().name
+        scope = list_name or primary
+        audio = audio_info.Cache.open(scope=scope, formerly="" if scope == primary else None)
 
     for folder_number, scan_folder in enumerate(scan_folders, start=1):
         # Reported per folder because the folder COUNT is the one total known
@@ -1625,6 +1635,10 @@ def generate_master_list(list_name=None):
         audio.read_pending(workers=workers, budget=minutes * 60,
                            progress=lambda done, total: write_progress(
                                "audio", folder_index=done, folder_count=total, files=listed))
+        if audio.unread:
+            print(f"[LIST-GEN] {len(audio.unread):,} audio file(s) could not be read this time "
+                  f"(a network or sharing error): they show their size alone, and the next "
+                  f"rebuild tries them again.")
         if audio.left_count:
             print(f"[LIST-GEN] {audio.left_count:,} audio file(s) not read within "
                   f"LIST_AUDIO_INFO_MINUTES = {minutes}: they show their size alone this "
@@ -2191,7 +2205,18 @@ def generate_master_list(list_name=None):
         if audio is not None:
             # Only a PUBLISHED rebuild forgets the files it did not see; a
             # failed one may have seen half the library.
-            audio.publish()
+            #
+            # AN OPTIONAL CACHE DOES NOT FAIL A LIVE LIST (#980). The swap has
+            # happened: the new list is what users are getting. A locked or
+            # unwritable cache here went to the except below, and the rebuild
+            # was reported failed - with several lists, as "still serving
+            # what they last built", which was untrue. close() still keeps
+            # what this rebuild read; the next one reads the rest again.
+            try:
+                audio.publish()
+            except (sqlite3.Error, OSError) as cache_err:
+                print(f"[LIST-GEN] The list is published, but the audio info cache could not be "
+                      f"updated ({cache_err}): the next rebuild reads again what it could not keep.")
             rate = audio.rate()
             print(f"[LIST-GEN] Audio info: {audio.read_count:,} file(s) read, "
                   f"{audio.reused_count:,} unchanged since the last rebuild"

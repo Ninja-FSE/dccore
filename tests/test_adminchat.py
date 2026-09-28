@@ -77,6 +77,38 @@ LOOPBACK_OK = _loopback_is_available()
 NEEDS_LOOPBACK = "needs loopback socket binding, which this machine does not allow"
 
 
+# How long a test waits for the bot's DCC CHAT offer before giving up (#950).
+# A ceiling, not a delay: every wait polls and returns the moment the offer is
+# there, so a generous one costs nothing when things work. 5 s failed three
+# tests on a macOS runner that took 210 s for a suite others finish in 115.
+OFFER_WAIT_SECONDS = 30.0
+
+
+def why_no_offer():
+    """What stood in the way when an expected offer never came (#950).
+
+    An offer can fail to appear for two reasons the bot only prints about -
+    the one-listener flag already held (a listener left over from another
+    test), or no free port left in the DCC range - and a CI log shows neither.
+    Stating both in the failure message means the next occurrence names its
+    own cause instead of leaving it to be guessed."""
+    start = int(getattr(config, "DCC_PORT_START", 55000))
+    end = int(getattr(config, "DCC_PORT_END", 55010))
+    free = 0
+    for port in range(start, end + 1):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.bind(("0.0.0.0", port))
+            free += 1
+        except OSError:
+            pass
+        finally:
+            probe.close()
+    return (f"no DCC CHAT offer within {OFFER_WAIT_SECONDS:.0f}s; the one-listener "
+            f"flag is {'SET' if adminchat._listening else 'clear'}, and {free} of "
+            f"{end - start + 1} ports in {start}-{end} are free")
+
+
 def wait_for(predicate, timeout=5.0, interval=0.02):
     """Poll rather than sleep a fixed time, so the suite is neither slow nor flaky."""
     deadline = time.time() + timeout
@@ -483,7 +515,7 @@ class ConnectFailureFallsBackToListening(unittest.TestCase):
         probe.close()
         return port
 
-    def offered_port(self, timeout=8.0):
+    def offered_port(self, timeout=OFFER_WAIT_SECONDS):
         deadline = time.time() + timeout
         while time.time() < deadline:
             for line in self.sent:
@@ -497,7 +529,7 @@ class ConnectFailureFallsBackToListening(unittest.TestCase):
         self.assertTrue(adminchat.handle_dcc_chat(self.irc, ADMIN_LINE, "SysOp", offer))
 
         port = self.offered_port()
-        self.assertIsNotNone(port, "a failed dial must be followed by an offer")
+        self.assertIsNotNone(port, "a failed dial must be followed by an offer: " + why_no_offer())
         self.assertGreaterEqual(port, config.DCC_PORT_START)
         self.assertLessEqual(port, config.DCC_PORT_END)
 
@@ -506,7 +538,7 @@ class ConnectFailureFallsBackToListening(unittest.TestCase):
         offer = f"DCC CHAT chat 2130706433 {self.dead_port()}"
         adminchat.handle_dcc_chat(self.irc, ADMIN_LINE, "SysOp", offer)
         port = self.offered_port()
-        self.assertIsNotNone(port)
+        self.assertIsNotNone(port, why_no_offer())
 
         client = socket.create_connection(("127.0.0.1", port), timeout=5.0)
         self.addCleanup(client.close)
@@ -538,7 +570,7 @@ class ConnectFailureFallsBackToListening(unittest.TestCase):
         adminchat.handle_dcc_chat(self.irc, ADMIN_LINE, "SysOp",
                                   "DCC CHAT chat 3405803817 55101")
         self.assertIsNotNone(self.offered_port(),
-                             "a timeout must fall back exactly as a refusal does")
+                             "a timeout must fall back exactly as a refusal does: " + why_no_offer())
 
     def test_listen_mode_does_not_dial_at_all(self):
         """So the operator stops paying the connect timeout on every login."""
@@ -555,7 +587,7 @@ class ConnectFailureFallsBackToListening(unittest.TestCase):
 
         adminchat.handle_dcc_chat(self.irc, ADMIN_LINE, "SysOp",
                                   "DCC CHAT chat 3405803817 55101")
-        self.assertIsNotNone(self.offered_port())
+        self.assertIsNotNone(self.offered_port(), why_no_offer())
         self.assertEqual([a for a in dialled if a[1] == 55101], [],
                          "listen mode must not dial the client")
 
@@ -570,26 +602,45 @@ class ConnectFailureFallsBackToListening(unittest.TestCase):
         config.ADMIN_CHAT_MODE = "connect"
 
         dial_attempted = threading.Event()
+        decided = threading.Event()
         listened = []
 
         real_connect = socket.create_connection
         real_listen = adminchat._listen_and_serve
+        real_connect_and_serve = adminchat._connect_and_serve
 
         def refuse(address, *args, **kwargs):
             dial_attempted.set()
             raise ConnectionRefusedError("refused")
 
+        # THE DECISION IS AWAITED, not assumed (#950). This used to check
+        # `listened` right after the dial was attempted, behind a
+        # wait_for(lambda: True) that returns on its first poll - so it
+        # checked before the thread had decided. With connect mode broken on
+        # purpose it still passed 3 runs in 20, and the thread it left
+        # running could decide AFTER this test ended: with the mode and the
+        # real _listen_and_serve already put back, it fell back for real,
+        # took the one-listener flag after the next test's reset and held it
+        # for LISTEN_TIMEOUT - the next test's own offer then went nowhere.
+        def connect_and_serve_then_say_so(*args, **kwargs):
+            try:
+                return real_connect_and_serve(*args, **kwargs)
+            finally:
+                decided.set()
+
         socket.create_connection = refuse
         adminchat._listen_and_serve = lambda *a, **k: listened.append(a)
+        adminchat._connect_and_serve = connect_and_serve_then_say_so
         self.addCleanup(lambda: setattr(socket, "create_connection", real_connect))
         self.addCleanup(lambda: setattr(adminchat, "_listen_and_serve", real_listen))
+        self.addCleanup(lambda: setattr(adminchat, "_connect_and_serve", real_connect_and_serve))
 
         adminchat.handle_dcc_chat(self.irc, ADMIN_LINE, "SysOp",
                                   "DCC CHAT chat 2130706433 55555")
 
         self.assertTrue(dial_attempted.wait(5.0), "the dial must at least be attempted")
-        # The decision happens on the same thread, immediately after the failure.
-        self.assertTrue(wait_for(lambda: True, timeout=0.2))
+        self.assertTrue(decided.wait(OFFER_WAIT_SECONDS),
+                        "the thread must finish deciding before this test ends")
         self.assertEqual(listened, [],
                          "connect mode must not fall back to listening")
 
@@ -719,7 +770,7 @@ class ListenModeEndToEnd(unittest.TestCase):
 
         self.irc = RecordingIrcSocket()
 
-    def offered_port(self, timeout=5.0):
+    def offered_port(self, timeout=OFFER_WAIT_SECONDS):
         """Pull the port out of the CTCP the bot sent back."""
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -835,7 +886,7 @@ class TheListenerFlagReleasesBeforeTheSessionBlocks(unittest.TestCase):
 
         self.irc = RecordingIrcSocket()
 
-    def offered_ports(self, count, timeout=5.0):
+    def offered_ports(self, count, timeout=OFFER_WAIT_SECONDS):
         """Pull `count` distinct offered ports out of everything sent so far."""
         deadline = time.time() + timeout
         seen = []
@@ -867,8 +918,9 @@ class TheListenerFlagReleasesBeforeTheSessionBlocks(unittest.TestCase):
 
     def test_the_flag_is_clear_while_an_authenticated_session_is_being_served(self):
         adminchat.handle_dcc_chat(self.irc, ADMIN_LINE, "SysOp", "DCC CHAT chat 0 11283")
-        first_port = self.offered_ports(1)[0]
-        self.authenticate(first_port)
+        offered = self.offered_ports(1)
+        self.assertTrue(offered, why_no_offer())
+        self.authenticate(offered[0])
 
         # The session above is now blocking in _serve()'s _reader_loop, same
         # as it would for the operator's whole session in production. The whole
@@ -881,8 +933,9 @@ class TheListenerFlagReleasesBeforeTheSessionBlocks(unittest.TestCase):
     def test_a_second_offer_is_not_refused_while_the_first_is_authenticated(self):
         """The user-visible symptom: a takeover offer silently going nowhere."""
         adminchat.handle_dcc_chat(self.irc, ADMIN_LINE, "SysOp", "DCC CHAT chat 0 11283")
-        first_port = self.offered_ports(1)[0]
-        self.authenticate(first_port)
+        offered = self.offered_ports(1)
+        self.assertTrue(offered, why_no_offer())
+        self.authenticate(offered[0])
 
         adminchat.handle_dcc_chat(self.irc, ADMIN_LINE, "SysOp", "DCC CHAT chat 0 22222")
 
@@ -894,7 +947,7 @@ class TheListenerFlagReleasesBeforeTheSessionBlocks(unittest.TestCase):
         self.assertEqual(len(ports), 2,
                          "the second offer must open its own listener and "
                          "send its own CTCP back, not be silently dropped "
-                         "at the one-listener gate")
+                         "at the one-listener gate: " + why_no_offer())
 
 
 class BadIpTracking(unittest.TestCase):

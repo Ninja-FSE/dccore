@@ -281,12 +281,19 @@ class ItStillDoesNotImportTheDaemon(unittest.TestCase):
         with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
             source = handle.read()
 
-        body = source[source.index("def build_stats_payload("):]
-        body = body[:body.index("\ndef ", 1)]
+        def body_of(name):
+            body = source[source.index("def %s(" % name):]
+            return body[:body.index("\ndef ", 1)]
 
-        for needle in ("import db", "import list as list_mod", "import stats_mgr"):
-            with self.subTest(needle=needle):
-                self.assertIn(needle, body)
+        # `list` moved with the Library block (#952): that block asks every
+        # served list, so it lives in build_library_payload(), which imports
+        # library and list itself for the same reason the builder imports db.
+        for function, needles in (
+                ("build_stats_payload", ("import db", "import stats_mgr")),
+                ("build_library_payload", ("import library", "import list as list_mod"))):
+            for needle in needles:
+                with self.subTest(function=function, needle=needle):
+                    self.assertIn(needle, body_of(function))
 
 
 if __name__ == "__main__":

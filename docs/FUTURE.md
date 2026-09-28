@@ -21,7 +21,10 @@ What DCCore does today, and what it does not do yet.
 
 - **One master list**, rebuilt by `!update`, from the dashboard, or by itself on a schedule (`LIST_REBUILD_SCHEDULE`: daily, weekly, monthly or every N hours), published atomically so a failed scan never overwrites a good index.
 - **Three formats** — `.txt`, `.zip` and `.rar`, all built every time; `LIST_FORMAT` picks which one is offered.
-- **Search** — `@find <words>` against the master list, with results fitted to the IRC line limit.
+- **Search** — `@find <words>` against the master list, with results fitted to the IRC line limit. Words in quotes must appear together, in that order: `@find "metal church" 1986`.
+- **Searching and downloading go on while the list rebuilds.** The new list is built beside the one people already have, and the bot pauses only for the few seconds it takes to swap it in (`PAUSE_ON_UPDATE`; `PAUSE_FOR_WHOLE_UPDATE` brings back the old whole-rebuild pause).
+- **Several folders scanned at once** (`LIST_SCAN_THREADS`, 16 by default), which is what makes a rebuild over a network drive shorter.
+- **Length and quality in the list, if you want them** (`LIST_SHOW_AUDIO_INFO`) — every MP3 and FLAC row gets its duration and bitrate after the size, `::INFO:: 10.3MB 4m31s 320/44.1/JS`, read once per file and remembered.
 - **Every folder heading says what it holds** — `14 files, 1.20GB` on its own line under the heading, placed so that every program that reads these lists (other DCCore bots, AutoQ, DCCore's own request handling) ignores it. Companion files (`.srt`, `.nfo`, `.sfv`…) travel with the film they belong to when the video list is split out, and stay with an album otherwise.
 - **A partially unreadable library fails the rebuild** rather than silently publishing a truncated list.
 
@@ -66,11 +69,18 @@ Two pieces were worth doing carefully rather than quickly, and one of them turne
 - **Broadcast search** — send one `@find` to a channel and collect every bot's reply, grouped under each bot's own parsed header.
 - **Both DCC directions** — active and passive/reverse SEND, since bots behind NAT use the latter.
 - **Hostile-input handling** — every other bot is treated as untrusted: admission control, size caps, and zip-slip / zip-bomb guards on any archive received.
+- **Their answers are understood** — what OmeNServE, SDFind, SpR, BWI and DCCore itself reply to a request. A queued request shows its place in their queue on the Downloads page and waits for its turn (`FETCH_QUEUED_TIMEOUT`, 12 hours by default); "I don't have that file" or "queue full" ends it at once, in the server's own words.
+- **The download queue looks after itself.** A file queued from a bot that is offline waits, and is asked for a minute after the bot comes back. Only `FETCH_MAX_PER_BOT` (3) are asked of one bot at a time, the next going when one arrives, so a big selection does not earn "queue full". A "busy" answer is asked again, three times, ten minutes apart. Unfinished downloads survive a restart.
+- **A bot that cannot be reached is paused**, after three failed connections in a row, with a **Resume** button on the Downloads page, instead of failing file after file. When the drive fetched files go to has less than 200 MB free, downloads wait and carry on by themselves once there is room.
+- **The List Browser** — every list you have fetched, one row per bot, with a tab for each list its archive holds (music, RAR, video) rather than only the largest. A light says whether the bot's advert shows a newer list than yours; a list you have not opened yet says *New*; click an online bot and its advertised free slots, queue and speed appear under it. One filter searches every held list at once, from an index built as each list arrives, and **Online only** takes the bots that are not here off both the sidebar and the search. A bot that never advertises can be added by hand, and a list can be fetched again, or removed, from its own row.
+- **Held lists can keep themselves up to date** (`AUTO_REFETCH_LISTS`, off by default): a list is fetched again when its bot's advert shows a different date or file count, or - for a bot whose advert shows no date - once it is 14 days old. Never more often than `AUTO_REFETCH_INTERVAL_HOURS`, and at most `AUTO_REFETCH_MAX_PER_RUN` at a time; only bots in one of your channels are asked, so lists of bots that have left never hold up the rest.
+- **Lists can be grabbed by themselves** (`AUTO_GRAB_LISTS`, off by default), on AutoGet's rules: the list of a bot you have none from is asked for one at a time, at most one every 10 minutes, after a random 5-360 second wait, not at all if someone else just asked that bot, and at most three times per bot, 30 minutes apart - counting only requests that went out, and starting over once a list arrives. Small, slow and "servers only" bots can be skipped, and a list you removed is not grabbed back until you fetch it yourself.
 
 ### Operating it
 
 - **Authenticated admin console over DCC CHAT**, gated on the operator's services host *and* a PBKDF2-hashed password. Read-only commands (`status`, `queue`, `slots`, `bans`, `uptime`, `version`) and action commands (`ban`, `unban`, `clearqueue`, `rehash`, `update`) — see [ADMIN-CONSOLE.md](ADMIN-CONSOLE.md). The feed's tags are in the bot's own theme colours (`ADMIN_CHAT_COLOURS`), and the diagnostic channel commands (`!ping`, `!debugnames`) answer only the bot's own admin, so two DCCore bots in one channel never answer each other's operator.
 - **A structured feed for scripts, and the bot's own window in mIRC.** A console session that says `hello <client> <version>` gets every event as one `DCCORE <TYPE> <fields…> <free text>` line — requests, queue positions, sends, resumes, completions, failures, searches, the rest as `LOG` — plus a `STATUS`/`SLOT`/`QUEUE` burst after every change and every 30 s (the heartbeat). `pair` mints a login token for a script that opens the console and nothing else. `scripts/mirc/dccore.mrc` (mIRC 6.10+) draws it all: the feed coloured per kind, a side panel with what is sending and who is waiting, the slots and today's totals in the title bar, console commands typed in the window, an options dialog; `/dccore pair <bot>` once, then it logs in by itself.
+- **DCCore Chat** - public chat with other operators in the channels the bot is in, over an ordinary channel message (not a NOTICE, which channel bots kick for) starting with a neutral `[ServersChat]` tag, relayed by the bot: the operator types in the mIRC window script's chat window, the bot says it (`chat * text` on the console) in the fewest channels that reach the other DCCore bots, which it finds by their `DCCore/sc` realname with WHO, and tagged lines from those bots come back over the structured feed. Its own window, which says it is public; channels picked from its right-click menu; a per-nick flood limit and a cap on what is sent; colours stripped; the last 50 lines in memory only for a window that reconnects; nothing ever sent automatically, and nothing written to disk. See [ADMIN-CONSOLE.md](ADMIN-CONSOLE.md).
 - **Optional web dashboard** — Search, Queue, List Browser grouped by folder, Downloads, a duplicate-filename verifier (which the build now warns about too, for operators who never open the dashboard), a list rebuilder, a Settings page, and a Console (the DCC CHAT admin console's commands and live log, in the browser — for an operator who wants neither a second IRC client nor a debug channel). Off by default, loopback by default, behind the same password as the DCC CHAT console.
 - **Purging a fetched list** - the manual half of the fetched-list purge, in two shapes: one bot at a time from its own list, and every offline bot at once from the toolbar. Removes the entry, the extracted files and the search index rows together. An automatic TTL is still open and deliberately second: `fetched_at` answers list staleness, not "this bot is gone", and a timer that deletes an operator's data by default is a surprise waiting to happen.
 - **Messages people send the bot** - a private message that is not a command gets no reply, and now leaves a record: a Messages page with an unread count, throttled per sender. The bot still never answers. Turning it off (`PRIVATE_MESSAGES_ENABLED = false`) keeps nothing, hides the page and its menu entry, and tells the sender once where to go instead - a NOTICE, once per person per day, under a burst ceiling, on the ordinary send lane.
@@ -78,7 +88,8 @@ Two pieces were worth doing carefully rather than quickly, and one of them turne
 - **The launcher is the install.** Extract, double-click (`start-dccore.bat`, `start-dccore.sh`, `start-dccore.command`): the first run opens a setup page in the browser — nickname, server, channels, your nick, the password, the music folder, the dashboard, each with the same **?** explanation the Settings page has, in English, French or Spanish — loopback-only, one-shot, behind a one-time code in the link, and the bot starts the moment you save. No Flask, or no browser: the same questions in the terminal (`configure.py`). On Windows with no Python at all, the launcher offers to download python.org's installer, checks it against a fingerprint pinned in the script, and runs it with both boxes ticked. Every run after that checks the setup and starts the bot.
 - **Starting with the system, the firewall, the router.** `install-autostart` scripts for Windows (Task Scheduler), Linux (a systemd user unit) and macOS (launchd), each with a remover, each running the launcher so the working directory is right; `allow-firewall.bat` adds the Windows rule for the bot's ports and the setup check names the `ufw`/`firewall-cmd` lines on Linux; port forwarding explained in plain words in both guides.
 - **Pre-flight check** — `start-dccore.sh check` verifies the setup without opening a socket, and says what stands between the bound ports and the outside on this OS.
-- **Every setting explains itself.** The **?** beside each of the 117 settings on the dashboard — and the comment above it in `settings.conf.sample` — is written for the person running the bot, in English, French and Spanish; the dashboard itself is translated the same three ways.
+- **It tells you when a new version is out.** Once a day (`CHECK_FOR_UPDATES`) it asks GitHub for the latest release - one request, carrying nothing about your bot - and says so in the dashboard's sidebar, the console's `status` and the mIRC window, each with a way to check now.
+- **Every setting explains itself.** The **?** beside every setting on the dashboard — and the comment above it in `settings.conf.sample` — is written for the person running the bot, in English, French and Spanish; the dashboard itself is translated the same three ways.
 - **Two configuration mechanisms** — `admin_config.py` for Python, `settings.conf` for plain text; the dashboard and console both write to the latter.
 - **`!rehash`** reloads code and settings live, preserving queues and transfer state.
 - **Channel adverts** on a timer, with a per-bot theme (five presets, or your own colours).
@@ -86,7 +97,7 @@ Two pieces were worth doing carefully rather than quickly, and one of them turne
 
 ### Quality
 
-- **6661 tests**, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14, in CI on every push and pull request — and a preflight script that runs the whole suite twice, the second time with the host's own tooling hidden, so a test that only passes on a developer's machine fails before it is pushed.
+- **7052 tests**, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14, in CI on every push and pull request — and a preflight script that runs the whole suite twice, the second time with the host's own tooling hidden, so a test that only passes on a developer's machine fails before it is pushed.
 - **Stdlib-only** — the daemon and its test suite need no third-party packages; Flask is required only for the optional dashboard.
 - **No reloaded module owns a lock** — `!rehash` re-executes a module body, so a module-level `threading.Lock()` is rebound while a thread is still inside it. Every lock in a reloaded module is allocated in `runtime.py` and bound by name, and `tests/test_no_reloaded_module_owns_a_lock.py` fails if a new one appears — the class, not the four instances that prompted it.
 - **A cross-list search index** — SQLite FTS5, built as each bot list is fetched, so the dashboard can filter every held list live rather than re-reading them at 2-11 seconds a keystroke.
@@ -147,11 +158,15 @@ nick (`ORIGINAL_NICK`, falling back to `NICKNAME`) however it is built, live or
 from a subprocess, so it survives the bot being on its alt nick at rebuild
 time.
 
-The sidebar half is still open: a bot that reconnects under its alt nick still
-shows there as a second bot, since nothing merges the two adverts. What is the
-stable identity to merge them on — the services account, the host, an operator
-mapping in settings? And is the fix to normalise at fetch time, to rewrite the
-request lines on the way out, or only to merge the two rows in the sidebar?
+**The sidebar half is done, for display only.** A bot seen under two nicks is
+one row, shown under the nick it has now, with the other named in the row's
+tooltip. Two kinds of evidence count. A NICK message from a known bot is proof.
+The other is its **ident**, together with the same advertised file count, an
+old nick whose QUIT, PART or NICK was actually seen, and the two never
+advertising at the same time. The ident is held in memory only: never written,
+never logged, gone on restart. No host or IP is kept at all. Anything short of
+all of that leaves two rows. Saved lists, the registry and the counters stay
+keyed per nick, so a wrong merge could only ever mis-group a row.
 
 **A bot that never advertises can now be added by hand.** A bot that answers
 `@nick` and `!nick <track>` perfectly well but never advertises in a shared
@@ -172,7 +187,6 @@ works, only that the operator says it exists.
 ### Smaller things worth having
 
 - **PER-LIST file exclusions** (`Exclude = .mpu,.db`) — OmenServe has them per list. `LIST_IGNORED_EXTENSIONS` does this globally; scoping it to one folder is the part still missing.
-- **A fetched list keeps only the peer's master.** Since the film-and-series split, a DCCore bot's archive carries two `.txt` files, and `list_fetch` picks one - now the master rather than whichever is larger. The films in the other are dropped from the fetched copy. Reading both into one fetched list changes what `_pick_list_file()` returns and the size ceiling that guards it, so it is a change of its own rather than part of the fix.
 - **Stealth channels** — serve a channel while advertising nothing in it.
 - **Multi-network** — real in OmenServe, and it would touch every socket path here.
 

@@ -37,7 +37,7 @@ import defaults as config  # noqa: E402
 import dcc_fetch  # noqa: E402
 import webserver  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, bots_in_the_channel  # noqa: E402
 
 
 class TheStateMeansWeAsked(DCCoreTestCase):
@@ -47,6 +47,7 @@ class TheStateMeansWeAsked(DCCoreTestCase):
     def setUp(self):
         super().setUp()
         self.set_config(CHANNEL="#somechannel", MAX_FETCH_SLOTS=3)
+        bots_in_the_channel("someotherbot", channel="#somechannel")
 
     def test_the_row_turns_offered_in_the_same_pass_that_sends_our_request(self):
         request_id = dcc_fetch.enqueue_fetch("someotherbot", "A Track.flac")

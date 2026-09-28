@@ -30,7 +30,7 @@ if REPO_ROOT not in sys.path:
 import dcc_fetch  # noqa: E402
 import defaults as config  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, bots_in_the_channel  # noqa: E402
 
 BOT = "PeerBot"
 
@@ -48,6 +48,7 @@ class TenPastedFilesAreThreeRequests(DCCoreTestCase):
 
         # About MAX_FETCH_SLOTS, one bot: the per-bot limit (#926) stays out of it.
         self.set_config(FETCH_MAX_PER_BOT=0)
+        bots_in_the_channel(BOT)
         self.set_config(MAX_FETCH_SLOTS=3, CHANNEL="#somechannel",
                         transfers_paused=False, fetch_feature_disabled=False)
         config.fetch_queue.clear()

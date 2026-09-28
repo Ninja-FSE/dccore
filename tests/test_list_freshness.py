@@ -40,7 +40,7 @@ import list_fetch  # noqa: E402
 import runtime  # noqa: E402
 import webserver  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, bots_in_the_channel  # noqa: E402
 
 
 class WhatTheyAdvertisedWhenWeFetched(DCCoreTestCase):
@@ -274,6 +274,7 @@ class AskingAgainWithoutBeingAsked(DCCoreTestCase):
         store[bot.lower()] = {"bot": bot, "fetched_at": fetched_at,
                               "entry_count": 10, "advert_when_fetched": then}
         self.set_config(fetched_bot_lists=store)
+        bots_in_the_channel(bot)
 
     def advertise(self, bot, now):
         runtime.known_bots[bot.lower()] = dict(now, nick=bot)
@@ -420,9 +421,9 @@ class AskingAgainWithoutBeingAsked(DCCoreTestCase):
         presence decisions already use - means the sweep simply waits for
         the activation hook (irc.delayed_activate()) instead of firing into
         a connection that is not ready for it."""
-        self.set_config(bot_joined_channel=False)
         self.hold("ReelBot", {"files": 100, "list_date": "Aug 1st"})
         self.advertise("ReelBot", {"files": 250, "list_date": "Sep 6th"})
+        self.set_config(bot_joined_channel=False)
 
         started = list_fetch.refetch_due_lists(log=lambda *_a: None, now=10 ** 9)
 

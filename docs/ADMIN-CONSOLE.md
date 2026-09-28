@@ -208,7 +208,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.13.1 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.13.2 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -247,6 +247,8 @@ prefix.
 | `update` | rebuild the MasterList |
 | `lists` | the bots' lists we hold, whether each has changed since we took our copy, how big and how old |
 | `fetch [<bot>]` | ask every held bot whose list has changed (up to 10 at a time, skipping offline ones), or one bot whatever its freshness |
+| `chat [#channel\|* <text>]` | say something in DCCore Chat, as the bot, in one channel or (`*`) the fewest that reach the other DCCore bots - **public**, see below; alone, the channels it can chat in |
+| `chat peers` / `chat who` | the other DCCore bots seen by WHO, and ask WHO again now |
 | `help` | the command list |
 | `hello <client> <version>` | switch this session to the structured feed (below) |
 | `pair <client> <version>` | mint a login token for a script (below) |
@@ -519,6 +521,14 @@ have been replaced with spaces.
 | `DCCORE QUEUE <pos> <nick> <files> <frozen_secs_left>` | one per queued user, the first 20 in the order they are served: position, files waiting, seconds until a frozen queue is dropped (0 = not frozen) | |
 | `DCCORE TOKEN <name>` | the reply to `pair` | the token, shown once |
 | `DCCORE PING` | stands in for a status burst the bot could not compute in time; a client treats it as any other line and shows nothing | |
+| `DCCORE CHAT <id> <channel> <nick>` | a DCCore Chat line said in one of the bot's channels: an id (its time in milliseconds, only ever going up - a client draws each id once), the channel, who said it (the bot's own nick for a line sent with `chat`; `*` for the bot's own remark, such as somebody hidden for flooding) | the text, stripped of colours |
+| `DCCORE CHANNELS` | the channels the bot is in, which are the ones it chats in; sent after `HELLO`, in answer to `chat` alone, and again with a status burst whenever they have changed | the channels, space-separated |
+
+After `HELLO` the bot also sends `CHANNELS` and then the last 50 `CHAT` lines it
+holds, so a window that reconnects shows what it missed. They are kept in memory
+only, and a restart forgets them. `CHAT` and `CHANNELS` are new line types, not
+fields inserted into old ones, so they do not move the minor. An older script
+shows them as they come, as it does any type it does not know.
 
 `<channel>` is always exactly one token, straight after the nick: the channel
 the request or search was made in, or `-` when there is none (a request by
@@ -714,13 +724,83 @@ sent at all: what is off there never reaches the script.
 /dccore trust                accept the bot's current host as the one to send the token to
 /dccore options              what to show, colours, panel, title bar, beep
 /dccore window               open or focus @DCCore
+/dccore chat [text]          open DCCore Chat, or say something in it (public)
 /dccore status               ask the bot for its status
+/dccore consolefeed on|off   what this window shows beyond STATUS - requests, sends, searches...
 /dccore lists                the bots' lists we hold, and which have changed
 /dccore fetch [bot]          ask the bots whose lists changed, or one bot
 /dccore raw <command>        send any console command
 /dccore panel on|off         the side panel
 /dccore font <size>          the window's font size, e.g. /dccore font 14
 ```
+
+### DCCore Chat: talking to other operators
+
+A second window, **DCCore Chat**, for chatting with other operators in the
+channels your bot is in. **Your bot is the relay.** What you type goes to the
+bot over this console, and the bot says it in the channels where it has seen
+other DCCore bots, as an ordinary channel message (never a NOTICE: channel
+bots kick for those). A chat line another DCCore bot sends in one of the
+bot's channels comes back to your window. Your own mIRC does not have to be
+in any channel.
+
+It is **public**. A channel message reaches everyone in it, whether or
+not they run this script. Your lines show as said by your bot. The window's
+title and its first lines say so.
+
+- **Opening it:** right-click in a channel or in `@DCCore` → *DCCore Chat*,
+  or `/dccore chat`. It also opens by itself (minimised, its button lit)
+  when a chat line arrives, unless you turn that off in `/dccore options`.
+- **Talking:** type in the window. By default the line is said once in the
+  fewest channels (at most 5) that reach every other DCCore bot seen, and in
+  no channel without one (`chat * <text>`). Right-click → *Send to* picks one
+  channel instead, and that channel is listened on too. `/dccore chat <text>`
+  does the same from anywhere. What you type goes on the bot's express lane,
+  so it is not held up behind a line for each of its other channels.
+- **Listening:** every channel the bot is in, by default. Only lines from
+  other DCCore bots arrive at all, so there is little to filter. Untick
+  *Listen on all the bot's channels* (right-click, or `/dccore options`) and
+  tick the ones you want under *Listen on* instead. Your own lines always
+  show.
+- **Reconnecting:** the bot keeps the last 50 lines in memory, and a window
+  that reconnects shows what it missed, each line once, with the time it
+  was said. A bot restart forgets them.
+
+**Who is another DCCore bot:** every DCCore bot registers with a realname whose
+first word is `DCCore/sc` (then its nick). The bot asks `WHO` for each of its
+channels at start and about every ten minutes (`chat who` asks at once,
+`chat peers` lists who answered) and remembers the nicks with that realname.
+Nothing is sent to them; WHO is answered by the server. A peer that leaves,
+quits or changes nick is forgotten. Anyone can write that realname, so it is
+a filter and not proof.
+
+A chat line is a channel message whose first word is `[ServersChat]`, **from
+one of those peers**. The bots' own adverts and search replies carry the
+realname too, and never the tag. The tag is neutral so that a script that is
+not DCCore's can speak it too. The bot takes only those, and only in its own
+channels, and:
+
+- **never answers a message by itself, and never sends a received line
+  on**, so two bots cannot echo each other. Every line it sends is one an
+  operator typed;
+- **limits each sender:** more than 5 lines in 10 seconds from one nick
+  hides that nick for 60 seconds, said once in the window. **Everyone
+  together** is limited too: past 30 lines in 10 seconds the rest are
+  dropped, said once;
+- **takes nothing from a nick you have banned;**
+- **limits what you send:** 6 channel lines a minute, so chat never holds up
+  the queue's own messages. A line said in three channels counts three;
+- **strips colours, control codes and the characters that reverse the
+  direction text is drawn in**, both ways;
+- **never writes a chat line to disk or to the debug channel.**
+
+The tag proves nothing about the sender. Anyone can type it, and the nick
+shown is whoever the server says sent the line.
+
+If your own mIRC is in the channel too, the raw tagged message is kept out of the
+channel window while the bot relays it, so you don't see every line twice.
+With the chat to the bot down, it shows in the channel as usual, so nothing
+is lost.
 
 ### Updating the script
 

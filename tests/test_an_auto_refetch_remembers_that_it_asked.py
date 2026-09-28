@@ -29,7 +29,7 @@ import defaults as config  # noqa: E402
 import list_fetch  # noqa: E402
 import runtime  # noqa: E402
 import webserver  # noqa: E402
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, bots_in_the_channel  # noqa: E402
 
 HOUR = 3600.0
 CHANGED_THEN = {"files": 100, "list_date": "Aug 1st"}
@@ -65,6 +65,7 @@ class TheFloorRunsFromTheLastAsk(DCCoreTestCase):
             {"bot": bot, "fetched_at": fetched_at, "entry_count": 10,
              "advert_when_fetched": CHANGED_THEN}, **extra)
         runtime.known_bots[bot.lower()] = dict(CHANGED_NOW, nick=bot)
+        bots_in_the_channel(bot)
 
     def sweep(self, now):
         return list_fetch.refetch_due_lists(log=lambda *_a: None, now=now)

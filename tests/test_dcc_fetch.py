@@ -32,7 +32,7 @@ import db  # noqa: E402
 import dcc  # noqa: E402
 import dcc_fetch  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, bots_in_the_channel  # noqa: E402
 
 
 def ip_long(ip):
@@ -564,6 +564,11 @@ class FallbackLockIsShared(DCCoreTestCase):
 
 class DispatcherStateMachineTests(DCCoreTestCase):
 
+    def setUp(self):
+        super().setUp()
+        # Joined, with the bots asked here present (#965).
+        bots_in_the_channel('bot', 'goodbot', 'passivebot', 'silentbot')
+
     def test_pending_rows_are_promoted_to_offered_and_a_request_is_queued(self):
         rid = dcc_fetch.enqueue_fetch("goodbot", "Song.flac")
         self.assertEqual(config.fetch_queue[rid]["state"], "pending")
@@ -759,9 +764,11 @@ class ARequestGoesToTheBotsOwnChannel(DCCoreTestCase):
         self.assertIn("PRIVMSG #two :!SomeBot", message)
 
     def test_a_bot_nowhere_we_know_of_falls_back_to_the_first_channel(self):
-        """Presence changed between enqueue and this dispatch tick - the
-        request must still go somewhere rather than vanish silently, even
-        though it is no better off than before this fix."""
+        """Seen, but in no channel we are configured for - a channel dropped
+        from CHANNEL by a rehash, say. The request must still go somewhere
+        rather than vanish silently. (A bot seen nowhere at all is not asked:
+        it waits as "offline", and before we have joined as "joining" - #965.)"""
+        bots_in_the_channel("ghostbot", channel="#elsewhere")
         message = self._dispatch("ghostbot")
 
         self.assertIn("PRIVMSG #one :", message)
@@ -795,6 +802,7 @@ class ARequestGoesToTheBotsOwnChannel(DCCoreTestCase):
 
     def test_broadcast_search_channel_still_answers_for_an_unplaceable_bot(self):
         self.set_config(BROADCAST_SEARCH_CHANNEL="#three")
+        bots_in_the_channel("ghostbot", channel="#elsewhere")
 
         message = self._dispatch("ghostbot")
 
@@ -2326,6 +2334,11 @@ class ListFetchDispatcherTests(DCCoreTestCase):
     "!<bot> <filename>" a "file" row sends - same paced outbound queue
     (oserve.queue_message), only the message body differs."""
 
+    def setUp(self):
+        super().setUp()
+        # Joined, with the bots asked here present (#965).
+        bots_in_the_channel('goodbot')
+
     def test_pending_list_row_is_promoted_and_sends_a_bare_at_bot_trigger(self):
         rid = dcc_fetch.enqueue_fetch("goodbot", "", request_type="list")
 
@@ -2504,6 +2517,11 @@ class DispatcherSecondLayerCtcpGuardTests(DCCoreTestCase):
     dispatcher: bypassing webserver.py's check entirely.
     """
 
+    def setUp(self):
+        super().setUp()
+        # Joined, with the bots asked here present (#965).
+        bots_in_the_channel('goodbot', 'otherbot', 'evilbot\x01ACTION pwned\x01', 'evilbot2\x01INJECTED\x01')
+
     def test_a_file_row_with_an_unsafe_bot_nick_is_never_sent(self):
         rid = dcc_fetch.enqueue_fetch("evilbot2\x01INJECTED\x01", "Song.mp3",
                                        request_type="file")
@@ -2580,6 +2598,11 @@ class DispatchLineLengthGuardTests(DCCoreTestCase):
     enqueue_fetch() itself performs no validation, so a filename this long
     reaching dispatch is exactly how a bypass of the web boundary would
     surface."""
+
+    def setUp(self):
+        super().setUp()
+        # Joined, with the bots asked here present (#965).
+        bots_in_the_channel('goodbot')
 
     def test_a_very_long_filename_still_produces_a_line_within_budget(self):
         import announce
@@ -2960,6 +2983,7 @@ class AWholeAlbumSelectedAtOnce(DCCoreTestCase):
         self.set_config(fetch_queue={}, MAX_FETCH_SLOTS=3,
                         fetch_feature_disabled=False, CHANNEL="#chan",
                         FETCH_MAX_PER_BOT=0)
+        bots_in_the_channel("listbot")
 
     def lines_sent(self):
         return [msg for _user, msg, _vip in self.oserve.queued]

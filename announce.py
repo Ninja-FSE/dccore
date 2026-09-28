@@ -631,6 +631,20 @@ def announce_worker():
                     print(f"[ANNOUNCE] Could not read which channels we are in: {membership_err}")
                     out_of = set()
 
+                # #982 audit finding 2 (follow-up): the keepalive fix alone
+                # only helps a QUIET link - a busy one (constant search
+                # traffic resetting last_recv_time) may never go 45s without
+                # data either, so the keepalive PING that used to be the only
+                # other driver can be just as rare as the server's own. This
+                # thread's own clock does not depend on the socket at all,
+                # so it is the one driver guaranteed to fire on schedule
+                # regardless of how busy the channels are.
+                try:
+                    import serverschat
+                    serverschat.refresh_peers()
+                except Exception as peers_err:
+                    print(f"[ANNOUNCE] Could not refresh DCCore Chat peers: {peers_err}")
+
                 for chan in channels_to_spam:
                     chan = chan.strip()
                     if not chan:
