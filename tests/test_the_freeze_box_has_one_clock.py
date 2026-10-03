@@ -246,7 +246,7 @@ class TheTimerThreadReadsTheSameClock(DCCoreTestCase):
 class TheReadLoopStartsAndStopsTheClock(unittest.TestCase):
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_the_disconnect_epilogue_pauses_it(self):

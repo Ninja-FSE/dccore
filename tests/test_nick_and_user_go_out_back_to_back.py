@@ -85,7 +85,7 @@ class NothingIsReadBeforeUserIsSent(unittest.TestCase):
     recv() there is no recv() and no loop - the two lines just go out."""
 
     def between_connect_and_the_reader(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
         loop = source[source.index("def irc_loop():"):]
         start = loop.index("s.connect((config.SERVER, config.PORT))")

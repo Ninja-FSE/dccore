@@ -41,7 +41,7 @@ import settings_file  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
 
 
-SAMPLE = os.path.join(REPO_ROOT, "settings.conf.sample")
+SAMPLE = os.path.join(REPO_ROOT, "conf", "settings.conf.sample")
 
 
 class WriterTestCase(DCCoreTestCase):
@@ -560,7 +560,7 @@ class TheWriteIsAtomic(WriterTestCase):
         """Reads the writer's own source rather than restating the rule: a
         temp file made anywhere but beside the target turns the final step
         into a cross-filesystem copy, which is not atomic."""
-        with io.open(os.path.join(REPO_ROOT, "settings_file.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "settings_file.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn("dir=directory", source)
@@ -569,7 +569,7 @@ class TheWriteIsAtomic(WriterTestCase):
     def test_it_does_not_reach_for_db_s_copy(self):
         """db.py has the same helper, and importing it here would close a
         cycle: db imports config, and config imports this module."""
-        with io.open(os.path.join(REPO_ROOT, "settings_file.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "settings_file.py"), encoding="utf-8") as handle:
             lines = [line for line in handle.read().splitlines()
                      if not line.strip().startswith("#")]
 

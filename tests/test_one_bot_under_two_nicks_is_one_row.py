@@ -195,7 +195,7 @@ class MemoryOnly(Case):
 
     def test_nothing_that_writes_to_disk_reads_it(self):
         for name in ("db.py", "irc.py", "announce.py"):
-            with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+            with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
                 code = handle.read()
             for line in code.splitlines():
                 stripped = line.strip()
@@ -265,7 +265,10 @@ class ByNickMessage(Case):
 
 class TheWiring(unittest.TestCase):
     def read(self, *parts):
-        with io.open(os.path.join(REPO_ROOT, *parts), encoding="utf-8") as handle:
+        _p = os.path.join(REPO_ROOT, "src", *parts)
+        if not os.path.exists(_p):
+            _p = os.path.join(REPO_ROOT, *parts)
+        with io.open(_p, encoding="utf-8") as handle:
             return handle.read()
 
     def test_every_advert_line_passes_its_ident(self):

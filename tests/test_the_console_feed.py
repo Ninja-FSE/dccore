@@ -232,7 +232,7 @@ class TheEventsAreEmittedWhereTheyHappen(DCCoreTestCase):
         library on disk, and the property is which branch the line is on -
         after the file is found and before the send-or-queue decision, so
         every accepted request reports once whichever way it goes."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def handle_download_request("):]
         found = body.index("file_name = os.path.basename(full_path)")
@@ -243,14 +243,14 @@ class TheEventsAreEmittedWhereTheyHappen(DCCoreTestCase):
         self.assertLess(request, decision)
 
     def test_a_folder_request_is_a_request_too(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn('asked for the folder \\"{clean_folder_name}\\"', source)
         self.assertIn('feed_event("REQUEST", f"{user} asked for the folder', source)
         self.assertIn('kind="folder", name=clean_folder_name', source)
 
     def test_a_resume_says_where_from(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def handle_resume_request("):]
         body = body[:body.index("def resume_transfers(")]
@@ -262,7 +262,7 @@ class TheEventsAreEmittedWhereTheyHappen(DCCoreTestCase):
                         "the RESUMED line must follow the accept, not precede a refusal")
 
     def test_a_search_reports_the_total_not_the_capped_count(self):
-        with io.open(os.path.join(REPO_ROOT, "list.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "list.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def execute_search("):]
         line = body.index('"SEARCH",')

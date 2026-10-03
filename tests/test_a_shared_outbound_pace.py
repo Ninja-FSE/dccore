@@ -363,7 +363,7 @@ class TheThirdUnpacedWriterIsFixedToo(unittest.TestCase):
 
     def source(self):
         with open(os.path.join(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__))), "irc.py"), encoding="utf-8") as f:
+                os.path.abspath(__file__))), "src", "irc.py"), encoding="utf-8") as f:
             return f.read()
 
     def version_reply_block(self):
@@ -399,7 +399,7 @@ class TheThirdUnpacedWriterIsFixedToo(unittest.TestCase):
         runtime.outbound_pacer before every send (queue_mgr.py), so these
         two gain that pacing for free instead of a third bespoke mechanism."""
         vip_lane = queue_mgr_source().split(
-            'if hasattr(config, \'vip_queue\') and config.vip_queue:', 1)[1][:700]
+            "elif hasattr(config, 'vip_queue') and config.vip_queue:", 1)[1][:700]
         self.assertIn("runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)",
                       vip_lane)
 
@@ -489,7 +489,7 @@ class TheFourthUnpacedWriterIsFixedToo(DCCoreTestCase):
 
 def queue_mgr_source():
     with open(os.path.join(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__))), "queue_mgr.py"), encoding="utf-8") as f:
+            os.path.abspath(__file__))), "src", "queue_mgr.py"), encoding="utf-8") as f:
         return f.read()
 
 

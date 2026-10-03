@@ -362,7 +362,7 @@ class ChannelCommandsCanBeRetired(unittest.TestCase):
     """ADMIN_CHANNEL_COMMANDS, so the console can eventually be the only way in."""
 
     def setUp(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             self.source = handle.read()
 
     def test_the_flag_defaults_to_on(self):
@@ -376,7 +376,7 @@ class ChannelCommandsCanBeRetired(unittest.TestCase):
         Spans several lines, so it is joined from the opening `elif` through the
         line that closes it.
         """
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             lines = handle.read().split("\n")
         start = next(i for i, l in enumerate(lines)
                      if l.strip().startswith("elif (getattr(config, 'ADMIN_CHANNEL_COMMANDS'"))
@@ -467,7 +467,7 @@ class BanAndUnbanAreDispatchedCaseInsensitively(unittest.TestCase):
     """
 
     def setUp(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             self.source = handle.read()
         self.original = config.ADMIN_CHANNEL_COMMANDS
         self.addCleanup(lambda: setattr(config, "ADMIN_CHANNEL_COMMANDS", self.original))

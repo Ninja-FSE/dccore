@@ -582,7 +582,7 @@ class ReconnectThawSummaryTests(DCCoreTestCase):
         correctly even if the call site quietly went back to calling
         send_debug() directly, so something has to check the wiring too."""
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(repo_root, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(repo_root, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn(

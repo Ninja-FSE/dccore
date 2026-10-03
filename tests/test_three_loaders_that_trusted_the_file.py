@@ -129,7 +129,7 @@ class TheSaveWalksACopy(unittest.TestCase):
 
     @staticmethod
     def body():
-        with io.open(os.path.join(REPO_ROOT, "db.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "db.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source.split("def save_dcc_queue", 1)[1]
         return body.split("\ndef ", 1)[0]

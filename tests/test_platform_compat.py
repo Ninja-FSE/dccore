@@ -310,7 +310,7 @@ def _calls_to(module_name, dotted):
     this very sentence would satisfy if it lived in the module.
     """
     owner, attribute = dotted.split(".")
-    path = os.path.join(REPO_ROOT, module_name)
+    path = (next((p for p in (os.path.join(REPO_ROOT, "src", module_name), os.path.join(REPO_ROOT, "conf", module_name), os.path.join(REPO_ROOT, module_name)) if os.path.exists(p)), os.path.join(REPO_ROOT, module_name)))
     with io.open(path, encoding="utf-8") as handle:
         tree = ast.parse(handle.read())
 
@@ -408,7 +408,7 @@ class WiringTests(unittest.TestCase):
         incoming connection, which on a DCC listener is a hijack."""
         for module in ("dcc.py", "adminchat.py", "dcc_fetch.py", "irc.py"):
             with self.subTest(module=module):
-                with io.open(os.path.join(REPO_ROOT, module), encoding="utf-8") as handle:
+                with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", module), os.path.join(REPO_ROOT, "conf", module), os.path.join(REPO_ROOT, module)) if os.path.exists(p)), os.path.join(REPO_ROOT, module))), encoding="utf-8") as handle:
                     tree = ast.parse(handle.read())
                 offenders = [node.lineno for node in ast.walk(tree)
                              if isinstance(node, ast.Attribute)
@@ -426,7 +426,7 @@ class WiringTests(unittest.TestCase):
         Windows, where it lives under Program Files."""
         for module in ("dcc.py", "update_list.py"):
             with self.subTest(module=module):
-                with io.open(os.path.join(REPO_ROOT, module), encoding="utf-8") as handle:
+                with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", module), os.path.join(REPO_ROOT, "conf", module), os.path.join(REPO_ROOT, module)) if os.path.exists(p)), os.path.join(REPO_ROOT, module))), encoding="utf-8") as handle:
                     source = handle.read()
 
                 self.assertNotIn('["rar", "a"', source)
@@ -455,7 +455,7 @@ class WiringTests(unittest.TestCase):
                                    "platform_compat.prepare_listener"), [])
 
     def test_config_supports_a_local_override(self):
-        source = open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8").read()
+        source = open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8").read()
         self.assertIn("from admin_config import *", source)
 
     def test_admin_config_is_gitignored(self):

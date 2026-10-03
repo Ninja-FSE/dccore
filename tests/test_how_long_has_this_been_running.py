@@ -181,7 +181,7 @@ class HowLongItTook(DCCoreTestCase):
         """Success, failure, timeout and the unexpected. A duration left over
         from the previous rebuild is worse than none - it would be shown
         against a run it did not measure."""
-        with io.open(os.path.join(REPO_ROOT, "commands.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"),
                      encoding="utf-8") as handle:
             body = handle.read().split("def async_list_updater(", 1)[1]
 
@@ -197,7 +197,7 @@ class HowLongItTook(DCCoreTestCase):
     def test_the_clock_starts_inside_the_thread(self):
         """Not when the request arrives. !update can wait on the maintenance
         lock, and time spent queued is not time spent rebuilding."""
-        with io.open(os.path.join(REPO_ROOT, "commands.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"),
                      encoding="utf-8") as handle:
             body = handle.read().split("def async_list_updater(", 1)[1]
 
@@ -217,7 +217,7 @@ class TheChannelIsToldToo(unittest.TestCase):
 
     @staticmethod
     def success_message():
-        with io.open(os.path.join(REPO_ROOT, "commands.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"),
                      encoding="utf-8") as handle:
             body = handle.read()
         return body.split("List update successfully completed", 1)[1].split(

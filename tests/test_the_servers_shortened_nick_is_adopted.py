@@ -84,7 +84,7 @@ class TheRule(DCCoreTestCase):
 class TheWiring(unittest.TestCase):
 
     def setUp(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             self.source = handle.read()
         self.loop = self.source[self.source.index("def irc_loop():"):]
 

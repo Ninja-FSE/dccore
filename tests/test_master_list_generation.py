@@ -947,7 +947,7 @@ class StillRequestableAfterTheSplit(MasterListCase):
         the list. Read out of the source: driving the real resolution needs a
         socket and a peer, and the one line that matters is which lists it
         opens."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as fh:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as fh:
             code = "\n".join(line.split("#", 1)[0]
                               for line in fh.read().splitlines())
 
@@ -1120,7 +1120,7 @@ class RarExtensionsIsAGateNotADisplayRule(MasterListCase):
         """Read out of dcc.py: driving a real pack needs a socket, a peer and
         a rar binary, and the one thing that matters is that the request path
         consults the setting at all. It did not."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as fh:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as fh:
             code = "\n".join(line.split("#", 1)[0]
                               for line in fh.read().splitlines())
 
@@ -1136,7 +1136,7 @@ class RarExtensionsIsAGateNotADisplayRule(MasterListCase):
     def test_the_refusal_says_the_files_are_still_available(self):
         """Refusing a pack must not read as refusing the content: every file
         in that folder is still listed and still requestable by name."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as fh:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as fh:
             source = fh.read()
 
         self.assertIn("still be requested by name", source)
@@ -1507,7 +1507,7 @@ class PackingHasACeiling(MasterListCase):
         time costs a pack slot, half an hour of RAR_TIMEOUT, a part-written
         archive in TMP_ZIP_DIR, and still ends with the requester told nothing
         useful. The size is knowable at request time."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as fh:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as fh:
             code = "\n".join(line.split("#", 1)[0]
                               for line in fh.read().splitlines())
 

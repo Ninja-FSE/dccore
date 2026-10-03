@@ -100,7 +100,7 @@ class ANewAdminConfigCarriesOnlyThePassword(DCCoreTestCase):
     def test_the_sample_itself_is_untouched_documentation(self):
         """Not seeded from any more, but still the file a hand setup copies:
         its own comments and live example lines stay readable."""
-        with io.open(os.path.join(REPO_ROOT, "admin_config.py.sample"),
+        with io.open(os.path.join(REPO_ROOT, "conf", "admin_config.py.sample"),
                      encoding="utf-8") as handle:
             sample = handle.read()
         self.assertIn("WEBUI_HOST", _active_assignments(sample))

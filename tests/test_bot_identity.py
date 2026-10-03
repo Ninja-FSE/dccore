@@ -114,7 +114,7 @@ class TheVersionQueryIsFloodGated(unittest.TestCase):
     """
 
     def test_version_is_in_the_flood_gated_ctcp_set(self):
-        source_path = os.path.join(REPO_ROOT, "irc.py")
+        source_path = os.path.join(REPO_ROOT, "src", "irc.py")
         with io.open(source_path, encoding="utf-8") as handle:
             lines = handle.read().splitlines()
 

@@ -115,7 +115,7 @@ def _guard_condition_for(marker):
     is a test quietly checking whichever handler happened to come first, and one
     that matches a comment is a test satisfied by prose.
     """
-    with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+    with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
         lines = handle.read().split("\n")
 
     hits = [i for i, raw in enumerate(lines)
@@ -200,7 +200,7 @@ class DispatchConditionsUseTheGuard(unittest.TestCase):
     """The handlers must actually call it, not keep their own substring test."""
 
     def setUp(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             raw = handle.read()
         # Assert on CODE only. The fix's own comments quote the old substring tests
         # to explain why they were wrong, and a naive text search cannot tell an

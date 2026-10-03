@@ -1,0 +1,2731 @@
+# adminchat.py - Authenticated DCC CHAT console for the operator.
+"""The operator's console: transport, authentication, and the commands.
+
+This file is the whole admin console. It authenticates a session, and it
+defines and dispatches every command that session can run - including the
+destructive ones (ban, unban, clearqueue, rehash, update). COMMANDS at the
+bottom is the complete list.
+
+It said the opposite until #231: "Phase 1: transport and authentication only.
+The admin commands themselves are NOT here yet, deliberately." That was true
+when the file was written and stopped being true when the dispatcher landed.
+It is the first thing anyone reads here, and it claimed a narrow
+security-review scope - "who may open a session, and what proves it" - for a
+file that also holds every command worth reviewing carefully.
+
+The authentication is still the part to read first, and it is described below.
+But it is no longer the only thing here.
+
+WHY DCC CHAT RATHER THAN A CHANNEL OR PM COMMAND
+------------------------------------------------
+is_admin() compares a nick against ADMIN_NICK, and on Undernet a nick is not
+owned without services auth - anyone can take the admin nick while the operator
+is offline and inherit every admin command, including !clearqueue.
+
+The gate here is the operator's Undernet services login. When a user logs into X
+and sets usermode +x, the server replaces their host with
+"<account>.users.undernet.org". Only the server can issue that host, and only to
+someone holding that account, so matching the host IS verifying the login - with
+no password shared with this bot and nothing to steal from its config.
+
+The socket is then the session. There is no token, no nick binding and no expiry
+bookkeeping: it dies when the TCP connection dies. That is the part a PM-based
+!auth command can never get right, because it always ends up trusting a nick
+again once the password has been accepted.
+
+WHERE THIS DELIBERATELY DIFFERS FROM iroffer
+---------------------------------------------
+iroffer screens only the remote IP at connect time; its hostmask test lives in
+dcc_host_password() and runs together with the password. So iroffer answers a
+stranger: it accepts, prints a banner naming its version, build, OS, feature list
+and uptime, and prompts.
+
+This one screens the host on the incoming CTCP, before replying at all. A stranger
+gets no banner, no connection, no reply of any kind, and no way to learn whether
+the mask was wrong. The cost of an unauthorised attempt is one regex. When the
+bot listens instead of dialling, the listener takes a connection only from the
+address the operator's CTCP advertised (#680) - a scanner that reaches the port
+first is dropped without a word and the window stays open for the operator.
+
+CONNECTION DIRECTION, AND THE INBOUND SURFACE
+---------------------------------------------
+The preferred path follows iroffer's non-passive form: the requesting client
+listens and supplies its ip/port, and the bot connects OUT to it. That path
+opens no listening port.
+
+Both fallbacks do. _open_chat_listener() binds a port in the
+DCC_PORT_START..DCC_PORT_END range when the bot cannot dial the operator's
+client, and the passive form - the client offering port 0, meaning "you listen
+instead" - is parsed and answered with an offer of our own. So this module is
+not inbound-surface-free, and the host check is what stands in front of that
+surface.
+
+Two earlier claims here were wrong and are corrected rather than deleted,
+because both were load-bearing for anyone deciding how much of this file needs
+a security review: that no listening port is opened (#217), and that passive
+DCC is not supported (#231). parse_offer() has handled port 0 since the
+listen-mode work, and tests/test_adminchat.py drives it end to end.
+"""
+
+import binascii
+import collections
+import hashlib
+import hmac
+import ipaddress
+import os
+import re
+import socket
+import threading
+import time
+
+import defaults as config
+import platform_compat
+
+# --------------------------------------------------------------------------
+# Tunables. Deliberately module constants rather than config entries: these are
+# safety limits, not preferences, and an operator lowering them by accident
+# would weaken the gate.
+# --------------------------------------------------------------------------
+CONNECT_TIMEOUT = 10.0        # dialling the operator's client
+LISTEN_TIMEOUT = 60.0         # waiting for the operator to accept our offer back
+AUTH_TIMEOUT = 60.0           # seconds to supply a password before the socket closes
+# There is deliberately NO idle timeout once authenticated. Earlier versions
+# closed a quiet console after 30 minutes, and an operator who leaves the
+# window open to watch the feed found it gone when they looked. A console is
+# a window the operator opened; it stays open until they close it, a second
+# login takes it over (_promote), or the connection itself dies - which TCP
+# keepalive on the socket notices within a couple of minutes.
+MAX_PASSWORD_ATTEMPTS = 3
+WRONG_PASSWORD_DELAY = 1.0    # slows scripted guessing without tying up the reader
+BAD_IP_BLOCK_SECONDS = 900.0
+OUTBOX_MAX = 500              # bounded: a stalled client drops lines, never grows
+
+PBKDF2_ITERATIONS = 200_000
+
+# --------------------------------------------------------------------------
+# Module state. This module is deliberately absent from commands.py's
+# CORE_MODULES: importlib.reload re-executes a module body, which would
+# drop a live session's socket on the floor on every !rehash. That is not
+# hypothetical - it is what used to happen to every runtime container in
+# config.py until PRESERVE_RUNTIME was added.
+# --------------------------------------------------------------------------
+_session = None               # the one authenticated session, or None
+_pending = None               # at most one connected-but-unauthenticated session
+_listening = False            # at most one passive listener WAITING to be dialled
+_state_lock = threading.Lock()
+
+_bad_ips = {}                 # ip -> [failure_count, blocked_until, last_failure]
+_bad_lock = threading.Lock()
+
+
+def forget_stale_failures(pool, now, window=None):
+    """Drop the addresses in `pool` that failed fewer than
+    MAX_PASSWORD_ATTEMPTS times and not within `window` seconds (#677,
+    audit L13). Called under the pool's own lock; returns how many went.
+
+    An address with one or two failures never reached a block, so the
+    expiry in is_bad_ip() never deleted it, and it stayed for the life of
+    the process - on an internet-exposed bind, one entry per scanner that
+    ever tried, for ever. A failure older than the block window does not
+    count towards a block either: two typos a day apart are not an attack.
+    Blocked addresses are left to the expiry that already forgets them.
+    """
+    window = BAD_IP_BLOCK_SECONDS if window is None else window
+    stale = [ip for ip, entry in pool.items()
+             if not entry[1] and now - (entry[2] if len(entry) > 2 else now) >= window]
+    for ip in stale:
+        del pool[ip]
+    return len(stale)
+
+
+# ==========================================================================
+# Hostmask matching
+# ==========================================================================
+
+def source_host(prefix_or_line):
+    """The host half of an IRC prefix, lowercased, or None.
+
+    Accepts either a bare prefix ("nick!ident@host") or a whole raw line, so
+    callers do not have to slice it first.
+    """
+    if not prefix_or_line:
+        return None
+    text = str(prefix_or_line)
+    if text.startswith(":"):
+        text = text[1:]
+    text = text.split(" ", 1)[0]
+    if "@" not in text:
+        return None
+    return text.rsplit("@", 1)[1].strip().lower() or None
+
+
+def host_pattern_of(mask):
+    """Reduce a configured mask to the HOST pattern it really means.
+
+    A mask may be written either as a bare host ("operator.users.undernet.org") or in
+    the familiar iroffer/IRC form ("*!*@operator.users.undernet.org"). Either way only
+    the part after the last "@" is used.
+
+    The nick and ident halves are discarded ON PURPOSE. In nick!ident@host the
+    ident is supplied by the client - anyone can set theirs to "operator" - so a
+    pattern that appears to constrain it grants no security while breaking the
+    moment the operator's client changes its ident setting. Only the host is
+    issued by the server.
+    """
+    if not mask:
+        return None
+    text = str(mask).strip().lower()
+    if not text:
+        return None
+    if "@" in text:
+        text = text.rsplit("@", 1)[1].strip()
+    return text or None
+
+
+def _compile(pattern):
+    """Wildcard pattern to anchored regex, matching security.py's hard-ban idiom."""
+    return re.compile("^" + re.escape(pattern).replace(r"\*", ".*") + "$")
+
+
+def admin_host_patterns():
+    """Configured host patterns, ignoring blanks. Empty means the console is off."""
+    raw = getattr(config, "ADMIN_HOSTMASKS", None) or []
+    if isinstance(raw, str):
+        raw = [part for part in raw.split(",")]
+    patterns = []
+    for entry in raw:
+        pattern = host_pattern_of(entry)
+        if pattern and pattern not in patterns:
+            patterns.append(pattern)
+    return patterns
+
+
+# Host suffixes a network hands out to EVERY logged-in user, one label per
+# account in front: "<account>.users.undernet.org". A pattern whose
+# wildcard stands where the account goes does not name one operator, it
+# names the whole logged-in population of the network (#669, audit L5).
+SHARED_ACCOUNT_HOST_SUFFIXES = (
+    "users.undernet.org",
+    "users.quakenet.org",
+)
+
+
+def broad_host_patterns():
+    """The configured patterns that are accepted but name far more than one
+    operator, each with the reason, for a warning at boot and on rehash
+    (#669, audit L5).
+
+    is_admin_host() refuses only a pattern that reduces to nothing once
+    wildcards and separators are stripped. A wildcard domain such as
+    "*.example.org" is deliberately accepted - it names a real, legitimate
+    set of hosts, and the password behind the gate is the second factor.
+    But two shapes are almost always a misreading of the documented
+    "<account>.users.undernet.org": a wildcard where the account goes
+    ("*.users.undernet.org" - every X-authenticated user of the network
+    reaches the password prompt, can hold the single pending session
+    against the real operator, and costs the bot a dial per CTCP), and a
+    literal part of one label ("*.org" - a top-level domain). Both still
+    match exactly as configured; this only says so out loud.
+    """
+    broad = []
+    for pattern in admin_host_patterns():
+        literal = pattern
+        for separator in "*!@":
+            literal = literal.replace(separator, "")
+        labels = [label for label in literal.split(".") if label]
+        if not labels:
+            continue  # refused outright by is_admin_host()
+        if "*" not in pattern:
+            continue  # one host, spelled out
+        if len(labels) == 1:
+            broad.append((pattern, f"it names the whole top-level domain .{labels[0]}"))
+            continue
+        head, _dot, rest = pattern.partition(".")
+        if rest.lower() in SHARED_ACCOUNT_HOST_SUFFIXES and set(head) <= set("*"):
+            broad.append((pattern, f"every logged-in user of the network has a {rest} host; "
+                                   f"the account name goes where the * is"))
+    return broad
+
+
+def report_broad_host_patterns(log=print):
+    """Print one warning per broad pattern; returns how many there were."""
+    broad = broad_host_patterns()
+    for pattern, why in broad:
+        log(f"[ADMINCHAT] WARNING: ADMIN_HOSTMASKS entry {pattern!r} is very broad - {why}. "
+            f"Anyone matching it reaches the console's password prompt. If you meant "
+            f"your own services host, write it in full, e.g. 'operator.users.undernet.org'.")
+    return len(broad)
+
+
+def is_admin_host(prefix_or_line):
+    """True only when the line's HOST matches a configured admin pattern.
+
+    A pattern reducing to nothing once wildcards are stripped is refused: it
+    would admit every host on the network and make the whole gate decorative.
+    security.py refuses an all-wildcard hard ban for the mirror-image reason.
+
+    Strips "*!@." - the same four characters security.py's own hard-ban guard
+    strips, not just "*". A HOST cannot contain "!" or "@" (only a full
+    <nick>!<ident>@<host> hostmask can), so those two are no-ops here - but a
+    host is made of dot-separated labels, and "*.*" reduces to a lone "." under
+    a stars-only strip: truthy, so it passed and compiled to a pattern
+    matching essentially every real host. #218, found by the same audit that
+    caught the hard-ban version of this in #168.
+    """
+    host = source_host(prefix_or_line)
+    if not host:
+        return False
+    for pattern in admin_host_patterns():
+        residue = pattern
+        for separator in "*!@.":
+            residue = residue.replace(separator, "")
+        if not residue:
+            print(f"[ADMINCHAT] Refusing dangerously broad ADMIN_HOSTMASKS entry: {pattern!r}")
+            continue
+        if _compile(pattern).match(host):
+            return True
+    return False
+
+
+# ==========================================================================
+# Password
+# ==========================================================================
+
+def make_password_hash(password, iterations=PBKDF2_ITERATIONS):
+    """Build the value to paste into admin_config.ADMIN_PASSWORD_HASH.
+
+    pbkdf2_hmac rather than scrypt: scrypt is the stronger primitive, but it
+    depends on the OpenSSL build Python was linked against and raises where that
+    is missing. pbkdf2 is always present in the standard library on every
+    platform, which matters for a daemon that has to run on both Linux and
+    Windows. The threat model tolerates it - an attacker must already hold the
+    operator's Undernet services account before the password is even reachable.
+    """
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", str(password).encode("utf-8"), salt, iterations)
+    return "pbkdf2_sha256${}${}${}".format(
+        iterations, binascii.hexlify(salt).decode(), binascii.hexlify(digest).decode())
+
+
+def verify_password(stored, supplied):
+    """Constant-time check of `supplied` against a stored pbkdf2 string.
+
+    Returns False rather than raising on a malformed or empty stored value: a
+    console with no password configured must refuse everyone, not admit them.
+    """
+    if not stored or not supplied:
+        return False
+    try:
+        scheme, iterations, salt_hex, digest_hex = str(stored).split("$")
+        if scheme != "pbkdf2_sha256":
+            return False
+        expected = binascii.unhexlify(digest_hex)
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", str(supplied).encode("utf-8"),
+            binascii.unhexlify(salt_hex), int(iterations))
+    except (ValueError, binascii.Error, TypeError):
+        return False
+    return hmac.compare_digest(expected, actual)
+
+
+def password_is_configured():
+    return bool(getattr(config, "ADMIN_PASSWORD_HASH", ""))
+
+
+# ==========================================================================
+# Bad-IP tracking
+# ==========================================================================
+# Copied from iroffer's count_badip()/is_in_badip(). Counting attempts within one
+# session is useless on its own, because an attacker simply reconnects; the count
+# has to outlive the connection.
+
+def note_bad_ip(ip):
+    if not ip:
+        return
+    with _bad_lock:
+        now = time.time()
+        forget_stale_failures(_bad_ips, now)
+        entry = _bad_ips.get(ip) or [0, 0.0, now]
+        entry[0] += 1
+        entry[2] = now
+        if entry[0] >= MAX_PASSWORD_ATTEMPTS:
+            entry[1] = now + BAD_IP_BLOCK_SECONDS
+            print(f"[ADMINCHAT] {ip} blocked for {int(BAD_IP_BLOCK_SECONDS)}s "
+                  f"after {entry[0]} failed password attempt(s).")
+        _bad_ips[ip] = entry
+
+
+def is_bad_ip(ip):
+    if not ip:
+        return False
+    with _bad_lock:
+        entry = _bad_ips.get(ip)
+        if not entry:
+            return False
+        if entry[1] and time.time() >= entry[1]:
+            del _bad_ips[ip]      # block expired; forget it entirely so a typo is not permanent
+            return False
+        return bool(entry[1])
+
+
+def clear_bad_ip(ip):
+    """A successful login clears the record for that address."""
+    with _bad_lock:
+        _bad_ips.pop(ip, None)
+
+
+# ==========================================================================
+# Session
+# ==========================================================================
+
+_IRC_FORMATTING = re.compile("\\x03\\d{0,2}(?:,\\d{1,2})?|[\\x02\\x0f\\x16\\x1d\\x1f]")
+
+
+def strip_irc_formatting(text):
+    """Drop mIRC colour and attribute codes.
+
+    The debug channel's lines are built for a colour-capable client sitting in a
+    channel. A console is read as a log; the codes only get in the way, and some
+    clients render a DCC CHAT window without colour support at all.
+    """
+    return _IRC_FORMATTING.sub("", str(text))
+
+
+# ==========================================================================
+# The structured feed (#550, step 2)
+#
+# A client that draws a window - dccore.mrc is the one this is for - wants
+# fields, not prose. After `hello <client> <version>` a session gets every
+# feed event as one line:
+#
+#     DCCORE <TYPE> <fixed fields...> <free text>
+#
+# Space-separated positional tokens, the ONE free-text field last, so a
+# mIRC script reads it as $N-. mIRC's whole toolkit is $1 $2 $N-, nicks never
+# contain spaces, and every reserved separator (\x1f \x03 \x02 \x01) is a
+# formatting or CTCP code already. Numbers are raw bytes and seconds; the
+# client formats. Tabs and control characters in any field become spaces.
+# ==========================================================================
+PROTOCOL_MAJOR = 1
+# The minor goes up every time a fixed field is INSERTED into a major-1 line
+# (#639, audit M37). The channel field after <nick> went in without any
+# number moving, on the reasoning that the protocol was unreleased - and an
+# already-loaded older dccore.mrc then parsed the channel as the position,
+# the slot, the byte count, with nothing anywhere saying why. HELLO now
+# carries "major.minor": a script that knows the major but a different
+# minor keeps parsing and warns that a field moved and which side to update;
+# the pre-minor script's own `$2 != 1` refuses "1.1" outright and falls back
+# to plain mode with "Update the script", which is the message it was
+# missing. The number is a string on the wire, never arithmetic: "1.10"
+# must not read as 1.1.
+PROTOCOL_MINOR = 1
+# The oldest dccore.mrc that reads this bot's lines right (#709, audit L45):
+# the one that knows HELLO carries major.minor and that a channel field
+# follows the nick. `hello <client> <version>` carries the script's own
+# version and the bot used to log it and nothing more, so an operator who
+# pulled the bot but not the script got every event line shifted by one
+# field with nothing saying why. The script checks the bot's number; this
+# is the bot checking the script's, and saying so in the window.
+MIN_SCRIPT_VERSION = "1.1"
+FEED_KINDS = ("REQUEST", "QUEUED", "SENDING", "RESUMED", "SENT", "FAIL", "SEARCH", "LISTFETCH", "FETCH")
+
+
+def _version_tuple(text):
+    """"1.10" -> (1, 10); anything that is not digits and dots -> None."""
+    parts = str(text or "").strip().split(".")
+    if not parts or not all(part.isdigit() for part in parts):
+        return None
+    return tuple(int(part) for part in parts)
+
+
+def script_is_too_old(version):
+    """Whether a client that said `hello <client> <version>` predates
+    MIN_SCRIPT_VERSION - or gave no version this bot can read."""
+    ours = _version_tuple(MIN_SCRIPT_VERSION)
+    theirs = _version_tuple(version)
+    return theirs is None or theirs < ours
+
+
+def _clean(value, token=False):
+    """A field as it may appear on a structured line: control characters
+    (tabs, CR, LF, colour codes) become spaces; a TOKEN field additionally
+    has its spaces replaced, since it must stay one $N."""
+    text = "".join(" " if ord(ch) < 32 else ch for ch in str("" if value is None else value))
+    if token:
+        text = text.strip().replace(" ", "_") or "?"
+    return text.strip()
+
+
+# A "::" standing on its own - bounded by whitespace or the ends of the name.
+_MARKER_TOKEN = re.compile(r"(?<!\S)::(?!\S)")
+
+
+def _name(value):
+    """A filename field: the last field of most lines, and on FAIL the one
+    before the ` :: ` that separates it from the reason. A `::` of its own
+    inside the name used to be defused (` :: ` -> ` : : `) but one at the
+    END was not (#682, audit L18): "name ::" gave "name :: :: reason" and the
+    script read the reason as ":: reason". An empty name gave "0 0  ::
+    reason", and the script - which collapses runs of spaces - read the name
+    as ":: reason" and the reason as nothing. Every standalone `::` is
+    defused now, wherever it sits, and an empty name is "?"."""
+    text = _MARKER_TOKEN.sub(": :", _clean(value))
+    return text or "?"
+
+
+def _num(value):
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _secs(value):
+    try:
+        return f"{float(value):.1f}"
+    except (TypeError, ValueError):
+        return "0.0"
+
+
+def _channel_token(value):
+    """The channel field of an event line: the channel name, or "-" when the
+    event has none (a request by private message, a transfer whose request
+    no longer says where it came from). Always ONE token, since it sits
+    among the fixed fields, ahead of the free text."""
+    text = _clean(value, token=True)
+    return text if text[:1] in ("#", "&", "+", "!") else "-"
+
+
+def structured_line(kind, fields):
+    """Render one feed event as its DCCORE line. Every kind FEED_KINDS names
+    has a shape below; anything else is a LOG line carrying the category
+    and the prose, so no category is ever lost by the typing."""
+    f = fields or {}
+    nick = _clean(f.get("nick"), token=True)
+    chan = _channel_token(f.get("channel"))
+    name = _name(f.get("name"))
+    kind = str(kind or "").upper()
+    if kind == "REQUEST":
+        return f"DCCORE REQUEST {nick} {chan} {_clean(f.get('kind') or 'file', token=True)} {name}"
+    if kind == "QUEUED":
+        return f"DCCORE QUEUED {nick} {chan} {_num(f.get('pos'))} {_num(f.get('busy'))} {_num(f.get('slots'))} {name}"
+    if kind == "SENDING":
+        return f"DCCORE SENDING {nick} {chan} {_num(f.get('slot'))} {_num(f.get('slots'))} {_num(f.get('bytes'))} {name}"
+    if kind == "RESUMED":
+        return f"DCCORE RESUMED {nick} {chan} {_num(f.get('at_bytes'))} {_num(f.get('total_bytes'))} {name}"
+    if kind == "SENT":
+        return (f"DCCORE SENT {nick} {chan} {_num(f.get('bytes'))} {_secs(f.get('seconds'))} "
+                f"{_num(f.get('bytes_per_s'))} {name}")
+    if kind == "FAIL":
+        return (f"DCCORE FAIL {nick} {chan} {_num(f.get('acked'))} {_num(f.get('total'))} {name} :: "
+                f"{_clean(f.get('reason'))}")
+    if kind == "SEARCH":
+        return f"DCCORE SEARCH {nick} {chan} {_num(f.get('results'))} {_clean(f.get('term'))}"
+    if kind == "LISTFETCH":
+        # A held bot list: asked for automatically, arrived, or unusable (#750).
+        # No channel: it is about a bot, not a person's request.
+        return (f"DCCORE LISTFETCH {_clean(f.get('bot'), token=True)} "
+                f"{_clean(f.get('action'), token=True)} {_clean(f.get('text'))}")
+    if kind == "FETCH":
+        # A file the bot itself fetched from another bot (#1019): asked, queued
+        # there, receiving, done or failed. Like LISTFETCH it names a bot, not a person.
+        return (f"DCCORE FETCH {_clean(f.get('bot'), token=True)} "
+                f"{_clean(f.get('action'), token=True)} {_clean(f.get('text'))}")
+    return f"DCCORE LOG {_clean(f.get('category') or kind or 'INFO', token=True)} {_clean(f.get('text'))}"
+
+
+def hello_line():
+    import defaults as config
+    return (f"DCCORE HELLO {PROTOCOL_MAJOR}.{PROTOCOL_MINOR} "
+            f"{_clean(getattr(config, 'NICKNAME', ''), token=True)} "
+            f"{_clean(getattr(config, 'SCRIPT_VERSION', ''))}")
+
+
+STATUS_INTERVAL = 30.0        # seconds between STATUS bursts to a structured session
+STATUS_WAIT = 2.0             # seconds the figures get before a PING stands in for the burst (#614)
+QUEUE_LINES_MAX = 20          # QUEUE rows per burst: the head of the queue, not all of it
+FREEZE_TIMEOUT = 300.0        # dcc.py's five-minute countdown, for the QUEUE row's seconds-left
+
+
+# The first script that draws the Downloading panel (#1019). An older one has no
+# handler for a FETCHING line and would print it as text every status burst.
+FETCHING_SCRIPT_VERSION = "1.8"
+
+
+def script_draws_fetching(version):
+    ours = _version_tuple(FETCHING_SCRIPT_VERSION)
+    theirs = _version_tuple(version)
+    return theirs is not None and theirs >= ours
+
+
+# The first script that draws a list rebuild's progress (#1024). An older one
+# would print a REBUILD line as text.
+REBUILD_SCRIPT_VERSION = "1.9"
+REBUILD_INTERVAL = 5.0        # seconds between REBUILD lines while one runs, between bursts
+
+
+def script_draws_rebuild(version):
+    ours = _version_tuple(REBUILD_SCRIPT_VERSION)
+    theirs = _version_tuple(version)
+    return theirs is not None and theirs >= ours
+
+
+def rebuild_lines(now=None):
+    """`DCCORE REBUILD <phase> <folder_index> <folder_count> <files> <elapsed>`
+    while a master-list rebuild runs, however it was started (console, !update,
+    the dashboard, the schedule): all of them set config.update_inprogress and
+    all of them write the progress file the dashboard's bar reads. Nothing
+    when none runs. Before the first progress write the phase is "starting"."""
+    if not getattr(config, "update_inprogress", False):
+        return []
+    progress = None
+    try:
+        import webserver
+        progress = webserver.read_list_progress()
+    except Exception as err:
+        print(f"[ADMINCHAT] Rebuild progress unavailable: {err}")
+    progress = progress or {}
+    phase = _clean(progress.get("phase") or "starting", token=True)
+    return [f"DCCORE REBUILD {phase} {_num(progress.get('folder_index'))} "
+            f"{_num(progress.get('folder_count'))} {_num(progress.get('files'))} "
+            f"{_num(progress.get('elapsed'))}"]
+
+
+# The first script with the @DCCore-Downloads window (#1022). The bot sends its
+# rows only to one that says 1.10+ in HELLO and has asked for them.
+DOWNLOADS_SCRIPT_VERSION = "1.10"
+DOWNLOADS_INTERVAL = 3.0      # seconds between snapshots to an open Downloads window
+DOWNLOADS_WAITING_MAX = 50    # Waiting rows per snapshot; the rest are counted, not sent
+DOWNLOADS_FINISHED_DEFAULT = 15
+DOWNLOADS_FINISHED_MAX = 15   # per list: Finished and Failed each keep this many
+DOWNLOADS_LOCK_WAIT = 0.25    # the writer never waits longer than this for the fetch lock
+_REQUEST_ID = re.compile(r"[0-9a-f]{12}")
+
+# Why a request has not gone out, the way the dashboard's Downloads page says it
+# (web/lang/en.json, download.waiting.*), keyed by what dcc_fetch sets in row["waiting"].
+DOWNLOAD_WAITING_NOTES = {
+    "offline": "waiting for {bot} to come back",
+    "just-back": "{bot} is back - asking shortly",
+    "retry": "busy - asking again later",
+    "their-turn": "waiting - {bot} has enough of ours",
+    "slots": "waiting for a free slot",
+    "paused": "paused - resume it on the dashboard",
+    "disk-full": "waiting for disk space",
+    "joining": "waiting to join the channels",
+}
+
+
+def script_draws_downloads(version):
+    ours = _version_tuple(DOWNLOADS_SCRIPT_VERSION)
+    theirs = _version_tuple(version)
+    return theirs is not None and theirs >= ours
+
+
+# The first script that surely reads PEERS and CONSOLEFEED lines (#1045). PEERS
+# came in while the script still said 1.6, CONSOLEFEED with 1.7, and the 1.5
+# that v1.13.1 shipped has neither: it would print "[PEERS] ..." as text on
+# every connect, every WHO round and every peer that joined or left.
+PEERS_SCRIPT_VERSION = "1.7"
+
+
+def script_reads_peers(version):
+    ours = _version_tuple(PEERS_SCRIPT_VERSION)
+    theirs = _version_tuple(version)
+    return theirs is not None and theirs >= ours
+
+
+def _download_name(row):
+    if row.get("request_type") == "list":
+        return f"{row.get('bot') or '?'}'s file list"
+    name = str(row.get("filename") or row.get("requested_filename") or "")
+    return name[5:] if name.startswith("!rar ") else name
+
+
+def _download_waiting_note(row):
+    state = row.get("state")
+    if state == "queued":
+        position = row.get("queue_position")
+        return f"queued there at #{position}" if position else "queued there"
+    if state == "offered":
+        return "asked - no answer yet"
+    template = DOWNLOAD_WAITING_NOTES.get(row.get("waiting"))
+    return template.format(bot=row.get("bot") or "the bot") if template else "asking shortly"
+
+
+def downloads_lines(finished_rows=DOWNLOADS_FINISHED_DEFAULT, now=None):
+    """The Downloads window's snapshot, or None when the fetch queue could not
+    be read in time (the caller tries again on its next pass):
+
+        DCCORE DLBEGIN
+        DCCORE DLROW <id> <kind> <state> <bot> <received> <total> <bps> <when> <note> <name>
+        (rows of one bot sit together within each kind)
+        DCCORE DLEND <waiting_total> <complete_total> <failed_total>
+
+    kind is d (coming in), w (waiting), c (finished) or f (failed). <note> is one token
+    (spaces as underscores, "-" for none): why a waiting row waits, or how a
+    finished one ended. <when> is the epoch a finished row ended, else 0. A
+    snapshot is whole or not sent: the script redraws only at DLEND.
+
+    The fetch lock is taken with a short timeout, not waited for: this runs on
+    the session writer, which is also the link's heartbeat.
+    """
+    import time as _time
+    now = _time.time() if now is None else now
+    try:
+        import dcc_fetch
+        queue = dcc_fetch._ensure_fetch_queue()
+        lock = dcc_fetch._fetch_lock()
+        if not lock.acquire(timeout=DOWNLOADS_LOCK_WAIT):
+            return None
+        try:
+            rows = [(rid, dict(row)) for rid, row in queue.items()]
+        finally:
+            lock.release()
+    except Exception as err:
+        print(f"[ADMINCHAT] Downloads unavailable for the window: {err}")
+        return None
+
+    coming, waiting, finished = [], [], []
+    for rid, row in rows:
+        state = row.get("state")
+        if state in ("receiving", "listening"):
+            coming.append((rid, row))
+        elif state in ("pending", "offered", "queued"):
+            waiting.append((rid, row))
+        elif state in ("complete", "failed"):
+            finished.append((rid, row))
+    by_asked = lambda item: item[1].get("requested_at", 0)
+    coming.sort(key=by_asked)
+    waiting.sort(key=by_asked)
+    def failed_row(row):
+        return row.get("state") == "failed" or bool(row.get("list_processing_error"))
+
+    by_ended = lambda item: item[1].get("finished_at") or item[1].get("requested_at", 0)
+    done = sorted((i for i in finished if not failed_row(i[1])), key=by_ended, reverse=True)
+    failed = sorted((i for i in finished if failed_row(i[1])), key=by_ended, reverse=True)
+
+    def by_bot(items):
+        """One bot's rows together, bots in the order each first appears, so the
+        window can head each group with the bot's nick."""
+        groups = {}
+        for item in items:
+            groups.setdefault(item[1].get("bot") or "?", []).append(item)
+        return [item for group in groups.values() for item in group]
+
+    def line(rid, kind, state, row, bps=0, when=0, note="-"):
+        return (f"DCCORE DLROW {rid} {kind} {state} {_clean(row.get('bot'), token=True)} "
+                f"{_num(row.get('bytes_received'))} {_num(row.get('total_size'))} {bps} {_num(when)} "
+                f"{_clean(note, token=True)} {_clean(_download_name(row))}")
+
+    lines = ["DCCORE DLBEGIN"]
+    for rid, row in by_bot(coming):
+        received = int(row.get("bytes_received") or 0)
+        began = float(row.get("receiving_since") or 0)
+        bps = int(received / (now - began)) if began and now > began + 0.5 else 0
+        lines.append(line(rid, "d", row.get("state"), row, bps=bps))
+    for rid, row in by_bot(waiting[:DOWNLOADS_WAITING_MAX]):
+        lines.append(line(rid, "w", row.get("state"), row, note=_download_waiting_note(row)))
+    keep = max(0, min(int(finished_rows), DOWNLOADS_FINISHED_MAX))
+    for rid, row in by_bot(done[:keep]):
+        lines.append(line(rid, "c", "complete", row, when=row.get("finished_at") or row.get("requested_at") or 0))
+    for rid, row in by_bot(failed[:keep]):
+        when = row.get("finished_at") or row.get("requested_at") or 0
+        note = (f"rejected: {row.get('list_processing_error')}" if row.get("state") != "failed"
+                else row.get("reason") or "no reason given")
+        lines.append(line(rid, "f", "failed", row, when=when, note=note))
+    lines.append(f"DCCORE DLEND {len(waiting)} {len(done)} {len(failed)}")
+    return lines
+
+
+def fetching_lines(now=None):
+    """One `DCCORE FETCHING <bot> <received> <total> <bps> <name>` per file the
+    bot is receiving from another bot right now - the panel's Downloading
+    section, the counterpart of SLOT. The speed is what this transfer has
+    moved since it began receiving; 0 until it has run long enough to say."""
+    import time as _time
+    now = _time.time() if now is None else now
+    try:
+        import dcc_fetch
+        queue = dcc_fetch._ensure_fetch_queue()
+        with dcc_fetch._fetch_lock():
+            rows = [dict(row) for row in queue.values() if row.get("state") == "receiving"]
+    except Exception as err:
+        print(f"[ADMINCHAT] Downloads unavailable for the status burst: {err}")
+        return []
+    lines = []
+    for row in sorted(rows, key=lambda r: r.get("requested_at", 0)):
+        received = int(row.get("bytes_received") or 0)
+        began = float(row.get("receiving_since") or 0)
+        bps = int(received / (now - began)) if began and now > began + 0.5 else 0
+        name = row.get("filename") or row.get("requested_filename") or ""
+        if row.get("request_type") == "list":
+            name = f"{row.get('bot') or '?'}'s file list"
+        lines.append(f"DCCORE FETCHING {_clean(row.get('bot'), token=True)} {received} "
+                     f"{_num(row.get('total_size'))} {bps} {_clean(name)}")
+    return lines
+
+
+def status_lines(now=None, fetching=False, rebuild=False):
+    """The STATUS burst (#550, step 3): what the client's title bar and side
+    panel are drawn from, read from what the daemon already holds.
+
+        DCCORE STATUS <used> <slots> <qfiles> <qusers> <sent_today> <bytes_today> <bps_now> <record_bps>
+                      <started_epoch> <failed> <searches>      (the last three: since the bot started)
+        DCCORE SLOT <nick> <sent> <total> <bps> <name>          one per active transfer
+        DCCORE QUEUE <pos> <nick> <files> <frozen_secs_left>    one per queued user, first 20
+
+    Today's figures are the ROLLED ones (db.load_advanced_stats_rolled), for
+    the reason announce.py gives: the daemon rotates the day only when a
+    transfer completes, so the raw row still shows yesterday under Today
+    on a quiet morning. Every figure failing to load reads 0 rather than
+    taking the burst down: a title bar with a wrong number beats no title
+    bar, and the log line says what could not be read.
+    """
+    import time as _time
+    now = _time.time() if now is None else now
+    transfers = [tx for tx in list(getattr(config, "active_transfers", []) or []) if isinstance(tx, dict)]
+    queue = {k: v for k, v in dict(getattr(config, "dcc_queue", {}) or {}).items() if v}
+    frozen = dict(getattr(config, "frozen_queues", {}) or {})
+    slots = getattr(config, "MAX_DCC_SLOTS", 0)
+
+    sent_today = bytes_today = record = bps_now = 0
+    try:
+        import db
+        import stats_mgr
+        stats = db.load_advanced_stats_rolled()
+        if isinstance(stats, list) and len(stats) > 6:
+            sent_today, bytes_today = int(stats[4] or 0), int(stats[5] or 0)
+        record = int(db.get_speed_record() or 0)
+        bps_now = int(stats_mgr.live_speed() or 0)
+    except Exception as err:
+        print(f"[ADMINCHAT] Status figures unavailable: {err}")
+
+    # Since the bot started, not since this client connected (#754): the start
+    # as an epoch (now minus the uptime), and the failures and searches the
+    # daemon itself has counted. Appended at the end of the line, which is
+    # what makes it a minor addition - an older script reads $1-$8 and stops.
+    started = failed = searches = 0
+    try:
+        import runtime
+        import stats_mgr as _stats
+        started = int(now - _stats.get_uptime_seconds())
+        failed = int(runtime.feed_counts.get("FAIL", 0))
+        searches = int(runtime.feed_counts.get("SEARCH", 0))
+    except Exception as err:
+        print(f"[ADMINCHAT] Start figures unavailable: {err}")
+
+    lines = [f"DCCORE STATUS {len(transfers)} {_num(slots)} "
+             f"{sum(len(rows) for rows in queue.values())} {len(queue)} "
+             f"{sent_today} {bytes_today} {bps_now} {record} "
+             f"{started} {failed} {searches}"]
+    for tx in transfers:
+        sent = int(tx.get("bytes_sent") or 0)
+        started = float(tx.get("started_at") or 0)
+        # The speed is what THIS connection has moved, not what the receiver
+        # holds: a resumed send starts with bytes_sent already at the resume
+        # point, and dividing all of it by the seconds since it restarted
+        # showed 108 MB/s for a link doing 6 (#746).
+        moved = max(0, sent - int(tx.get("resume_offset") or 0))
+        bps = int(moved / (now - started)) if started and now > started + 0.5 else 0
+        lines.append(f"DCCORE SLOT {_clean(tx.get('user'), token=True)} {sent} "
+                     f"{_num(tx.get('size'))} {bps} {_clean(tx.get('file'))}")
+    # In the queue's own order, which is the order dcc.check_queue_and_send()
+    # walks it (dict insertion order: first request first, kept across a
+    # save/load). Sorted by nick, the <pos> was an alphabetical rank shown as
+    # a position, and with more than 20 waiting the user actually next in
+    # line could fall off the burst altogether (#612).
+    for pos, user in enumerate(list(queue)[:QUEUE_LINES_MAX], start=1):
+        left = 0
+        if user.lower() in frozen:    # both dicts key on the lowercased nick; be sure
+            left = max(0, int(FREEZE_TIMEOUT - (now - float(frozen[user.lower()] or 0))))
+        lines.append(f"DCCORE QUEUE {pos} {_clean(user, token=True)} {len(queue[user])} {left}")
+    if fetching:
+        lines.extend(fetching_lines(now))
+    if rebuild:
+        lines.extend(rebuild_lines(now))
+    return lines
+
+
+def console_line(msg_text, category="INFO"):
+    """One feed line as the DCC chat shows it.
+
+    A DCC CHAT window IS an IRC client, and it renders mIRC colour codes the
+    way a channel does - so with ADMIN_CHAT_COLOURS on (the default) the tag
+    carries the same label and colour the debug channel's block does
+    (announce.category_tag(), one table for both), in the operator's own
+    theme, and the text keeps whatever bold a caller put round a nick. The
+    old "a console is read as a log, not rendered by an IRC client" was true
+    of the dashboard's Console page - whose sink keeps stripping - and false
+    of this one. Off gives the plain `[TAG] text` a client that does not
+    render codes wants. #550, step 1.
+    """
+    import announce
+    import theme
+    if not bool(getattr(config, "ADMIN_CHAT_COLOURS", True)):
+        return f"[{category}] {strip_irc_formatting(msg_text)}"
+    label, colour = announce.category_tag(category, theme.blocks())
+    return f"{colour}[{label}]{config.C_RESET} {msg_text}"
+
+
+class Session:
+    """One DCC CHAT connection. The socket IS the session.
+
+    Writes never happen on a caller's thread. Everything that wants to say
+    something appends to a bounded deque and a dedicated writer thread drains it.
+    That is not tidiness: send_debug() is called from the IRC read loop, and if a
+    log line could block on a stalled admin client - a minimised window, a sleeping
+    laptop, a half-open TCP connection - the daemon's network thread would freeze
+    and drop off the server. The same bounded hand-off announce.py already uses.
+    """
+
+    def __init__(self, sock, peer_ip, nick, host):
+        self.sock = sock
+        self.peer_ip = peer_ip
+        self.nick = nick
+        self.host = host
+        self.authenticated = False
+        self.opened_at = time.time()
+        self.last_activity = time.time()
+        self.attempts = 0
+        self.closed = False
+        self.dropped = 0
+        # Structured mode (#550): set by the `hello` command, never before
+        # authentication. `client` is what the script called itself.
+        self.structured = False
+        self.draws_fetching = False   # the script said it can draw FETCHING lines (#1019)
+        self.draws_rebuild = False    # ... and REBUILD lines (#1024)
+        self._rebuild_sent_at = 0.0
+        self._rebuild_shown = False   # a REBUILD line is on the script's panel
+        self.draws_downloads = False  # ... and the Downloads window's rows (#1022)
+        self.reads_peers = False      # ... and PEERS and CONSOLEFEED lines (#1045)
+        self.downloads_finished = 0   # > 0 while that window is open: how many finished rows it wants
+        self._downloads_sent_at = 0.0
+        self._downloads_last = None   # the last snapshot sent, to send only a change
+        self.client = ""
+        self._reported_dropped = 0
+        self._status_sent_at = 0.0
+        self._status_due = False      # set by event_sink, acted on by the writer
+        self._status_job = None       # (thread, lines) while a burst is being computed
+        # The DCCORE CHANNELS line this session was last sent (#371): sent
+        # again with a status burst when the bot's channels change, so a
+        # chat window's channel list does not go stale (#958 review).
+        self._chat_channels = None
+        self._outbox = collections.deque(maxlen=OUTBOX_MAX)
+        self._wake = threading.Event()
+        self._lock = threading.Lock()
+        self._writer = None
+
+    # -- output ------------------------------------------------------------
+
+    def send(self, text=""):
+        """Queue one line. Never blocks, never raises, never touches the socket.
+
+        In structured mode every line the bot sends starts with DCCORE, so a
+        command reply - the fourteen handlers call this directly - is wrapped
+        as `DCCORE OUT <text>`; a line that already is a DCCORE line goes as
+        it is. The client routes OUT lines to wherever it shows replies and
+        can never mistake one for an event.
+        """
+        if self.closed:
+            return
+        text = str(text)
+        if self.structured and not text.startswith("DCCORE "):
+            text = "DCCORE OUT " + text
+        if len(self._outbox) == self._outbox.maxlen:
+            self.dropped += 1
+        self._outbox.append(text)
+        self._wake.set()
+
+    def start_writer(self):
+        self._writer = threading.Thread(target=self._writer_loop, daemon=True)
+        self._writer.start()
+
+    def send_status(self):
+        """One STATUS burst, now - ON THE WRITER THREAD ONLY.
+
+        status_lines() reads the live figures, and one of them
+        (stats_mgr.live_speed) takes dcc.queue_lock, a plain Lock. The
+        events that ask for a burst - SENDING above all - are emitted from
+        inside `with queue_lock:` in dcc.check_queue_and_send(), so computing
+        the burst on the emitting thread was that thread taking a lock it
+        already held: it froze holding queue_lock, every later request froze
+        behind it, the IRC loop stopped answering PING and the bot dropped
+        off the network (seen live, 2026-09-19, the first night with the
+        mIRC script connected). So event_sink only flags that a burst is
+        due, and the writer, which holds nothing, computes and sends it.
+
+        Computes it on a helper thread with a deadline, not inline (#614):
+        the burst is also the heartbeat, and a writer parked on queue_lock
+        (or a locked stats DB) for the script's 90 seconds sent nothing at
+        all - not the feed, not a LOG line - so the script called the link
+        dead, reconnected, and the new session's writer parked at the same
+        point: a login every ~100 s while the bot itself was fine. If the
+        figures are not in within STATUS_WAIT, `DCCORE PING` stands in for
+        the burst - any line resets the script's timer - and the helper is
+        left to finish; while it is still running no second one is started,
+        and its lines go out on the pass that finds them ready in time.
+        """
+        if self.closed or not self.authenticated or not self.structured:
+            return
+        self._status_sent_at = time.time()
+        self._status_due = False
+        self._send_chat_channels_if_changed()
+        job = self._status_job
+        if job is None or not job[0].is_alive():
+            lines = []
+
+            def compute():
+                try:
+                    lines.extend(status_lines(fetching=self.draws_fetching,
+                                              rebuild=self.draws_rebuild))
+                except Exception as err:
+                    print(f"[ADMINCHAT] Status burst failed: {err}")
+
+            job = (threading.Thread(target=compute, daemon=True), lines)
+            self._status_job = job
+            job[0].start()
+        job[0].join(STATUS_WAIT)
+        if job[0].is_alive():
+            self.send("DCCORE PING")
+            return
+        self._status_job = None
+        for line in job[1]:
+            self.send(line)
+        self._rebuild_shown = any(line.startswith("DCCORE REBUILD ") for line in job[1])
+        self._rebuild_sent_at = time.time()
+
+    def send_rebuild_progress(self):
+        """A REBUILD line between bursts while a rebuild runs, and one
+        `DCCORE REBUILD end` when it stops, so the panel does not wait up to a
+        whole status interval to say the rebuild is over (#1024). Reads the
+        progress file only - no lock - so it is safe on the writer thread."""
+        if not (self.draws_rebuild and self.structured and self.authenticated):
+            return
+        now = time.time()
+        if now - self._rebuild_sent_at < REBUILD_INTERVAL:
+            return
+        lines = rebuild_lines(now)
+        if not lines and not self._rebuild_shown:
+            return
+        self._rebuild_sent_at = now
+        self._rebuild_shown = bool(lines)
+        self.send(lines[0] if lines else "DCCORE REBUILD end")
+
+    def request_downloads(self):
+        """The Downloads window's next snapshot goes on the writer's next pass,
+        whatever the interval and whatever the last one said. Safe from any thread."""
+        self._downloads_last = None
+        self._downloads_sent_at = 0.0
+        self._wake.set()
+
+    def send_downloads(self):
+        """One snapshot for an open Downloads window (#1022), at most every
+        DOWNLOADS_INTERVAL and only when it differs from the last. Nothing at
+        all while the window is closed: the window tells the bot when it opens
+        and closes, so a bot with none open does no work for it."""
+        if not (self.downloads_finished and self.draws_downloads
+                and self.structured and self.authenticated):
+            return
+        now = time.time()
+        if now - self._downloads_sent_at < DOWNLOADS_INTERVAL:
+            return
+        lines = downloads_lines(self.downloads_finished, now)
+        if lines is None:
+            return
+        self._downloads_sent_at = now
+        if lines == self._downloads_last:
+            return
+        self._downloads_last = lines
+        for text in lines:
+            self.send(text)
+
+    def _send_chat_channels_if_changed(self):
+        """DCCORE CHANNELS again when the bot's channels have changed since
+        this session was told (#371). A chat window reads it to know which
+        channels the bot relays; stale, it would hide a raw NOTICE for a
+        channel the bot has left. At most one status interval late. Only to
+        a session told once already, at `hello` - anything else never asked
+        for the chat's channels."""
+        try:
+            import serverschat
+            line = serverschat.channels_line()
+        except Exception:
+            return
+        if self._chat_channels is not None and line != self._chat_channels:
+            self._chat_channels = line
+            self.send(line)
+
+    def request_status(self):
+        """Ask the writer for a burst on its next pass. Safe from any thread,
+        under any lock: it touches no figure and takes no lock."""
+        self._status_due = True
+        self._wake.set()
+
+    def _writer_loop(self):
+        while not self.closed:
+            # A burst an event asked for goes out ahead of whatever is queued
+            # behind it: the title bar should not wait for the backlog, and
+            # a burst is a few lines. The timer's own burst, below, still
+            # fills silence only.
+            if self._status_due and self.structured and self.authenticated:
+                self.send_status()
+            if not self._outbox:
+                # The STATUS timer rides on the writer's own half-second
+                # wake rather than a thread of its own: one thread per
+                # session was the design, and a burst every STATUS_INTERVAL
+                # is also the heartbeat a client uses to tell a quiet link
+                # from a dead one. It fills silence only - a client that is
+                # behind is receiving lines already, and a burst on top of a
+                # backlog would only push more of them off the outbox.
+                if (self.structured and self.authenticated
+                        and time.time() - self._status_sent_at >= STATUS_INTERVAL):
+                    self.send_status()
+                    continue
+                self.send_rebuild_progress()
+                self.send_downloads()
+                self._wake.wait(0.5)
+                self._wake.clear()
+                continue
+            try:
+                line = self._outbox.popleft()
+            except IndexError:
+                continue
+            # A slow client loses lines rather than stalling the daemon; in
+            # structured mode it is told how many, on the next line that does
+            # get through, so the window can say so instead of silently
+            # missing them.
+            if self.structured and self.dropped > self._reported_dropped:
+                lost = self.dropped - self._reported_dropped
+                self._reported_dropped = self.dropped
+                line = f"DCCORE DROPPED {lost}\n" + line
+            # DCC CHAT is line-oriented and terminated with \n. mIRC accepts \r\n
+            # too, but a bare \n is what every other client expects.
+            payload = (line + "\n").encode("utf-8", "replace")
+            try:
+                with self._lock:
+                    self.sock.sendall(payload)
+            except (OSError, socket.timeout) as err:
+                print(f"[ADMINCHAT] Write to {self.nick} failed ({err}); closing session.")
+                self.close(announce_text=None)
+                return
+
+    def debug_sink(self, msg_text, category="INFO"):
+        """Target for announce.send_debug's fan-out.
+
+        A pure append, like send() itself. This runs on whatever thread called
+        send_debug - including the IRC read loop - so it must never touch the
+        socket or wait for anything.
+        """
+        if self.closed or not self.authenticated:
+            return
+        if self.structured:
+            # The feed kinds arrive with their fields through event_sink;
+            # sending the prose too would show every event twice.
+            if str(category).upper() in FEED_KINDS:
+                return
+            self.send(structured_line("LOG", {"category": category,
+                                              "text": strip_irc_formatting(msg_text)}))
+            return
+        self.send(console_line(msg_text, category))
+
+    def event_sink(self, kind, fields, text):
+        """Target for announce.feed_event's fan-out: the fields of one feed
+        event. Only a structured session draws on it; a plain one has the
+        prose from debug_sink already."""
+        if self.closed or not self.authenticated or not self.structured:
+            return
+        # `text` is the event's prose, handed to the sink beside the fields.
+        # The kinds that carry their own fields (REQUEST, SENT, ...) never
+        # read it; LISTFETCH's whole payload is that sentence, and it used to
+        # be looked for in the fields, where it was not - the window drew a
+        # bare "[LISTS]" tag (#750).
+        self.send(structured_line(kind, {"text": text, **fields}))
+        # A slot or a queue just changed; the title bar should not wait for
+        # the timer to say so. Flagged, not computed: this runs on the
+        # emitting thread, which may hold queue_lock - see send_status().
+        if str(kind).upper() in ("SENDING", "SENT", "FAIL", "QUEUED", "RESUMED"):
+            self.request_status()
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def close(self, announce_text="Session closed."):
+        if self.closed:
+            return
+        try:
+            import announce
+            announce.remove_debug_sink(self.debug_sink)
+            announce.remove_event_sink(self.event_sink)
+        except Exception:
+            pass
+        if announce_text:
+            # Written inline rather than queued: the writer thread is about to
+            # stop, so a queued goodbye would never leave the building.
+            # Wrapped as send() wraps (#679, audit L15): "Goodbye." and "Line
+            # too long." went out bare on a structured session, the two lines
+            # that broke "every line starts with DCCORE". A line that already
+            # is one (DCCORE TAKEN) goes as it is.
+            if self.structured and not announce_text.startswith("DCCORE "):
+                announce_text = "DCCORE OUT " + announce_text
+            try:
+                with self._lock:
+                    self.sock.sendall((announce_text + "\n").encode("utf-8", "replace"))
+            except OSError:
+                pass
+        self.closed = True
+        self._wake.set()
+        try:
+            self.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+    def expired(self, now=None):
+        """True when this session has outstayed its allowance.
+
+        Only an UNAUTHENTICATED session has one: sixty seconds to supply a
+        password. An authenticated console is never closed by a clock - see
+        the note beside AUTH_TIMEOUT.
+        """
+        if self.authenticated:
+            return False
+        now = now if now is not None else time.time()
+        return (now - self.opened_at) > AUTH_TIMEOUT
+
+
+# ==========================================================================
+# Banner and command surface
+# ==========================================================================
+
+def banner_lines():
+    """Modelled on iroffer's chat_banner(): welcome, build, then the prompt.
+
+    The uptime line iroffer prints is deliberately absent from the BANNER, but
+    the value behind it is live: _uptime_seconds() below wraps
+    stats_mgr.get_uptime_seconds(), and both `uptime` and `status` report it.
+
+    This used to say the function was "called from nowhere" and reset to zero on
+    every !rehash. Neither is true any more: it has two callers, and stats_mgr
+    guards start_time with a try/except NameError precisely so a reload leaves
+    the original value standing (#232).
+    """
+    return [
+        "",
+        f"Welcome to {getattr(config, 'NICKNAME', None)}",
+        f"{getattr(config, 'SCRIPT_VERSION', '')} - {platform_compat.describe()}",
+        "",
+    ]
+
+
+def format_uptime(seconds):
+    """iroffer's phrasing, because the banner is modelled on iroffer's."""
+    seconds = int(max(0, seconds))
+    days, rest = divmod(seconds, 86400)
+    hours, rest = divmod(rest, 3600)
+    minutes = rest // 60
+    parts = []
+    if days:
+        parts.append(f"{days} Day{'s' if days != 1 else ''}")
+    if hours or days:
+        parts.append(f"{hours} Hr{'s' if hours != 1 else ''}")
+    parts.append(f"{minutes} Min")
+    if len(parts) > 1:
+        return ", ".join(parts[:-1]) + " and " + parts[-1]
+    return parts[0]
+
+
+def _uptime_seconds():
+    import stats_mgr
+    return stats_mgr.get_uptime_seconds()
+
+
+# --------------------------------------------------------------------------
+# Read-only commands. These build their own output, so they answer directly.
+# --------------------------------------------------------------------------
+
+def _cmd_version(session, args):
+    session.send(getattr(config, "SCRIPT_VERSION", ""))
+    session.send(platform_compat.describe())
+
+
+def _cmd_checkversion(session, args):
+    """Ask GitHub now whether a newer DCCore exists (#572), whatever
+    CHECK_FOR_UPDATES says. On a thread, so the console is not held for the
+    request's timeout; the answer comes back into this session - success or
+    failure, never silence."""
+    import threading
+
+    def run():
+        import version_check
+        result = version_check.manual_check()
+        if result.get("cooldown"):
+            session.send(f"Checked moments ago - try again in {result['cooldown']}s. "
+                         f"Version: {version_check.describe()}")
+        else:
+            session.send(f"Version check: {version_check.describe()}")
+
+    session.send("Asking GitHub for the latest release...")
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _checkupdates_reply(session, on):
+    """The setting, said to whoever asked: the DCCORE line dccore.mrc reads
+    to a structured session, a sentence to a person - a plain DCC chat, or
+    the dashboard's Console (_WebConsoleSession.structured is False). A
+    person used to be shown the protocol line itself; `pair` made the same
+    choice for the same reason (#581)."""
+    if getattr(session, "structured", False):
+        return f"DCCORE CHECKUPDATES {'on' if on else 'off'}"
+    return (f"The daily update check is {'on' if on else 'off'}"
+            f"{'' if on else ' - checkversion still asks GitHub by hand'}.")
+
+
+def _cmd_checkupdates(session, args):
+    """Turn CHECK_FOR_UPDATES on or off, or report it with no argument.
+
+    Written through settings_file.save() and a rehash - the same path the
+    dashboard's own Settings save uses - not by poking config directly:
+    a rehash re-reads settings.conf, so the change is real rather than
+    live-only-until-restart, and commands._handle_rehash_request() already
+    calls version_check.ensure_worker() after every rehash (wired in for
+    #776's rebuild-schedule worker, the identical need), so turning it on
+    here really starts the daily check rather than waiting for one.
+
+    The `DCCORE CHECKUPDATES on|off` reply is read by dccore.mrc's options
+    dialog (mIRC checkbox follow-up to #572) - a plain prose reply would
+    have meant either parsing prose or a second, structured-only command,
+    and every other piece of state the script keeps in sync with the bot
+    already arrives as a DCCORE line.
+    """
+    import threading
+
+    arg = args.strip().lower()
+    if arg not in ("", "on", "off"):
+        session.send("Usage: checkupdates [on|off]")
+        return
+    if not arg:
+        session.send(_checkupdates_reply(session, getattr(config, "CHECK_FOR_UPDATES", True)))
+        return
+    wanted = arg == "on"
+
+    def apply():
+        import settings_file
+        settings_file.save(vars(config), {"CHECK_FOR_UPDATES": wanted})
+        import commands
+        commands.handle_rehash_request(session.nick, CONSOLE_SOURCE, authorised=True)
+        # `wanted`, not a re-read of config: the rehash just triggered reloads
+        # it from the file this save() just wrote, so it is not in doubt -
+        # and reading it back here would make this line's correctness depend
+        # on that reload having actually finished, which is exactly the
+        # coupling test_rehash_returns_only_the_acknowledgement's own
+        # rehash-mocking convention exists to avoid.
+        session.send(_checkupdates_reply(session, wanted))
+
+    session.send(f"Turning the daily update check {'on' if wanted else 'off'} ...")
+    _run_detached(session, "checkupdates", apply)
+
+
+def _consolefeed_reply(session, on):
+    """The setting, said to whoever asked - same split as _checkupdates_reply
+    and for the same reason: dccore.mrc's options dialog reads the DCCORE
+    line, a person reads a sentence."""
+    if getattr(session, "structured", False):
+        return f"DCCORE CONSOLEFEED {'on' if on else 'off'}"
+    return (f"The console feed is {'on' if on else 'off'}"
+            f"{'' if on else ' - status still arrives, nothing else does'}.")
+
+
+def _cmd_consolefeed(session, args):
+    """Turn DEBUG_TO_CONSOLE on or off, or report it with no argument.
+
+    Found live (#1006 follow-up): an operator's dccore.mrc window kept
+    showing its STATUS burst - that one is unconditional once a session is
+    structured and authenticated - while REQUEST, SENDING, SENT and every
+    other feed line stayed silent, because DEBUG_TO_CONSOLE gates those in
+    announce.feed_event() and nothing said so. The window looking alive
+    while quietly missing everything else is a worse experience than the
+    window plainly saying why.
+
+    Written through settings_file.save() and a rehash, the same path
+    _cmd_checkupdates uses and for the same reason: a rehash re-reads
+    settings.conf, so the change survives a restart rather than holding
+    only until one.
+    """
+    arg = args.strip().lower()
+    if arg not in ("", "on", "off"):
+        session.send("Usage: consolefeed [on|off]")
+        return
+    if not arg:
+        session.send(_consolefeed_reply(session, getattr(config, "DEBUG_TO_CONSOLE", True)))
+        return
+    wanted = arg == "on"
+
+    def apply():
+        import settings_file
+        settings_file.save(vars(config), {"DEBUG_TO_CONSOLE": wanted})
+        import commands
+        commands.handle_rehash_request(session.nick, CONSOLE_SOURCE, authorised=True)
+        session.send(_consolefeed_reply(session, wanted))
+
+    session.send(f"Turning the console feed {'on' if wanted else 'off'} ...")
+    _run_detached(session, "consolefeed", apply)
+
+
+def _cmd_uptime(session, args):
+    session.send(f"Running {format_uptime(_uptime_seconds())}")
+
+
+def _cmd_slots(session, args):
+    transfers = list(getattr(config, "active_transfers", []))
+    limit = getattr(config, "MAX_DCC_SLOTS", 0)
+    session.send(f"Slots: {len(transfers)}/{limit} in use")
+    if not transfers:
+        session.send("  (nothing sending)")
+        return
+    for tx in transfers:
+        sent = tx.get("bytes_sent", 0)
+        session.send(f"  {str(tx.get('user', '?')):<20} {str(tx.get('file', '?'))[:48]:<48} "
+                     f"{sent:,} bytes")
+
+
+def _cmd_queue(session, args):
+    queue = dict(getattr(config, "dcc_queue", {}))
+    frozen = dict(getattr(config, "frozen_queues", {}))
+    target = args.strip().lower()
+
+    if target:
+        rows = queue.get(target, [])
+        if not rows:
+            session.send(f"{target} has nothing queued.")
+            return
+        session.send(f"{target}: {len(rows)} file(s)"
+                     f"{' (FROZEN)' if target in frozen else ''}")
+        for row in rows:
+            name = row.get("file", "?") if isinstance(row, dict) else str(row)
+            session.send(f"  {name}")
+        return
+
+    if not queue:
+        session.send("The queue is empty.")
+        return
+    total = sum(len(rows) for rows in queue.values())
+    session.send(f"{total} file(s) queued for {len(queue)} user(s), in serving order:")
+    # The dispatcher's order, not alphabetical: the same walk dcc.py makes (#612).
+    for user_key in queue:
+        session.send(f"  {user_key:<20} {len(queue[user_key]):>4} file(s)"
+                     f"{'  FROZEN' if user_key in frozen else ''}")
+
+
+def _cmd_status(session, args):
+    import dcc
+    import list as list_mod
+
+    transfers = getattr(config, "active_transfers", [])
+    session.send(f"{getattr(config, 'SCRIPT_VERSION', '')} - "
+                 f"running {format_uptime(_uptime_seconds())}")
+    session.send(f"Nick        : {getattr(config, 'NICKNAME', '?')}")
+    session.send(f"Slots       : {len(transfers)}/{getattr(config, 'MAX_DCC_SLOTS', 0)} in use")
+    try:
+        session.send(f"Queued      : {dcc.get_total_queued_count()} file(s) for "
+                     f"{len(getattr(config, 'dcc_queue', {}))} user(s)")
+    except Exception as err:
+        session.send(f"Queued      : unavailable ({err})")
+    session.send(f"Frozen      : {len(getattr(config, 'frozen_queues', {}))} queue(s)")
+    session.send(f"Timed bans  : {len(getattr(config, 'banned_users', {}))}")
+    try:
+        import db
+        session.send(f"Hard bans   : {len(db.load_hard_bans())}")
+    except Exception as err:
+        session.send(f"Hard bans   : unavailable ({err})")
+    try:
+        count, date_str, size_str, _ = list_mod.get_file_count_date_size_and_raw_bytes()
+        session.send(f"MasterList  : {count:,} files, {size_str}, dated {date_str}")
+    except Exception as err:
+        session.send(f"MasterList  : unavailable ({err})")
+    try:
+        import commands as _commands
+        session.send(f"Rebuild     : {_commands.describe_rebuild_schedule()}")
+    except Exception as err:
+        session.send(f"Rebuild     : unavailable ({err})")
+    try:
+        import version_check
+        session.send(f"Version     : {version_check.describe()}")
+    except Exception as err:
+        session.send(f"Version     : unavailable ({err})")
+
+
+# --------------------------------------------------------------------------
+# Action commands.
+#
+# Each one runs on its own thread. rehash reloads eight modules and update walks
+# the whole NFS library, which takes minutes - doing either on the reader thread
+# would freeze this session for the duration, unable to read a command.
+#
+# They report through announce.send_debug, which reaches this console via the
+# sink registered at authentication, so their output arrives here as well as in
+# the debug channel.
+#
+# authorised=True: the session has already proved the operator's services login
+# and a password, which is a stronger claim than the nick comparison inside
+# those handlers - and that comparison would refuse a console whose current nick
+# is not in ADMIN_NICK.
+# --------------------------------------------------------------------------
+
+def _run_detached(session, label, fn):
+    def wrapper():
+        try:
+            fn()
+        except Exception as err:
+            session.send(f"{label} failed: {err}")
+            print(f"[ADMINCHAT] {label} raised: {err}")
+    threading.Thread(target=wrapper, daemon=True).start()
+
+
+def _cmd_ban(session, args):
+    pattern = args.strip()
+    if not pattern:
+        session.send("Usage: ban <pattern>   e.g. ban *!*@spammer.net")
+        return
+    import commands
+    session.send(f"Banning {pattern} ...")
+    _run_detached(session, "ban", lambda: commands.handle_hard_ban_request(
+        session.nick, CONSOLE_SOURCE, f"!ban {pattern}", authorised=True))
+
+
+def _cmd_unban(session, args):
+    pattern = args.strip()
+    if not pattern:
+        session.send("Usage: unban <pattern>")
+        return
+    import commands
+    session.send(f"Unbanning {pattern} ...")
+    _run_detached(session, "unban", lambda: commands.handle_hard_unban_request(
+        session.nick, CONSOLE_SOURCE, f"!unban {pattern}", authorised=True))
+
+
+def _cmd_bans(session, args):
+    import db
+    patterns = db.load_hard_bans()
+    timed = dict(getattr(config, "banned_users", {}))
+    if not patterns and not timed:
+        session.send("No bans.")
+        return
+    if patterns:
+        session.send(f"Permanent ({len(patterns)}):")
+        for pattern in patterns:
+            session.send(f"  {pattern}")
+    if timed:
+        session.send(f"Timed ({len(timed)}):")
+        for user_key in sorted(timed):
+            session.send(f"  {user_key}")
+
+
+def _cmd_clearqueue(session, args):
+    target = args.strip()
+    if not target:
+        session.send("Usage: clearqueue <nick>")
+        return
+    import commands
+    session.send(f"Clearing the queue for {target} ...")
+    _run_detached(session, "clearqueue", lambda: commands.handle_admin_clear_queue(
+        session.nick, CONSOLE_SOURCE, f"!clearqueue {target}", authorised=True))
+
+
+def _cmd_rehash(session, args):
+    import commands
+    session.send("Rehashing - reloading modules in place ...")
+    _run_detached(session, "rehash", lambda: commands.handle_rehash_request(
+        session.nick, CONSOLE_SOURCE, authorised=True))
+
+
+def _cmd_update(session, args):
+    import commands
+    session.send("Rebuilding the MasterList - this walks the whole library and "
+                 "can take minutes ...")
+    _run_detached(session, "update", lambda: commands.handle_list_update_request(
+        session.nick, CONSOLE_SOURCE, authorised=True))
+
+
+# LIST FRESHNESS AND FETCH (#750). The List Browser in the dashboard shows, for
+# every bot whose list we hold, whether their own advert says it has moved on
+# since we took our copy, and the automatic refresh asks again; the console had
+# nothing. `lists` shows the same verdicts and `fetch` asks, through the same
+# enqueue the dashboard's own button uses - so the slot limits, the duplicate
+# guard and the queue ceiling apply exactly as they do there.
+FETCH_COMMAND_MAX = 10       # bots asked by one `fetch`; a run of thirty is a burst nobody asked for
+
+
+def _held_lists():
+    """[(real nick, summary row)], one per bot whose list we hold.
+
+    The summaries carry one row per LIST a bot published, keyed "nick" or
+    "nick/marker"; the freshness, age and presence are the bot's, so the first
+    row (the bot's main list sorts first) stands for it. Acting on a bot uses
+    the real nick, never the display one.
+    """
+    import webserver
+    seen = {}
+    for row in webserver.build_fetched_bot_list_summaries():
+        if not row.get("held"):
+            continue
+        nick = str(row.get("bot", "")).split("/", 1)[0]
+        if nick and nick.lower() not in seen:
+            seen[nick.lower()] = (nick, row)
+    return list(seen.values())
+
+
+def _age_text(then, now=None):
+    try:
+        seconds = max(0, int((time.time() if now is None else now) - float(then)))
+    except (TypeError, ValueError):
+        return "?"
+    if seconds < 90:
+        return f"{seconds} s"
+    if seconds < 90 * 60:
+        return f"{seconds // 60} min"
+    if seconds < 48 * 3600:
+        return f"{seconds // 3600} h"
+    return f"{seconds // 86400} d"
+
+
+def _cmd_lists(session, args):
+    """`lists`: the held bot lists and whether each has changed since we took it."""
+    rows = _held_lists()
+    if not rows:
+        session.send("No bot's list is held yet. `fetch <bot>` asks one for its list.")
+        return
+    changed = [nick for nick, row in rows if row.get("freshness") == "changed"]
+    session.send(f"{len(rows)} held list(s), {len(changed)} changed since we took our copy:")
+    order = sorted(rows, key=lambda item: (item[1].get("freshness") != "changed", item[0].lower()))
+    for nick, row in order:
+        online = {True: "online", False: "offline"}.get(row.get("online"), "")
+        session.send(f"  {nick:<16} {str(row.get('freshness') or '?'):<8} "
+                     f"{int(row.get('count') or 0):>10,} files  "
+                     f"fetched {_age_text(row.get('fetched_at'))} ago  {online}".rstrip())
+    if changed:
+        session.send("Ask for the changed ones with `fetch`, or one bot with `fetch <bot>`.")
+
+
+def _ask_for_list(nick):
+    """(ok, message) after asking `nick` for its list through the dashboard's enqueue."""
+    import webserver
+    status, result = webserver.build_list_fetch_enqueue_result(nick)
+    if status == 200:
+        return True, f"asked {nick} for its list"
+    return False, f"{nick}: {result.get('error', 'refused')}"
+
+
+def _cmd_fetch(session, args):
+    """`fetch [bot]`: ask every held bot whose list has changed, or one bot."""
+    name = args.strip()
+    if name:
+        ok, message = _ask_for_list(name)
+        session.send((message + ". It arrives when the transfer finishes." if ok else message))
+        return
+
+    changed = [(nick, row) for nick, row in _held_lists() if row.get("freshness") == "changed"]
+    if not changed:
+        session.send("Nothing to fetch: no held list has changed. (A bot that publishes no "
+                     "date is never treated as changed; `fetch <bot>` asks one anyway.)")
+        return
+    asked, skipped = [], []
+    for nick, row in sorted(changed, key=lambda item: float(item[1].get("fetched_at") or 0)):
+        if row.get("online") is False:
+            skipped.append(f"{nick} (offline)")
+            continue
+        if len(asked) >= FETCH_COMMAND_MAX:
+            skipped.append(f"{nick} (over the limit of {FETCH_COMMAND_MAX} - run `fetch` again)")
+            continue
+        ok, message = _ask_for_list(nick)
+        (asked if ok else skipped).append(nick if ok else message)
+    if asked:
+        session.send(f"Asked {len(asked)} bot(s) for their lists: {', '.join(asked)}. "
+                     f"Each arrives when its transfer finishes.")
+    for line in skipped:
+        session.send(f"  not asked: {line}")
+
+
+def _cmd_downloads(session, args):
+    """`downloads on [rows]` / `downloads off`: what dccore.mrc's
+    @DCCore-Downloads window says when it opens and closes (#1022). `rows` is
+    how many finished downloads it wants to see."""
+    parts = args.split()
+    word = parts[0].lower() if parts else ""
+    if word == "off":
+        session.downloads_finished = 0
+        session._downloads_last = None
+        return
+    if word != "on":
+        session.send("Usage: downloads on [rows] | downloads off")
+        return
+    if not session.draws_downloads:
+        session.send(f"The Downloads window needs dccore.mrc {DOWNLOADS_SCRIPT_VERSION} or later "
+                     f"(this one said {session.client or 'nothing'}).")
+        return
+    try:
+        rows = int(parts[1]) if len(parts) > 1 else DOWNLOADS_FINISHED_DEFAULT
+    except ValueError:
+        rows = DOWNLOADS_FINISHED_DEFAULT
+    session.downloads_finished = min(max(rows, 1), DOWNLOADS_FINISHED_MAX)
+    session.request_downloads()
+
+
+def _refresh_downloads(session):
+    """An open Downloads window redraws at once; the dashboard's console has none."""
+    refresh = getattr(session, "request_downloads", None)
+    if refresh:
+        refresh()
+
+
+def _download_row(session, args, usage):
+    """(request_id, row) for the id a Downloads-window command names, or None
+    after telling the operator why not."""
+    request_id = args.strip().lower()
+    if not _REQUEST_ID.fullmatch(request_id):
+        session.send(f"Usage: {usage}")
+        return None
+    import dcc_fetch
+    with dcc_fetch._fetch_lock():
+        row = dict(dcc_fetch._ensure_fetch_queue().get(request_id) or {})
+    if not row:
+        session.send("That download is no longer in the list.")
+        return None
+    return request_id, row
+
+
+def _cmd_dlcancel(session, args):
+    """`dlcancel <id>`: let a request go that has not started - what the
+    dashboard's Cancel does. A transfer under way cannot be stopped (#1022)."""
+    found = _download_row(session, args, "dlcancel <id>")
+    if found is None:
+        return
+    import webserver
+    request_id, row = found
+    status, result = webserver.build_fetch_delete_result(
+        request_id, only_states=("pending", "offered", "queued"))
+    if status == 200:
+        session.send(f"Cancelled {_download_name(row)} from {row.get('bot')}.")
+        _refresh_downloads(session)
+    else:
+        session.send(result.get("error", "Could not cancel that download."))
+
+
+def _cmd_dlagain(session, args):
+    """`dlagain <id>`: ask again for a download that failed, by the route the
+    original request took - what the dashboard's Download again does. The old
+    row stays, as the record of what happened."""
+    found = _download_row(session, args, "dlagain <id>")
+    if found is None:
+        return
+    row = found[1]
+    failed = row.get("state") == "failed" or bool(row.get("list_processing_error"))
+    if not failed:
+        session.send("Only a download that failed can be asked for again.")
+        return
+    bot = row.get("bot") or ""
+    if row.get("request_type") == "list":
+        ok, message = _ask_for_list(bot)
+        session.send(message if not ok else f"Asked {bot} for its list again.")
+    elif row.get("request_type") == "folder":
+        # By the folder route (#1040): asked as a file, "!rar <folder>" was a
+        # file row matched by name, and the pack the other bot sent back was
+        # refused as unsolicited.
+        import dcc_fetch
+        import webserver
+        status, result = webserver.build_folder_rar_fetch_enqueue_result(bot, dcc_fetch.folder_asked_for(row))
+        session.send(f"Asked {bot} for {_download_name(row)} again." if status == 200
+                     else (result.get("error") or "Refused."))
+    else:
+        import webserver
+        wanted = row.get("requested_filename") or row.get("filename") or ""
+        status, result = webserver.build_fetch_enqueue_result([{"bot": bot, "filename": wanted}])
+        if status == 200:
+            session.send(f"Asked {bot} for {_download_name(row)} again.")
+        else:
+            errors = result.get("errors") or []
+            session.send(result.get("error") or (errors[0].get("error") if errors else "Refused."))
+    _refresh_downloads(session)
+
+
+def _cmd_dlclear(session, args):
+    """`dlclear`: forget every finished download, as the dashboard's Clear
+    finished does. The files stay on disk."""
+    import webserver
+    status, result = webserver.build_fetch_clear_result({"which": "finished"})
+    if status == 200:
+        count = result.get("cleared", 0)
+        session.send(f"Forgot {count} finished download(s). The files are still on disk.")
+        _refresh_downloads(session)
+    else:
+        session.send(result.get("error", "Could not clear the list."))
+
+
+def _cmd_quit(session, args):
+    session.close(announce_text="Goodbye.")
+    _forget(session)
+
+
+def _cmd_shutdown(session, args):
+    """Stop the bot (#1065) - the way Ctrl-C in its window does, for a bot
+    whose window is minimised, hidden or not there. Asks for "now" first:
+    quit closes this session, and one letter away from it is no place for a
+    command that ends the bot."""
+    if args.strip().lower() != "now":
+        session.send("This stops the bot: it leaves IRC and ends. Type 'shutdown now' to do it.")
+        return
+    session.send("Stopping the bot. Start it again with start-dccore (or the autostart task).")
+    import stopping
+    stopping.request_stop_soon(f"asked by {session.nick} in the admin console")
+
+
+def _cmd_verify(session, args):
+    """Report filenames the master list carries under more than one folder.
+
+    Reads the list rather than walking the library: it is the list a requester
+    copies a name out of, and the list dcc.py resolves that name against, so
+    it is where a collision actually matters.
+    """
+    import list as list_mod
+
+    entries, _total = list_mod.find_matching_entries([], limit=None)
+    if not entries:
+        session.send("The master list is empty or could not be read. "
+                     "Run 'update' first.")
+        return
+
+    duplicates = list_mod.find_duplicate_filenames(entries)
+    if not duplicates:
+        session.send(f"{len(entries):,} file(s) checked - every filename is unique.")
+        return
+
+    session.send(f"{len(duplicates):,} filename(s) appear under more than one "
+                 f"folder, out of {len(entries):,} checked.")
+    session.send("A request that names a file alone reaches only the first copy "
+                 "listed under that name. Pasting a search result's whole line, "
+                 "size included, reaches the copy that size names:")
+    for item in duplicates[:VERIFY_CONSOLE_LIMIT]:
+        session.send(f"  {item['filename']}  ({item['count']} folders)")
+        for folder in item["folders"]:
+            session.send(f"      {list_mod.resolve_list_folder(folder)}")
+    if len(duplicates) > VERIFY_CONSOLE_LIMIT:
+        session.send(f"  ... and {len(duplicates) - VERIFY_CONSOLE_LIMIT:,} more "
+                     f"not shown. The dashboard's Tools view lists them all.")
+
+
+def _cmd_hello(session, args):
+    """`hello <client> <version>`: switch this session to the structured feed.
+
+    Only reachable once authenticated - handle_command() is - so an
+    unauthenticated socket cannot switch anything. A client on a bot without
+    this command gets the dispatcher's "Unknown command: hello" and stays in
+    prose mode, which is the whole reason the switch is opt-in rather than
+    the default: an old bot with a new script still works.
+    """
+    parts = args.split()
+    session.client = parts[0] if parts else "unknown"
+    version = parts[1] if len(parts) > 1 else ""
+    session.structured = True
+    session.draws_fetching = script_draws_fetching(version)
+    session.draws_rebuild = script_draws_rebuild(version)
+    session.draws_downloads = script_draws_downloads(version)
+    session.reads_peers = script_reads_peers(version)
+    session.send(hello_line())
+    if script_is_too_old(version):
+        # After HELLO, as a plain OUT line the window shows (#709): the
+        # script keeps parsing - the major is the same - but a field it
+        # does not know about sits in every event line.
+        session.send(f"This {session.client} is version {version or 'unknown'}; this bot's "
+                     f"lines are for {MIN_SCRIPT_VERSION} or later. Update the script "
+                     f"(scripts/mirc/dccore.mrc in the bot's folder), or the panel will "
+                     f"read a field wrong.")
+        print(f"[ADMINCHAT] {session.nick}'s {session.client} is {version or 'unknown'}; "
+              f"{MIN_SCRIPT_VERSION} or later reads this bot's lines. Told them.")
+    # So the options dialog's checkbox (#572 follow-up) shows the real state
+    # the moment it is opened, rather than "unknown" until the operator
+    # happens to run checkupdates themselves.
+    session.send(f"DCCORE CHECKUPDATES {'on' if getattr(config, 'CHECK_FOR_UPDATES', True) else 'off'}")
+    # Same for the console feed itself (#1006 follow-up), and said again in
+    # plain text every time - not just once ever - because a window that
+    # only ever shows STATUS looks alive, not silenced, and an operator who
+    # never opens Options has no other way to learn why. This is the only
+    # `hello` line with a plain-text half: a checkbox no one has looked at
+    # yet is a quieter kind of "wrong" than an empty window is.
+    console_feed_on = getattr(config, "DEBUG_TO_CONSOLE", True)
+    if session.reads_peers:
+        session.send(f"DCCORE CONSOLEFEED {'on' if console_feed_on else 'off'}")
+    if not console_feed_on:
+        # The #1009 review: this used to point at "/dccore
+        # consolefeed on" (not a real /dccore subcommand - dccore.mrc's
+        # `alias dccore` had no branch for it, so it fell through to the
+        # help text) and "Settings > Console feed" (a different dashboard
+        # category - CONSOLE_SHOW_* and DEBUG_CHANNEL_FEED live there;
+        # DEBUG_TO_CONSOLE is under Debug & logging). Both now name
+        # something that actually works.
+        session.send("The console feed is off (Settings > Debug & logging > "
+                     "\"Send debug lines to admin console\", or /dccore consolefeed on): "
+                     "this window will keep showing STATUS, but no requests, sends, "
+                     "failures or searches until it is turned on.")
+    # DCCore Chat (#371): the channels it can chat in, and what was said
+    # while this window was away - from memory, never from disk.
+    import serverschat
+    session._chat_channels = serverschat.channels_line()
+    session.send(session._chat_channels)
+    if session.reads_peers:
+        for chan in serverschat.channels():
+            session.send(serverschat.peers_channel_line(chan))
+    for line in serverschat.recent_lines():
+        session.send(line)
+    session.send_status()
+    print(f"[ADMINCHAT] {session.nick}'s session switched to the structured feed "
+          f"({session.client} {' '.join(parts[1:]) or '?'}).")
+
+
+def _cmd_pair(session, args):
+    """`pair <client> [version]`: mint a token this client can log in with.
+
+    Printed ONCE, here; only its hash is kept. Pairing the same name again
+    replaces the old token, which is also how a lost one is rotated. For
+    the script this is the first-run flow: the admin types the password by
+    hand once, the script sends `pair dccore.mrc 1.0`, keeps the token, and
+    logs in with it from then on. See docs/ADMIN-CONSOLE.md.
+    """
+    import datetime
+    import secrets
+    import db
+    name = (args.split() or ["client"])[0]
+    token = secrets.token_urlsafe(32)
+    tokens = db.load_admin_tokens()
+    replaced = name in tokens
+    tokens[name] = {"hash": make_password_hash(token),
+                    "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "by": session.nick}
+    db.save_admin_tokens(tokens)
+    print(f"[ADMINCHAT] {session.nick} paired a console client as {name!r}.")
+    if session.structured:
+        session.send(f"DCCORE TOKEN {name} {token}")
+    else:
+        session.send(f"Paired {name}. Its token, shown once - it opens this chat and nothing else:")
+        session.send(f"  {token}")
+        session.send(f"Revoke it with: unpair {name}")
+        if replaced:
+            # The old token stopped working the moment the new one was saved: a
+            # script that held it is locked out until it is given this one (or
+            # pairs itself again), and it would otherwise find out only from a
+            # refused login.
+            session.send(f"This replaced the token {name} had before - a script "
+                         f"still using the old one must be paired again.")
+
+
+def _cmd_unpair(session, args):
+    """`unpair [name]`: list the paired clients, or revoke one."""
+    import db
+    tokens = db.load_admin_tokens()
+    name = (args.split() or [""])[0]
+    if not name:
+        if not tokens:
+            session.send("No paired clients.")
+            return
+        session.send(f"{len(tokens)} paired client(s):")
+        for key in sorted(tokens):
+            entry = tokens[key] if isinstance(tokens[key], dict) else {}
+            session.send(f"  {key:<20} paired {entry.get('created', '?')} by {entry.get('by', '?')}")
+        session.send("Revoke one with: unpair <name>")
+        return
+    if name not in tokens:
+        session.send(f"No paired client called {name}.")
+        return
+    del tokens[name]
+    db.save_admin_tokens(tokens)
+    print(f"[ADMINCHAT] {session.nick} revoked the console token {name!r}.")
+    session.send(f"Revoked {name}. A client still logged in with it stays until it disconnects.")
+
+
+def _cmd_chat(session, args):
+    """`chat #channel <text>`, `chat * <text>` or `chat nick <text>`: say
+    something in DCCore Chat (#371), as the bot. `#channel`/`*` is a channel
+    message, public; `nick` is a private message to one known peer instead -
+    only ever a nick WHO has already found. `chat` alone: the channels it can
+    chat in. `chat peers` / `chat who`: the other DCCore bots seen, and ask
+    again."""
+    import serverschat
+    text = str(args or "").strip()
+    if text.lower() == "peers":
+        session.send(serverschat.peers_line())
+        return
+    if text.lower() == "who":
+        asked = serverschat.refresh_peers(force=True)
+        session.send(f"Asked WHO in {asked} channel(s); `chat peers` shows who answered.")
+        return
+    if not text:
+        if session.structured:
+            session.send(serverschat.channels_line())
+        else:
+            chans = serverschat.channels()
+            session.send("Chat channels: " + (" ".join(chans) if chans else "none yet")
+                         + ". Usage: chat #channel <text> (public: everyone there reads it).")
+        return
+    parts = text.split(None, 1)
+    ok, message = serverschat.say(session.nick, parts[0], parts[1] if len(parts) > 1 else "")
+    # A structured window sees its own line come back as a CHAT line; a
+    # person at a plain console is told it went.
+    if not ok or not session.structured:
+        session.send(message)
+
+
+def _cmd_help(session, args):
+    session.send("Available commands:")
+    for name in sorted(COMMANDS):
+        _fn, summary, usage = COMMANDS[name]
+        session.send(f"  {usage:<20} {summary}")
+    session.send("")
+    session.send("Channel commands still work as before; this console does not "
+                 "replace them yet.")
+
+
+# How many duplicate names the console spells out in full. Every line here
+# is a DCC CHAT line, so a library with hundreds of collisions would flood
+# the session; the count is always reported, only the detail is capped.
+VERIFY_CONSOLE_LIMIT = 20
+
+
+# name -> (function, one-line summary, usage shown by help)
+COMMANDS = {
+    "status":     (_cmd_status,     "everything at a glance",            "status"),
+    "queue":      (_cmd_queue,      "queued files, all or one user",     "queue [nick]"),
+    "slots":      (_cmd_slots,      "what is sending right now",         "slots"),
+    "bans":       (_cmd_bans,       "permanent and timed bans",          "bans"),
+    "uptime":     (_cmd_uptime,     "how long the daemon has run",       "uptime"),
+    "version":    (_cmd_version,    "build and platform",                "version"),
+    "checkversion": (_cmd_checkversion, "ask GitHub whether a newer DCCore is out", "checkversion"),
+    "checkupdates": (_cmd_checkupdates, "turn the daily update check on/off, or report it", "checkupdates [on|off]"),
+    "consolefeed": (_cmd_consolefeed, "turn the console/dccore.mrc feed on/off, or report it", "consolefeed [on|off]"),
+    "ban":        (_cmd_ban,        "add a permanent wildcard ban",      "ban <pattern>"),
+    "unban":      (_cmd_unban,      "remove a permanent wildcard ban",   "unban <pattern>"),
+    "clearqueue": (_cmd_clearqueue, "force-clear another user's queue",  "clearqueue <nick>"),
+    "rehash":     (_cmd_rehash,     "reload modules in place",           "rehash"),
+    "update":     (_cmd_update,     "rebuild the MasterList",            "update"),
+    "verify":     (_cmd_verify,     "filenames listed in two folders",   "verify"),
+    "lists":      (_cmd_lists,      "held bot lists, and which have changed", "lists"),
+    "fetch":      (_cmd_fetch,      "ask the bots whose lists changed",  "fetch [bot]"),
+    "downloads":  (_cmd_downloads,  "the Downloads window opening or closing", "downloads on [rows]|off"),
+    "dlcancel":   (_cmd_dlcancel,   "cancel a download that has not started", "dlcancel <id>"),
+    "dlagain":    (_cmd_dlagain,    "ask again for a download that failed", "dlagain <id>"),
+    "dlclear":    (_cmd_dlclear,    "forget the finished downloads",     "dlclear"),
+    "chat":       (_cmd_chat,       "public operator chat in a channel", "chat [#chan|*|nick text]"),
+    "hello":      (_cmd_hello,      "switch to the structured feed (dccore.mrc)", "hello <client> <version>"),
+    "pair":       (_cmd_pair,       "mint a login token for a script",   "pair <client> [version]"),
+    "unpair":     (_cmd_unpair,     "list or revoke paired scripts",     "unpair [name]"),
+    "shutdown":   (_cmd_shutdown,   "stop the bot",                      "shutdown now"),
+    "help":       (_cmd_help,       "this list",                         "help"),
+    "quit":       (_cmd_quit,       "close this session",                "quit"),
+}
+
+# What the admin handlers see as the "channel" a console command came from. It
+# is not a channel, and it must not look like one: announce.send_debug puts this
+# straight into the debug line, and a real channel name there would read as
+# though someone had typed the command in public.
+CONSOLE_SOURCE = "DCC-CONSOLE"
+
+
+def handle_command(session, text):
+    """Dispatch one authenticated line."""
+    stripped = text.strip()
+    if not stripped:
+        return
+    command, _, args = stripped.partition(" ")
+    entry = COMMANDS.get(command.lower())
+    if entry is None:
+        session.send(f"Unknown command: {command}. Type 'help'.")
+        return
+    session.last_activity = time.time()
+    print(f"[ADMINCHAT] {session.nick} ran: {stripped}")
+    try:
+        entry[0](session, args)
+    except Exception as err:
+        # One bad command must not take the session down with it.
+        session.send(f"Command failed: {err}")
+        print(f"[ADMINCHAT] Command {command!r} raised: {err}")
+
+
+# ==========================================================================
+# Reader loop
+# ==========================================================================
+
+def _forget(session):
+    global _session, _pending
+    with _state_lock:
+        if _session is session:
+            _session = None
+        if _pending is session:
+            _pending = None
+
+
+def _promote(session):
+    """A newly authenticated session replaces any live one.
+
+    Replace rather than refuse, because the realistic case is the operator's own
+    stale window: a session left open on another machine, or a client that froze
+    while the server has not yet timed the nick out. Refusing would lock him out
+    until the old TCP connection died on its own.
+
+    The replacement happens only AFTER the new session authenticates, never on
+    connect. Otherwise anyone who matched the host could drop the operator's live
+    console without knowing the password.
+    """
+    global _session, _pending
+    with _state_lock:
+        previous = _session
+        _session = session
+        if _pending is session:
+            _pending = None
+    # Runtime reports reach the console from here on. Registered only after
+    # authentication, so an unauthenticated socket never sees a log line.
+    try:
+        import announce
+        announce.add_debug_sink(session.debug_sink)
+        announce.add_event_sink(session.event_sink)
+    except Exception as sink_err:
+        print(f"[ADMINCHAT] Could not attach the debug sink: {sink_err}")
+
+    if previous is not None and previous is not session:
+        # Written INLINE, through close(announce_text=...), and not queued with
+        # send(): queueing hands the line to the writer thread and the very next
+        # statement closes the socket, so the writer found the session closed
+        # before it sent anything - the replaced client was never told (#583,
+        # #597, #600), never entered its "taken" state, and reconnected five
+        # seconds later, taking the console straight back. Two clients then
+        # traded it for ever. A structured session gets a line of its own
+        # (`DCCORE TAKEN <ip>`), not prose wrapped in DCCORE OUT, so a script can
+        # tell it apart from a console command's reply.
+        if previous.structured:
+            notice = f"DCCORE TAKEN {session.peer_ip}"
+        else:
+            notice = f"Session taken over from {session.peer_ip}. Closing this one."
+        previous.close(announce_text=notice)
+    return previous
+
+
+def _reader_loop(session):
+    buffer = ""
+    try:
+        while not session.closed:
+            if session.expired():
+                session.close(announce_text="No password within %ds." % int(AUTH_TIMEOUT))
+                break
+            try:
+                data = session.sock.recv(1024)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if not data:
+                break
+
+            session.last_activity = time.time()
+            buffer += data.decode("utf-8", "replace")
+            # Clients disagree about the terminator; normalise before splitting.
+            buffer = buffer.replace("\r\n", "\n").replace("\r", "\n")
+            while "\n" in buffer:
+                line, buffer = buffer.split("\n", 1)
+                if session.closed:
+                    break
+                if session.authenticated:
+                    handle_command(session, line)
+                else:
+                    _check_password(session, line)
+            # A client that never sends a newline must not grow the buffer forever.
+            if len(buffer) > 4096:
+                session.close(announce_text="Line too long.")
+                break
+    finally:
+        session.close(announce_text=None)
+        _forget(session)
+
+
+def _token_matches(supplied):
+    """Which paired client's token `supplied` is, or None. Tokens are PBKDF2
+    hashes in the same scheme as the password, so a stolen store is as
+    useless as a stolen password hash; a handful of them per attempt is
+    the cost, and attempts are already rate-limited."""
+    import db
+    for name, entry in db.load_admin_tokens().items():
+        if isinstance(entry, dict) and verify_password(entry.get("hash", ""), supplied):
+            return name
+    return None
+
+
+def _check_password(session, line):
+    # Verbatim, bar the newline the reader already split on: the setup page,
+    # POST /api/settings/password and the dashboard's login all hash and
+    # verify the password exactly as typed, so a password with a leading or
+    # trailing space has to open this console too (#622). Only an empty line
+    # - a stray Enter at the prompt - is not an attempt.
+    supplied = line
+    if not supplied:
+        return
+    # The password, or a paired client's token (#550, step 3). A token opens
+    # a chat and nothing else: the dashboard's login checks
+    # ADMIN_PASSWORD_HASH alone and never sees the token store.
+    paired = _token_matches(supplied)
+    if paired:
+        print(f"[ADMINCHAT] {session.nick} logged in with the token paired as {paired!r}.")
+    if paired or verify_password(getattr(config, "ADMIN_PASSWORD_HASH", ""), supplied):
+        session.authenticated = True
+        session.last_activity = time.time()
+        clear_bad_ip(session.peer_ip)
+        replaced = _promote(session)
+        session.send("")
+        session.send("Entering DCC Chat Admin Interface")
+        session.send('For help type "help"')
+        if replaced is not None:
+            session.send(f"(replaced an existing session from {replaced.peer_ip})")
+        session.send("")
+        print(f"[ADMINCHAT] {session.nick} authenticated from {session.host} ({session.peer_ip}).")
+        return
+
+    session.attempts += 1
+    note_bad_ip(session.peer_ip)
+    print(f"[ADMINCHAT] Failed password from {session.nick} ({session.host}), "
+          f"attempt {session.attempts}/{MAX_PASSWORD_ATTEMPTS}.")
+    if session.attempts >= MAX_PASSWORD_ATTEMPTS:
+        session.close(announce_text="Incorrect Password.")
+        _forget(session)
+        return
+    # Small fixed delay. NOT exponential: this runs on the session's own reader
+    # thread, and a long sleep would just hold the thread open for an attacker.
+    time.sleep(WRONG_PASSWORD_DELAY)
+    session.send("Incorrect Password.")
+    session.send("Enter Your Password:")
+
+
+# ==========================================================================
+# Entry point from irc.py
+# ==========================================================================
+
+def parse_offer(ctcp_text):
+    """Pull a dialable (ip, port) out of 'DCC CHAT chat <ip-as-long> <port>'.
+
+    Returns None for anything malformed. Otherwise returns (ip, port), where ip
+    is None when the client's offer cannot be dialled and the bot should listen
+    instead:
+
+    * port 0 is the passive form - the client is explicitly asking us to listen.
+    * 0.0.0.0 means the client does not know its own address. mIRC sends this
+      when its Local Info lookup has not resolved, and it is not a no-op: on
+      Linux connect() to 0.0.0.0 is treated as "this host", so the bot dials
+      ITSELF and gets ECONNREFUSED. That is exactly the
+      "Could not connect to operator at 0.0.0.0:11283" in the field report.
+    * multicast and reserved ranges cannot be a listening client either.
+
+    Loopback and private addresses are deliberately kept dialable: an operator
+    on the same LAN as the daemon, or testing locally, is a legitimate case.
+    """
+    parts = str(ctcp_text).strip().strip("\x01").split()
+    if len(parts) < 4 or parts[0].upper() != "DCC" or parts[1].upper() != "CHAT":
+        return None
+
+    # Read fields by POSITION, never from the end. The two forms differ in length:
+    #
+    #   active   DCC CHAT chat <ip> <port>            5 tokens
+    #   passive  DCC CHAT chat <ip> 0 <token>         6 tokens
+    #
+    # Counting back from the end works only for the active form. On a passive
+    # offer parts[-2] is the literal 0 and parts[-1] is the token, so
+    # "DCC CHAT chat 3405803861 0 350" parsed as 0.0.0.0 port 350 and was thrown
+    # out as unusable - which is exactly what the field report showed.
+    #
+    # The third token is the "chat" argument, but not every client sends one, so
+    # it is skipped only when it is not itself a number.
+    rest = parts[2:]
+    if rest and not rest[0].lstrip("-").isdigit():
+        rest = rest[1:]
+    if len(rest) < 2:
+        return None
+
+    try:
+        ip_long = int(rest[0])
+        port = int(rest[1])
+    except (ValueError, TypeError):
+        return None
+    token = rest[2] if len(rest) > 2 else None
+
+    if port < 0 or port > 65535:
+        return None
+    if ip_long < 0 or ip_long > 0xFFFFFFFF:
+        return None
+    if port == 0:
+        # Passive DCC. The token identifies this request and MUST come back in
+        # our own offer, or the client cannot match the two and ignores us.
+        return None, 0, token
+    if port < 1024:
+        return None
+    try:
+        address = ipaddress.IPv4Address(ip_long)
+    except (ipaddress.AddressValueError, ValueError):
+        return None
+    if address.is_unspecified or address.is_multicast or address.is_reserved:
+        return None, port, token
+    return str(address), port, token
+
+
+def handle_dcc_chat(irc_sock, line, nick, ctcp_text):
+    """Entry point. Returns True if the request was taken up.
+
+    Called from the IRC read loop, so it must not block: every path either
+    returns immediately or hands off to a thread.
+    """
+    if not is_admin_host(line):
+        # Silence. No reply, no NOTICE, no debug line - a debug line to the
+        # channel would tell anyone watching that the mask was wrong, and would
+        # let a stranger fill the log for free. stdout only.
+        print(f"[ADMINCHAT] Ignored DCC CHAT from unauthorised host: {source_host(line)}")
+        return False
+
+    if not password_is_configured():
+        print("[ADMINCHAT] DCC CHAT from an authorised host refused: "
+              "ADMIN_PASSWORD_HASH is not set. Generate one with "
+              "adminchat.make_password_hash() and put it in admin_config.py.")
+        return False
+
+    offer = parse_offer(ctcp_text)
+    if offer is None:
+        print(f"[ADMINCHAT] Unusable DCC CHAT offer from {nick}: {ctcp_text!r}")
+        return False
+
+    ip, port, token = offer
+    host = source_host(line)
+
+    if ip is None:
+        # Either passive DCC, or a client that does not know its own address and
+        # sent 0.0.0.0. Listen and offer the connection back instead of dialling
+        # somewhere that cannot answer.
+        print(f"[ADMINCHAT] {nick} offered no usable address "
+              f"({'passive DCC' if port == 0 else 'unroutable IP'}); listening instead.")
+        threading.Thread(target=_listen_and_serve, args=(irc_sock, nick, host, token),
+                         daemon=True).start()
+        return True
+
+    if is_bad_ip(ip):
+        print(f"[ADMINCHAT] DCC CHAT from {ip} refused: address is temporarily blocked.")
+        return False
+
+    mode = str(getattr(config, "ADMIN_CHAT_MODE", "auto") or "auto").strip().lower()
+    if mode == "listen":
+        # The operator knows their client is not reachable and does not want to
+        # pay CONNECT_TIMEOUT discovering it again on every single login.
+        print(f"[ADMINCHAT] ADMIN_CHAT_MODE is 'listen'; offering the connection to {nick} "
+              f"rather than dialling {ip}:{port}.")
+        # The address the CTCP advertised is the one the connection has to
+        # come from (#680): the listener would otherwise take whoever reached
+        # the port first.
+        threading.Thread(target=_listen_and_serve, args=(irc_sock, nick, host, token, ip),
+                         daemon=True).start()
+        return True
+
+    threading.Thread(target=_connect_and_serve,
+                     args=(irc_sock, nick, host, ip, port, token), daemon=True).start()
+    return True
+
+
+def _open_chat_listener():
+    """Bind a listener inside the configured DCC port range.
+
+    Scans DOWNWARD from DCC_PORT_END. start_dcc_send() scans upward from
+    DCC_PORT_START, so a console opening while transfers are running tends to
+    land at the far end rather than competing for the same port. With
+    MAX_DCC_SLOTS transfers plus one console there is room either way.
+
+    The range is deliberately the same one as DCC SEND: it is already forwarded
+    to the daemon, so the console needs no new firewall rule.
+    """
+    start = int(getattr(config, "DCC_PORT_START", 55000))
+    end = int(getattr(config, "DCC_PORT_END", 55010))
+    for port in range(end, start - 1, -1):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # SO_REUSEADDR means the OPPOSITE thing on Windows - it lets another
+        # process bind the same port and take the connection. platform_compat
+        # picks the right option per platform.
+        platform_compat.prepare_listener(sock)
+        try:
+            sock.bind(("0.0.0.0", port))
+            # listen() HERE, not at the call site. On POSIX, SO_REUSEADDR lets a
+            # second socket bind the same port while the first is bound but not
+            # yet listening - so returning a merely-bound socket let two console
+            # attempts claim one port and fight over the connection. Listening
+            # claims it properly, and bind then fails for the second caller.
+            # Windows never had the hole, because SO_EXCLUSIVEADDRUSE refuses the
+            # duplicate at bind; CI caught it on Linux only.
+            sock.listen(1)
+            return sock, port
+        except OSError:
+            sock.close()
+            continue
+    return None, None
+
+
+def _serve(sock, peer_ip, nick, host, description):
+    """Banner, prompt and reader loop. Shared by both transports."""
+    global _pending
+
+    # ONE TIMEOUT, BOTH DIRECTIONS - which is what settimeout() means (#458).
+    #
+    # This used to be described as two: a short recv timeout, and a separate
+    # send timeout said to be SEND_TIMEOUT (30s). There was no second timeout.
+    # SEND_TIMEOUT was declared, never referenced, and the writer's sendall()
+    # has always run under this same one second.
+    #
+    # A real send deadline is not available cheaply here: the writer runs on
+    # its own thread and shares this socket with the reader loop, and
+    # settimeout() is per SOCKET rather than per direction - raising it around
+    # a send would raise it for a recv another thread is sitting in.
+    # SO_SNDTIMEO is direction-specific but interacts badly with Python's own
+    # timeout handling.
+    #
+    # One second is defensible for this workload rather than merely tolerated:
+    # the console sends short lines, so sendall() only blocks if the kernel
+    # buffer is full, and that means the peer has already stopped reading long
+    # enough to fill it. Tearing the session down then is the right answer.
+    # What was wrong was a constant claiming otherwise.
+    sock.settimeout(1.0)
+    platform_compat.apply_keepalive(sock, idle=60, interval=15, count=4)
+
+    session = Session(sock, peer_ip, nick, host)
+
+    with _state_lock:
+        stale_pending = _pending
+        _pending = session
+    if stale_pending is not None:
+        # Only one unauthenticated socket at a time, so a matching host cannot
+        # pile up half-open connections.
+        stale_pending.close(announce_text="Superseded by a newer connection.")
+
+    session.start_writer()
+    for text in banner_lines():
+        session.send(text)
+    session.send("Enter Your Password:")
+
+    print(f"[ADMINCHAT] DCC CHAT {description} for {nick} ({host}).")
+    _reader_loop(session)
+    print(f"[ADMINCHAT] Session with {nick} closed.")
+
+
+def _connect_and_serve(irc_sock, nick, host, ip, port, token=None):
+    """Dial the operator's listening client, and listen instead if that fails.
+
+    Dialling out is the tidier path - one dialog rather than two - but it can
+    only work if the client is actually reachable at the address it advertised,
+    and there are several ordinary reasons it is not:
+
+      * the client is behind a VPN, so it reports the VPN's exit address while
+        inbound connections to it are not forwarded anywhere;
+      * a router is not forwarding the port, or a firewall drops rather than
+        rejects, which shows up as a TIMEOUT rather than a refusal;
+      * the daemon's own outbound to high ports is blocked.
+
+    A failure here used to be the end of it. It is not: the bot's own listener
+    is proven reachable every day by DCC SEND, so falling back to offering the
+    connection costs one timeout and then works. Set ADMIN_CHAT_MODE = "listen"
+    to skip straight to it and not pay the timeout at all.
+    """
+    try:
+        sock = socket.create_connection((ip, port), timeout=CONNECT_TIMEOUT)
+    except OSError as err:
+        mode = str(getattr(config, "ADMIN_CHAT_MODE", "auto") or "auto").strip().lower()
+        if mode == "connect":
+            print(f"[ADMINCHAT] Could not connect to {nick} at {ip}:{port} ({err}). "
+                  f"ADMIN_CHAT_MODE is 'connect', so not falling back to listening.")
+            return
+        print(f"[ADMINCHAT] Could not connect to {nick} at {ip}:{port} ({err}); "
+              f"falling back to listening. Set ADMIN_CHAT_MODE = \"listen\" in "
+              f"admin_config.py to go straight here and skip the wait.")
+        _listen_and_serve(irc_sock, nick, host, token)
+        return
+    _serve(sock, ip, nick, host, f"opened to {ip}:{port}")
+
+
+def _listen_and_serve(irc_sock, nick, host, token=None, expected_ip=None):
+    """Listen on the configured range and offer the connection back.
+
+    Used when the client's own offer cannot be dialled - it asked for passive
+    DCC, or it does not know its own address and sent 0.0.0.0. This is iroffer's
+    chat_setup_out() path, and it is the more robust one here: it depends on
+    nothing the client knows about itself, and it uses the port range the
+    operator already forwards for DCC SEND.
+
+    The address advertised is the bot's own public IP, resolved once at startup
+    and already used for every DCC SEND handshake.
+    """
+    import dcc
+
+    global _listening
+
+    # ONE LISTENER AT A TIME, and this is the earliest point it can be
+    # enforced.
+    #
+    # Every other limit on this path runs AFTER accept(): is_bad_ip() is
+    # consulted on the connecting address, and the single-_pending rule inside
+    # _serve() applies to a session that already exists. Nothing bounded how
+    # many listeners could be OPEN at once - and irc.py deliberately leaves
+    # DCC CHAT out of the set security.is_flooding() meters, so the CTCPs that
+    # start them are not rate-limited either.
+    #
+    # So a handful of passive DCC CHAT offers took every port in
+    # DCC_PORT_START..DCC_PORT_END and held them for LISTEN_TIMEOUT, which is
+    # the same range DCC SEND needs: the bot stops being able to send files at
+    # all, and recovers only when the listeners time out. Found by audit.
+    #
+    # The same shape as the _pending rule one step further on - "at most one
+    # connected-but-unauthenticated session" - applied to the step before it.
+    # A refused offer costs the sender nothing but another CTCP once the
+    # current one resolves, and a real operator makes one at a time.
+    with _state_lock:
+        if _listening:
+            print(f"[ADMINCHAT] A console listener is already waiting to be "
+                  f"dialled; ignoring the offer from {nick}.")
+            return
+        _listening = True
+    try:
+        _listen_and_serve_locked(irc_sock, nick, host, token, expected_ip)
+    finally:
+        # #423: a safety net now, not the release point. The two return paths
+        # in _listen_and_serve_locked before it ever opens a listener land
+        # here directly, and so would any exception neither of its own
+        # try/finally blocks catches - but the normal path already cleared
+        # this flag itself, right after the listener closed, well before
+        # _serve() started blocking for the session's life. Clearing an
+        # already-clear flag here is a harmless no-op.
+        with _state_lock:
+            _listening = False
+
+
+def _is_private_address(ip):
+    """True for a private-network or link-local address - NOT loopback
+    (#881).
+
+    The operator and the bot sharing one home router is a NAT hairpin the
+    CTCP's self-reported address cannot describe: the client advertises the
+    router's public IP (the only address it knows for itself), but the TCP
+    connection that actually arrives came out the LAN side and carries a
+    private source address instead - the exact-match check below rejected
+    it as a stranger, blocking the operator's own console on the very setup
+    #680 was meant to protect. A peer reaching the port from the public
+    internet can never present a private source address unless it is
+    already inside the trusted network, so widening the match to private
+    addresses does not reopen the scanner risk #680 closed - it only
+    widens who counts as "close enough to be trusted" from one exact
+    address to the whole LAN, the boundary ADMIN_HOSTMASKS and the DCC
+    port-forwarding guide already treat as trusted everywhere else.
+
+    Loopback is deliberately excluded: it is not a LAN-sharing case (traffic
+    on 127.0.0.0/8 never left the machine it originated on), and every real
+    test connection in this suite necessarily arrives over loopback -
+    counting it as "private" would make a same-machine test unable to model
+    a stranger at all.
+    """
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return address.is_private and not address.is_loopback
+
+
+def _is_the_operator(peer_ip, expected_ip, own_ip):
+    """Whether a connection to the console listener is the operator's.
+
+    No address was advertised (a passive request): the first peer, as ever.
+    The advertised address: yes (#680). A private one: only on a NAT hairpin
+    (#881) - when the address the operator advertised is the bot's own
+    public one, which is what a client behind the same router as the bot
+    knows for itself. #881 took any private address, and wherever the
+    source address is not the real client's - a proxy or container that
+    rewrites it, a LAN or private network shared with others - that let
+    whoever reached the port first take the one listener: the banner, the
+    password prompts, and the operator's own connect finding the port gone.
+    """
+    if not expected_ip or peer_ip == expected_ip:
+        return True
+    return bool(own_ip) and expected_ip == own_ip and _is_private_address(peer_ip)
+
+
+def _listen_and_serve_locked(irc_sock, nick, host, token=None, expected_ip=None):
+    """The listener itself. Only ever called with _listening set, so at most
+    one of these holds a port at a time.
+
+    `expected_ip` is the address the operator's CTCP advertised, when it
+    advertised one (#680, audit L16): the host check gates who can make the
+    bot OPEN a listener, but accept() took whoever reached the port first
+    in the LISTEN_TIMEOUT window - a scanner on the public DCC range got the
+    banner (nick, version, platform) and three password prompts, the single
+    listener was gone, and the operator's own connect found the port closed.
+    A peer from any other address is dropped without a word and the listener
+    keeps waiting for the rest of the window - UNLESS it is a private
+    address (#881): the operator and the bot behind the same home router
+    both show that router's public IP, so the operator's own connection can
+    arrive with a private source address that does not match what the CTCP
+    advertised, and _is_private_address() covers that hairpin without
+    admitting a stranger from the public internet. A passive offer carries
+    no address at all, so there is nothing to compare and the first peer is
+    taken as before.
+    """
+    import dcc
+
+    global _listening
+
+    ip_long = dcc.get_public_ip_long()
+    try:
+        own_ip = str(ipaddress.ip_address(int(ip_long))) if ip_long else None
+    except ValueError:
+        own_ip = None
+    if not ip_long:
+        print("[ADMINCHAT] Cannot offer a DCC CHAT: the bot's own public IP is unknown "
+              "(config.MY_IP_OR_DOCK did not resolve).")
+        return
+
+    listener, port = _open_chat_listener()
+    if listener is None:
+        start = getattr(config, "DCC_PORT_START", 55000)
+        end = getattr(config, "DCC_PORT_END", 55010)
+        print(f"[ADMINCHAT] No free port in {start}-{end} for the console; "
+              f"all of them are in use by transfers.")
+        return
+
+    sock = None
+    try:
+        # Already listening - _open_chat_listener does it, so the port is claimed
+        # before this function ever advertises it.
+        listener.settimeout(LISTEN_TIMEOUT)
+        # A passive request carries a token identifying it, and the reply must
+        # carry the same one back or the client cannot match our offer to the
+        # request it is waiting on, and silently ignores us.
+        suffix = f" {token}" if token else ""
+        offer = f"PRIVMSG {nick} :\x01DCC CHAT chat {ip_long} {port}{suffix}\x01\r\n"
+        # sendall(), not send() (#504). send() returns how many bytes it
+        # actually took and the caller has to loop on the rest; with the
+        # kernel send buffer nearly full this line would go out truncated
+        # and the server would read the fragment as a complete command.
+        # Guarded by tests/test_no_socket_write_is_a_partial_write.py.
+        irc_sock.sendall(offer.encode("utf-8", errors="ignore"))
+        print(f"[ADMINCHAT] Offered DCC CHAT to {nick} on "
+              f"{getattr(config, 'MY_IP_OR_DOCK', '?')}:{port}; waiting for the connection.")
+        deadline = time.monotonic() + LISTEN_TIMEOUT
+        while True:
+            listener.settimeout(max(0.001, deadline - time.monotonic()))
+            sock, addr = listener.accept()
+            peer_ip = addr[0]
+            if _is_the_operator(peer_ip, expected_ip, own_ip):
+                break
+            # Not the operator (#680): no banner, no prompt, and the window
+            # is still open for the address the offer was made to.
+            why = (" (a private address is only taken when that is the bot's own public one: "
+                   "the same router)" if _is_private_address(peer_ip) else "")
+            print(f"[ADMINCHAT] Dropped a connection from {peer_ip} on port {port}: "
+                  f"the DCC CHAT was offered to {nick} at {expected_ip}{why}. Still waiting.")
+            try:
+                sock.close()
+            except OSError:
+                pass
+            sock = None
+    except socket.timeout:
+        print(f"[ADMINCHAT] {nick} did not accept the DCC CHAT offer within "
+              f"{int(LISTEN_TIMEOUT)}s; giving the port back.")
+        return
+    except OSError as err:
+        print(f"[ADMINCHAT] Could not offer a DCC CHAT to {nick} ({err}).")
+        return
+    finally:
+        try:
+            listener.close()
+        except OSError:
+            pass
+        # #423: released HERE, not left to the wrapper in _listen_and_serve.
+        # That wrapper's own finally only fires once THIS function returns -
+        # and it used to return only after _serve() did, which blocks for the
+        # whole session's life - for as long as the operator keeps it open. For that
+        # window every other passive DCC CHAT offer was refused outright, so
+        # an operator whose own client could not be dialled had no way to
+        # take over an existing console session at all - the one thing
+        # _promote() exists to guarantee. The port itself is already given
+        # back by listener.close() just above; the one-SESSION rule from here
+        # on is _pending's and _promote()'s job, not this flag's.
+        with _state_lock:
+            _listening = False
+
+    # The peer address is only known now, so the blocklist is checked here rather
+    # than before the offer, as it is on the dial-out path.
+    if is_bad_ip(peer_ip):
+        print(f"[ADMINCHAT] Connection from {peer_ip} dropped: address is temporarily blocked.")
+        try:
+            sock.close()
+        except OSError:
+            pass
+        return
+
+    _serve(sock, peer_ip, nick, host, f"accepted from {peer_ip} on port {port}")
+
+
+# ==========================================================================
+# Introspection, for phase 3 and for tests
+# ==========================================================================
+
+def active_session():
+    """The live authenticated session, or None."""
+    with _state_lock:
+        session = _session
+    if session is not None and session.closed:
+        return None
+    return session
+
+
+def reset_state_for_tests():
+    """Drop all sessions and bad-IP records. Tests only."""
+    global _session, _pending, _listening
+    with _state_lock:
+        sessions = [s for s in (_session, _pending) if s is not None]
+        _session = None
+        _pending = None
+        # The one-listener flag is module state like the two above, and a test
+        # whose listener thread outlives it would otherwise refuse every
+        # passive offer in every test that ran afterwards.
+        _listening = False
+    for session in sessions:
+        session.close(announce_text=None)
+    with _bad_lock:
+        _bad_ips.clear()
+
+
+def _read_password(prompt):
+    """Read a password without echoing it, falling back when there is no console.
+
+    getpass on Windows reads the console device directly and ignores redirected
+    stdin, so piping into this script hangs forever rather than failing. Detect
+    that and read stdin instead - echoed, and said so out loud.
+    """
+    import getpass
+    import sys as _sys
+    if _sys.stdin is not None and _sys.stdin.isatty():
+        return getpass.getpass(prompt)
+    print(prompt + "(input is not a terminal, so it will be echoed)")
+    line = _sys.stdin.readline()
+    if not line:
+        raise SystemExit("No input.")
+    return line.rstrip("\r\n")
+
+
+if __name__ == "__main__":
+    # An entry point of its own - see update_list.py.
+    import platform_compat
+    platform_compat.install_console_encoding_guard()
+
+    print("Generate the value for admin_config.ADMIN_PASSWORD_HASH.")
+    first = _read_password("Password: ")
+    second = _read_password("Again: ")
+    if first != second:
+        raise SystemExit("Passwords did not match.")
+    if not first:
+        raise SystemExit("Empty password refused.")
+    print()
+    print('ADMIN_PASSWORD_HASH = "%s"' % make_password_hash(first))
+    print()
+    print("Paste that line into admin_config.py (gitignored), not config.py.")

@@ -107,6 +107,10 @@ class TwoFoldersOneFilename(PathSecurityBase):
         self.notices.clear()
         InlineThread.dispatched = []
         config.dcc_queue.clear()
+        # Each request is a fresh one: the send the last one started (these
+        # threads are recorded, never run) is over, or a repeat is refused (#1086).
+        config.active_transfers.clear()
+        getattr(config, "user_processing_lock", set()).clear()
         with quiet():
             dcc.handle_download_request(self.sock, "dave", name, "#dccore-test")
         return [kind for kind, _args in self.notices]

@@ -4,12 +4,30 @@ import time
 import sys
 import os
 
+# Every other daemon module lives in src/ (#959): put it on the path before
+# any of them is imported, so every existing "import irc" / "import defaults
+# as config" throughout the codebase keeps working unchanged - the modules
+# still only ever refer to each other by bare name, never a package prefix.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
 # FIRST, before anything else can print. Several modules print at import time,
 # and on a console whose code page cannot encode the Swedish log strings
 # (cp1253, cp1251, cp932, ascii - anything but Western European) an unguarded
 # print() raises UnicodeEncodeError and takes the thread down with it. See
 # platform_compat.install_console_encoding_guard for the full explanation.
 import platform_compat
+# NO WINDOW, NO STREAMS (#1065). Started with pythonw - BOT_WINDOW = hidden -
+# there is no console, and sys.stdout and sys.stderr are None: print() quietly
+# does nothing, but sys.stdout.write() raises, and the dashboard's Flask writes
+# that way. A real null file stands in, so every write works; what is written
+# still reaches the log file, through the timestamp wrapper installed on it.
+WINDOWLESS = __name__ == "__main__" and (sys.stdout is None or sys.stderr is None)
+if WINDOWLESS:
+    _no_console = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = _no_console
+    if sys.stderr is None:
+        sys.stderr = _no_console
 # ONLY WHEN THIS FILE IS THE PROGRAM (#707, audit L43). list.py imports
 # oserve, so every test process - and every script that imports announce -
 # used to run these two installs at import time and wrap the runner's own
@@ -31,6 +49,41 @@ import defaults as config
 if __name__ == "__main__":
     platform_compat.set_console_timestamp_format(
         getattr(config, "CONSOLE_TIMESTAMP_FORMAT", "%H:%M:%S"))
+
+    # `oserve.py --stop` (#1065): ask the bot running from this folder to stop,
+    # wait until it has, and exit - before anything below starts, and before
+    # the log file is opened, since this process is not the bot.
+    if "--stop" in sys.argv[1:]:
+        import stopping
+        sys.exit(stopping.stop_from_outside())
+    # `oserve.py --running`: exit 0 when a bot holds this folder, 1 when not.
+    # start-dccore.bat asks before starting one with no window or a minimised
+    # one, since it is not there afterwards to read the "already running" exit.
+    if "--running" in sys.argv[1:]:
+        import stopping
+        sys.exit(0 if stopping.running_pid()[0] else 1)
+
+    # And to a file (#1065), from here on. Read on every line through
+    # sys.modules: a settings save reloads defaults, and a changed or emptied
+    # path then takes effect without a restart.
+    def _console_log_settings():
+        current = sys.modules.get("defaults") or config
+        try:
+            megabytes = max(0, int(getattr(current, "CONSOLE_LOG_MAX_MB", 5)))
+        except (TypeError, ValueError):
+            megabytes = 5
+        try:
+            keep = max(1, int(getattr(current, "CONSOLE_LOG_KEEP", 5)))
+        except (TypeError, ValueError):
+            keep = 5
+        path = str(getattr(current, "CONSOLE_LOG_FILE", "") or "").strip()
+        if not path and WINDOWLESS:
+            # With no window the file is the only place anything is said: a
+            # windowless bot keeps the default log even when it is turned off.
+            path = os.path.join("data", "logs", "dccore.log")
+        return path, megabytes * 1024 * 1024, keep
+
+    platform_compat.install_console_log(_console_log_settings)
 
 # Allocate the locks at startup, in memory. This keeps config.py free of
 # function calls and imports.
@@ -93,6 +146,13 @@ EXIT_SETUP_IN_THE_TERMINAL = 3
 # a launcher can say "already running" rather than "failed".
 EXIT_ALREADY_RUNNING = 4
 
+# Pass as is_vip to put a line in the lane that is sent before everything else:
+# the requests for files from other bots (#1028). The advert alone is two lines
+# for every channel, a couple of minutes of the pacer on a bot in many of them,
+# and a request behind it sat that long while someone waited for a download.
+FETCH_LANE = "fetch"
+
+
 def queue_message(user, message, is_vip=False):
     """The queue's entry point, with a strictly isolated VIP express lane."""
     user_key = user.lower()
@@ -100,6 +160,9 @@ def queue_message(user, message, is_vip=False):
     
     # VIP GATE: only genuine channel adverts, or messages explicitly flagged
     # is_vip=True, are allowed through here.
+    if is_vip == FETCH_LANE:
+        config.fetch_request_queue.append(message)
+        return
     if user_key == "channel_announce" or is_vip:
         config.vip_queue.append(message)
         return
@@ -152,6 +215,11 @@ def startup(setup_page=None):
         print("[CRITICAL] Stop the other one first (its own window, or the autostart task), "
               "or run a second bot from a second folder.")
         sys.exit(EXIT_ALREADY_RUNNING)
+
+    # A stop file left from before (#1065) asked an earlier bot to stop, not
+    # this one: gone before the watcher could read it.
+    import stopping
+    stopping.clear_stale_stop_file()
 
     # The hard backstop for #170's RFC: scripts/setup_check.py's pre-flight
     # report is a friendlier, EARLIER warning an operator can choose to run
@@ -248,8 +316,11 @@ def startup(setup_page=None):
     # And drop what the master list left in those counters before it stopped
     # being counted - one row per rebuild, sitting at the top of a table meant
     # for files. Runs every boot rather than once: it is a no-op the moment
-    # there is nothing to remove, and an operator restoring an old
-    # download_counts.json should not get the rows back for good.
+    # there is nothing to remove, and an operator restoring an old data
+    # directory should not get the rows back for good. Both this and the
+    # migration above work on download_counts.db, and whichever reaches it
+    # first imports an older download_counts.json into it (#1133), so the
+    # import comes first and these two see every row it brought.
     db.prune_list_artifact_download_counts()
 
     # Before find_latest_list() below: defaults.py's LIST_BASE_NAME derivation
@@ -305,7 +376,8 @@ def startup(setup_page=None):
         # operator upgrading with lists already held had a full map and an
         # empty index, and the dashboard's filter stated positively that no
         # list matched anything. Once per start, and only for what is
-        # missing; a library already indexed costs one query.
+        # missing; a list already indexed costs one quick question to the
+        # index (#1071 - it used to read the whole index to find out).
         try:
             import list_index
             list_index.backfill_missing(config.fetched_bot_lists)
@@ -497,17 +569,7 @@ def run_forever():
             # Hand the whole network job to the IRC module
             irc.irc_loop()
         except KeyboardInterrupt:
-            print("\nShutting down...")
-            # One last flush of the bot registry (#691): it is written on a
-            # 30 s interval, and a Ctrl-C inside that window lost the last
-            # adverts and a source the dashboard had just added. Never
-            # fatal on the way out.
-            try:
-                import irc as _irc_flush
-                _irc_flush._flush_known_bots(force=True)
-            except Exception:
-                pass
-            sys.exit(0)
+            _shut_down()
         except Exception as main_err:
             print(f"[CRITICAL MAIN ERROR] The main loop stopped: {main_err}")
 
@@ -520,11 +582,54 @@ def run_forever():
         announce.is_ready = False
 
         print("[CONNECT] Lost the connection. Reconnecting to the IRC server in 10 seconds...")
-        time.sleep(10)
+        # Inside a try of its own (#1065 review): a stop landing in these ten
+        # seconds escaped as a traceback and skipped the flush below.
+        try:
+            time.sleep(10)
+        except KeyboardInterrupt:
+            _shut_down()
+
+
+def _shut_down():
+    """Ctrl-C, and every other way to stop (#1065): flush, then exit 0.
+
+    A second interrupt while this runs - Ctrl-C pressed twice, a stop from the
+    dashboard and from `start-dccore stop` together - is swallowed rather than
+    escaping as a traceback that skips the flush and exits non-zero, which
+    launchd restarts (#1065 review). Not by ignoring SIGINT: a test drives
+    run_forever() in-process and its runner must keep Ctrl-C."""
+    try:
+        print("\nShutting down...")
+        # The stop file is the request just answered (#1065); a copy left
+        # behind would stop the next start too.
+        try:
+            import stopping
+            stopping.clear_stale_stop_file()
+        except Exception:
+            pass
+        # One last flush of the bot registry (#691): it is written on a
+        # 30 s interval, and a Ctrl-C inside that window lost the last
+        # adverts and a source the dashboard had just added. Never
+        # fatal on the way out.
+        try:
+            import irc as _irc_flush
+            _irc_flush._flush_known_bots(force=True)
+        except Exception:
+            pass
+    except KeyboardInterrupt:
+        pass   # asked twice: still stopping, and still exit 0
+    sys.exit(0)
 
 
 if __name__ == "__main__":
     startup()
+    # The other ways to stop (#1065) all end in run_forever()'s Ctrl-C
+    # KeyboardInterrupt: the watcher for `start-dccore stop` starts here, in
+    # the program only - a test that drives run_forever() in-process must
+    # never have its own runner interrupted by it.
+    import stopping
+    stopping.restore_interrupt()
+    stopping.ensure_watcher()
     run_forever()
 
 

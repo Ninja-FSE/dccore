@@ -53,10 +53,10 @@ from tests.support import DCCoreTestCase, RecordingSocket  # noqa: E402
 def thread_calls():
     """(module, line, is_daemon) for every threading.Thread(...) call."""
     out = []
-    for name in sorted(os.listdir(REPO_ROOT)):
+    for name in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src")))):
         if not name.endswith(".py"):
             continue
-        path = os.path.join(REPO_ROOT, name)
+        path = (next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name)))
         if not os.path.exists(path):
             # Gone between listdir() and here. The control test below writes
             # a tmp*.py into this very directory and removes it again, so two
@@ -148,7 +148,7 @@ class EveryStartedThreadIsADaemon(unittest.TestCase):
     def test_the_two_command_handlers_are_covered_by_this(self):
         """Named because they are the ones that were wrong, and because a
         future reader should be able to find the case from the test."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
 
         targets = []

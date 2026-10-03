@@ -87,7 +87,7 @@ class TheBurstIsGone(ChannelSyncCase):
         """Read out of commands.py: reaching this block for real means
         reloading every module in the daemon. Asserted as the STATEMENT - the
         word irc_sock appears in the comment above it either way."""
-        with io.open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code.split("def _handle_rehash_request(", 1)[1]
         body = re.sub(chr(35) + "[^" + chr(10) + "]*", "", body)
@@ -105,7 +105,7 @@ class TheBurstIsGone(ChannelSyncCase):
 
         Found by the end-to-end fixture, whose oserve stand-in carried only
         irc_connection: the first AttributeError took the whole rehash down."""
-        with io.open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code.split("def _handle_rehash_request(", 1)[1]
         body = re.sub(chr(35) + "[^" + chr(10) + "]*", "", body)
@@ -364,7 +364,7 @@ class ASettingThatCameBackBlank(ChannelSyncCase):
         """The fix is only a fix if the caller captures it at the right
         moment - after the reload it is the same blank the guard already had.
         Asserted as a SEQUENCE: captured beside old_chans, used after."""
-        with io.open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code.split("def _handle_rehash_request(", 1)[1]
         body = re.sub(chr(35) + "[^" + chr(10) + "]*", "", body)

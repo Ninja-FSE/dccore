@@ -11,6 +11,9 @@
 ;    totals. Anything you type in the window goes back to the bot as a
 ;    console command, and the reply comes back into the window.
 ;
+;    And @DCCore-Downloads (#1022): what the bot is downloading from other
+;    bots, what waits, and what finished - see its section below.
+;
 ;    And DCCore Chat (#371): a second window for public chat with other
 ;    operators in the channels your bot is in, relayed by the bot - see
 ;    its section near the end of this file.
@@ -83,7 +86,7 @@
 
 alias dccore.ini { return $qt($+($scriptdir,dccore.ini)) }
 alias dccore.bot { return $hget(dccore,bot) }
-alias dccore.ver { return 1.7 }
+alias dccore.ver { return 1.11 }
 ;  The feed's protocol minor this script was written for. The bot says
 ;  its own in HELLO as major.minor; a different minor means a field was
 ;  inserted on one side and the lines would read wrong - see HELLO below.
@@ -127,6 +130,7 @@ alias dccore.init {
   dccore.default font 1
   dccore.default bg -1
   dccore.default statusmin 5
+  dccore.default dlfinished 15
   dccore.default wantopen 0
   dccore.default show.request 1
   dccore.default show.queued 1
@@ -227,6 +231,13 @@ alias dccore {
   if (%cmd == lists) { dccore.send lists | return }
   if (%cmd == fetch) { dccore.send fetch $2- | return }
   if (%cmd == window) { dccore.window | window -a $dccore.win | return }
+  if (%cmd == downloads) { dccore.dl.window | return }
+  if (%cmd == weburl) {
+    if ($2 == $null) { dccore.dl.askweb | return }
+    dccore.set weburl $2
+    dccore.sys The dashboard is at $2 $+ .
+    return
+  }
   if (%cmd == chat) {
     if ($2 == $null) { dccore.chat.window | window -a $dccore.chat.win | return }
     dccore.chat.say $2-
@@ -256,6 +267,8 @@ alias dccore {
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore trust $+ $str($dccore.nbsp,16) accept the bot's current host as the one to send the token to
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore options $+ $str($dccore.nbsp,14) what to show, colours, panel, title bar, beep
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore window $+ $str($dccore.nbsp,15) open or focus @DCCore
+  echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore downloads $+ $str($dccore.nbsp,10) open the downloads window: coming in, waiting, finished
+  echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore weburl [addr] $+ $str($dccore.nbsp,7) where the bot's dashboard is, for the window's menu
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore chat [text] $+ $str($dccore.nbsp,9) open DCCore Chat, or say something in it (public)
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore status $+ $str($dccore.nbsp,15) ask the bot for its status
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore lists $+ $str($dccore.nbsp,16) the bots' lists we hold, and which have changed
@@ -390,6 +403,7 @@ on *:CHATCLOSE: {
   dccore.title
   dccore.chat.title
   dccore.panel
+  dccore.dl.draw
   if (%was == taken) {
     ; another client took the session; reconnecting now would only take
     ; it straight back and the two of you would trade it for ever
@@ -586,6 +600,8 @@ alias dccore.structured {
     ; connected to the bot" for a whole session if the window was opened
     ; before this HELLO landed - chat worked, the title just never said so.
     dccore.chat.title
+    ; a Downloads window left open across a reconnect asks again (#1022)
+    if ($window($dccore.dl.win)) { hdel dccore.live dlend | dccore.dl.tell | dccore.dl.draw }
     return
   }
   if (%type == STATUS) { dccore.status $2- | return }
@@ -611,11 +627,39 @@ alias dccore.structured {
   if (%type == PEERS) { dccore.chat.peerline $2- | return }
   if (%type == SLOT) { hadd dccore.live slot. $+ $dccore.st(nslots) $2- | hinc dccore.live nslots | dccore.panel.soon | return }
   if (%type == QUEUE) { hadd dccore.live queue. $+ $2 $3- | dccore.panel.soon | return }
+  ; <bot> <received> <total> <bps> <name>: one file the bot is leeching now
+  ; (#1019), part of the same burst as SLOT; the panel's Downloading section.
+  if (%type == FETCHING) { hadd dccore.live fetch. $+ $dccore.st(nfetch) $2- | hinc dccore.live nfetch | dccore.panel.soon | return }
+  ; <phase> <folder_index> <folder_count> <files> <elapsed>: a list rebuild is
+  ; running (#1024), however it was started; `end` when it stops. Kept in
+  ; dccore.live and cleared by every STATUS, so a missed `end` lasts one burst.
+  if (%type == REBUILD) {
+    if ($2 == end) { hdel dccore.live rebuild }
+    else { hadd dccore.live rebuild $2- }
+    dccore.title
+    dccore.panel.soon
+    return
+  }
+  ; The Downloads window's snapshot (#1022): DLBEGIN, one DLROW per download
+  ; (<id> <kind> <state> <bot> <received> <total> <bps> <when> <note> <name>),
+  ; DLEND <waiting_total> <complete_total> <failed_total>. Drawn at DLEND only, so a window
+  ; is never drawn from half a snapshot.
+  if (%type == DLBEGIN) { hdel -w dccore.live dl.* | hadd dccore.live dln 1 | return }
+  if (%type == DLROW) { hadd dccore.live dl. $+ $dccore.st(dln) $2- | hinc dccore.live dln | return }
+  if (%type == DLEND) { hadd dccore.live dlwait $2 | hadd dccore.live dlfin $3 | hadd dccore.live dlfail $4 | hadd dccore.live dlend 1 | dccore.dl.draw | return }
   if (%type == OUT) { dccore.out $2- | return }
   if (%type == LISTFETCH) {
     ; <bot> <auto|arrived|unusable> <text>: a held bot list asked for again,
     ; arrived, or not usable. The text already names the bot.
     dccore.msg $dccore.tag(LISTS,search) $4-
+    return
+  }
+  if (%type == FETCH) {
+    ; <bot> <asked|queued|receiving|done|failed> <text>: a file the bot itself
+    ; is leeching from another bot (#1019). The text already names the bot and
+    ; the file. These live in the @DCCore-Downloads window's log (#1022), not
+    ; here; with that window closed they are not shown.
+    dccore.dl.log $3 $4-
     return
   }
   if (%type == TAKEN) {
@@ -714,7 +758,10 @@ alias dccore.status {
   ; the SLOT and QUEUE lines of this burst follow at once; start afresh
   hdel -w dccore.live slot.*
   hdel -w dccore.live queue.*
+  hdel -w dccore.live fetch.*
+  hdel dccore.live rebuild
   hadd dccore.live nslots 1
+  hadd dccore.live nfetch 1
   dccore.title
   dccore.panel.soon
   ; Not while the side panel is shown (#1013): it carries the same figures,
@@ -730,6 +777,14 @@ alias dccore.status {
 ; ---------------------------------------------------------------------
 ;  Drawing: the text, the title bar, the side panel
 ; ---------------------------------------------------------------------
+
+; What a rebuild has reached, for the title bar: "rebuilding folder 7/20" (or
+; the phase alone when it has no folders to count).
+alias dccore.rebuild.short {
+  var %l = $dccore.st(rebuild)
+  var %n = $gettok(%l,3,32)
+  return rebuilding $iif(%n > 0,folder $gettok(%l,2,32) $+ / $+ %n,$gettok(%l,1,32))
+}
 
 alias dccore.window {
   if ($window($dccore.win)) { return }
@@ -844,6 +899,15 @@ alias dccore.round {
   return $round($1,0)
 }
 alias dccore.speed { return $+($dccore.bytes($1),/s) }
+; a whole number with thousands separators: 312000 -> 312,000
+alias dccore.num {
+  var %n = $int($1), %o = $null
+  while (%n >= 1000) {
+    %o = $+($chr(44),$base($calc(%n % 1000),10,10,3),%o)
+    %n = $int($calc(%n / 1000))
+  }
+  return $+(%n,%o)
+}
 alias dccore.pad2 { return $iif($1 < 10,$+(0,$1),$1) }
 alias dccore.dur {
   var %s = $int($1)
@@ -904,7 +968,8 @@ alias dccore.title {
   var %net = $iif($network,$network,$server)
   if ($dccore.st(state) != in) { titlebar $dccore.win %bot $dccore.dot $iif($dccore.st(state),$dccore.st(state),not connected) | return }
   if (!$dccore.opt(titlebar)) || ($dccore.st(mode) != structured) { titlebar $dccore.win %bot on %net | return }
-  titlebar $dccore.win %bot on %net $dccore.dot slots $dccore.st(st.used) $+ / $+ $dccore.st(st.slots) $dccore.dot queue $dccore.st(st.qusers) $dccore.dot today $dccore.st(st.sent) files / $dccore.bytes($dccore.st(st.bytes)) $dccore.dot $dccore.speed($dccore.st(st.bps))
+  var %rb = $iif(($dccore.st(rebuild) != $null) && (!$dccore.opt(panel)),$dccore.dot $dccore.rebuild.short,)
+  titlebar $dccore.win %bot on %net %rb $dccore.dot slots $dccore.st(st.used) $+ / $+ $dccore.st(st.slots) $dccore.dot queue $dccore.st(st.qusers) $dccore.dot today $dccore.st(st.sent) files / $dccore.bytes($dccore.st(st.bytes)) $dccore.dot $dccore.speed($dccore.st(st.bps))
 }
 
 ; SLOT and QUEUE lines arrive one by one after STATUS with no end marker,
@@ -956,6 +1021,32 @@ alias dccore.panel {
   }
   if (%used < %slots) { aline -l 14 $dccore.win $dccore.nbsp $+ $dccore.nbsp ( $+ $calc(%slots - %used) free) }
   aline -l 14 $dccore.win $dccore.nbsp
+  ; Downloading (#1019): what the bot itself is leeching from other bots. Only
+  ; drawn while something is; a row starts with "<" (Sending's start with ">",
+  ; which dccore.sels reads).
+  if ($dccore.st(fetch.1) != $null) {
+    var %nf = $calc($dccore.st(nfetch) - 1)
+    aline -l %head $dccore.win Downloading %nf
+    var %i = 1
+    while ($dccore.st(fetch. $+ %i) != $null) {
+      var %l = $dccore.st(fetch. $+ %i)
+      ; <bot> <received> <total> <bps> <name>
+      var %pct = $iif($gettok(%l,3,32) > 0,$int($calc($gettok(%l,2,32) * 100 / $gettok(%l,3,32))),0)
+      aline -l $dccore.opt(col.sends) $dccore.win < $dccore.fit($gettok(%l,1,32),9) $dccore.rfit($dccore.bytes($gettok(%l,3,32)),7) $dccore.rfit(%pct $+ $chr(37),4) $dccore.rfit($dccore.speed($gettok(%l,4,32)),9)
+      inc %i
+    }
+    aline -l 14 $dccore.win $dccore.nbsp
+  }
+  ; Rebuilding (#1024): the phase, the folder it is on and the files so far.
+  ; Only drawn while one runs.
+  if ($dccore.st(rebuild) != $null) {
+    var %r = $dccore.st(rebuild)
+    aline -l %head $dccore.win Rebuilding $gettok(%r,1,32)
+    if ($gettok(%r,3,32) > 0) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp folder $gettok(%r,2,32) $+ / $+ $gettok(%r,3,32) $dccore.dot $dccore.num($gettok(%r,4,32)) files }
+    else { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,4,32)) files }
+    if ($gettok(%r,5,32) > 0) { aline -l 14 $dccore.win $dccore.nbsp $+ $dccore.nbsp running $dccore.dur($gettok(%r,5,32)) }
+    aline -l 14 $dccore.win $dccore.nbsp
+  }
   aline -l %head $dccore.win Queue $dccore.st(st.qusers) $iif($dccore.st(st.qfiles) > 0,( $+ $dccore.st(st.qfiles) files))
   var %i = 1
   while ($dccore.st(queue. $+ %i) != $null) {
@@ -1009,6 +1100,163 @@ alias dccore.sels {
     if ($left(%n,9) == %f) { return %n }
     inc %i
   }
+}
+
+; ---------------------------------------------------------------------
+;  The Downloads window (#1022): what the bot is leeching from other bots
+; ---------------------------------------------------------------------
+;
+;  Watching only. The bot sends a whole snapshot - DLBEGIN, a DLROW for each
+;  download, DLEND - every few seconds, and only while this window is open:
+;  the window says `downloads on <rows>` when it opens (and after a
+;  reconnect) and `downloads off` when it closes. Searching other bots'
+;  lists and adding to the queue stay on the dashboard; the menu opens it.
+;
+;  The rows are in the window's side listbox, like @DCCore's panel, so a row
+;  can be selected and right-clicked. dlmap.<line> remembers which download
+;  a line is: "<kind>:<state>:<id>" (one word, so it passes as one argument). The bars are # and - (plain ASCII).
+
+alias dccore.dl.win { return @DCCore-Downloads }
+alias dccore.dl.rows {
+  var %n = $dccore.opt(dlfinished)
+  return $iif(%n isnum 1-15,$int(%n),15)
+}
+alias dccore.dl.tell {
+  if ($chat($dccore.bot)) && ($dccore.st(mode) == structured) { .msg $+(=,$dccore.bot) downloads on $dccore.dl.rows }
+}
+alias dccore.dl.window {
+  if ($window($dccore.dl.win)) { window -a $dccore.dl.win | return }
+  window -l64 $dccore.dl.win
+  if ($dccore.opt(font)) { font $dccore.dl.win $dccore.fontsize Lucida Console }
+  titlebar $dccore.dl.win DCCore Downloads $dccore.dot what $iif($dccore.bot,$dccore.bot,the bot) is fetching from other bots
+  echo 14 -i2 $dccore.dl.win Every request, queue place, transfer and result appears here as it happens; the list on the right is how things stand now.
+  echo 14 -i2 $dccore.dl.win Right-click a row there: cancel a request that is waiting, or download a failed one again. Searching other bots is on the dashboard (right-click, Open the dashboard).
+  hdel dccore.live dlend
+  dccore.dl.draw
+  dccore.dl.tell
+}
+on *:CLOSE:@DCCore-Downloads: {
+  if ($chat($dccore.bot)) && ($dccore.st(mode) == structured) { .msg $+(=,$dccore.bot) downloads off }
+}
+
+; One event of the fetch feed into this window's own log, tagged the way the
+; feed reads: <asked|queued|receiving|done|failed> <text>.
+alias dccore.dl.log {
+  if (!$window($dccore.dl.win)) { return }
+  var %tag = $dccore.tag(FETCH,sends)
+  if ($1 == asked) { %tag = $dccore.tag(REQUEST,search) }
+  elseif ($1 == queued) { %tag = $dccore.tag(QUEUE,queued) }
+  var %text = $2-
+  ; the bot's words are "Receiving ..." and "Fetched ..."; here they read as what they are
+  if ($1 == receiving) { %tag = $dccore.tag(DOWNLOADING,sends) | %text = Started downloading $3- }
+  elseif ($1 == done) { %tag = $dccore.tag(FINISHED,sends) | %text = Received $3- }
+  elseif ($1 == failed) { %tag = $dccore.tag(FAILED,fail) }
+  if ($version >= 7) { echo -mti2 $dccore.dl.win %tag %text }
+  else { echo -ti2 $dccore.dl.win %tag %text }
+}
+
+; "<kind>:<state>:<id>" of the selected row, or nothing
+alias dccore.dl.pick { return $hget(dccore.live,$+(dlmap.,$sline($dccore.dl.win,1).ln)) }
+alias dccore.dl.do {
+  var %p = $dccore.dl.pick
+  if (%p != $null) { dccore.send $1 $gettok(%p,3,58) }
+}
+alias dccore.dl.askweb {
+  var %u = $input(Address of the DCCore dashboard - for example http://host.example:8420/,eo,DCCore)
+  if (%u != $null) { dccore.set weburl %u | dccore.sys The dashboard is at %u $+ . }
+}
+alias dccore.dl.web {
+  if ($dccore.opt(weburl) == $null) { dccore.dl.askweb }
+  var %u = $dccore.opt(weburl)
+  if (%u == $null) { return }
+  if ($left(%u,7) != http://) && ($left(%u,8) != https://) { %u = http:// $+ %u }
+  run $qt(%u)
+}
+
+; A time for a finished row: the hour and minute, with the day when it is not today.
+alias dccore.dl.when {
+  if ($1 !isnum) || ($1 <= 0) { return --:-- }
+  return $asctime($1,$iif($calc($ctime - $1) > 72000,ddd HH:nn,HH:nn))
+}
+alias dccore.dl.bar {
+  var %pct = $1
+  if (%pct > 100) { %pct = 100 }
+  var %fill = $int($calc(%pct / 10))
+  return $+($chr(91),$str($chr(35),%fill),$str($chr(45),$calc(10 - %fill)),$chr(93))
+}
+
+; One line into the listbox, remembering what it stands for.
+alias dccore.dl.add {
+  aline -l $1 $dccore.dl.win $3-
+  if ($2 != -) { hadd dccore.live $+(dlmap.,$line($dccore.dl.win,0,1)) $2 }
+}
+
+alias dccore.dl.draw {
+  if (!$window($dccore.dl.win)) { return }
+  clear -l $dccore.dl.win
+  hdel -w dccore.live dlmap.*
+  var %w = $dccore.dl.win
+  if ($dccore.st(mode) != structured) { aline -l 14 %w $iif($dccore.st(state) == in,(no downloads in plain mode),(not connected)) | return }
+  if (!$dccore.st(dlend)) { aline -l 14 %w (asking the bot...) | return }
+  var %head = $dccore.opt(col.head)
+  var %n = $calc($dccore.st(dln) - 1)
+  var %nd = 0, %i = 1
+  while (%i <= %n) {
+    if ($gettok($dccore.st(dl. $+ %i),2,32) == d) { inc %nd }
+    inc %i
+  }
+  var %nw = $dccore.st(dlwait), %nf = $dccore.st(dlfin), %nx = $dccore.st(dlfail)
+  if (%nd == 0) && (%nw == 0) && (%nf == 0) && (%nx == 0) { aline -l 14 %w (nothing downloading, waiting or finished) | return }
+  var %kind = none, %lastbot = $null, %ind = $dccore.nbsp $+ $dccore.nbsp
+  %i = 1
+  while (%i <= %n) {
+    var %l = $dccore.st(dl. $+ %i)
+    ; <id> <kind> <state> <bot> <received> <total> <bps> <when> <note> <name>
+    var %k = $gettok(%l,2,32), %bot = $gettok(%l,4,32), %name = $gettok(%l,10-,32)
+    ; the end of a long name is what tells two files apart
+    if ($len(%name) > 44) { %name = .. $+ $right(%name,42) }
+    var %note = $replace($gettok(%l,9,32),_,$dccore.nbsp)
+    var %map = $+(%k,:,$gettok(%l,3,32),:,$gettok(%l,1,32))
+    if (%k != %kind) {
+      if (%kind != none) { dccore.dl.add 14 - $dccore.nbsp }
+      %kind = %k
+      %lastbot = $null
+      if (%k == d) { dccore.dl.add %head - Downloading %nd }
+      elseif (%k == w) { dccore.dl.add %head - Waiting %nw $iif(%nw > 50,( $+ showing the first 50 $+ )) }
+      elseif (%k == c) { dccore.dl.add %head - Finished $iif(%nf > $dccore.dl.rows,(last $dccore.dl.rows of %nf),( $+ %nf $+ )) }
+      else { dccore.dl.add %head - Failed $iif(%nx > $dccore.dl.rows,(last $dccore.dl.rows of %nx),( $+ %nx $+ )) }
+    }
+    ; a nick once, its downloads under it
+    if (%bot != %lastbot) { %lastbot = %bot | dccore.dl.add $dccore.opt(col.name) - %bot }
+    if (%k == d) {
+      var %got = $gettok(%l,5,32), %total = $gettok(%l,6,32)
+      var %pct = $iif(%total > 0,$int($calc(%got * 100 / %total)),0)
+      dccore.dl.add $dccore.opt(col.sends) %map %ind $+ %name
+      dccore.dl.add 14 %map %ind $+ $dccore.dl.bar(%pct) $dccore.rfit($iif(%total > 0,%pct $+ $chr(37),?),4) $dccore.rfit($dccore.speed($gettok(%l,7,32)),9) $dccore.rfit($dccore.bytes($iif(%total > 0,%total,%got)),7)
+    }
+    elseif (%k == w) {
+      dccore.dl.add 14 %map %ind $+ %name
+      dccore.dl.add $dccore.opt(col.queued) %map %ind $+ %note
+    }
+    elseif (%k == c) {
+      dccore.dl.add $dccore.opt(col.sends) %map %ind $+ $dccore.fit(%name,44) $dccore.rfit($dccore.bytes($gettok(%l,5,32)),7) $dccore.dl.when($gettok(%l,8,32))
+    }
+    else {
+      dccore.dl.add $dccore.opt(col.fail) %map %ind $+ $dccore.fit(%name,44) $dccore.rfit($dccore.bytes($gettok(%l,5,32)),7) $dccore.dl.when($gettok(%l,8,32))
+      dccore.dl.add $dccore.opt(col.fail) %map %ind $+ %note
+    }
+    inc %i
+  }
+}
+
+menu @DCCore-Downloads {
+  $iif($gettok($dccore.dl.pick,1,58) == w,Cancel this request):dccore.dl.do dlcancel
+  $iif($gettok($dccore.dl.pick,2,58) == failed,Download again):dccore.dl.do dlagain
+  Clear the finished ones...:dccore.confirm dlclear Clear the list of finished downloads? Only the list is cleared and no files are deleted.
+  -
+  Open the dashboard in the browser:dccore.dl.web
+  Options...:dccore.options
+  Close:window -c @DCCore-Downloads
 }
 
 ; ---------------------------------------------------------------------
@@ -1077,20 +1325,17 @@ alias dccore.askfont {
 
 ; Every /dccore command, and every console command worth a click, is here.
 menu @DCCore {
-  Status:dccore.send status
-  Slots:dccore.send slots
-  Queue:dccore.send queue
-  Bans:dccore.send bans
-  Uptime:dccore.send uptime
-  Version:dccore.send version
-  Check for a new version:dccore.send checkversion
-  Daily update check $iif($dccore.st(checkupdates) == on,off,on):dccore.send checkupdates $iif($dccore.st(checkupdates) == on,off,on)
-  Console feed $iif($dccore.st(consolefeed) == on,off,on):dccore.send consolefeed $iif($dccore.st(consolefeed) == on,off,on)
+  Script Settings:dccore.options
+  Console command:dccore.askraw
   -
-  $iif($dccore.selq,Queue of $dccore.selq):dccore.send queue $dccore.selq
-  $iif($dccore.selq,Clear the queue of $dccore.selq):dccore.send clearqueue $dccore.selq
-  $iif($dccore.sels,Queue of $dccore.sels):dccore.send queue $dccore.sels
-  -
+  Info
+  .Status:dccore.send status
+  .Slots:dccore.send slots
+  .Queue:dccore.send queue
+  .Uptime:dccore.send uptime
+  .Version:dccore.send version
+  .-
+  .Command list:dccore
   Lists
   .Show the lists:dccore lists
   .Fetch the changed lists:dccore fetch
@@ -1098,12 +1343,22 @@ menu @DCCore {
   Library
   .Find duplicate filenames:dccore.send verify
   .Rebuild the list...:dccore.confirm update Rebuild the list? It walks the whole library and can take minutes.
-  Admin
+  User control
+  .Bans:dccore.send bans
   .Ban...:dccore.ask ban Ban pattern (for example *!*@host.example)
   .Unban...:dccore.ask unban Pattern to remove
   .Clear a queue...:dccore.ask clearqueue Clear the queue of which nick
+  Control
+  .Check for a new version:dccore.send checkversion
+  .Daily update check $iif($dccore.st(checkupdates) == on,off,on):dccore.send checkupdates $iif($dccore.st(checkupdates) == on,off,on)
+  .Console feed $iif($dccore.st(consolefeed) == on,off,on):dccore.send consolefeed $iif($dccore.st(consolefeed) == on,off,on)
+  .-
   .Reload the bot (rehash)...:dccore.confirm rehash Reload the bot's code and settings?
-  Console command...:dccore.askraw
+  .Stop the bot...:if ($input(Stop the bot? It leaves IRC and ends; start it again with start-dccore.,yq,DCCore)) { dccore.send shutdown now }
+  -
+  $iif($dccore.selq,Queue of $dccore.selq):dccore.send queue $dccore.selq
+  $iif($dccore.selq,Clear the queue of $dccore.selq):dccore.send clearqueue $dccore.selq
+  $iif($dccore.sels,Queue of $dccore.sels):dccore.send queue $dccore.sels
   -
   Connection
   .$iif($chat($dccore.bot),Disconnect,Connect):dccore $iif($chat($dccore.bot),disconnect,connect)
@@ -1111,12 +1366,14 @@ menu @DCCore {
   .Forget the token (unpair):dccore unpair
   .Trust the bot's host:dccore trust
   Window
-  .Options...:dccore.options
+  .DCCore Chat:dccore chat
+  .Downloads window:dccore downloads
+  .-
   .Panel $iif($dccore.opt(panel),off,on):dccore panel $iif($dccore.opt(panel),off,on)
   .Font size...:dccore.askfont
+  .Dashboard address...:dccore weburl
   .Clear window:clear @DCCore
-  DCCore Chat:dccore chat
-  Command list:dccore
+  Clear finished...:dccore.confirm dlclear Clear the list of finished downloads? Only the list is cleared and no files are deleted.
 }
 
 menu nicklist {
@@ -1129,6 +1386,7 @@ menu status,channel {
   DCCore
   .Open the window:dccore window
   .Open DCCore Chat:dccore chat
+  .Open the Downloads window:dccore downloads
   .Show the lists:dccore lists
   .Fetch the changed lists:dccore fetch
   .Command list:dccore
@@ -1148,7 +1406,7 @@ alias dccore.options {
 
 dialog dccore.opt {
   title "DCCore window - options"
-  size -1 -1 322 280
+  size -1 -1 322 288
   option dbu
   box "Show in @DCCore", 100, 5 3 312 102
   check "Requests (who asked for what)", 101, 10 13 170 10
@@ -1176,29 +1434,31 @@ dialog dccore.opt {
   text "min, 0 = off", 216, 268 71 49 8
   text "Panel headings", 217, 248 83 66 8
   combo 218, 248 91 52 70, drop
-  box "Window", 300, 5 108 312 50
+  box "Window", 300, 5 108 312 58
   check "Side panel: slots, queue and totals", 301, 10 118 170 10
   check "Slots, queue and speed in the title bar", 302, 10 129 170 10
   check "Console replies in a separate window", 303, 10 140 170 10
   check "Beep on a failed transfer", 304, 192 118 118 10
   check "Fixed-width font, size", 305, 192 129 100 10
   edit "", 306, 294 128 18 11, autohs
+  text "Finished downloads to show", 309, 10 153 130 8
+  edit "", 310, 142 151 18 11, autohs
   text "Background", 307, 192 142 48 8
   combo 308, 242 140 56 70, drop
-  box "Connection", 400, 5 161 312 63
-  text "Bot nick", 401, 10 173 36 8
-  edit "", 402, 48 171 56 11, autohs
-  text "", 403, 110 173 204 8
-  check "Reconnect and log in by itself when the bot comes back", 404, 10 186 300 10
-  check "Console feed on (also requests and sends - not just status)", 405, 10 198 300 10
-  check "Check GitHub for a new DCCore version", 406, 10 210 260 10
-  box "DCCore Chat (public)", 600, 5 227 312 36
-  check "Listen on every channel the bot is in, not only the ticked ones", 601, 10 237 300 10
-  check "Open the chat window when a line arrives", 602, 10 248 300 10
-  button "OK", 1, 232 266 40 12, ok default
-  button "Cancel", 2, 276 266 40 12, cancel
-  button "Pair again...", 501, 5 266 46 12
-  button "Forget token", 502, 54 266 46 12
+  box "Connection", 400, 5 169 312 63
+  text "Bot nick", 401, 10 181 36 8
+  edit "", 402, 48 179 56 11, autohs
+  text "", 403, 110 181 204 8
+  check "Reconnect and log in by itself when the bot comes back", 404, 10 194 300 10
+  check "Console feed on (also requests and sends - not just status)", 405, 10 206 300 10
+  check "Check GitHub for a new DCCore version", 406, 10 218 260 10
+  box "DCCore Chat (public)", 600, 5 235 312 36
+  check "Listen on every channel the bot is in, not only the ticked ones", 601, 10 245 300 10
+  check "Open the chat window when a line arrives", 602, 10 256 300 10
+  button "OK", 1, 232 274 40 12, ok default
+  button "Cancel", 2, 276 274 40 12, cancel
+  button "Pair again...", 501, 5 274 46 12
+  button "Forget token", 502, 54 274 46 12
 }
 
 alias dccore.colours { return 00 white,01 black,02 navy,03 green,04 red,05 maroon,06 purple,07 orange,08 yellow,09 lime,10 teal,11 cyan,12 blue,13 pink,14 grey,15 silver }
@@ -1222,6 +1482,7 @@ on *:dialog:dccore.opt:init:0: {
   if ($dccore.opt(beep)) { did -c dccore.opt 304 }
   if ($dccore.opt(font)) { did -c dccore.opt 305 }
   did -ra dccore.opt 306 $dccore.fontsize
+  did -ra dccore.opt 310 $dccore.dl.rows
   dccore.fillbg
   if ($dccore.bot) { did -ra dccore.opt 402 $dccore.bot }
   did -ra dccore.opt 403 $iif($dccore.opt(token),Paired $dccore.opt(paired) (token in dccore.ini),Not paired: the bot will ask for the password)
@@ -1254,6 +1515,7 @@ on *:dialog:dccore.opt:sclick:1: {
   var %i = 1
   var %panel = $dccore.opt(panel)
   var %bg = $dccore.opt(bg)
+  var %dl = $dccore.dl.rows
   while (%i <= 8) {
     var %g = $gettok($dccore.groups,%i,32)
     hadd dccore show. $+ %g $did(dccore.opt,$calc(100 + %i)).state
@@ -1271,6 +1533,7 @@ on *:dialog:dccore.opt:sclick:1: {
   hadd dccore font $did(dccore.opt,305).state
   if ($did(dccore.opt,306).text isnum) && ($did(dccore.opt,306).text >= 6) { hadd dccore fontsize $did(dccore.opt,306).text }
   hadd dccore bg $calc($did(dccore.opt,308).sel - 2)
+  hadd dccore dlfinished $iif($did(dccore.opt,310).text isnum 1-15,$int($did(dccore.opt,310).text),15)
   hadd dccore auto $did(dccore.opt,404).state
   hadd dccore chat.all $did(dccore.opt,601).state
   hadd dccore chat.popup $did(dccore.opt,602).state
@@ -1288,6 +1551,7 @@ on *:dialog:dccore.opt:sclick:1: {
   ; and only once the bot has told us" reasoning as checkupdates above.
   var %consolefeed = $iif($did(dccore.opt,405).state == 1,on,off)
   if ($dccore.st(consolefeed) != $null && %consolefeed != $dccore.st(consolefeed)) { dccore.send consolefeed %consolefeed }
+  if ($window($dccore.dl.win)) && (%dl != $dccore.dl.rows) { dccore.dl.tell }
   if ($window($dccore.win)) {
     if (%panel != $dccore.opt(panel)) { dccore.rebuild }
     if ($dccore.opt(font)) { font $dccore.win $dccore.fontsize Lucida Console }
@@ -1377,9 +1641,14 @@ alias dccore.chat.window {
 alias dccore.chat.title {
   if (!$window($dccore.chat.win)) { return }
   var %to = $dccore.opt(chat.to)
-  var %auto = (%to == $null) || (%to == *)
-  var %where = $iif(%auto,$iif($dccore.st(chat.replyto) != $null,$dccore.st(chat.replyto),every channel with other DCCore bots),%to)
-  var %priv = (!%auto) && ($left(%to,1) !isin #&+!)
+  ; /var stores a condition as its TEXT - never empty, so always "true" to
+  ; $iif - so each is evaluated by $iif here (#1041). And "privately" is
+  ; decided by where the line goes, the automatic target included: with no
+  ; pick, a peer who wrote privately is answered privately.
+  var %auto = $iif((%to == $null) || (%to == *),1,0)
+  var %target = $iif(%auto,$dccore.st(chat.replyto),%to)
+  var %where = $iif(%target != $null,%target,every channel with other DCCore bots)
+  var %priv = $iif((%target != $null) && ($left(%target,1) !isin $+($chr(35),&+!)),1,0)
   titlebar $dccore.chat.win DCCore Chat $dccore.dot public $dccore.dot typing sends $iif(%priv,privately to,to) %where $iif(!$dccore.chat.relaying,$dccore.dot not connected to the bot)
 }
 alias dccore.chat.sys {
@@ -1408,7 +1677,19 @@ alias dccore.chat.feed {
   ; happens to land (#958 follow-up). Never "-" or "*" - those are only an
   ; OWN fan-out line's channel. A private line's channel is "@<nick>" -
   ; reply there means privately to that nick, so the "@" is dropped.
-  if ($3 != $dccore.bot) && ($2 != $null) && ($2 != -) { hadd dccore.live chat.replyto $iif($left($2,1) == @,$mid($2,2-),$2) | dccore.chat.title }
+  ;
+  ; A PRIVATE CONVERSATION IS NEVER MOVED TO A CHANNEL BY ITSELF. Any line
+  ; used to move the target, so one arriving from a channel while a private
+  ; reply was being typed sent that reply to the channel, in public. Now a
+  ; private line always takes the target, and a channel line only while the
+  ; target is no one or a channel - and only from a channel listened on,
+  ; since a line nobody sees is no reason to move. The bot's own remarks
+  ; (nick "*") never move it. A manual pick still overrides all of this.
+  if ($3 != $dccore.bot) && ($3 != *) && ($2 != $null) && ($2 != -) {
+    var %rt = $dccore.st(chat.replyto)
+    if ($left($2,1) == @) { hadd dccore.live chat.replyto $mid($2,2-) | dccore.chat.title }
+    elseif ($dccore.chat.listens($2)) && ((%rt == $null) || ($left(%rt,1) isin $+($chr(35),&))) { hadd dccore.live chat.replyto $2 | dccore.chat.title }
+  }
   ; Your own lines, and any private line (its "@<nick>" channel was never
   ; something to tick in the Listen on menu), always show (#958 follow-up):
   ; one said with `chat *` comes back with "-" for its channel, since it

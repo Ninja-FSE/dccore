@@ -176,7 +176,7 @@ class AnAmbiguousLabelIsRefusedWithDirections(TwoListsOverTwoTrees):
     def test_the_notice_exists(self):
         """send_dcc_error() knows the kind dcc.py sends."""
         import re
-        with io.open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "announce.py"), encoding="utf-8") as handle:
             source = handle.read()
         self.assertRegex(source, r'"ambiguous_list": "Error: .*channel it was advertised in\."')
 

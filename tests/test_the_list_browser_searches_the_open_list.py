@@ -200,7 +200,7 @@ class TheRoutesForwardQ(unittest.TestCase):
     are already covered by real execution."""
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as h:
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as h:
             return h.read()
 
     def test_the_own_list_route_forwards_q(self):

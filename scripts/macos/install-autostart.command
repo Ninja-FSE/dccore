@@ -26,7 +26,10 @@
 cd "$(cd "$(dirname "$0")" && pwd -P)/../.." || exit 1
 ROOT="$(pwd -P)"
 
-if [ ! -f "admin_config.py" ] && [ ! -f "settings.conf" ]; then
+# At the root, or in conf/ (#959) - where the daemon moves them the first
+# time it starts, so a second start would otherwise look like a first run.
+if [ ! -f "admin_config.py" ] && [ ! -f "settings.conf" ] \
+        && [ ! -f "conf/admin_config.py" ] && [ ! -f "conf/settings.conf" ]; then
     echo
     echo "  DCCore is not set up yet. Run start-dccore.command once first - it"
     echo "  asks the setup questions - then this file."

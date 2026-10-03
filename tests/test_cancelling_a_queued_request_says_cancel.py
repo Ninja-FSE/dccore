@@ -45,7 +45,7 @@ class WhichRowsHaveNotStarted(unittest.TestCase):
         done = subprocess.run(["node", "-e", script], capture_output=True, timeout=60)
         self.assertEqual(done.returncode, 0, done.stderr.decode("utf-8", "replace"))
         self.assertEqual(done.stdout.decode("utf-8").strip(),
-                         "pending=true,queued=true,offered=false,receiving=false,complete=false,failed=false")
+                         "pending=true,queued=true,offered=true,receiving=false,complete=false,failed=false")
 
 
 class TheButtonAsksIt(unittest.TestCase):

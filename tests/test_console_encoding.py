@@ -261,7 +261,7 @@ class ALoggedLineReachesDiskBeforeTheProcessDies(unittest.TestCase):
         """
         return (
             "import sys, time\n"
-            "sys.path.insert(0, r'" + REPO_ROOT + "')\n"
+            "sys.path.insert(0, r'" + os.path.join(REPO_ROOT, "src") + "')\n"
             + setup + "\n"
             "for i in range(" + str(self.LINES) + "):\n"
             "    print('line %02d' % i)\n"

@@ -285,7 +285,7 @@ class TheHandlerActuallyCallsIt(unittest.TestCase):
     def handler():
         import io
 
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as f:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as f:
             body = f.read()
         block = body.split('if is_user_event(line, "NICK"):', 1)[1]
         return block.split("# Anchored", 1)[0]

@@ -298,13 +298,19 @@ class TheFilterAndTheParserCannotDrift(unittest.TestCase):
 
     def test_every_field_is_offered_to_the_page(self):
         offered = set(omenserve_import.variable_names())
-        declared = {field.variable for field in omenserve_import.FIELDS}
+        # The figures, and KeepTrack's two text variables read beside them (#1062).
+        declared = ({field.variable for field in omenserve_import.FIELDS}
+                    | set(omenserve_import.TEXT_VARIABLES))
 
         self.assertEqual(offered, declared)
 
     def test_every_offered_name_is_one_the_parser_recognises(self):
         for name in omenserve_import.variable_names():
             with self.subTest(name=name):
+                if name in omenserve_import.TEXT_VARIABLES:
+                    # Read for what they say, not shown as a figure (#1062).
+                    self.assertEqual(omenserve_import.parse_vars(f"n0={name} x"), {name: "x"})
+                    continue
                 result = omenserve_import.read_install(f"n0={name} 123")
                 row = [r for r in result["rows"] if r["variable"] == name]
 

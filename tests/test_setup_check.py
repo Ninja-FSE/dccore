@@ -116,7 +116,7 @@ class BothPlatformsAreFullyDescribed(unittest.TestCase):
         for platform in self.platforms().values():
             relative = platform.start_cmd.lstrip("./").replace("\\", "/")
             self.assertTrue(
-                os.path.exists(os.path.join(REPO_ROOT, relative)),
+                os.path.exists((next((p for p in (os.path.join(REPO_ROOT, "src", relative), os.path.join(REPO_ROOT, "conf", relative), os.path.join(REPO_ROOT, relative)) if os.path.exists(p)), os.path.join(REPO_ROOT, relative)))),
                 f"{platform.display} tells the operator to run {relative}, "
                 f"which is not in the repository")
 

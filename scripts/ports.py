@@ -18,10 +18,11 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
+SRC = os.path.join(REPO, "src")  # defaults.py lives there (#959)
 
 
 def main():
-    for path in (REPO, HERE):
+    for path in (REPO, HERE, SRC):
         if path not in sys.path:
             sys.path.insert(0, path)
     os.chdir(REPO)

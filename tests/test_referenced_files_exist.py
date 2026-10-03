@@ -53,6 +53,8 @@ MAY_BE_ABSENT = {
                        "every clean checkout, and the code tests for it",
     "local_config.py": "the pre-#178 name, still named by the migration that "
                        "exists precisely because it is gone",
+    "dccore.stop": "a request, not a file that should be there: written by "
+                   "`start-dccore stop` and removed by the bot as it reads it (#1065)",
     "driver.py": "written at run time into a temp directory by "
                  "tests/test_rehash_end_to_end.py, which runs a real !rehash "
                  "in a separate interpreter - it is a name being CREATED, "

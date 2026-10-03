@@ -31,7 +31,7 @@ COUNT_CLAIM = re.compile(r"\b(\d{4,})\**\s+(?:tests|of them)\b")
 
 
 def read(relative):
-    path = os.path.join(REPO_ROOT, relative)
+    path = (next((p for p in (os.path.join(REPO_ROOT, "src", relative), os.path.join(REPO_ROOT, "conf", relative), os.path.join(REPO_ROOT, relative)) if os.path.exists(p)), os.path.join(REPO_ROOT, relative)))
     if not os.path.exists(path):
         return ""
     with io.open(path, encoding="utf-8") as handle:

@@ -342,7 +342,7 @@ class TheDaemonInstallsIt(unittest.TestCase):
         """setup_check.py and configure.py print a report for a person to read
         once, not a log; a stamp on every line of a report is noise."""
         for name in ("scripts/setup_check.py", "configure.py"):
-            with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+            with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
                 with self.subTest(script=name):
                     self.assertNotIn("install_console_timestamps", handle.read())
 
@@ -355,7 +355,7 @@ class TheSettingIsWiredThrough(unittest.TestCase):
         self.assertIs(defaults.__annotations__.get("CONSOLE_TIMESTAMP_FORMAT"), str)
 
     def test_in_the_sample_file(self):
-        with io.open(os.path.join(REPO_ROOT, "settings.conf.sample"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "conf", "settings.conf.sample"), encoding="utf-8") as handle:
             self.assertIn("#CONSOLE_TIMESTAMP_FORMAT = %H:%M:%S", handle.read())
 
     def test_on_the_dashboard_under_debug_and_logging(self):

@@ -29,7 +29,12 @@ PROSE = ["docs/INSTALL.md", "docs/WINDOWS.md", "docs/MACOS.md", "docs/FUTURE.md"
 
 
 def read(relative):
-    path = os.path.join(REPO_ROOT, relative)
+    # #959: src/ (the daemon's modules), then conf/ (settings.conf.sample,
+    # admin_config.py.sample), then the repository root otherwise.
+    for folder in (os.path.join(REPO_ROOT, "src"), os.path.join(REPO_ROOT, "conf"), REPO_ROOT):
+        path = os.path.join(folder, relative)
+        if os.path.exists(path):
+            break
     if not os.path.exists(path):
         return ""
     with io.open(path, encoding="utf-8", errors="replace") as handle:

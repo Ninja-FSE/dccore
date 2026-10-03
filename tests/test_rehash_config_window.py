@@ -332,7 +332,7 @@ class TheDashboardReadsUnderTheLock(unittest.TestCase):
     machine."""
 
     def test_build_settings_payload_takes_the_reload_lock(self):
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
 
@@ -700,7 +700,7 @@ class ARehashWaitsForTransfersToFinish(DCCoreTestCase):
         source, because driving a real rehash means driving a real socket -
         and asserted as a sequence, since the call alone in the wrong place
         would pass a check for the call alone."""
-        with io.open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             # COMMENTS STRIPPED, and the search scoped to the rehash body.
             # Whole-file index() found a COMMENT mentioning
             # reload_modules_in_order() five hundred lines above the call, so
@@ -722,7 +722,7 @@ class ARehashWaitsForTransfersToFinish(DCCoreTestCase):
         """Waking the queue while still paused would have every dispatch
         refused by the gate the wait put up - and the wake is the thing that
         restarts the queue the operator asked for."""
-        with io.open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             code = handle.read()
 
         self.assertLess(code.index("_dcc_resume.resume_transfers()"),
@@ -743,7 +743,7 @@ class ARehashWaitsForTransfersToFinish(DCCoreTestCase):
         The window is now everything between entering the handler and the
         message it prints, which is exactly the span the resume has to be
         in."""
-        with io.open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             code = chr(10).join(line.split("#", 1)[0]
                                 for line in handle.read().splitlines())
         body = code.split("def _handle_rehash_request(", 1)[1]
@@ -925,7 +925,7 @@ class TheSocketSendBuffer(DCCoreTestCase):
         self.assertEqual(sock.options, [])
 
     def test_the_transfer_path_applies_it(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             code = handle.read()
 
         self.assertIn("_apply_send_buffer(conn)", code)
@@ -956,7 +956,7 @@ class TheSocketSendBuffer(DCCoreTestCase):
         """Read out of the source: driving a real transfer needs a peer on a
         socket, and what matters is that the loop reads the setting rather
         than the literal it replaced."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             code = handle.read()
 
         self.assertIn("block = dcc_block_size()", code)
@@ -967,7 +967,7 @@ class TheSocketSendBuffer(DCCoreTestCase):
     def test_it_is_resolved_once_per_transfer_not_once_per_pass(self):
         """A getattr in the inner loop of a 4 GB send is a million lookups for
         one answer that cannot change mid-file."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             code = handle.read()
         loop = code.split("block = dcc_block_size()", 1)[1].split("break", 1)[0]
 

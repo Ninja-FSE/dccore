@@ -32,7 +32,7 @@ LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
 
 
 def read(relative):
-    with io.open(os.path.join(REPO_ROOT, relative), encoding="utf-8") as handle:
+    with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", relative), os.path.join(REPO_ROOT, "conf", relative), os.path.join(REPO_ROOT, relative)) if os.path.exists(p)), os.path.join(REPO_ROOT, relative))), encoding="utf-8") as handle:
         return handle.read()
 
 
@@ -41,7 +41,7 @@ class EveryInternalLinkResolves(unittest.TestCase):
     def test_no_document_points_at_a_missing_file(self):
         broken = []
         for relative in AUTHORED:
-            base = os.path.dirname(os.path.join(REPO_ROOT, relative))
+            base = os.path.dirname((next((p for p in (os.path.join(REPO_ROOT, "src", relative), os.path.join(REPO_ROOT, "conf", relative), os.path.join(REPO_ROOT, relative)) if os.path.exists(p)), os.path.join(REPO_ROOT, relative))))
             for text, target in LINK.findall(read(relative)):
                 if target.startswith(("http://", "https://", "#", "mailto:")):
                     continue
@@ -60,7 +60,7 @@ class EveryInternalLinkResolves(unittest.TestCase):
 
     def test_every_authored_document_exists(self):
         missing = [r for r in AUTHORED
-                   if not os.path.exists(os.path.join(REPO_ROOT, r))]
+                   if not os.path.exists((next((p for p in (os.path.join(REPO_ROOT, "src", r), os.path.join(REPO_ROOT, "conf", r), os.path.join(REPO_ROOT, r)) if os.path.exists(p)), os.path.join(REPO_ROOT, r))))]
 
         self.assertEqual(missing, [], "; ".join(missing))
 

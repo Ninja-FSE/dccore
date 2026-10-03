@@ -31,7 +31,7 @@ from tests.support import DCCoreTestCase, install_fake_oserve  # noqa: E402
 
 
 def source(name):
-    with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+    with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
         return handle.read()
 
 
@@ -50,9 +50,9 @@ class EveryOutboundLineGoesOutWhole(unittest.TestCase):
                          "send() returns how many bytes it took and the caller "
                          "discards it, so a full kernel buffer truncates the "
                          "line")
-        self.assertEqual(code.count("current_sock.sendall("), 2,
-                         "both the VIP lane and the standard lane must send "
-                         "the whole line")
+        self.assertEqual(code.count("current_sock.sendall("), 3,
+                         "the fetch lane, the VIP lane and the standard lane "
+                         "must each send the whole line")
 
     def test_it_encodes_the_way_the_other_writer_does(self):
         """A filename the socket cannot spell must cost a character, not raise

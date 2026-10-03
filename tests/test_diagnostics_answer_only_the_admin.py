@@ -83,7 +83,7 @@ class TheDispatchGatesBothBeforeDoingAnything(unittest.TestCase):
     its notice - and that !list, next to them, does not."""
 
     def branch(self, marker):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
         start = source.index(marker)
         return source[start:start + 900]

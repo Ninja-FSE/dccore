@@ -129,7 +129,7 @@ class TheAdvertLoopIsolatesEachChannel(unittest.TestCase):
     """
 
     def _worker_function(self):
-        with io.open(os.path.join(REPO_ROOT, "announce.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "announce.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
         tree = ast.parse(source)

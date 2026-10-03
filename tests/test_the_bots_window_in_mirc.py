@@ -125,7 +125,7 @@ class EveryLineTypeIsHandled(unittest.TestCase):
                        "Incorrect Password.", "Session taken over from",
                        "Unknown command: hello"):
             self.assertIn(prompt, text)
-        with io.open(os.path.join(REPO_ROOT, "adminchat.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "adminchat.py"), encoding="utf-8") as handle:
             source = handle.read()
         for prompt in ("Enter Your Password:", "Entering DCC Chat Admin Interface",
                        "Incorrect Password.", "Session taken over from"):

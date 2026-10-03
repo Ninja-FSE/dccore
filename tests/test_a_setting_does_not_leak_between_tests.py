@@ -75,7 +75,7 @@ class TheFallbackChannelIsReadFromConfig(DCCoreTestCase):
     def test_dcc_fetch_prefers_it_when_it_is_set(self):
         import dcc_fetch
 
-        source = open(os.path.join(REPO_ROOT, "dcc_fetch.py"),
+        source = open(os.path.join(REPO_ROOT, "src", "dcc_fetch.py"),
                       encoding="utf-8").read()
 
         self.assertIn("BROADCAST_SEARCH_CHANNEL", source)

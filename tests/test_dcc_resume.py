@@ -319,7 +319,7 @@ class TheSendPathUsesIt(unittest.TestCase):
     read the source for the four things the wiring has to get right."""
 
     def source(self):
-        with open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_the_offer_is_registered_before_the_handshake_is_sent(self):
@@ -358,7 +358,7 @@ class TheSendPathUsesIt(unittest.TestCase):
 class TheDispatchIsThrottled(unittest.TestCase):
 
     def source(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_a_resume_reaches_the_handler(self):

@@ -11,6 +11,12 @@ import tempfile
 import zipfile
 import time
 import json
+
+# This script is an entry point of its own (README/INSTALL.md say "python3
+# update_list.py"), and stays at the repository root for that reason - but
+# everything it imports below now lives in src/ (#959).
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
 import defaults as config
 import library
 import platform_compat
@@ -1078,7 +1084,8 @@ def _write_rar_artifact(tmp_path, members, directory=None):
         # utf-8/replace for the same reason as dcc.py's rar call.
         result = subprocess.run(cmd, capture_output=True, text=True,
                                 encoding="utf-8", errors="replace",
-                                timeout=getattr(config, "RAR_TIMEOUT", 1800))
+                                timeout=getattr(config, "RAR_TIMEOUT", 1800),
+                                **platform_compat.no_console_window())
         if result.returncode == 0 and os.path.exists(built):
             platform_compat.replace_with_retry(built, tmp_path)
             return True

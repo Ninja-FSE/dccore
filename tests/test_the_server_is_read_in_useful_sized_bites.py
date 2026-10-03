@@ -150,7 +150,7 @@ class BothLoopsUseIt(unittest.TestCase):
     the main loop is the registration, so there is one recv() to check."""
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"),
                      encoding="utf-8") as handle:
             return handle.read()
 

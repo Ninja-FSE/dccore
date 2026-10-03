@@ -174,7 +174,7 @@ class NoSettingIsDerivedBeforeOverridesLand(unittest.TestCase):
     """
 
     def _parse(self):
-        with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
             return ast.parse(handle.read())
 
     def _override_lines(self, tree):

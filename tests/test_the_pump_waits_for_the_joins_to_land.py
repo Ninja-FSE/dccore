@@ -174,7 +174,7 @@ class TheEpilogueClearsTheLaneAdvertsActuallyUse(unittest.TestCase):
     key is gone and the live lane is what gets emptied."""
 
     def epilogue(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
         return source.split("Lost the connection. Reconnecting", 1)[1][:2500]
 

@@ -134,9 +134,9 @@ SWEDISH = re.compile(
 def _modules():
     """Every .py file the daemon itself is built from."""
     out = []
-    for name in sorted(os.listdir(REPO_ROOT)):
+    for name in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src")))):
         if name.endswith(".py") and name != "admin_config.py":
-            out.append(os.path.join(REPO_ROOT, name))
+            out.append((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))))
     return out
 
 
@@ -444,7 +444,7 @@ def has_swedish_accent(line):
 
 
 def _plain_lines(name):
-    path = os.path.join(REPO_ROOT, name)
+    path = (next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name)))
     if not os.path.exists(path):
         return []
     with io.open(path, encoding="utf-8") as handle:
@@ -502,7 +502,7 @@ class ThePlainOperatorFilesAreEnglish(unittest.TestCase):
         """A renamed or deleted file would make this pass by reading nothing,
         which is the failure mode of every allowlist-shaped check."""
         missing = [name for name in PLAIN_FILES
-                   if not os.path.exists(os.path.join(REPO_ROOT, name))]
+                   if not os.path.exists((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))))]
 
         self.assertEqual(missing, [],
                          "named here but not in the tree, so nothing is scanned")

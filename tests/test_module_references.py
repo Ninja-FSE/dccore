@@ -115,10 +115,10 @@ class EveryNamedModuleExists(unittest.TestCase):
     def _references(self):
         """{module_name: ["file:line", ...]} across the daemon's own source."""
         references = {}
-        for filename in sorted(os.listdir(REPO_ROOT)):
+        for filename in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src")))):
             if not filename.endswith(".py"):
                 continue
-            with io.open(os.path.join(REPO_ROOT, filename), encoding="utf-8") as handle:
+            with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", filename), os.path.join(REPO_ROOT, "conf", filename), os.path.join(REPO_ROOT, filename)) if os.path.exists(p)), os.path.join(REPO_ROOT, filename))), encoding="utf-8") as handle:
                 source = handle.read()
             for name, lineno in module_name_literals(source):
                 references.setdefault(name, []).append(f"{filename}:{lineno}")
@@ -138,7 +138,9 @@ class EveryNamedModuleExists(unittest.TestCase):
         for name, sites in sorted(references.items()):
             if name in ABSENT_BY_DESIGN:
                 continue
-            if not os.path.exists(os.path.join(REPO_ROOT, f"{name}.py")):
+            path = f"{name}.py"
+            if not (os.path.exists(os.path.join(REPO_ROOT, "src", path))
+                    or os.path.exists(os.path.join(REPO_ROOT, path))):
                 missing.append(f"{name!r} (named at {', '.join(sites)})")
 
         self.assertEqual(

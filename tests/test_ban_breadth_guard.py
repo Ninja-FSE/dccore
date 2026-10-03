@@ -181,7 +181,7 @@ class TheSampleDoesNotPutTheDashboardOnTheLan(unittest.TestCase):
     it set 0.0.0.0, doing the thing it had just described as opt-in."""
 
     def sample(self):
-        with io.open(os.path.join(REPO_ROOT, "admin_config.py.sample"),
+        with io.open(os.path.join(REPO_ROOT, "conf", "admin_config.py.sample"),
                      encoding="utf-8") as handle:
             return handle.read()
 
@@ -207,7 +207,7 @@ class TheSampleDoesNotPutTheDashboardOnTheLan(unittest.TestCase):
         """
         import ast
         declared = {}
-        with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
         for node in tree.body:
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):

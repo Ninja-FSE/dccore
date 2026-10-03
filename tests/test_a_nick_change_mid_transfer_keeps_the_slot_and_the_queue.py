@@ -33,6 +33,7 @@ import db  # noqa: E402
 import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 import irc  # noqa: E402
+import runtime  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
 from tests import test_complete_means_the_receiver_acked_it as ack  # noqa: E402
@@ -186,6 +187,28 @@ class ARenameSavesTheQueue(DCCoreTestCase):
         irc.note_nick_change("OldNick", "NewNick")
         self.assertEqual(config.dcc_queue["newnick"][0]["file"], "theirs.flac")
         self.assertIn("oldnick", config.dcc_queue)
+
+
+    def test_the_wait_goes_with_the_queue(self):
+        runtime.queue_waiting_since["oldnick"] = 5.0
+        irc.note_nick_change("OldNick", "NewNick")
+        self.assertEqual(runtime.queue_waiting_since, {"newnick": 5.0})
+
+    def test_a_stale_stamp_on_the_new_nick_is_replaced(self):
+        runtime.queue_waiting_since.update({"oldnick": 5.0, "newnick": 99.0})
+        irc.note_nick_change("OldNick", "NewNick")
+        self.assertEqual(runtime.queue_waiting_since, {"newnick": 5.0})
+
+    def test_a_stale_stamp_is_dropped_when_the_old_nick_had_none(self):
+        runtime.queue_waiting_since["newnick"] = 99.0
+        irc.note_nick_change("OldNick", "NewNick")
+        self.assertNotIn("newnick", runtime.queue_waiting_since)
+
+    def test_the_stamp_stays_when_the_queue_under_the_new_nick_is_left_alone(self):
+        config.dcc_queue["newnick"] = [{"file": "theirs.flac", "user_raw": "NewNick"}]
+        runtime.queue_waiting_since.update({"oldnick": 5.0, "newnick": 99.0})
+        irc.note_nick_change("OldNick", "NewNick")
+        self.assertEqual(runtime.queue_waiting_since, {"oldnick": 5.0, "newnick": 99.0})
 
 
 if __name__ == "__main__":

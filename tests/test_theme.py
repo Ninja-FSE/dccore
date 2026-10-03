@@ -183,7 +183,7 @@ class TheLookDidNotChange(ThemedPathCase):
 
         readers = 0
         for name in ("announce.py", "list.py"):
-            tree = ast.parse(io.open(os.path.join(REPO_ROOT, name),
+            tree = ast.parse(io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))),
                                      encoding="utf-8").read())
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call)
@@ -206,14 +206,14 @@ class NoNinthCopy(unittest.TestCase):
     output would pass just as happily on nine."""
 
     def modules(self):
-        for name in sorted(os.listdir(REPO_ROOT)):
+        for name in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src")))):
             if name.endswith(".py") and name not in ("theme.py", "admin_config.py"):
                 yield name
 
     def test_no_module_but_theme_contains_a_block_code(self):
         offenders = []
         for name in self.modules():
-            with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+            with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
                 for number, line in enumerate(handle, 1):
                     for literal in BLOCK_LITERALS:
                         if literal in line:
@@ -226,7 +226,7 @@ class NoNinthCopy(unittest.TestCase):
         nothing anywhere would be broken rather than reassuring. This control
         is what caught the scan looking for the character when every module
         spells it as an escape."""
-        with io.open(os.path.join(REPO_ROOT, "theme.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "theme.py"), encoding="utf-8") as handle:
             body = handle.read()
 
         for code in BLOCK_CODES:

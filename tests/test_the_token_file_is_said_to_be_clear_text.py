@@ -22,7 +22,7 @@ if REPO_ROOT not in sys.path:
 
 
 def read(relative):
-    with io.open(os.path.join(REPO_ROOT, relative), encoding="utf-8") as handle:
+    with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", relative), os.path.join(REPO_ROOT, "conf", relative), os.path.join(REPO_ROOT, relative)) if os.path.exists(p)), os.path.join(REPO_ROOT, relative))), encoding="utf-8") as handle:
         return handle.read()
 
 

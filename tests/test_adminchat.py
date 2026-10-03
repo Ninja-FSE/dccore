@@ -1279,7 +1279,7 @@ class WiringIsInPlace(unittest.TestCase):
     """irc.py must actually route DCC CHAT here, and only from a private message."""
 
     def setUp(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             self.source = handle.read()
 
     def test_irc_hands_dcc_chat_to_the_console(self):
@@ -1295,7 +1295,7 @@ class WiringIsInPlace(unittest.TestCase):
 
     def test_adminchat_is_not_reloaded_by_rehash(self):
         """importlib.reload would drop a live session's socket on every !rehash."""
-        with open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             commands_source = handle.read()
         for line in commands_source.split("\n"):
             if "modules_to_reload" in line and "=" in line:

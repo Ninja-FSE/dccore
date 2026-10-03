@@ -57,7 +57,7 @@ def version_claims(text):
 class TheShippedProse(unittest.TestCase):
 
     def claims_in(self, relative):
-        path = os.path.join(REPO_ROOT, relative)
+        path = (next((p for p in (os.path.join(REPO_ROOT, "src", relative), os.path.join(REPO_ROOT, "conf", relative), os.path.join(REPO_ROOT, relative)) if os.path.exists(p)), os.path.join(REPO_ROOT, relative)))
         if not os.path.exists(path):
             return []
         with io.open(path, encoding="utf-8", errors="replace") as handle:

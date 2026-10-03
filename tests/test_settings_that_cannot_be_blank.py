@@ -258,7 +258,7 @@ class BothCallSitesUseIt(unittest.TestCase):
     unreachable getattr default."""
 
     def test_no_getattr_alt_nickname_default_remains(self):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         # The assignment, not the name: resolve_alt_nick's own docstring quotes
@@ -274,7 +274,7 @@ class BothCallSitesUseIt(unittest.TestCase):
         ladder in fallback_nick(), whose first rung is the alternate - and
         a registered bot keeps its name on a refusal, so the helper has one
         caller: the definition plus that rung."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertEqual(source.count("resolve_alt_nick("), 2,

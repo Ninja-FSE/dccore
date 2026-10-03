@@ -65,12 +65,14 @@ RUNTIME_CONTAINERS = {
     "active_transfers": list,
     "banned_users": dict,
     "frozen_queues": dict,
+    "queue_waiting_since": dict,
     "channel_users": dict,
     "user_requests": dict,
     "muted_until": dict,
     "whois_status": dict,
     "failed_transfers": dict,
     "vip_queue": list,
+    "fetch_request_queue": list,
     "send_queue": dict,
     "user_processing_lock": set,
     "broadcast_search_results": list,
@@ -108,6 +110,7 @@ RUNTIME_CONTAINERS = {
     # later, unrelated test's nick could match a timestamp this test left
     # behind and get merged with it in the List Browser.
     "recent_departures": dict,
+    "recent_departure_bases": dict,
     "nick_aliases": dict,
     # #376 option B: a leftover ident or departure is a merge the next test
     # never set up.
@@ -122,6 +125,8 @@ RUNTIME_CONTAINERS = {
     "chat_peers": dict,
     "chat_peers_meta": dict,
     "chat_who_round": dict,
+    # #1066: one test's modes or resend count are not the next one's.
+    "on_connect_state": dict,
     # Same reasoning: a leftover is one test's message showing up in the next
     # test's panel.
     "private_messages": list,
@@ -234,6 +239,7 @@ _ORPHANED_QUEUE_SINK = os.path.join(_ORPHANED_WRITE_DIR, "dcc_queue.txt")
 # download-count history the same way it emptied the queue.
 _ORPHANED_SPEED_RECORD_SINK = os.path.join(_ORPHANED_WRITE_DIR, "speed_record.txt")
 _ORPHANED_DOWNLOAD_COUNTS_SINK = os.path.join(_ORPHANED_WRITE_DIR, "download_counts.json")
+_ORPHANED_TRANSFER_LOG_SINK = os.path.join(_ORPHANED_WRITE_DIR, "transfers.db")
 
 
 def reset_config(**overrides):
@@ -260,6 +266,7 @@ def reset_config(**overrides):
         else:
             del canonical[:]
         setattr(config, name, canonical)
+    runtime.known_bots_pruned_at = 0.0
     for name, value in SETTINGS_DEFAULTS.items():
         setattr(config, name, value)
     for name, value in RUNTIME_FLAGS.items():
@@ -678,7 +685,9 @@ class DCCoreTestCase(unittest.TestCase):
         # time a test drove a transfer all the way to completion, because
         # db.record_download() is only reached on the success path and
         # nothing had ever taken one. A module-level constant like the two
-        # above, so it is rebound here and restored in tearDown.
+        # above, so it is rebound here and restored in tearDown. Since #1133
+        # the counts live in a database derived from this path (its extension
+        # replaced by .db), so moving the path moves the database with it.
         self._real_download_counts_file = db.DOWNLOAD_COUNTS_FILE
         db.DOWNLOAD_COUNTS_FILE = os.path.join(self._fetch_history_dir,
                                                "download_counts.json")
@@ -741,7 +750,8 @@ class DCCoreTestCase(unittest.TestCase):
             BANS_FILE=os.path.join(self._fetch_history_dir, "bans.txt"),
             STATS_FILE=os.path.join(self._fetch_history_dir, "stats.txt"),
             LIST_INDEX_FILE=os.path.join(self._fetch_history_dir, "list_index.db"),
-            LIST_AUDIO_INFO_CACHE=os.path.join(self._fetch_history_dir, "audio_info.db"))
+            LIST_AUDIO_INFO_CACHE=os.path.join(self._fetch_history_dir, "audio_info.db"),
+            TRANSFER_LOG_FILE=os.path.join(self._fetch_history_dir, "transfers.db"))
 
     def tearDown(self):
         restore_daemon_functions()
@@ -808,6 +818,8 @@ class DCCoreTestCase(unittest.TestCase):
         ):
             setattr(_db, name, sink)
             setattr(self.config, name, sink)
+        # transfer_log.py reads its path from config alone, at the moment of the write.
+        self.config.TRANSFER_LOG_FILE = _ORPHANED_TRANSFER_LOG_SINK
 
     def set_config(self, **overrides):
         """Set config attributes for the duration of one test, restoring

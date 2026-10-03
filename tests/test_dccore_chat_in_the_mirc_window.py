@@ -182,37 +182,57 @@ class WhatComesFromTheBot(unittest.TestCase):
     def test_its_own_lines_are_marked_as_its_own(self):
         self.assertTrue(any("$iif($3 == $dccore.bot,own,other)" in s for s in self.feed))
 
+    GUARD = "if ($3 != $dccore.bot) && ($3 != *) && ($2 != $null) && ($2 != -) {"
+    PRIVATE = ("if ($left($2,1) == @) { hadd dccore.live chat.replyto $mid($2,2-) "
+               "| dccore.chat.title }")
+    CHANNEL = ("elseif ($dccore.chat.listens($2)) && ((%rt == $null) || ($left(%rt,1) isin "
+               "$+($chr(35),&))) { hadd dccore.live chat.replyto $2 | dccore.chat.title }")
+
     def test_somebody_else_s_line_names_where_to_reply(self):
         """Typing with no channel picked replies where the conversation is,
         not to wherever a set-cover happens to land (#958 follow-up)."""
-        self.assertIn('if ($3 != $dccore.bot) && ($2 != $null) && ($2 != -) '
-                      '{ hadd dccore.live chat.replyto $iif($left($2,1) == @,$mid($2,2-),$2) | dccore.chat.title }',
-                      self.feed)
+        self.assertIn(self.GUARD, self.feed)
+        guard = self.feed.index(self.GUARD)
+        self.assertEqual(self.feed[guard + 1], "var %rt = $dccore.st(chat.replyto)")
+        self.assertEqual(self.feed[guard + 2], self.PRIVATE)
+        self.assertEqual(self.feed[guard + 3], self.CHANNEL)
+
+    def test_a_private_conversation_is_never_moved_to_a_channel_by_itself(self):
+        """A line from a channel arriving while a private reply was typed
+        sent that reply to the channel, in public. A channel line moves the
+        target only while it is no one or already a channel."""
+        self.assertIn("((%rt == $null) || ($left(%rt,1) isin $+($chr(35),&)))", self.CHANNEL)
+        self.assertIn(self.CHANNEL, self.feed)
+
+    def test_only_a_channel_listened_on_moves_it(self):
+        """A line nobody sees - the listen filter drops it below - is no
+        reason to move the target."""
+        self.assertTrue(self.CHANNEL.startswith("elseif ($dccore.chat.listens($2))"))
 
     def test_the_title_follows_the_reply_target_the_moment_it_changes(self):
         """Seen live: dccore.chat.title only ran on login, a send-target
         pick, or a connection-state change - never when an incoming line
         moved the auto-reply target to a different channel or peer - so it
         could go on naming the PREVIOUS one for the rest of the session."""
-        record = [s for s in self.feed if "chat.replyto" in s][0]
-        self.assertIn("dccore.chat.title", record)
+        records = [s for s in self.feed if "hadd dccore.live chat.replyto" in s]
+        self.assertEqual(len(records), 2)
+        for record in records:
+            self.assertIn("dccore.chat.title", record)
 
     def test_a_private_line_names_the_peer_to_reply_to_not_the_at_sign(self):
         """A private line's channel is "@<nick>" - replying there means
         privately to that nick, so the "@" itself must not end up in
         chat.replyto (#371 follow-up)."""
-        record = [s for s in self.feed if "chat.replyto" in s][0]
-        self.assertIn("$iif($left($2,1) == @,$mid($2,2-),$2)", record)
+        self.assertIn("hadd dccore.live chat.replyto $mid($2,2-)", self.PRIVATE)
 
-    def test_never_recorded_from_a_fan_out_own_line(self):
+    def test_never_recorded_from_a_fan_out_own_line_or_a_remark(self):
         """"-" and "*" are only ever an OWN line's channel (a `chat *` fan-out
         and its "somebody was hidden" remark); neither is a real channel to
-        reply into."""
-        record = [s for s in self.feed if "chat.replyto" in s][0]
-        self.assertIn("($2 != -)", record)
-        # $3 != $dccore.bot already excludes the own-line "-"/"*" cases,
-        # since those only ever arrive with $3 == $dccore.bot or $3 == *.
-        self.assertIn("$3 != $dccore.bot", record)
+        reply into. A remark from the bot itself (nick "*") is not somebody
+        talking, and never moves it."""
+        self.assertIn("($2 != -)", self.GUARD)
+        self.assertIn("$3 != $dccore.bot", self.GUARD)
+        self.assertIn("($3 != *)", self.GUARD)
 
 
 class WhatIsSent(unittest.TestCase):
@@ -333,7 +353,8 @@ class TheWindowIsTheInterface(unittest.TestCase):
         text = script()
         self.assertIn("/dccore chat [text]", text)
         self.assertIn(".Open DCCore Chat:dccore chat", text)
-        self.assertIn("alias dccore.ver { return 1.7 }", text)
+        match = re.search(r"alias dccore\.ver \{ return ([0-9.]+) \}", text)
+        self.assertGreaterEqual(tuple(int(p) for p in match.group(1).split(".")), (1, 8))
 
 
 class TheDefaultIsEveryChannelWithOtherDccoreBots(unittest.TestCase):
@@ -455,7 +476,8 @@ class MessagingAPeerPrivately(unittest.TestCase):
 
     def test_the_title_says_privately_for_a_nick_target(self):
         title = "\n".join(statements(block(script(), "alias dccore.chat.title")))
-        self.assertIn("$left(%to,1) !isin #&+!", title)
+        # On where the line goes, the automatic target included (#1041).
+        self.assertIn("$left(%target,1) !isin $+($chr(35),&+!)", title)
         self.assertIn("privately to", title)
 
 

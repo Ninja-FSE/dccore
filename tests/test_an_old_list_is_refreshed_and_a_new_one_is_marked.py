@@ -114,14 +114,14 @@ class ANewListSaysSo(ListCase):
     def test_a_refreshed_list_is_new_again(self):
         """Every fetch writes seen_at = 0 - read from the code that stores it."""
         import io
-        with io.open(os.path.join(REPO_ROOT, "list_fetch.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "list_fetch.py"), encoding="utf-8") as handle:
             code = handle.read()
         at = code.index('"advert_when_fetched": _advert_snapshot(bot),')
         self.assertIn('"seen_at": 0,', code[at:at + 500])
 
     def test_the_route_marks_it_when_the_list_is_served(self):
         import io
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
             code = handle.read()
         at = code.index("def api_filelists_bot(nick):")
         body = code[at:at + 900]

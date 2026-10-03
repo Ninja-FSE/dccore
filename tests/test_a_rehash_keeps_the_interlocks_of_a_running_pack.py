@@ -93,7 +93,7 @@ class TheRehashAsksBeforeAndAfterTheReload(unittest.TestCase):
     is the function above with that answer."""
 
     def rehash(self):
-        with io.open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             return handle.read().split("def handle_rehash_request(", 1)[1]
 
     def test_the_answer_is_read_right_after_the_wait(self):

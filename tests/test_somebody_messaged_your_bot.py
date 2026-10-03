@@ -281,7 +281,7 @@ class WhatTheCaptureDecides(unittest.TestCase):
         """
         import re as _re
 
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as f:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as f:
             body = f.read()
         block = body.split("announce.record_private_message(user, msg)", 1)[0]
         # Anchored on the CALL, not on the whole `if` line. The condition
@@ -314,7 +314,7 @@ class WhatTheCaptureDecides(unittest.TestCase):
     def test_it_happens_after_the_flood_check(self):
         """So a flood cannot fill the panel. Asserted by WHERE the capture is
         - everything this reads sits after that gate in the file."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as f:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as f:
             body = f.read()
 
         # The call, not the whole condition: #888 added "not is_file_request"
@@ -326,7 +326,7 @@ class WhatTheCaptureDecides(unittest.TestCase):
     def test_it_happens_after_the_ban_check(self):
         """A banned user's message is dropped before this, so a ban silences
         them in the panel too - not just in the channel."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as f:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as f:
             body = f.read()
 
         self.assertLess(body.index("if not security.check_user_status(user"),

@@ -96,7 +96,7 @@ class ItRunsBeforeTheServerDoes(unittest.TestCase):
     server starts."""
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"),
                      encoding="utf-8") as handle:
             return handle.read()
 

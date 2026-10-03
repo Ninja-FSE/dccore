@@ -265,7 +265,7 @@ class ItStillDoesNotImportTheDaemon(unittest.TestCase):
     test as things importing webserver must not pull in."""
 
     def test_the_daemon_imports_are_inside_the_function(self):
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
             lines = handle.read().splitlines()
 
         top_level = [line for line in lines
@@ -278,7 +278,7 @@ class ItStillDoesNotImportTheDaemon(unittest.TestCase):
                                  "breaks testing the routes without a daemon" % module)
 
     def test_the_payload_builder_imports_them_itself(self):
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         def body_of(name):

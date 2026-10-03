@@ -21,8 +21,10 @@ rem ---------------------------------------------------------------------
 cd /d "%~dp0..\.."
 
 rem  Autostart on a tree that has never been set up would ask the setup
-rem  questions at every logon. Once by hand first.
-if not exist "admin_config.py" if not exist "settings.conf" (
+rem  questions at every logon. Once by hand first. At the root, or in conf\
+rem  (#959): the first start moves them there, so after it the root has neither
+rem  and this refused every install under the new layout (#1084).
+if not exist "admin_config.py" if not exist "settings.conf" if not exist "conf\admin_config.py" if not exist "conf\settings.conf" (
     echo.
     echo   DCCore is not set up yet. Run start-dccore.bat once first - it asks
     echo   the setup questions - then this file.

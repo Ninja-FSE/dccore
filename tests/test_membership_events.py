@@ -171,7 +171,7 @@ def _guard_condition_for(marker, helper=("is_user_event", "is_server_numeric",
     matches a comment is a test satisfied by prose, which is how the first draft
     of the sibling suite fooled itself.
     """
-    with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+    with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
         lines = handle.read().split("\n")
 
     hits = [i for i, raw in enumerate(lines)
@@ -338,7 +338,7 @@ class NoBareSubstringTestsRemain(unittest.TestCase):
     """The handlers must call the guards, not keep their own substring tests."""
 
     def setUp(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             raw = handle.read()
         # Assert on CODE only. The fix's own comments quote the old tests to
         # explain why they were wrong, and a naive text search cannot tell an

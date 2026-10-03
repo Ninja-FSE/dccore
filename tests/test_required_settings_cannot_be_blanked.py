@@ -161,7 +161,7 @@ class TheGuardCoversEveryWriter(unittest.TestCase):
         self.assertIn("settings_file.save(", source)
 
     def test_the_dashboard_writes_through_settings_file_save(self):
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn("settings_file.save(", source)

@@ -186,7 +186,7 @@ class HardBanFileDurability(DCCoreTestCase):
 
     def test_the_handlers_no_longer_open_the_file_for_writing(self):
         """Source check, because the two defects above were both in this shape."""
-        with open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             source = handle.read()
         for stale in ('open(filename, "w"', 'open(filename, "a"'):
             with self.subTest(stale=stale):
@@ -442,12 +442,12 @@ class BothPathsShareOneImplementation(unittest.TestCase):
     """The inline copy in !clearqueue was replaced, not duplicated."""
 
     def setUp(self):
-        with open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             self.source = handle.read()
 
     def test_both_handlers_call_the_shared_helper(self):
-        self.assertEqual(self.source.count("dcc.discard_orphaned_temp_archives("), 2,
-                         "@<nick>-remove and !clearqueue must both use it")
+        self.assertEqual(self.source.count("dcc.discard_orphaned_temp_archives("), 3,
+                         "@<nick>-remove, @<nick>-remove <file> and !clearqueue must all use it")
 
     def test_commands_no_longer_removes_files_itself(self):
         self.assertFalse("os.remove(" in self.source,
@@ -506,6 +506,11 @@ class RehashPreservesEveryRuntimeContainer(unittest.TestCase):
             "An operator narrowing this after finding something packable "
             "that should not be needs the change to take effect on the "
             "rehash, not on the next restart",
+        "fetch_request_queue":
+            "transient OUTPUT like vip_queue: the requests for files from "
+            "other bots, sent within seconds - and a request lost here "
+            "is asked again: its line is no longer waiting, so the "
+            "row's offer timer runs out and the dispatcher sends it anew",
         "vip_queue":
             "transient OUTPUT, not state. commands.py says so explicitly: "
             "restoring it would replay lines addressed to channels the "
@@ -542,8 +547,8 @@ class RehashPreservesEveryRuntimeContainer(unittest.TestCase):
                                            not silently missed by either.
         """
         import ast
-        path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "defaults.py")
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(repo_root, "src", "defaults.py")  # #959
         with open(path, encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
         names = []

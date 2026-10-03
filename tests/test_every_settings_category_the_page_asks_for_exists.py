@@ -271,7 +271,7 @@ class EverythingElseThePageNamesByString(unittest.TestCase):
         the literal "/lang/" prefix is visible to the regex below."""
         import webserver as _webserver
 
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"),
                      encoding="utf-8") as handle:
             server = handle.read()
 

@@ -63,7 +63,7 @@ class AByteOrderMarkDoesNotEatTheFirstSetting(DCCoreTestCase):
         """save() decodes the same file to edit it in place. Left as plain
         utf-8 there, a mark would reappear inside the first line of the
         rewritten file - so the bug would come back on the next save."""
-        source = io.open(os.path.join(REPO_ROOT, "settings_file.py"),
+        source = io.open(os.path.join(REPO_ROOT, "src", "settings_file.py"),
                          encoding="utf-8").read()
 
         self.assertNotIn('decode("utf-8")', source,

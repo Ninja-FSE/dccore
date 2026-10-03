@@ -57,6 +57,9 @@
       <button class="nav-item" data-view="tools">
         <span class="nav-icon">&#9881;</span> <span data-i18n="view.tools.title">Tools</span>
       </button>
+      <button class="nav-item" data-view="live">
+        <span class="nav-icon">&#9654;</span> <span data-i18n="view.live.title">Live Transfers</span>
+      </button>
       <button class="nav-item" data-view="stats">
         <span class="nav-icon">&#9673;</span> <span data-i18n="view.stats.title">Stats</span>
       </button>
@@ -209,21 +212,123 @@
       </div>
 
       <h2 class="panel-title" data-i18n="download.panelTitle">Downloads (fetched from other bots)</h2>
-      <div class="table-wrap">
-        <table class="data-table" id="downloads-table">
-          <thead>
-            <tr>
-              <th data-i18n="common.bot">Bot</th>
-              <th data-i18n="common.file">File</th>
-              <th data-i18n="common.state">State</th>
-              <th data-i18n="common.progress">Progress</th>
+      <div id="downloads-summary" class="downloads-summary" aria-live="polite"></div>
+      <!-- #1019/#1021: the download list is three boxes - what is still in the
+           queue (the only one with Cancel), what arrived, and what failed - each
+           sorted and paged on its own. Clearing forgets a list; the files stay
+           on disk. -->
+      <div class="downloads-toolbar">
+        <label class="downloads-pagesize">
+          <span data-i18n="download.perPage">Per page</span>
+          <select id="downloads-pagesize" class="search-input">
+            <option value="10">10</option>
+            <option value="15">15</option>
+            <option value="20">20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+        </label>
+      </div>
+      <div id="downloads-boxes">
+      <section class="downloads-box" id="downloads-box-queue">
+        <div class="downloads-boxbar">
+          <h3 class="downloads-box-title"><span data-i18n="download.box.queue">In the queue</span>
+            <span class="col-dim" id="downloads-queue-count"></span></h3>
+          <span class="downloads-pager">
+            <button type="button" class="btn btn-small" id="downloads-queue-prev" disabled
+                    data-i18n-title="download.prevPage" title="Previous page">&lsaquo;</button>
+            <span id="downloads-queue-pageinfo" class="col-dim"></span>
+            <button type="button" class="btn btn-small" id="downloads-queue-next" disabled
+                    data-i18n-title="download.nextPage" title="Next page">&rsaquo;</button>
+          </span>
+          <span class="downloads-clear">
+          </span>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="downloads-queue-table">
+            <thead>
+              <tr>
+              <th data-sort-col="bot" aria-sort="none"><button type="button" class="sort-btn" data-sort="bot"><span data-i18n="common.bot">Bot</span></button></th>
+              <th data-sort-col="file" aria-sort="none"><button type="button" class="sort-btn" data-sort="file"><span data-i18n="common.file">File</span></button></th>
+              <th data-sort-col="state" aria-sort="none"><button type="button" class="sort-btn" data-sort="state"><span data-i18n="common.state">State</span></button></th>
+              <th data-sort-col="progress" aria-sort="none"><button type="button" class="sort-btn" data-sort="progress"><span data-i18n="common.progress">Progress</span></button></th>
               <th></th>
-            </tr>
-          </thead>
-          <tbody id="downloads-body">
-            <tr class="empty-row"><td colspan="5" data-i18n="download.nothingQueued">Nothing queued yet.</td></tr>
-          </tbody>
-        </table>
+              </tr>
+            </thead>
+            <tbody id="downloads-queue-body">
+              <tr class="empty-row"><td colspan="5" data-i18n="download.nothingQueued">Nothing here.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="downloads-box" id="downloads-box-finished">
+        <div class="downloads-boxbar">
+          <h3 class="downloads-box-title"><span data-i18n="download.box.finished">Finished</span>
+            <span class="col-dim" id="downloads-finished-count"></span></h3>
+          <span class="downloads-pager">
+            <button type="button" class="btn btn-small" id="downloads-finished-prev" disabled
+                    data-i18n-title="download.prevPage" title="Previous page">&lsaquo;</button>
+            <span id="downloads-finished-pageinfo" class="col-dim"></span>
+            <button type="button" class="btn btn-small" id="downloads-finished-next" disabled
+                    data-i18n-title="download.nextPage" title="Next page">&rsaquo;</button>
+          </span>
+          <span class="downloads-clear">
+          <button type="button" class="btn btn-small btn-danger" id="downloads-clear-complete" disabled
+                  data-i18n-title="download.clearTitle"
+                  title="Forget the finished downloads in this list. The files stay on disk.">Clear downloaded</button>
+          </span>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="downloads-finished-table">
+            <thead>
+              <tr>
+              <th data-sort-col="bot" aria-sort="none"><button type="button" class="sort-btn" data-sort="bot"><span data-i18n="common.bot">Bot</span></button></th>
+              <th data-sort-col="file" aria-sort="none"><button type="button" class="sort-btn" data-sort="file"><span data-i18n="common.file">File</span></button></th>
+              <th data-sort-col="state" aria-sort="none"><button type="button" class="sort-btn" data-sort="state"><span data-i18n="common.state">State</span></button></th>
+              <th data-sort-col="progress" aria-sort="none"><button type="button" class="sort-btn" data-sort="progress"><span data-i18n="common.progress">Progress</span></button></th>
+              <th></th>
+              </tr>
+            </thead>
+            <tbody id="downloads-finished-body">
+              <tr class="empty-row"><td colspan="5" data-i18n="download.box.finishedEmpty">Nothing here.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="downloads-box" id="downloads-box-failed">
+        <div class="downloads-boxbar">
+          <h3 class="downloads-box-title"><span data-i18n="download.box.failed">Failed</span>
+            <span class="col-dim" id="downloads-failed-count"></span></h3>
+          <span class="downloads-pager">
+            <button type="button" class="btn btn-small" id="downloads-failed-prev" disabled
+                    data-i18n-title="download.prevPage" title="Previous page">&lsaquo;</button>
+            <span id="downloads-failed-pageinfo" class="col-dim"></span>
+            <button type="button" class="btn btn-small" id="downloads-failed-next" disabled
+                    data-i18n-title="download.nextPage" title="Next page">&rsaquo;</button>
+          </span>
+          <span class="downloads-clear">
+          <button type="button" class="btn btn-small btn-danger" id="downloads-clear-failed" disabled
+                  data-i18n-title="download.clearTitle"
+                  title="Forget the failed downloads in this list. The files stay on disk.">Clear failed</button>
+          </span>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table" id="downloads-failed-table">
+            <thead>
+              <tr>
+              <th data-sort-col="bot" aria-sort="none"><button type="button" class="sort-btn" data-sort="bot"><span data-i18n="common.bot">Bot</span></button></th>
+              <th data-sort-col="file" aria-sort="none"><button type="button" class="sort-btn" data-sort="file"><span data-i18n="common.file">File</span></button></th>
+              <th data-sort-col="state" aria-sort="none"><button type="button" class="sort-btn" data-sort="state"><span data-i18n="common.state">State</span></button></th>
+              <th data-sort-col="progress" aria-sort="none"><button type="button" class="sort-btn" data-sort="progress"><span data-i18n="common.progress">Progress</span></button></th>
+              <th></th>
+              </tr>
+            </thead>
+            <tbody id="downloads-failed-body">
+              <tr class="empty-row"><td colspan="5" data-i18n="download.box.failedEmpty">Nothing here.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
       </div>
     </section>
 
@@ -479,6 +584,18 @@
         <p class="tool-status" id="verify-status"></p>
         <div class="verify-results" id="verify-results"></div>
       </div>
+      <div class="tool-card">
+        <div class="tool-head">
+          <h2 class="tool-name" data-i18n="tools.stopBot">Stop the bot</h2>
+          <button type="button" class="btn" id="stop-bot-run-btn" data-i18n="tools.stopBotButton">Stop</button>
+        </div>
+        <p class="tool-what" data-i18n="tools.stopBotWhat">
+          Stops the bot the way Ctrl-C in its window does: it leaves IRC and
+          ends. For a bot whose window is minimised or hidden. Start it again
+          with start-dccore, or the autostart task.
+        </p>
+        <p class="tool-status" id="stop-bot-status"></p>
+      </div>
     </section>
 
     <section class="view" id="view-settings">
@@ -499,7 +616,7 @@
       </div>
     </section>
 
-    <section class="view" id="view-stats">
+    <section class="view" id="view-live">
       <div class="stat-group-label" data-i18n="stats.transfer">Transfer</div>
       <div class="stat-row is-wide">
         <div class="stat-card"><div class="stat-value" id="st-speed">&mdash;</div><div class="stat-label" data-i18n="stats.speedNow">Speed now</div></div>
@@ -508,55 +625,6 @@
         <div class="stat-card"><div class="stat-value" id="st-queued">&mdash;</div><div class="stat-label" id="st-queued-label" data-i18n="sidebar.queued">Queued</div></div>
         <div class="stat-card"><div class="stat-value" id="st-uptime">&mdash;</div><div class="stat-label" data-i18n="stats.uptime">Uptime</div></div>
       </div>
-
-      <div class="stat-group-label" data-i18n="stats.sent">Sent</div>
-      <div class="stat-row is-wide">
-        <div class="stat-card"><div class="stat-value" id="st-sent-total">&mdash;</div><div class="stat-label" id="st-sent-total-files" data-i18n="common.total">Total</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-sent-today">&mdash;</div><div class="stat-label" id="st-sent-today-files" data-i18n="common.today">Today</div></div>
-        <div class="stat-card"><div class="stat-value" id="st-sent-yesterday">&mdash;</div><div class="stat-label" id="st-sent-yesterday-files" data-i18n="common.yesterday">Yesterday</div></div>
-      </div>
-
-      <div class="stat-group-label" data-i18n="stats.library">Library</div>
-      <!-- #952: the cards are BUILT by renderLibrary(), because how many there
-           are depends on how many lists this bot serves - the total, one per
-           list when there is more than one, and when the list was built. -->
-      <div class="stat-row is-wide" id="st-library"></div>
-
-
-      <!-- SIDE BY SIDE: two "most downloaded" tables that used to stack full
-           width, one under the other, for no reason beyond being written
-           that way - neither needs the whole row, and stacked they pushed
-           whatever came after them a screen's height down. The long names
-           that would otherwise force one wide are truncated instead (see
-           .stat-top-name), which is what keeps both columns the width they
-           are here rather than each fighting to be as wide as its longest
-           row. -->
-      <div class="stat-top-grid">
-        <div>
-          <div class="stat-group-label" data-i18n="stats.mostDownloadedFiles">Most downloaded &mdash; files</div>
-          <div class="table-wrap">
-            <table class="stat-top-table">
-              <thead><tr><th data-i18n="common.file">File</th><th class="col-num" data-i18n="stats.timesSent">Times sent</th></tr></thead>
-              <tbody id="st-top-files"></tbody>
-            </table>
-          </div>
-        </div>
-
-        <div>
-          <div class="stat-group-label" id="st-top-albums-label" data-i18n="stats.mostDownloadedAlbums">Most downloaded &mdash; album folders</div>
-          <div class="table-wrap" id="st-top-albums-wrap">
-            <table class="stat-top-table">
-              <thead><tr><th data-i18n="stats.album">Album</th><th class="col-num" data-i18n="stats.timesSent">Times sent</th></tr></thead>
-              <tbody id="st-top-albums"></tbody>
-            </table>
-          </div>
-          <p class="stat-foot" id="st-top-albums-off" style="display:none;" data-i18n-html="stats.folderPackingOff">
-            Folder packing is off (<code>RAR_ENABLED</code>), so no album can be sent.
-          </p>
-        </div>
-      </div>
-
-      <p class="stat-foot" id="st-foot"></p>
 
       <!-- Queue, folded in from its own tab (#133): "everything the bot
            knows about itself, with the queue table keeping its place in
@@ -593,6 +661,112 @@
           </tbody>
         </table>
       </div>
+    </section>
+
+    <section class="view" id="view-stats">
+      <!-- The Stats page follows ONE period (#1117): the record's figures for
+           it, the most-sent files and albums, and the nicks. The record (#1102)
+           is what transfer_log.py has written for every finished transfer since
+           #1069; All time also counts what the bot sent before that. Loaded
+           when Stats opens and when the period changes - not on the page's
+           poll. Every nick and file name is set as text by renderRecord(),
+           never written into this markup. -->
+      <div id="record-period-box">
+        <div class="stat-group-label" data-i18n="stats.recordPeriod">Period</div>
+        <div class="record-periods" id="record-periods" role="group"
+             data-i18n-aria-label="stats.recordPeriod" aria-label="Period">
+          <button type="button" class="btn btn-small record-period" data-period="day" data-i18n="stats.periodDay">24 hours</button>
+          <button type="button" class="btn btn-small record-period" data-period="week" data-i18n="stats.periodWeek">7 days</button>
+          <button type="button" class="btn btn-small record-period" data-period="month" data-i18n="stats.periodMonth">30 days</button>
+          <button type="button" class="btn btn-small record-period is-active" data-period="all" data-i18n="stats.periodAll">All time</button>
+        </div>
+      </div>
+      <p class="import-status" id="record-status" hidden></p>
+
+      <div id="record-sent" hidden>
+        <div class="stat-group-label" data-i18n="stats.sent">Sent</div>
+        <div class="stat-row is-eight" id="record-cards"></div>
+      </div>
+
+      <div class="stat-group-label" data-i18n="stats.library">Library</div>
+      <!-- #952: the cards are BUILT by renderLibrary(), because how many there
+           are depends on how many lists this bot serves - the total, one per
+           list when there is more than one, and when the list was built. -->
+      <div class="stat-row is-wide" id="st-library"></div>
+
+
+      <!-- SIDE BY SIDE: two "most downloaded" tables that used to stack full
+           width, one under the other, for no reason beyond being written
+           that way - neither needs the whole row, and stacked they pushed
+           whatever came after them a screen's height down. The long names
+           that would otherwise force one wide are truncated instead (see
+           .stat-top-name), which is what keeps both columns the width they
+           are here rather than each fighting to be as wide as its longest
+           row. -->
+      <div class="stat-top-grid" id="stat-top-grid">
+        <div>
+          <div class="stat-group-label" data-i18n="stats.mostDownloadedFiles">Most downloaded &mdash; files</div>
+          <div class="table-wrap">
+            <table class="stat-top-table">
+              <thead><tr><th data-i18n="common.file">File</th><th class="col-num" data-i18n="stats.timesSent">Times sent</th></tr></thead>
+              <tbody id="st-top-files"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div>
+          <div class="stat-group-label" id="st-top-albums-label" data-i18n="stats.mostDownloadedAlbums">Most downloaded &mdash; album folders</div>
+          <div class="table-wrap" id="st-top-albums-wrap">
+            <table class="stat-top-table">
+              <thead><tr><th data-i18n="stats.album">Album</th><th class="col-num" data-i18n="stats.timesSent">Times sent</th></tr></thead>
+              <tbody id="st-top-albums"></tbody>
+            </table>
+          </div>
+          <p class="stat-foot" id="st-top-albums-off" style="display:none;" data-i18n-html="stats.folderPackingOff">
+            Folder packing is off (<code>RAR_ENABLED</code>), so no album can be sent.
+          </p>
+        </div>
+      </div>
+
+
+      <p class="stat-foot" id="st-foot"></p>
+
+      <div id="record-body" hidden>
+        <div class="record-top-grid">
+          <div>
+            <div class="stat-group-label" data-i18n="stats.recordTopSent">Sent to</div>
+            <div class="table-wrap">
+              <table class="stat-top-table record-nick-table">
+                <thead><tr><th data-i18n="stats.nick">Nick</th><th class="col-num" data-i18n="stats.files">Files</th><th class="col-num" data-i18n="common.size">Size</th></tr></thead>
+                <tbody id="record-top-sent"></tbody>
+              </table>
+            </div>
+          </div>
+          <div>
+            <div class="stat-group-label" data-i18n="stats.recordTopReceived">Received from</div>
+            <div class="table-wrap">
+              <table class="stat-top-table record-nick-table">
+                <thead><tr><th data-i18n="stats.nick">Nick</th><th class="col-num" data-i18n="stats.files">Files</th><th class="col-num" data-i18n="common.size">Size</th></tr></thead>
+                <tbody id="record-top-received"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <p class="stat-foot" id="record-imported" hidden data-i18n="stats.recordIncludesImported">All time includes figures imported from KeepTrack, which have no date. The nick tables add what KeepTrack kept per nick.</p>
+
+        <div class="record-nick">
+          <input type="text" class="search-input" id="record-nick-input" maxlength="64" spellcheck="false"
+                 data-i18n-placeholder="stats.recordNickPlaceholder" placeholder="A nick"
+                 data-i18n-aria-label="stats.recordNickPlaceholder" aria-label="A nick">
+          <button type="button" class="btn btn-small" id="record-nick-show" data-i18n="stats.lookUp">Look up</button>
+        </div>
+        <div class="record-nick-result" id="record-nick-result" hidden></div>
+
+        <div class="record-actions">
+          <a class="btn btn-small" id="record-export" href="/api/stats/record.csv?period=all" download data-i18n="stats.exportCsv">Export CSV</a>
+          <button type="button" class="btn btn-small btn-danger" id="record-forget-all" data-i18n="stats.forgetEveryone">Forget everyone&hellip;</button>
+        </div>
+      </div>
 
       <!-- Bringing an OmenServe operator's history across (#69). The numbers
            live in mIRC's own scripts/vars.ini, written by whichever add-ons
@@ -601,10 +775,10 @@
            The file is read IN THE PAGE and only the recognised lines are
            sent, so an operator's other ~268 variables - their nicks,
            channels, paths and passwords - never cross the network. -->
-      <div class="stat-group-label" data-i18n="stats.comingFromOmenServe">Coming from OmenServe</div>
+      <div class="stat-group-label" data-i18n="stats.comingFromOmenServe">Coming from OmenServe or KeepTrack</div>
       <div class="import-panel">
         <p class="import-intro" data-i18n-html="stats.importIntro">
-          Bring your totals across from OmenServe. Your counters live in
+          Bring your totals across from OmenServe or KeepTrack. Your counters live in
           mIRC's <code>scripts/vars.ini</code> &mdash; choose it below and you
           will see exactly what would change before anything is written.
           Only the counter lines are sent; the rest of the file stays on your
@@ -624,6 +798,7 @@
 
         <p class="import-status" id="import-status" hidden></p>
 
+        <div class="import-source" id="import-source" hidden></div>
         <div class="table-wrap" id="import-preview-wrap" hidden>
           <table class="data-table">
             <thead>
@@ -636,6 +811,24 @@
         <div class="import-confirm" id="import-confirm" hidden>
           <button type="button" class="btn btn-accent btn-small" id="import-apply" data-i18n="stats.importTheseFigures">Import these figures</button>
           <button type="button" class="btn btn-small" id="import-cancel" data-i18n="common.cancel">Cancel</button>
+        </div>
+
+        <!-- KeepTrack's per-nick history (#1064): KTData.txt, read on the
+             server; the host column in it is never kept. -->
+        <p class="import-intro" data-i18n="stats.ktdataIntro">
+          KeepTrack also kept what each nick had from you and you from it, in
+          KTData.txt in mIRC's folder. Bring that across too: nicks and their
+          totals only - the hosts in the file are not kept.
+        </p>
+        <div class="import-actions">
+          <label class="btn btn-small" for="ktdata-file" data-i18n="stats.chooseKTData">Choose KTData.txt&hellip;</label>
+          <input type="file" id="ktdata-file" accept=".txt,text/plain" hidden>
+        </div>
+        <p class="import-status" id="ktdata-status" hidden></p>
+        <div class="import-ktdata-preview" id="ktdata-preview" hidden></div>
+        <div class="import-confirm" id="ktdata-confirm" hidden>
+          <button type="button" class="btn btn-accent btn-small" id="ktdata-apply" data-i18n="stats.importKTData">Import the per-nick history</button>
+          <button type="button" class="btn btn-small" id="ktdata-cancel" data-i18n="common.cancel">Cancel</button>
         </div>
       </div>
     </section>

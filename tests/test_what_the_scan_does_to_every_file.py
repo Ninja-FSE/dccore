@@ -43,7 +43,7 @@ def code_only(name):
     them and in the changelog entry for them, so a search of the raw source
     would pass on the prose alone.
     """
-    with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+    with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
         text = handle.read()
     text = re.sub(chr(35) + "[^" + chr(10) + "]*", "", text)
     return re.sub(r'"""..*?"""', "", text, flags=re.S)

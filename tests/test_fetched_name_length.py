@@ -1,4 +1,4 @@
-"""The offering bot chooses the filename, and 255 was still the wall.
+r"""The offering bot chooses the filename, and 255 was still the wall.
 
 WHAT WENT WRONG
 
@@ -198,7 +198,7 @@ class TheOpenSiteNoLongerClaimsLongPathCoversIt(unittest.TestCase):
     def test_the_comment_does_not_say_the_wrap_makes_the_length_safe(self):
         """The defect was documented as handled. A future reader following that
         comment would remove the fit as redundant."""
-        with io.open(os.path.join(REPO_ROOT, "dcc_fetch.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc_fetch.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
 

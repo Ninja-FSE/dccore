@@ -80,10 +80,40 @@ class RarInprogressOwnershipTests(DCCoreTestCase):
         config.dcc_queue["bob"] = [next_file]
 
         dcc.start_dcc_send(self.sock, "bob", next_file["path"], "Album.rar",
-                           "#dccore-test", next_file)
+                           "#dccore-test", next_file, owns_packer=True)
 
         self.assertFalse(config.rar_inprogress,
                          "a pack's own send must still release its own interlock on abort")
+
+    def test_a_queued_archive_sent_as_a_plain_row_does_not_clear_another_packs_lock(self):
+        """#1081. A pack that finished with every slot busy leaves its archive
+        queued as a row that still says is_temporary_zip. When that row is later
+        dispatched like any plain file it never took rar_inprogress, so its
+        send must not clear the one another user's pack is holding."""
+        config.rar_inprogress = True  # erin's pack, running
+
+        next_file = queue_row(user="bob", filename="Album.rar", is_temporary_zip=True,
+                              is_unpacked_rar_folder=False)
+        config.dcc_queue["bob"] = [next_file]
+
+        dcc.start_dcc_send(self.sock, "bob", next_file["path"], "Album.rar",
+                           "#dccore-test", next_file)
+
+        self.assertTrue(config.rar_inprogress,
+                        "a queued archive sent as a plain row released another user's pack interlock")
+
+    def test_only_the_packers_own_handoff_claims_ownership(self):
+        """Pinned in the source: the real pack needs rar. The thread the packer
+        starts for its fresh archive must say it owns the interlock, and no
+        other start_dcc_send call may."""
+        import re
+        from tests import test_the_feed_says_which_channel as feed
+        body = feed.source("dcc.py")
+        calls = re.findall(r"start_dcc_send,\s*\n?\s*args=\(([^)]*)\)", body)
+        self.assertEqual(len(calls), 4, calls)
+        owning = [c for c in calls if c.strip().endswith("True")]
+        self.assertEqual(len(owning), 1, calls)
+        self.assertIn("target_rar_path", owning[0])
 
 
 class ArchiveNamingTests(unittest.TestCase):

@@ -135,7 +135,7 @@ class TheDefaultDependsOnThePlatform(DCCoreTestCase):
         conditional would be wrong on Linux however large it was."""
         import io
 
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
 

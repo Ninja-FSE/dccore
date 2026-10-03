@@ -57,14 +57,14 @@ UNSPELLABLE = "Bjo\u0308rk \u2013 Jo\u0301ga \u00e9\u00e7"
 
 
 def source(name):
-    with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+    with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
         return handle.read()
 
 
 def entry_points():
     """Every module that can be started as a script of its own."""
     found = []
-    for name in sorted(os.listdir(REPO_ROOT)):
+    for name in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src")))):
         if not name.endswith(".py"):
             continue
         if '__name__ == "__main__"' in source(name):
@@ -161,6 +161,9 @@ class TheGuardSurvivesAPathItCannotSpell(unittest.TestCase):
         env = dict(os.environ)
         env["PYTHONIOENCODING"] = NARROW_CODE_PAGE
         env.pop("PYTHONUTF8", None)
+        # PYTHONPATH: platform_compat lives in src/ now (#959), and cwd alone
+        # no longer finds it.
+        env["PYTHONPATH"] = os.path.join(REPO_ROOT, "src") + os.pathsep + env.get("PYTHONPATH", "")
         return subprocess.run(
             [sys.executable, "-c", code], capture_output=True, text=True,
             encoding="utf-8", errors="replace", env=env, cwd=REPO_ROOT,
@@ -208,7 +211,7 @@ class TheGuardSurvivesAPathItCannotSpell(unittest.TestCase):
 PARENTS = tuple(name for name in (
     "commands.py", "dcc.py", "update_list.py",
     os.path.join("scripts", "preflight.py"),
-) if os.path.exists(os.path.join(REPO_ROOT, name)))
+) if os.path.exists((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name)))))
 
 
 class NoParentDecodesWithTheLocaleCodePage(unittest.TestCase):

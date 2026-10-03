@@ -1008,10 +1008,10 @@ class FetchDeleteResultTests(DCCoreTestCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp, stored)))
 
     def test_in_flight_states_are_refused_not_deleted(self):
-        """"pending" is deliberately NOT in this list - see
-        tests/test_fetch_queue_bounds.py, which covers why it is deletable and
-        that the other three still are not."""
-        for state in ("offered", "listening", "receiving"):
+        """"pending" and "offered" are deliberately NOT in this list - see
+        tests/test_fetch_queue_bounds.py, which covers why they are deletable
+        and that these two still are not."""
+        for state in ("listening", "receiving"):
             with self.subTest(state=state):
                 rid = f"r-{state}"
                 self._put_row(rid, state=state, stored_filename=None)
@@ -2043,7 +2043,7 @@ class FetchDeleteButtonRegressionTests(unittest.TestCase):
         self.assertNotIn('data-folder="', self.source)
 
     def test_delete_click_handler_confirms_before_calling_the_delete_route(self):
-        start = self.source.index('el.downloadsBody.addEventListener("click"')
+        start = self.source.index('el.downloadsBoxes.addEventListener("click"')
         body = self.source[start:start + 1200]
         self.assertIn("window.confirm(", body)
         self.assertIn('"/api/fetch/" + encodeURIComponent(requestId) + "/delete"', body)
@@ -2404,7 +2404,7 @@ class JsonBodyMustBeAnObject(DCCoreTestCase):
         """
         path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "webserver.py")
+            "src", "webserver.py")
         with io.open(path, encoding="utf-8") as handle:
             source = handle.read()
 
@@ -2999,7 +2999,7 @@ class WebuiFallbacksMatchWhatConfigShips(unittest.TestCase):
     SOURCES = ("oserve.py", "webserver.py")
 
     def shipped_defaults(self):
-        path = os.path.join(REPO_ROOT, "defaults.py")
+        path = os.path.join(REPO_ROOT, "src", "defaults.py")
         with io.open(path, encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
         shipped = {}
@@ -3021,7 +3021,7 @@ class WebuiFallbacksMatchWhatConfigShips(unittest.TestCase):
         """[(file, line, name, fallback), ...] for every WEBUI_* getattr."""
         found = []
         for filename in self.SOURCES:
-            path = os.path.join(REPO_ROOT, filename)
+            path = (next((p for p in (os.path.join(REPO_ROOT, "src", filename), os.path.join(REPO_ROOT, "conf", filename), os.path.join(REPO_ROOT, filename)) if os.path.exists(p)), os.path.join(REPO_ROOT, filename)))
             with io.open(path, encoding="utf-8") as handle:
                 source = handle.read()
             for node in ast.walk(ast.parse(source)):

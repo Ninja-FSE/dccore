@@ -390,7 +390,7 @@ class TheSampleStaysInStepWithConfig(unittest.TestCase):
         import gen_settings_sample
 
         expected = gen_settings_sample.build()
-        with io.open(os.path.join(REPO_ROOT, "settings.conf.sample"),
+        with io.open(os.path.join(REPO_ROOT, "conf", "settings.conf.sample"),
                      encoding="utf-8") as handle:
             actual = handle.read()
 
@@ -406,7 +406,7 @@ class TheSampleStaysInStepWithConfig(unittest.TestCase):
         gen_settings_sample.build()'s own output, so a bug in build() that
         forgot to blank one out would still be caught here rather than both
         this test and the drift check agreeing on the same wrong answer."""
-        with io.open(os.path.join(REPO_ROOT, "settings.conf.sample"),
+        with io.open(os.path.join(REPO_ROOT, "conf", "settings.conf.sample"),
                      encoding="utf-8") as handle:
             lines = handle.read().splitlines()
 
@@ -417,7 +417,7 @@ class TheSampleStaysInStepWithConfig(unittest.TestCase):
                              f"{name} is REQUIRED but the sample shows a real value")
 
     def test_every_overridable_setting_is_documented(self):
-        with io.open(os.path.join(REPO_ROOT, "settings.conf.sample"),
+        with io.open(os.path.join(REPO_ROOT, "conf", "settings.conf.sample"),
                      encoding="utf-8") as handle:
             sample = handle.read()
 
@@ -426,7 +426,7 @@ class TheSampleStaysInStepWithConfig(unittest.TestCase):
         # (ORIGINAL_NICK, MY_IP_OR_DOCK), which are not settings anybody can
         # put in a file.
         import ast
-        with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
         missing = []
         # Both node types: an annotated setting (`MAX_DCC_SLOTS: int = 3`) is
@@ -561,7 +561,7 @@ class ConfigDeclaresEachSettingsType(unittest.TestCase):
         would report them, and would also depend on which tests happened to
         run first.
         """
-        with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
 
         annotated = {node.target.id for node in tree.body

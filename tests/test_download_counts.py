@@ -42,8 +42,9 @@ class CountsCase(DCCoreTestCase):
         self.addCleanup(setattr, db, "DOWNLOAD_COUNTS_FILE", previous)
 
     def counts(self):
-        with io.open(self.path, encoding="utf-8") as handle:
-            return json.load(handle)
+        """The stored rows. They were this test's JSON file until #1133 moved
+        them into the database beside it, which only reads that file once."""
+        return db.load_download_counts()
 
 
 class CountingASend(CountsCase):
@@ -290,7 +291,7 @@ class TheSendPathCountsWhatItSent(unittest.TestCase):
     is the #119 shape: a correct function no live path reaches."""
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_a_completed_send_records_a_download(self):
@@ -327,9 +328,15 @@ class TheSendPathCountsWhatItSent(unittest.TestCase):
                  and '"""' not in line]
 
         self.assertTrue(calls)
+        # The send path asks once and hands the answer to both the counter and
+        # the transfer record (#1068), so a call may name the result it was
+        # given rather than call the function in place.
+        decided = "_key, _shown, _kind = download_count_identity("
         for call in calls:
             with self.subTest(call=call):
-                self.assertIn("download_count_identity(", call)
+                if "download_count_identity(" not in call:
+                    self.assertEqual(call, "db.record_download(_key, _shown, _kind)")
+                    self.assertEqual(self.source().count(decided), 1)
 
 
 class WhatEachSendIsCountedAs(DCCoreTestCase):

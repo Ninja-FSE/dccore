@@ -99,9 +99,20 @@ class ANoLongerLiveConnectionHoldsTheQueue(DCCoreTestCase):
 
         dcc.start_dcc_send(RecordingSocket(), "dave", self.track,
                            "Song.flac", "#chan",
-                           self.next_file(is_temporary_zip=True))
+                           self.next_file(is_temporary_zip=True), owns_packer=True)
 
         self.assertFalse(config.rar_inprogress)
+
+    def test_a_queued_archive_row_that_owns_no_pack_leaves_the_lock_alone(self):
+        """#1081: the row says is_temporary_zip, but another user's pack holds
+        the interlock and this send never took it."""
+        self.set_config(rar_inprogress=True)
+
+        dcc.start_dcc_send(RecordingSocket(), "dave", self.track,
+                           "Song.flac", "#chan",
+                           self.next_file(is_temporary_zip=True))
+
+        self.assertTrue(config.rar_inprogress)
 
 
 class TheLiveSocketIsUsedNotTheStaleParameter(DCCoreTestCase):

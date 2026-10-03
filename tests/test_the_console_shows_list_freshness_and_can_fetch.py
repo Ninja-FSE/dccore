@@ -181,7 +181,7 @@ class TheFetch(WithSummaries):
         self.assertIn("Nope: 'bot' has a space", self.session.text)
 
     def test_it_uses_the_dashboards_own_enqueue(self):
-        with open(os.path.join(REPO_ROOT, "adminchat.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "adminchat.py"), encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn("webserver.build_list_fetch_enqueue_result(nick)", source)
 

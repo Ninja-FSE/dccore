@@ -201,8 +201,13 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
     """
 
     def _production_modules(self):
-        return [f for f in sorted(os.listdir(REPO_ROOT))
-                if f.endswith(".py") and f != "configure.py"]
+        # The repository root - entry points run by hand, like oserve.py -
+        # and src/ (#959), merged: a name in both would be the same module
+        # found twice, and there is none today.
+        names = set()
+        for folder in (REPO_ROOT, os.path.join(REPO_ROOT, "src")):
+            names |= {f for f in os.listdir(folder) if f.endswith(".py")}
+        return sorted(f for f in names if f != "configure.py")
 
     def test_the_scan_finds_modules_to_check(self):
         """Fixture invariant - an empty file list would pass vacuously."""
@@ -234,7 +239,7 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
     def test_no_module_rebinds_a_container(self):
         offenders = []
         for filename in self._production_modules():
-            path = os.path.join(REPO_ROOT, filename)
+            path = (next((p for p in (os.path.join(REPO_ROOT, "src", filename), os.path.join(REPO_ROOT, "conf", filename), os.path.join(REPO_ROOT, filename)) if os.path.exists(p)), os.path.join(REPO_ROOT, filename)))
             with io.open(path, encoding="utf-8") as handle:
                 source = handle.read()
             tree = ast.parse(source)
@@ -302,7 +307,7 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
                    "LIST_VIDEO_EXTENSIONS", "LIST_VIDEO_COMPANION_EXTENSIONS",
                    "RAR_EXTENSIONS"}
 
-        with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
 
         offenders = []
@@ -388,9 +393,13 @@ class EveryContainerIsBoundInACleanInterpreter(unittest.TestCase):
             "          for n in containers}\n"
             "print(json.dumps(result))\n"
         )
+        # PYTHONPATH: defaults/runtime live in src/ now (#959), and cwd alone
+        # no longer finds them.
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.path.join(REPO_ROOT, "src") + os.pathsep + env.get("PYTHONPATH", "")
         result = subprocess.run(
             [sys.executable, "-c", code],
-            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60, env=env,
         )
         if result.returncode != 0:
             raise AssertionError(

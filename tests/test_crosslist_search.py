@@ -252,7 +252,7 @@ class WhichBotsHaveNothing(IndexCase):
         keystroke: measured at 1150-1400ms across four million rows, against
         2-4ms with it. That is the difference between a filter bar and a
         search button."""
-        with open(os.path.join(REPO_ROOT, "list_index.py"),
+        with open(os.path.join(REPO_ROOT, "src", "list_index.py"),
                   encoding="utf-8") as handle:
             code = "\n".join(line.split("#", 1)[0]
                               for line in handle.read().splitlines())
@@ -983,7 +983,7 @@ class TheIndexIsWrittenByTheFetch(unittest.TestCase):
     that was already walking the file."""
 
     def source(self):
-        with open(os.path.join(REPO_ROOT, "list_fetch.py"),
+        with open(os.path.join(REPO_ROOT, "src", "list_fetch.py"),
                   encoding="utf-8") as handle:
             return handle.read()
 
