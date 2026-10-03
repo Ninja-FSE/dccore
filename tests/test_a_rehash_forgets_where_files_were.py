@@ -123,7 +123,7 @@ class TheRehashCallsIt(unittest.TestCase):
     the reload rather than before it, where the reload would undo it."""
 
     def rehash(self):
-        with io.open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             return handle.read().split("def handle_rehash_request(", 1)[1]
 
     def test_the_rehash_forgets_the_lookups(self):

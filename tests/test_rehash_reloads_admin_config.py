@@ -164,7 +164,8 @@ class TheDaemonsOwnOrderIsRight(unittest.TestCase):
                 continue  # optional and gitignored; absent in a clean checkout
             with self.subTest(module=name):
                 self.assertTrue(
-                    os.path.exists(os.path.join(REPO_ROOT, name + ".py")),
+                    os.path.exists(os.path.join(REPO_ROOT, "src", name + ".py"))
+                    or os.path.exists(os.path.join(REPO_ROOT, name + ".py")),
                     f"{name} is in CORE_MODULES but there is no {name}.py")
 
     def test_commands_reloads_itself_last(self):

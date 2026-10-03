@@ -145,7 +145,7 @@ class ALongFetchedNameCanStillBeDownloaded(DCCoreTestCase):
         """werkzeug's safe_join() joins with a forward slash, which a \\\\?\\
         path will not accept - so wrapping the directory and keeping
         send_from_directory() looks like a fix and is not."""
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
         route = source.split("def api_fetch_download(", 1)[1]

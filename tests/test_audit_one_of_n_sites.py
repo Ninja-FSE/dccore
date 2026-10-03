@@ -132,7 +132,7 @@ class ALatencyReadingCannotBeForgedFromAChannel(DCCoreTestCase):
         """Scoped to the read loop's own source: the defect is the test used
         at that one site, and it is not reachable from outside a live IRC
         session."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn('is_server_numeric(line, "PONG") and "OSERVE_LATENCY_CHECK"',

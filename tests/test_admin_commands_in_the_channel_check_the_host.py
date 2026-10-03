@@ -135,7 +135,7 @@ class TheCommands(DCCoreTestCase):
 class TheReadLoopPassesTheHost(unittest.TestCase):
 
     def source(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_every_admin_command_is_handed_the_senders_host(self):

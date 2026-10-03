@@ -104,7 +104,9 @@ class WhatAnInstallOffers(ImportCase):
 
         self.assertEqual(webserver.current_importable_stats(),
                          {"total_files": 7, "total_bytes": 99,
-                          "speed_record": 5})
+                          "speed_record": 5,
+                          # KeepTrack's received totals (#1062): none imported.
+                          "received_files": 0, "received_bytes": 0})
 
     def test_it_shows_the_figures_it_will_not_import_too(self):
         """Library size and lists sent have nowhere to go here, and saying so
@@ -210,7 +212,8 @@ class WritingIt(ImportCase):
         self.assertEqual(status, 200)
         self.assertEqual(webserver.current_importable_stats(), {
             "total_files": 45902, "total_bytes": 16295360049140,
-            "speed_record": 48762663})
+            "speed_record": 48762663,
+            "received_files": 0, "received_bytes": 0})
 
     def test_it_reports_the_before_and_after(self):
         """What actually happened, rather than what was asked for."""
@@ -373,7 +376,8 @@ class ThePageSendsOnlyTheCounters(unittest.TestCase):
 
     def test_the_route_answers_with_exactly_what_the_parser_knows(self):
         served = set(omenserve_import.variable_names())
-        declared = {field.variable for field in omenserve_import.FIELDS}
+        declared = ({field.variable for field in omenserve_import.FIELDS}
+                    | set(omenserve_import.TEXT_VARIABLES))
 
         self.assertEqual(served, declared)
 

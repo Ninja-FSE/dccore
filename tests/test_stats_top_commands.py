@@ -304,7 +304,7 @@ class ItIsReachable(unittest.TestCase):
     """A handler nothing dispatches answers nobody - the #119 shape."""
 
     def source(self, name):
-        with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+        with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
             return handle.read()
 
     def test_the_channel_dispatch_calls_both(self):

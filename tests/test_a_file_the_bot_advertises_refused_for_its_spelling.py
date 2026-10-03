@@ -270,7 +270,7 @@ class TheResolverSaysWhyItCarriesTheName(unittest.TestCase):
         requester's spelling where the list's belonged - so the assertion is
         about which name reaches os.path.join, not about a word appearing
         somewhere in dcc.py."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             code = handle.read()
         code = "\n".join(line.split("#", 1)[0] for line in code.splitlines())
 

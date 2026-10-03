@@ -316,7 +316,7 @@ class NothingIdentifyingShips(unittest.TestCase):
                 yield name
 
     def read(self, path):
-        with io.open(os.path.join(REPO_ROOT, path), encoding="utf-8",
+        with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", path), os.path.join(REPO_ROOT, "conf", path), os.path.join(REPO_ROOT, path)) if os.path.exists(p)), os.path.join(REPO_ROOT, path))), encoding="utf-8",
                      errors="replace") as handle:
             return handle.read()
 

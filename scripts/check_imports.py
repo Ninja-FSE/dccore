@@ -22,8 +22,9 @@ were named twice; !list was compared case-sensitively in one place and
 case-insensitively in another. The fix is always the same - derive it, do not
 repeat it.
 
-So the list is the filesystem. A new module at the repository root is covered
-the moment it is created, without anybody remembering to add it here.
+So the list is the filesystem. A new module at the repository root - or, since
+#959, in src/ - is covered the moment it is created, without anybody
+remembering to add it here.
 """
 
 import importlib
@@ -32,6 +33,7 @@ import sys
 import traceback
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(REPO, "src")
 
 # admin_config.py is gitignored, machine-specific and optional. config.py
 # already imports it when present and shrugs when it is not, so importing it
@@ -40,20 +42,24 @@ SKIP = {"admin_config"}
 
 
 def module_names():
-    """Every importable module at the repository root, in a stable order."""
+    """Every importable module at the repository root - an entry point run by
+    hand, like oserve.py, configure.py or update_list.py - and in src/ (#959),
+    in a stable order."""
     names = []
-    for entry in sorted(os.listdir(REPO)):
-        if not entry.endswith(".py") or entry.startswith("_"):
-            continue
-        name = entry[:-3]
-        if name in SKIP:
-            continue
-        names.append(name)
-    return names
+    for folder in (REPO, SRC):
+        for entry in sorted(os.listdir(folder)):
+            if not entry.endswith(".py") or entry.startswith("_"):
+                continue
+            name = entry[:-3]
+            if name in SKIP or name in names:
+                continue
+            names.append(name)
+    return sorted(names)
 
 
 def main():
     sys.path.insert(0, REPO)
+    sys.path.insert(0, SRC)
     os.chdir(REPO)
 
     names = module_names()

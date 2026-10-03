@@ -57,7 +57,7 @@ WEB = os.path.join(REPO_ROOT, "web")
 LANG_DIR = os.path.join(WEB, "lang")
 LANGUAGES = ("en", "fr", "es")
 
-DATA_I18N = re.compile(r'data-i18n(?:-html|-placeholder|-title)?="([^"]+)"')
+DATA_I18N = re.compile(r'data-i18n(?:-html|-placeholder|-title|-aria-label)?="([^"]+)"')
 # A translation key looks like "namespace.name" or "namespace.sub.name" -
 # lowercase-led dotted segments. app.js uses these three ways that a single
 # fixed regex cannot all catch at once: literal t("key") calls, an object
@@ -104,8 +104,8 @@ def load_dict(code):
 
 def keys_referenced_in_source():
     """Every translation key the dashboard's own source actually asks for -
-    index.html's data-i18n, data-i18n-html, data-i18n-placeholder and
-    data-i18n-title attributes, plus every key-shaped string literal in
+    index.html's data-i18n, data-i18n-html, data-i18n-placeholder,
+    data-i18n-title and data-i18n-aria-label (#1102) attributes, plus every key-shaped string literal in
     app.js (see JS_KEY_SHAPED_STRING above for why a shape match, not a
     narrower t(...)-call match, is what covers all of app.js's ways of
     naming a key), plus the "setup.*" keys the server-rendered setup page
@@ -116,7 +116,7 @@ def keys_referenced_in_source():
     js = read("app.js")
     found.update(JS_KEY_SHAPED_STRING.findall(js))
 
-    with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+    with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
         found.update(SETUP_KEY_STRING.findall(handle.read()))
 
     return found

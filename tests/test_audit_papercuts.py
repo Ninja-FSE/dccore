@@ -35,7 +35,7 @@ class AMuteIsNotLabelledAsABan(unittest.TestCase):
         """The formatter is one table on category (announce.category_tag(),
         which replaced an elif chain in #550), so what matters is that MUTE
         and TBAN are separate entries in it."""
-        with io.open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "announce.py"), encoding="utf-8") as handle:
             source = handle.read()
         table = source[source.index("def category_tag("):source.index("def send_debug(")]
 
@@ -54,7 +54,7 @@ class AMuteIsNotLabelledAsABan(unittest.TestCase):
 
     def test_the_mute_path_uses_the_mute_category(self):
         """The rename is worthless if the caller still says TBAN."""
-        with io.open(os.path.join(REPO_ROOT, "security.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "security.py"), encoding="utf-8") as handle:
             lines = handle.read().split("\n")
 
         mute_line = next(n for n, l in enumerate(lines)
@@ -168,7 +168,7 @@ class AFailedCleanupIsNotSilent(unittest.TestCase):
         not move it."""
         import ast
 
-        with io.open(os.path.join(REPO_ROOT, "dcc_fetch.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc_fetch.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
 
         guarded = []

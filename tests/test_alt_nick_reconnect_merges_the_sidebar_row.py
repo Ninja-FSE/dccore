@@ -380,7 +380,7 @@ class TheHandlersActuallyCallTheseFunctions(unittest.TestCase):
 
     @staticmethod
     def source():
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as f:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as f:
             return f.read()
 
     def test_the_part_branch_calls_it_only_after_actually_removing_someone(self):

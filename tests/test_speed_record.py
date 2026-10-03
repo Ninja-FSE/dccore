@@ -159,7 +159,7 @@ class EveryPersistedValueHasAWriterInTheDaemon(unittest.TestCase):
 
     @staticmethod
     def db_source():
-        with io.open(os.path.join(REPO_ROOT, "db.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "db.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def writers(self):
@@ -176,7 +176,7 @@ class EveryPersistedValueHasAWriterInTheDaemon(unittest.TestCase):
         return found
 
     def daemon_modules(self):
-        return [f for f in sorted(os.listdir(REPO_ROOT))
+        return [f for f in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src"))))
                 if f.endswith(".py") and f not in ("db.py",)]
 
     def reachable(self):
@@ -184,7 +184,7 @@ class EveryPersistedValueHasAWriterInTheDaemon(unittest.TestCase):
         source = self.db_source()
         direct = set()
         for filename in self.daemon_modules():
-            with io.open(os.path.join(REPO_ROOT, filename), encoding="utf-8") as handle:
+            with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", filename), os.path.join(REPO_ROOT, "conf", filename), os.path.join(REPO_ROOT, filename)) if os.path.exists(p)), os.path.join(REPO_ROOT, filename))), encoding="utf-8") as handle:
                 text = handle.read()
             for name in re.findall(r"def (\w+)\(", source):
                 if re.search(r"\b%s\s*\(" % re.escape(name), text):
@@ -256,7 +256,7 @@ class TheClockStopsWhenTheBytesDo(DCCoreTestCase):
         property becomes: the stamp is the final ack, nothing sleeps between
         the stamp and its use, and the wall clock is not consulted again.
         """
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code[code.index("def start_dcc_send("):]
 
@@ -272,7 +272,7 @@ class TheClockStopsWhenTheBytesDo(DCCoreTestCase):
                          "the receiver has closed its file")
 
     def test_the_duration_no_longer_reads_the_wall_clock_at_the_end(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             code = handle.read()
 
         self.assertNotIn(

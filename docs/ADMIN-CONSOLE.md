@@ -45,7 +45,7 @@ this bot, and there is nothing in its config for an attacker to steal.
 
 > **The ident is deliberately ignored.**
 > In `nick!ident@host` the ident half is supplied by your client — anyone can set
-> theirs to `flac`. Only the host is issued by the server. DCCore discards the
+> theirs to `alex`. Only the host is issued by the server. DCCore discards the
 > nick and ident parts of any configured mask on purpose: constraining them would
 > grant no security while breaking the moment your client's ident setting changes.
 
@@ -85,7 +85,7 @@ the hash by hand instead:
 From the DCCore directory, on either platform:
 
 ```
-python adminchat.py
+python src/adminchat.py
 ```
 
 It prompts twice, then prints a line ready to paste:
@@ -208,7 +208,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.13.2 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.14.0 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -247,12 +247,17 @@ prefix.
 | `update` | rebuild the MasterList |
 | `lists` | the bots' lists we hold, whether each has changed since we took our copy, how big and how old |
 | `fetch [<bot>]` | ask every held bot whose list has changed (up to 10 at a time, skipping offline ones), or one bot whatever its freshness |
+| `downloads on [<rows>]` / `downloads off` | the mIRC Downloads window opened (with how many finished and failed rows it wants, 1-15) or closed; the bot sends its `DLBEGIN` snapshots only in between (#1022) |
+| `dlcancel <id>` | let a download go that has not started (waiting, asked, queued there); never a transfer under way or a finished one |
+| `dlagain <id>` | ask again for a download or list that failed; the old row stays |
+| `dlclear` | forget every finished download (the files stay on disk) |
 | `chat [#channel\|* <text>]` | say something in DCCore Chat, as the bot, in one channel or (`*`) the fewest that reach the other DCCore bots - **public**, see below; alone, the channels it can chat in |
 | `chat peers` / `chat who` | the other DCCore bots seen by WHO, and ask WHO again now |
 | `help` | the command list |
 | `hello <client> <version>` | switch this session to the structured feed (below) |
 | `pair <client> <version>` | mint a login token for a script (below) |
 | `unpair [<client>]` | list the paired scripts, or revoke one |
+| `shutdown now` | stop the bot, the way Ctrl-C in its window does: it leaves IRC and ends (`shutdown` alone says how) |
 | `quit` | close the session |
 
 `lists` and `fetch` are the console side of the List Browser's freshness check and
@@ -516,8 +521,12 @@ have been replaced with spaces.
 | `DCCORE DROPPED <n>` | lines the bot had to drop for a slow client | |
 | `DCCORE TAKEN <ip>` | the address that took the console over | |
 | `DCCORE LISTFETCH <bot> <action>` | `auto` (asked again automatically), `arrived`, `unusable` | one line of prose that names the bot |
+| `DCCORE FETCH <bot> <action>` | `asked`, `queued` (in that bot's queue), `receiving`, `done`, `failed` - a file the bot itself leeches from another bot, e.g. from the dashboard's Downloads page | one line of prose that names the bot and the file |
 | `DCCORE STATUS <used> <slots> <qfiles> <qusers> <sent_today> <bytes_today> <bps_now> <record_bps> <started> <failed> <searches>` | slots in use / total, files and users queued, today's sends and bytes, speed now, the record; then when the bot started (epoch) and the failures and searches it has seen since | |
 | `DCCORE SLOT <nick> <sent> <total> <bps>` | one per active transfer: bytes so far, size, speed from its own clock | the name |
+| `DCCORE FETCHING <bot> <received> <total> <bps> <name>` | one per file the bot is receiving from another bot right now (#1019), in the status burst after the QUEUE lines - the panel's Downloading section. Sent only to a script that said it is 1.8 or later in `HELLO` | the name (a list shows as "<bot>'s file list") |
+| `DCCORE DLBEGIN` / `DCCORE DLROW <id> <kind> <state> <bot> <received> <total> <bps> <when> <note> <name>` / `DCCORE DLEND <waiting_total> <complete_total> <failed_total>` | the Downloads window's snapshot (#1022): one `DLROW` per download - `kind` is `d` (coming in), `w` (waiting), `c` (finished) or `f` (failed, a rejected list included), at most 15 of each of the last two, `note` one token (why it waits, or how it ended), `when` the epoch a finished one ended. Whole or not sent; every 3 seconds at most and only when it changed, only after `downloads on`. Sent only to a script that said 1.10 or later in `HELLO` | the Downloads window |
+| `DCCORE REBUILD <phase> <folder_index> <folder_count> <files> <elapsed>` | a master-list rebuild is running, however it was started (#1024): in the status burst and every 5 seconds between; `DCCORE REBUILD end` once when it stops. The phase is `starting`, `scanning`, `audio`, `writing` or `publishing`. Sent only to a script that said it is 1.9 or later in `HELLO` | the phase |
 | `DCCORE QUEUE <pos> <nick> <files> <frozen_secs_left>` | one per queued user, the first 20 in the order they are served: position, files waiting, seconds until a frozen queue is dropped (0 = not frozen) | |
 | `DCCORE TOKEN <name>` | the reply to `pair` | the token, shown once |
 | `DCCORE PING` | stands in for a status burst the bot could not compute in time; a client treats it as any other line and shows nothing | |
@@ -678,7 +687,7 @@ Chat request** to auto-accept so it never asks again.
 | the side panel | **Sending n/m**: each running transfer with its size, percentage and speed; **Queue n**: who is waiting, in order, with `frozen m:ss` on a queue that is counting down; **Today**: files and bytes sent, the speed record; and what this window has seen since it opened |
 | the title bar | `MusicBot on Undernet · slots 2/3 · queue 14 · today 38 files / 12.4GB · 1.5MB/s`, updated with every status burst |
 | the editbox | anything you type is a console command - `status`, `queue helen`, `clearqueue ivan`, `ban *!*@bad.host` - and the reply comes back as `[CONSOLE]` lines, or into a second `@DCCore-console` window if you prefer |
-| right-click | the common commands; on a panel line, that user's queue or clearing it; in any channel's nick list, **DCCore → Queue of / Clear the queue of** that nick |
+| right-click | the common commands, **Script Settings** and **Console command** on top, then the groups **Info**, **Lists**, **Library**, **User control**, **Control** (update check, console feed, reload, **Stop the bot**), **Connection** and **Window** (DCCore Chat, Downloads window, panel, font); on a panel line, that user's queue or clearing it; in any channel's nick list, **DCCore → Queue of / Clear the queue of** that nick |
 | the window's button | on the switchbar or treebar, like any channel's: the **message** colour when there is new activity - a request, a queue position, a send, a search - and the **highlight** colour (the one mIRC uses when somebody says your nick) on a failed transfer or dropped lines, so a failure stands out. The `[STATUS]` line, joins, parts and bans do not light it, as they would not in a channel. mIRC 7 or later |
 | a beep | on a failed transfer, if you leave that on |
 
@@ -694,7 +703,7 @@ retries; `/dccore connect` starts them again.
 
 ### Options
 
-`/dccore options` (or right-click → Options...):
+`/dccore options` (or right-click → Script Settings):
 
 - a tickbox and a colour for each kind of event - requests, queue
   positions, sends, failures, searches, joins/parts/quits, bans, other log
@@ -726,6 +735,8 @@ sent at all: what is off there never reaches the script.
 /dccore options              what to show, colours, panel, title bar, beep
 /dccore window               open or focus @DCCore
 /dccore chat [text]          open DCCore Chat, or say something in it (public)
+/dccore downloads            open @DCCore-Downloads: what the bot is fetching from other bots (needs 1.10)
+/dccore weburl [addr]        where the bot's dashboard is, for that window's menu
 /dccore status               ask the bot for its status
 /dccore consolefeed on|off   what this window shows beyond STATUS - requests, sends, searches...
 /dccore lists                the bots' lists we hold, and which have changed
@@ -749,7 +760,7 @@ It is **public**. A channel message reaches everyone in it, whether or
 not they run this script. Your lines show as said by your bot. The window's
 title and its first lines say so.
 
-- **Opening it:** right-click in a channel or in `@DCCore` → *DCCore Chat*,
+- **Opening it:** right-click in a channel → *DCCore Chat*, or in `@DCCore` → *Window* → *DCCore Chat*,
   or `/dccore chat`. It also opens by itself (minimised, its button lit)
   when a chat line arrives, unless you turn that off in `/dccore options`.
 - **Talking:** type in the window. By default the line is said once in the
@@ -757,7 +768,11 @@ title and its first lines say so.
   no channel without one (`chat * <text>`). Right-click → *Send to* picks one
   channel instead, and that channel is listened on too. `/dccore chat <text>`
   does the same from anywhere. What you type goes on the bot's express lane,
-  so it is not held up behind a line for each of its other channels.
+  so it is not held up behind a line for each of its other channels. With
+  nothing picked, an answer goes where the conversation is: privately to a
+  peer who wrote to you privately, or to the channel the last line you see
+  came from. A private conversation is never moved to a channel by itself -
+  only a pick does that.
 - **Listening:** every channel the bot is in, by default. Only lines from
   other DCCore bots arrive at all, so there is little to filter. Untick
   *Listen on all the bot's channels* (right-click, or `/dccore options`) and
@@ -931,12 +946,14 @@ listener.
 
 You do not have to work out which it is. Set `ADMIN_CHAT_MODE = "listen"` and the
 bot stops dialling you altogether. The listener it opens answers only a connection
-from the address your client advertised in its CTCP, or from any private-network
-address (#881) - if you and the bot share one home router, your client advertises
-that router's public IP, but your own connection can arrive at the bot with a
-private LAN address instead (a NAT hairpin), which the exact match alone would
-reject as a stranger. Anything else that reaches the port during the window - a
-public address that is neither one - is dropped without a banner, logged as
+from the address your client advertised in its CTCP - or, when the address you
+advertised is the bot's own public one, from a private-network address (#881): if
+you and the bot share one home router, your client advertises that router's public
+IP, but your own connection can arrive at the bot with a private LAN address
+instead (a NAT hairpin), which the exact match alone would reject as a stranger.
+Only then: a private address when you are somewhere else is a neighbour on a
+shared network, or a proxy's own address, not you. Anything else that reaches the
+port during the window is dropped without a banner, logged as
 `Dropped a connection from <ip> ... Still waiting.`, and the port stays open for
 you. (A passive request advertises no address, so there the first connection is
 taken.)

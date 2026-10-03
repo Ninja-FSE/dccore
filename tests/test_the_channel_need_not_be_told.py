@@ -71,7 +71,7 @@ class NoOutboundPathUsesBold(DCCoreTestCase):
     def test_no_template_in_announce_py_carries_one(self):
         """The property, over every path at once - including the ones that
         need a socket and cannot be driven from here."""
-        with open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as f:
+        with open(os.path.join(REPO_ROOT, "src", "announce.py"), encoding="utf-8") as f:
             source = f.read()
 
         self.assertNotIn("{B}", source)
@@ -120,7 +120,7 @@ class TheChannelNoticeCanBeTurnedOff(DCCoreTestCase):
         """Asserted on the source because the alternative - gating the whole
         function - would also take the operator's own debug line, and both
         versions pass any test that only checks the channel went quiet."""
-        with open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as f:
+        with open(os.path.join(REPO_ROOT, "src", "announce.py"), encoding="utf-8") as f:
             source = f.read()
         body = source.split("def send_transfer_complete(", 1)[1] \
                      .split("\ndef ", 1)[0]
@@ -138,7 +138,7 @@ class TheChannelNoticeCanBeTurnedOff(DCCoreTestCase):
     def test_off_still_says_so_in_the_log(self):
         """Silence in the channel is wanted; silence in the operator's own
         console is how a setting gets blamed for a bug."""
-        with open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as f:
+        with open(os.path.join(REPO_ROOT, "src", "announce.py"), encoding="utf-8") as f:
             source = f.read()
 
         self.assertIn("the \"\n              f\"channel notice is off (ANNOUNCE_TRANSFERS).",
@@ -147,7 +147,7 @@ class TheChannelNoticeCanBeTurnedOff(DCCoreTestCase):
     def test_the_private_notices_are_not_affected(self):
         """The point of the setting. Whoever asked still gets told - it is the
         channel that stops being told."""
-        with open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as f:
+        with open(os.path.join(REPO_ROOT, "src", "announce.py"), encoding="utf-8") as f:
             source = f.read()
 
         for name in ("send_dcc_sending_notice", "send_dcc_queue_notice"):
@@ -156,14 +156,14 @@ class TheChannelNoticeCanBeTurnedOff(DCCoreTestCase):
                 self.assertNotIn("ANNOUNCE_TRANSFERS", body)
 
     def test_nor_is_the_dcc_offer_itself(self):
-        with open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as f:
+        with open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as f:
             self.assertNotIn("ANNOUNCE_TRANSFERS", f.read())
 
 
 class TheSampleAndTheSettingAgree(unittest.TestCase):
 
     def test_the_shipped_sample_carries_it(self):
-        with open(os.path.join(REPO_ROOT, "settings.conf.sample"),
+        with open(os.path.join(REPO_ROOT, "conf", "settings.conf.sample"),
                   encoding="utf-8") as f:
             sample = f.read()
 
@@ -172,7 +172,7 @@ class TheSampleAndTheSettingAgree(unittest.TestCase):
     def test_and_explains_what_stays_on(self):
         """An operator reading only the sample should not have to guess
         whether turning this off stops answering requests."""
-        with open(os.path.join(REPO_ROOT, "settings.conf.sample"),
+        with open(os.path.join(REPO_ROOT, "conf", "settings.conf.sample"),
                   encoding="utf-8") as f:
             sample = f.read()
         note = sample.split("ANNOUNCE_TRANSFERS", 1)[0].rsplit("\n\n", 1)[-1]

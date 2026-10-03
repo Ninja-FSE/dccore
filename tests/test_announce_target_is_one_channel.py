@@ -134,7 +134,7 @@ class TheAdvertLoopReadsTheChannelsSafely(DCCoreTestCase):
     instead."""
 
     def test_the_worker_does_not_split_the_setting_by_hand(self):
-        with io.open(os.path.join(REPO_ROOT, "announce.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "announce.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
 
@@ -169,7 +169,7 @@ class TheGlobalScanSeparatesTheTwoQuestions(unittest.TestCase):
     """
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_the_membership_check_asks_every_channel(self):

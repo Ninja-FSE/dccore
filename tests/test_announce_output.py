@@ -458,7 +458,11 @@ class TransferSpeedLockUsesDccQueueLock(unittest.TestCase):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         self.by_file = {}
         for name in self.SOURCES:
-            path = os.path.join(repo_root, name)
+            # src/ first (#959: where both of these live now), the
+            # repository root otherwise.
+            path = os.path.join(repo_root, "src", name)
+            if not os.path.exists(path):
+                path = os.path.join(repo_root, name)
             if not os.path.exists(path):
                 continue
             with open(path, "r", encoding="utf-8") as handle:

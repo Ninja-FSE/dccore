@@ -22,6 +22,9 @@ import textwrap
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
+SRC_DIR = os.path.join(REPO_ROOT, "src")  # settings_file.py/settings_help.py live there (#959)
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
 
 import settings_file  # noqa: E402
 import settings_help  # noqa: E402
@@ -34,7 +37,7 @@ HEADER = """\
 # Copy this file to settings.conf and uncomment the lines you want to
 # change. Anything left commented out keeps its default, shown here.
 #
-#     cp settings.conf.sample settings.conf
+#     cp conf/settings.conf.sample conf/settings.conf
 #
 # settings.conf is gitignored, so your values never show up as a diff
 # and are never overwritten by an update.
@@ -68,7 +71,7 @@ def _render(value):
 
 
 def build():
-    path = os.path.join(REPO_ROOT, "defaults.py")
+    path = os.path.join(SRC_DIR, "defaults.py")
     with io.open(path, encoding="utf-8") as handle:
         source = handle.read()
     lines = source.split("\n")
@@ -139,7 +142,7 @@ def build():
 
 
 def main():
-    target = os.path.join(REPO_ROOT, "settings.conf.sample")
+    target = os.path.join(REPO_ROOT, "conf", "settings.conf.sample")
     content = build()
     with io.open(target, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(content)

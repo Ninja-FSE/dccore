@@ -37,7 +37,7 @@ WINDOWS = os.path.join(REPO_ROOT, "scripts", "windows", "start-dccore.bat")
 
 
 def env_with(overrides):
-    """A copy of os.environ with `overrides` applied CASE-INSENSITIVELY.
+    r"""A copy of os.environ with `overrides` applied CASE-INSENSITIVELY.
 
     os.environ upper-cases its keys on Windows ("PROGRAMW6432"), and a plain
     dict.update({"ProgramW6432": ...}) adds a second key differing only in
@@ -271,7 +271,7 @@ class TheOfferRun(unittest.TestCase):
 @unittest.skipUnless(os.name == "nt" and (shutil.which("cmd.exe") or shutil.which("cmd")),
                      "cmd.exe is only available on Windows")
 class ThePythonTheInstallerPutSomewhere(unittest.TestCase):
-    """The launcher's own search, executed (#647, audit M45): nothing on
+    r"""The launcher's own search, executed (#647, audit M45): nothing on
     PATH, but a python.exe under the folder the python.org installer uses
     - per-user, or all-users - and the launcher must find it and run the
     check with it. Until now every test either had Python on PATH or
@@ -305,7 +305,7 @@ class ThePythonTheInstallerPutSomewhere(unittest.TestCase):
         os.makedirs(self.programfiles)
 
     def plant(self, folder):
-        """A working python.exe at <folder>\python.exe, the installer's layout."""
+        r"""A working python.exe at <folder>\python.exe, the installer's layout."""
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", folder],
                        check=True, capture_output=True, timeout=120)
         shutil.copy(os.path.join(folder, "Scripts", "python.exe"), os.path.join(folder, "python.exe"))

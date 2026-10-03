@@ -250,7 +250,7 @@ class TheHandshakeActuallyUsesIt(unittest.TestCase):
 
     def dcc_source(self):
         import io
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_the_offer_is_built_through_the_fitter(self):

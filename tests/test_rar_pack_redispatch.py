@@ -163,7 +163,7 @@ class EveryReleasePathWakesTheQueue(unittest.TestCase):
 
     def release_sites(self):
         import ast
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             lines = handle.read().split("\n")
         return [n for n, line in enumerate(lines, 1)
                 if line.strip() == "config.rar_inprogress = False"]
@@ -178,7 +178,7 @@ class EveryReleasePathWakesTheQueue(unittest.TestCase):
         """
         import ast
 
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
         return {node.lineno for node in ast.walk(tree)
                 if isinstance(node, ast.Call)

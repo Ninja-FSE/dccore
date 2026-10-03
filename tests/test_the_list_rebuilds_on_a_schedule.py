@@ -232,7 +232,7 @@ class TheWorker(DCCoreTestCase):
         import io
         with io.open(os.path.join(REPO_ROOT, "oserve.py"), encoding="utf-8") as handle:
             self.assertIn("commands.ensure_rebuild_schedule_worker()", handle.read())
-        with io.open(os.path.join(REPO_ROOT, "commands.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
             rehash = handle.read().split("def _handle_rehash_request(", 1)[1].split("\ndef ", 1)[0]
         self.assertIn("if ensure_rebuild_schedule_worker():", rehash)
 

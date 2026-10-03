@@ -239,7 +239,7 @@ class WhichOneHappens(unittest.TestCase):
         explaining them, so a search over them matches the explanation."""
         import re as _re
 
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as f:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as f:
             body = f.read()
         block = body.split("announce.decline_private_message(user)", 1)[0]
         # The call, not the whole `if` line: #888 added "not is_file_request"

@@ -40,6 +40,9 @@ import dcc  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
 
 LOOPBACK_LONG = struct.unpack("!I", socket.inet_aton("127.0.0.1"))[0]
+# The one router's public address, which the operator's client advertises
+# and the bot has too - what makes it a hairpin.
+SHARED_PUBLIC_LONG = struct.unpack("!I", socket.inet_aton("203.0.113.50"))[0]
 
 
 class TheHelperOnItsOwn(unittest.TestCase):
@@ -141,8 +144,10 @@ class TheListenerOverARealSocket(DCCoreTestCase):
         return peer
 
     def test_a_lan_address_that_does_not_match_the_advertised_one_is_still_served(self):
-        """The audit's report: the CTCP advertised the shared public IP,
-        and the connection arrived from the operator's private one."""
+        """The audit's report: the CTCP advertised the shared public IP -
+        the bot's own, since both sit behind the one router - and the
+        connection arrived from the operator's private one."""
+        dcc.get_public_ip_long = lambda: SHARED_PUBLIC_LONG
         port, done = self.listen_reporting(expected_ip="203.0.113.50",
                                            reported_peer_ip="192.168.50.23")
 
@@ -150,6 +155,19 @@ class TheListenerOverARealSocket(DCCoreTestCase):
         self.assertTrue(done.wait(5))
 
         self.assertEqual(self.served, [("192.168.50.23", "operator")])
+
+    def test_a_lan_address_is_dropped_when_it_is_not_a_hairpin(self):
+        """The operator advertised an address that is not the bot's own:
+        they are somewhere else, and a private peer is a neighbour, or a
+        proxy's own address - not them."""
+        port, done = self.listen_reporting(expected_ip="198.51.100.7",
+                                           reported_peer_ip="192.168.50.23")
+
+        self.connect(port)
+        self.assertTrue(done.wait(5))
+
+        self.assertEqual(self.served, [])
+        self.assertIn("only taken when that is the bot's own public one", self.out.getvalue())
 
     def test_a_public_address_that_does_not_match_is_still_dropped(self):
         """The control: widening to private addresses must not widen to

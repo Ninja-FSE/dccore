@@ -341,7 +341,7 @@ class TheVirtualPrefix(unittest.TestCase):
         the current one stopped it seeing the headings in every list already
         downloaded, so a bare request against one resolved nothing at all -
         which is what the resolution-counting test caught."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             code = handle.read()
 
         self.assertIn("for p in list_mod.LIST_FOLDER_PREFIXES", code)

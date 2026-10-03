@@ -233,7 +233,7 @@ class TheOrderOfResponsibilities(unittest.TestCase):
     must not hold a lock or know what a kick is."""
 
     def source(self, name):
-        with open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+        with open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
             return handle.read()
 
     def test_the_read_loop_only_records(self):

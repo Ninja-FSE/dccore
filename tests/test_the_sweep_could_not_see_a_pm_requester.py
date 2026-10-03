@@ -333,7 +333,7 @@ class ARestoredQueueIsLookedAtOnActivation(_SweepCase):
         irc_loop. The call has to sit in the branch that just claimed
         channel sync, after the claim - the same reason that branch exists:
         with channel_users empty every waiting user looks absent."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def delayed_activate("):]
         body = body[:body.index("def background_nick_monitor(")]
@@ -380,7 +380,7 @@ class TheSpecificUserPathStillFreezes(_SweepCase):
     the shared policy rather than a second copy of it."""
 
     def test_the_specific_user_branch_uses_the_shared_helper(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def check_queue_and_send("):]
         body = body[:body.index("# B) Global queue handling")]

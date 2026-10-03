@@ -3,7 +3,7 @@
 This covers the Windows packaging — a launcher and a setup check, in
 `scripts/windows/`, alongside their Linux counterparts in `scripts/linux/`.
 Nothing here changes how the daemon behaves; the platform differences that do
-exist live in `platform_compat.py` and are covered by CI on both operating
+exist live in `src/platform_compat.py` and are covered by CI on both operating
 systems.
 
 The daemon itself already runs on Windows. Its whole boot sequence was verified
@@ -29,7 +29,7 @@ round-tripped, DCC listener bound, WinRAR found at its install path.
 ```
   Python was not found.
 
-  DCCore can download Python 3.14.7 from python.org and install it
+  DCCore can download Python 3.14.8 from python.org and install it
   for you: about 32 MB, for your user only (no administrator prompt),
   with "Add python.exe to PATH" and "py launcher" both ticked. The
   download is checked against a fingerprint before it is run.
@@ -49,6 +49,38 @@ anyway.)
 No Command Prompt needed. The window that opens **is** the bot: closing it
 stops the bot, so leave it open or minimise it. `Ctrl-C` in it stops the bot
 on purpose.
+
+Everything the window shows is also saved in `data\logs\dccore.log`, with the
+date on every line, so what the bot said is still there after the window is
+closed. At 5 MB the file becomes `dccore.log.1` and a new one starts; five old
+ones are kept. Settings > Debug & logging changes the place, the size and the
+count, or turns it off.
+
+To stop a bot whose window you cannot get at - minimised and forgotten, or
+started by the logon task - run `scripts\windows\start-dccore.bat stop`. It
+asks the bot to stop itself and waits until it has; if the bot does not stop
+within a minute it says so and prints the command to end it by force. The
+dashboard's Tools page has **Stop the bot**, and the admin console has
+`shutdown now`; all three stop it the way Ctrl-C does.
+
+### Without the window
+
+Settings > Debug & logging > **The bot's window** (`BOT_WINDOW`) decides how
+`start-dccore.bat` starts the bot, from the next start on:
+
+| Value | The bot |
+|---|---|
+| `normal` | in its own window, as above |
+| `minimised` | in its own window, minimised to the taskbar |
+| `hidden` | with no window at all; what it says is in `data\logs\dccore.log` |
+
+With `minimised` or `hidden` the launcher's window says the bot is running and
+closes after a few seconds. Stop the bot with `start-dccore.bat stop`, the
+dashboard's Tools > Stop the bot, or `shutdown now` in the admin console. The
+very first run always has its window, since the setup needs it, and a hidden
+bot keeps the log file even if it was turned off: it is the only place it
+can say anything. The logon task (`install-autostart.bat`) follows the same
+setting.
 
 The setup page is `http://127.0.0.1:8420/setup` and answers only to this
 PC, only until the form is saved, and only with the one-time code in the
@@ -117,7 +149,7 @@ There is a fourth, and it stops the dashboard rather than the daemon:
 [WEBUI] ADMIN_PASSWORD_HASH is not set; refusing to start the dashboard
 ```
 
-Run `python adminchat.py` to set one.
+Run `python src/adminchat.py` to set one.
 
 **The IRC side is separate** and reports itself separately - look for the
 `[JOIN]` line naming how many channels it asked for. A daemon that is serving
@@ -230,7 +262,7 @@ equivalent, for anyone who would rather edit the files by hand.
 
 ### 1. Create `admin_config.py`
 
-Copy `admin_config.py.sample` to `admin_config.py` and fill it in. That file is
+Copy `conf/admin_config.py.sample` to `conf/admin_config.py` and fill it in. That file is
 gitignored and never leaves your machine.
 
 > **The one line that matters most is `CHANNEL`.**
@@ -264,11 +296,11 @@ set it explicitly if you want the list named differently from the bot.
 near the top.
 
 **Prefer plain text?** Every setting above can also go in `settings.conf`
-instead (copy `settings.conf.sample` to `settings.conf`) — no Python syntax,
+instead (copy `conf/settings.conf.sample` to `conf/settings.conf`) — no Python syntax,
 and it's what the web dashboard's Settings page writes to as well. The setup
 check in step 2 accepts either file; `admin_config.py` still owns
 `ADMIN_HOSTMASKS`/`ADMIN_PASSWORD_HASH` most naturally, since those come from
-running `python adminchat.py`, but they work in `settings.conf` too.
+running `python src/adminchat.py`, but they work in `settings.conf` too.
 
 ### 2. Check the setup
 
@@ -298,7 +330,7 @@ dashboard came up, and which of them means Flask was never installed.
 
 ## Why there is a launcher at all
 
-Every data path in `defaults.py` is relative — `./data/bans.txt`, `./lists` — so
+Every data path in `src/defaults.py` is relative — `./data/bans.txt`, `./lists` — so
 they resolve against the **working directory**, not the code. Started from
 anywhere other than the repository folder, the daemon quietly creates an empty
 `data` folder wherever it happened to start and boots with no bans, no queue and
@@ -399,7 +431,8 @@ scripts\windows\install-autostart.bat
 
 That creates a Task Scheduler entry, "DCCore", that runs `start-dccore.bat`
 when you log on - the launcher, so the working directory is right, and so the
-bot's window opens as usual (closing it still stops the bot). For your user
+bot starts the way `BOT_WINDOW` says: in its window by default (closing it
+still stops the bot), or minimised, or with no window at all. For your user
 only: no administrator, no stored password. `remove-autostart.bat` deletes
 the entry. It refuses a tree that has never been set up, since the setup
 questions need someone at the keyboard - run the launcher once first.
@@ -420,7 +453,7 @@ other.
 Generate the password hash with:
 
 ```
-python adminchat.py
+python src/adminchat.py
 ```
 
 Run that yourself. The password never needs to leave this machine.

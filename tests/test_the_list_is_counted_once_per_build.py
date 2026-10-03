@@ -242,7 +242,7 @@ class ItIsWiredIn(unittest.TestCase):
 
 
     def test_the_tuple_function_counts_through_the_cache(self):
-        with io.open(os.path.join(REPO_ROOT, "list.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "list.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def get_file_count_date_size_and_raw_bytes("):]
         body = body[:body.index("\ndef ", 10)]

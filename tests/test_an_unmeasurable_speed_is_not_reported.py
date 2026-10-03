@@ -107,7 +107,7 @@ class TheSendPathDecidesIt(unittest.TestCase):
     source - the arithmetic itself is covered above."""
 
     def source(self):
-        with open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_the_reported_figure_is_gated(self):

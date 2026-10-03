@@ -1,4 +1,4 @@
-"""The greedy PART regex took the LAST " PART " in the line, so a part
+r"""The greedy PART regex took the LAST " PART " in the line, so a part
 reason containing " PART " mis-attributed the channel (audit L29, #693).
 
 `^:([^!]+)!.* PART (\S+)` with re.search: the `.*` is greedy, so the
@@ -62,7 +62,7 @@ class TheReadLoopUsesThem(unittest.TestCase):
 
     def test_the_handlers_parse_through_the_named_functions(self):
         import io
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             body = handle.read()
 
         self.assertIn("part_match = parse_part(line)", body)

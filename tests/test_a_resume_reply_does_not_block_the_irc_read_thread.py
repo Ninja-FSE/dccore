@@ -175,7 +175,7 @@ class WhileThePacerIsBusy(DCCoreTestCase):
 class TheReadLoop(unittest.TestCase):
 
     def test_the_read_loop_asks_for_the_background_reply(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
         start = source.index("dcc.handle_resume_request(")
         call = source[start:start + 200]

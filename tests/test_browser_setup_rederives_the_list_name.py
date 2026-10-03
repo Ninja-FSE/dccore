@@ -48,7 +48,7 @@ class TheDerivation(DCCoreTestCase):
 
     def test_import_still_derives_it(self):
         """The module-level call is what made it work before."""
-        with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn("\nderive_list_base_name()\n", source)
 

@@ -216,7 +216,7 @@ class AnUpdateOnlyClearsTheSearchFlagItRaised(DCCoreTestCase):
 
 
 def _function(module_name, function_name):
-    with io.open(os.path.join(REPO_ROOT, module_name), encoding="utf-8") as handle:
+    with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", module_name), os.path.join(REPO_ROOT, "conf", module_name), os.path.join(REPO_ROOT, module_name)) if os.path.exists(p)), os.path.join(REPO_ROOT, module_name))), encoding="utf-8") as handle:
         tree = ast.parse(handle.read())
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == function_name:
@@ -286,7 +286,7 @@ class TheCheckAndTheSetShareOneLock(unittest.TestCase):
         import runtime
         self.assertIsInstance(runtime.list_update_gate, type(threading.Lock()))
         for module_name in ("list.py", "commands.py"):
-            with io.open(os.path.join(REPO_ROOT, module_name), encoding="utf-8") as handle:
+            with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", module_name), os.path.join(REPO_ROOT, "conf", module_name), os.path.join(REPO_ROOT, module_name)) if os.path.exists(p)), os.path.join(REPO_ROOT, module_name))), encoding="utf-8") as handle:
                 self.assertNotIn("list_update_gate = threading.Lock()", handle.read())
 
 

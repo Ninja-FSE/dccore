@@ -109,7 +109,7 @@ class AnIndentedLineIsAMistake(unittest.TestCase):
 
     def test_the_shipped_sample_still_parses(self):
         """The file every install starts from."""
-        with io.open(os.path.join(REPO_ROOT, "settings.conf.sample"),
+        with io.open(os.path.join(REPO_ROOT, "conf", "settings.conf.sample"),
                      encoding="utf-8") as handle:
             settings_file.parse(handle.read())
 
@@ -126,7 +126,7 @@ class AFixedChoiceSettingIsChecked(unittest.TestCase):
     def test_every_mode_adminchat_actually_tests_for_is_allowed(self):
         """Read out of adminchat, so the two cannot drift: a mode the daemon
         branches on but CHOICES refuses would be unreachable."""
-        with io.open(os.path.join(REPO_ROOT, "adminchat.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "adminchat.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
 

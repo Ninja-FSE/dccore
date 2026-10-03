@@ -40,7 +40,7 @@ DIRECT_ASSIGNMENT = re.compile(r"^\s*(?:self\.)?config\.(?:DEBUG_)?MSG_DELAY\s*=
 
 
 def shipped(name):
-    with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
+    with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
         for line in handle:
             if line.startswith(name + ":") or line.startswith(name + " "):
                 return float(line.split("=", 1)[1].split("#", 1)[0].strip())

@@ -148,7 +148,7 @@ class TheWindowsGuideQuotesWhatTheDaemonPrints(unittest.TestCase):
     def source(self, name):
         import io
 
-        with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+        with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
             return handle.read()
 
     def test_the_running_line_is_the_one_webserver_prints(self):

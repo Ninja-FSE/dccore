@@ -113,7 +113,7 @@ On Windows that command is **`py configure.py`**. A python.org install gives you
 7. **Music directory** - optional here (see below); if the folder does not exist it offers to create it.
 8. **Web dashboard, yes or no** (off unless you say yes). A yes asks two more: whether it should be reachable from other devices on your LAN, and - if Flask is not installed - whether to install it now.
 
-Then two offers, either of which you can decline: **generate the file list now** (when a music directory was given; a first start does it anyway), and **import your OmenServe totals** from its `vars.ini` if you are coming from there. The answers are written to `settings.conf`, with the password hash (and nothing else) in `admin_config.py`.
+Then two offers, either of which you can decline: **generate the file list now** (when a music directory was given; a first start does it anyway), and **import your OmenServe or KeepTrack totals** from mIRC's `vars.ini` (in mIRC's folder, or `scripts\vars.ini` on older installs) if you are coming from there. When both counted your sends you pick which totals to keep - they counted the same sends, so they are never added together. The answers are written to `settings.conf`, with the password hash (and nothing else) in `admin_config.py`.
 
 The music directory is optional here. It is usually easier to browse and confirm it from the dashboard's Settings page once the bot is running than to type a path blind. Everything else stays changeable afterwards.
 
@@ -123,9 +123,9 @@ Safe to run again later: every prompt shows what is already configured as its de
 
 `configure.py` is a convenience, not a requirement. There are two mechanisms and you can use either or both.
 
-**`settings.conf`** — plain text, no Python syntax. Copy `settings.conf.sample` and edit. This is what the dashboard's Settings page and the admin console both write to. The explanation above each setting in the sample is the same text the Settings page shows when you hover the **?** beside a setting; below it, the sample also carries the developer's longer note from `defaults.py` for anyone who wants the reasoning.
+**`conf/settings.conf`** — plain text, no Python syntax. Copy `conf/settings.conf.sample` to `conf/settings.conf` and edit. This is what the dashboard's Settings page and the admin console both write to. The explanation above each setting in the sample is the same text the Settings page shows when you hover the **?** beside a setting; below it, the sample also carries the developer's longer note from `defaults.py` for anyone who wants the reasoning.
 
-**`admin_config.py`** — Python. Copy `admin_config.py.sample` and edit. Better for values you would rather keep out of a file other tools rewrite, such as `ADMIN_HOSTMASKS` and `ADMIN_PASSWORD_HASH`.
+**`conf/admin_config.py`** — Python. Copy `conf/admin_config.py.sample` to `conf/admin_config.py` and edit. Better for values you would rather keep out of a file other tools rewrite, such as `ADMIN_HOSTMASKS` and `ADMIN_PASSWORD_HASH`.
 
 Both are gitignored. `defaults.py` applies `admin_config.py` first and `settings.conf` second, so a value set in both takes the `settings.conf` one. The daemon says so at startup for every setting that `admin_config.py` sets to something `settings.conf` then overrides (`[CONFIG] settings.conf overrides WEBUI_HOST, which admin_config.py also sets ...`) — if an edit to `admin_config.py` seems to do nothing, that line is why.
 
@@ -141,6 +141,10 @@ Three things are deliberately *not* required:
 ### Disk the dashboard uses
 
 The List Browser lists the bots it has seen advertising in your channels; a bot that never advertises can be added by nick in the sidebar (**Add a bot that does not advertise**), and stays until you use **Forget**. The List Browser's filter searches every bot list you have downloaded at once, which needs a search index at `data/list_index.db`. It is built as each list is fetched and is roughly the size of the lists again — ten large lists can mean several hundred megabytes. `LIST_INDEX_FILE` moves it. Deleting it is safe: the filter stops working until the next fetch rebuilds it, and nothing else uses it. If the file is ever damaged (a torn restore, a disk error), DCCore moves it aside as `list_index.db.corrupt-<timestamp>`, starts a fresh one and re-indexes the lists you hold at the next filter query; the log says so, and the moved copy can be deleted.
+
+The Stats page follows one period, and its figures come from the **transfer record**, which reads `data/transfers.db`: one small row for every finished transfer, with the nick it went to or came from (no host, no channel). Pick a period - 24 hours, 7 days, 30 days or all time - to see the files and lists sent, the size, the top and average speed, the average wait in the queue, what was received, the files and albums sent most and the nicks sent to and received from most. All time also counts any KeepTrack totals you imported, which have no date, and what the bot sent before the record began. Speed, slots and the queue are on the **Live Transfers** page. **Look up** shows one nick. If somebody asks to be forgotten, look them up and use **Forget**: every row with that nick goes, imported figures included, and the file is wiped, not just unlinked. **Forget everyone** empties the record. Both ask first and cannot be undone. **Export CSV** saves the chosen period as a spreadsheet. `TRANSFER_LOG_FILE` moves the file; empty turns the record off.
+
+The all-time **Most downloaded** tables come from `data/download_counts.db`, one row per file or album the bot has ever sent. `DOWNLOAD_COUNTS_FILE` sets where: the database is that path with its extension replaced by `.db`, or the path itself if it already ends in `.db`. Coming from a version that kept these counts in `data/download_counts.json`, the first start copies them into the database once and never writes the JSON again. So if you go back to the older version, it still finds the JSON and shows the counts as they were at the upgrade - but whatever it counts while you run it stays in the JSON, and upgrading again does not bring that back, because the copy has already been made. If the database is ever damaged, DCCore moves it aside as `download_counts.db.corrupt-<timestamp>`, starts a fresh one and copies the JSON in again: the counts as they were at the upgrade, which is less than the damaged file held. Back it up with the bot stopped, or together with the `download_counts.db-wal` and `download_counts.db-shm` files SQLite keeps beside it while it writes.
 
 ## Check before you start
 
@@ -225,10 +229,15 @@ nick. Each says how to start it now, once the hand-run bot is stopped:
 `systemctl --user start dccore` on Linux, `launchctl load -w
 ~/Library/LaunchAgents/com.dccore.bot.plist` on macOS, `start-dccore.bat` on
 Windows. The same applies later: with the autostart in place, do not also
-start the launcher by hand while it is running. On Linux the unit starts at
+start the launcher by hand while it is running. To stop it, on any platform:
+`start-dccore stop` (`scripts\windows\start-dccore.bat stop`,
+`./scripts/linux/start-dccore.sh stop`, `scripts/macos/start-dccore.command stop`),
+the dashboard's Tools > Stop the bot, or `shutdown now` in the admin console. On Linux the unit starts at
 login; to have it start at boot without anyone logging in, once: `loginctl
-enable-linger $USER`. Its output is in `journalctl --user -u dccore -f`; on
-macOS in `~/Library/Logs/dccore.log`; on Windows the bot's own window opens
+enable-linger $USER`. Its output is in `journalctl --user -u dccore -f` (and on every platform in
+`data/logs/dccore.log`, with the date on each line); on
+macOS in `~/Library/Logs/dccore.log`; on Windows the bot's own window opens (or not: `BOT_WINDOW` = `minimised` or `hidden`, see
+[WINDOWS.md](WINDOWS.md#without-the-window))
 at logon, as it does from a double-click.
 
 ## Build the first list
@@ -371,14 +380,17 @@ nothing about your bot - and says so in the dashboard's sidebar (with a **Check 
 says why instead. It is on by default and says so at every start: untick *Tell me when a new version is out* on the
 Settings page, or set `CHECK_FOR_UPDATES = false`, on a machine that should not go out.
 
-Your settings and data are never touched by an upgrade: `settings.conf`, `admin_config.py` and everything under `data/` are gitignored, so updating the code cannot overwrite them. That is also the one thing to watch — see step 4.
+Your settings and data are never changed by an upgrade: `settings.conf`, `admin_config.py` and everything under `data/` are gitignored, so updating the code cannot overwrite them. (The first start after v1.13.2 moves the two config files into `conf/`, unchanged - see [Coming from v1.13.2 or earlier](#coming-from-v1132-or-earlier).) That is also the one thing to watch — see step 4.
 
 **1. Stop the daemon.** A transfer in progress will be cut off, so a quiet moment is kinder than mid-queue.
 
-**2. Back up `data/` and your config.** It holds your stats, ban list, download counts and speed record — none of it recoverable if something goes wrong.
+**2. Back up `data/` and your config.** It holds your stats, ban list, download counts and speed record — none of it recoverable if something goes wrong. Your config is at the top of the folder up to v1.13.2, and in `conf/` from v1.14.0 on; the two `cp` lines below copy it from wherever it is.
 
 ```bash
-cp -r data data.backup && cp settings.conf admin_config.py data.backup/
+mkdir -p data.backup
+cp -r data data.backup/
+cp settings.conf admin_config.py data.backup/ 2>/dev/null
+cp conf/settings.conf conf/admin_config.py data.backup/ 2>/dev/null
 ```
 
 **3. Get the new version.**
@@ -392,11 +404,13 @@ If you installed from a downloaded release rather than a clone, download the new
 **4. Check for new settings.** This is the step people miss. `settings.conf` is gitignored, so `git pull` updates `settings.conf.sample` but never your own file. New settings do not appear in it, and you will not hear about them.
 
 ```bash
-comm -23 <(grep -oE '^#?[A-Z_]+ *=' settings.conf.sample | tr -d '# =' | sort) \
-         <(grep -oE '^[A-Z_]+ *=' settings.conf | tr -d ' =' | sort)
+comm -23 <(grep -oE '^#?[A-Z_]+ *=' conf/settings.conf.sample | tr -d '# =' | sort) \
+         <(grep -oE '^[A-Z_]+ *=' conf/settings.conf | tr -d ' =' | sort)
 ```
 
-That lists every setting the sample knows about and your file does not. Most of them will be settings you were happy to leave at their defaults, so read it as "what exists", not as a to-do list.
+That lists every setting the sample knows about and your file does not. **Coming from v1.13.2 or earlier, run step 6 first:** your `settings.conf` is still at the top of the folder until the new version has started once, and `check` is what moves it into `conf/`.
+
+Most of them will be settings you were happy to leave at their defaults, so read it as "what exists", not as a to-do list.
 
 Nothing breaks if you skip this — every setting has a working default and the daemon runs fine without any of them being present. You simply will not know what became available. The changelog is the readable version of the same information.
 
@@ -419,6 +433,39 @@ This checks the configuration without connecting to IRC, so a mistake surfaces b
 ```
 
 The master list is only regenerated when you ask. If a release changes what the list contains, the file you are serving keeps its old content until the next `!update` — which looks like the upgrade did nothing.
+
+### Coming from v1.13.2 or earlier
+
+**Your config moves into `conf/`, by itself.** The program's modules are now in `src/`, and your `settings.conf` and
+`admin_config.py` in `conf/`. The first start - or `start-dccore check` - moves the two files there and says so with a
+`[MIGRATE]` line; nothing in them changes. `oserve.py`, `configure.py` and `update_list.py` stay at the top, so the
+start scripts and `configure.py` work as before. Three things that do change:
+
+- The admin console's password hash is made with `python src/adminchat.py`; the tool used to be at the top of the folder.
+- A script or guide of yours that opens `settings.conf` by its path should open `conf/settings.conf`.
+- **If you unpacked the release over the old folder**, the old copies of the modules are still at the top: every
+  `.py` file there except `oserve.py`, `configure.py` and `update_list.py`, and the two `.sample` files. The bot no
+  longer reads them, but the old `adminchat.py` there would still run old code - delete them. (Or unpack the release into
+  a new folder and copy `data/` and your two config files across.)
+
+**Update `dccore.mrc`.** Save this release's `scripts/mirc/dccore.mrc` over yours and type `/reload -rs dccore.mrc`
+in mIRC. An older script keeps working, without the new Downloads window, the rebuild progress and the fixes.
+
+**The download counts move into a database.** The first start copies `data/download_counts.json` into
+`data/download_counts.db` - a few seconds on a bot that has sent a great many different files - and never writes the
+JSON again, so going back to v1.13 still shows the counts as they were at the upgrade.
+
+**Three new things are on by default** - each harmless, each worth knowing:
+
+- **A log file.** Everything the bot's window shows also goes to `data/logs/dccore.log`: at most 5 MB, and five old
+  ones kept (about 30 MB in all). `CONSOLE_LOG_FILE`, `CONSOLE_LOG_MAX_MB` and `CONSOLE_LOG_KEEP` change that; an
+  empty file name turns it off.
+- **A record of finished transfers**, with the nick each went to or came from, in `data/transfers.db`. It is what
+  the Stats page's new section reads; a nick can be forgotten there. An empty `TRANSFER_LOG_FILE` turns it off.
+- **The on-connect check.** If your on-connect commands set a user mode such as `+x`, the bot checks that it took
+  and sends them again if not, up to six times per connection. `ON_CONNECT_CHECK_MINUTES = 0` turns it off.
+
+No list rebuild is needed: nothing changed what the list contains.
 
 ### Coming from v1.10.0 or earlier
 

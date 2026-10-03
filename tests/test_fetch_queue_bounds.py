@@ -169,11 +169,12 @@ class APendingRowCanBeDeleted(DCCoreTestCase):
         self.assertEqual(status, 200)
         self.assertNotIn("rid", config.fetch_queue)
 
-    def test_the_three_genuinely_in_flight_states_are_still_refused(self):
+    def test_the_two_genuinely_in_flight_states_are_still_refused(self):
         """The control, and the reason this is not simply "allow everything":
-        those three have a thread or a socket that deleting the row would
-        orphan. Only pending has neither."""
-        for state in ("offered", "listening", "receiving"):
+        those two have a thread or a socket that deleting the row would
+        orphan. A pending or offered row has neither (an offered one is only a
+        request on the wire, held for a slot)."""
+        for state in ("listening", "receiving"):
             with self.subTest(state=state):
                 self._put(f"r-{state}", state)
 
@@ -181,6 +182,24 @@ class APendingRowCanBeDeleted(DCCoreTestCase):
 
                 self.assertEqual(status, 409)
                 self.assertIn(f"r-{state}", config.fetch_queue)
+
+    def test_a_request_still_waiting_for_the_bots_answer_can_be_cancelled(self):
+        self._put("r-offered", "offered")
+
+        status, _result = webserver.build_fetch_delete_result("r-offered")
+
+        self.assertEqual(status, 200)
+        self.assertNotIn("r-offered", config.fetch_queue)
+
+    def test_an_offer_arriving_for_a_cancelled_request_is_refused(self):
+        self._put("r-offered", "offered")
+        webserver.build_fetch_delete_result("r-offered")
+
+        with dcc_fetch._fetch_lock():
+            claimed = dcc_fetch._claim_matching_offer_locked(
+                config.fetch_queue, "goodbot", "Song.flac")
+
+        self.assertEqual(claimed, (None, None))
 
     def test_a_bulk_enqueue_can_be_undone_without_restarting(self):
         """The whole finding, end to end: queue a batch, then empty it through
@@ -217,13 +236,13 @@ class TheDashboardOffersTheButton(unittest.TestCase):
 
         self.assertIn('state === "pending"', deletable)
 
-    def test_the_three_in_flight_states_are_not(self):
+    def test_the_two_in_flight_states_are_not(self):
         """The control. Offering it for `receiving` would orphan a running
         transfer thread - the reason the original refusal existed at all."""
         window = self.render_downloads()
         deletable = window[window.index("var deletable ="):][:200]
 
-        for state in ("offered", "listening", "receiving"):
+        for state in ("listening", "receiving"):
             with self.subTest(state=state):
                 self.assertNotIn(f'"{state}"', deletable)
 
@@ -261,7 +280,7 @@ class TheConfirmPromptMatchesWhatIsBeingRemoved(unittest.TestCase):
         with io.open(os.path.join(REPO_ROOT, "web", "app.js"),
                      encoding="utf-8") as handle:
             body = handle.read()
-        start = body.index("el.downloadsBody.addEventListener")
+        start = body.index("el.downloadsBoxes.addEventListener")
         return body[start:start + 1400]
 
     def test_a_queued_row_does_not_warn_about_an_irreversible_delete(self):

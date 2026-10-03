@@ -89,7 +89,7 @@ class AShortSendIsNotACompletedTransfer(unittest.TestCase):
 
     @staticmethod
     def completion_block():
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         # The anchor moved with #526: completion is the receiver's final
         # acknowledgement now, not the sender's local EOF. Everything this

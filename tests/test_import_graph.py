@@ -56,8 +56,13 @@ ALLOWED = {
 
 
 def repo_modules():
-    return {name[:-3] for name in os.listdir(REPO_ROOT)
-            if name.endswith(".py") and not name.startswith("_")}
+    """Every daemon module's bare name - at the repository root (an entry
+    point run by hand, like oserve.py) and in src/ (#959)."""
+    names = set()
+    for folder in (REPO_ROOT, os.path.join(REPO_ROOT, "src")):
+        names |= {name[:-3] for name in os.listdir(folder)
+                  if name.endswith(".py") and not name.startswith("_")}
+    return names
 
 
 def modules_after_importing(target):
@@ -71,9 +76,13 @@ def modules_after_importing(target):
         "print(json.dumps(sorted(m for m in sys.modules if m in known)))\n"
         % (target, known)
     )
+    # PYTHONPATH: `target` (webserver) lives in src/ now (#959), and cwd
+    # alone no longer finds it.
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.path.join(REPO_ROOT, "src") + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run(
         [sys.executable, "-c", code],
-        cwd=REPO_ROOT, capture_output=True, text=True, timeout=120,
+        cwd=REPO_ROOT, capture_output=True, text=True, timeout=120, env=env,
     )
     if result.returncode != 0:
         raise AssertionError(

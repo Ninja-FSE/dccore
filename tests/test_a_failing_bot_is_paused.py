@@ -104,7 +104,7 @@ class ThreeFailuresPauseABot(PauseCase):
     def test_only_an_active_connect_counts(self):
         """The call sits in the active connect's failure branch, not the
         passive listener's."""
-        with io.open(os.path.join(REPO_ROOT, "dcc_fetch.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc_fetch.py"), encoding="utf-8") as handle:
             code = handle.read()
         connect = code.index('_mark_failed_locked(row, f"connect error: {connect_err}")')
         self.assertIn("_note_connect_failure(row.get(\"bot\"))", code[connect:connect + 600])

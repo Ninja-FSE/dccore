@@ -45,8 +45,12 @@ class SideFilePaths(DCCoreTestCase):
     def test_reader_and_writer_agree_on_the_names(self):
         """The split literal in two modules is how issue #34 happened."""
         for module in (list_mod, update_list):
-            source = open(os.path.join(REPO_ROOT, f"{module.__name__}.py"),
-                          encoding="utf-8").read()
+            name = f"{module.__name__}.py"
+            # src/ first (#959: where list.py lives now), the repository
+            # root otherwise - update_list.py is an entry point and stayed.
+            in_src = os.path.join(REPO_ROOT, "src", name)
+            path = in_src if os.path.exists(in_src) else os.path.join(REPO_ROOT, name)
+            source = open(path, encoding="utf-8").read()
             with self.subTest(module=module.__name__):
                 self.assertFalse('"dccore.size.txt"' in source,
                                  "name the side files once, in config")

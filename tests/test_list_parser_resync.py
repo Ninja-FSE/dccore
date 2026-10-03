@@ -179,7 +179,7 @@ class OurOwnListCannotProduceThis(unittest.TestCase):
     def test_the_fetched_path_uses_the_same_parser(self):
         """If list_fetch stopped sharing this parser, this whole file would be
         guarding something no remote input can reach."""
-        with io.open(os.path.join(REPO_ROOT, "list_fetch.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "list_fetch.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
 

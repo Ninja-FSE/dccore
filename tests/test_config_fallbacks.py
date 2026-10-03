@@ -51,9 +51,9 @@ RUNTIME_ASSIGNED = {"ORIGINAL_NICK", "MY_IP_OR_DOCK", "fetch_feature_disabled"}
 
 
 def modules():
-    for name in sorted(os.listdir(REPO_ROOT)):
+    for name in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src")))):
         if name.endswith(".py") and name != "admin_config.py":
-            yield name, os.path.join(REPO_ROOT, name)
+            yield name, (next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name)))
     scripts = os.path.join(REPO_ROOT, "scripts")
     for name in sorted(os.listdir(scripts)):
         if name.endswith(".py"):
@@ -62,7 +62,7 @@ def modules():
 
 def declared_defaults():
     """Every setting config.py declares, and the value it declares."""
-    with io.open(os.path.join(REPO_ROOT, "defaults.py"), encoding="utf-8") as handle:
+    with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
         tree = ast.parse(handle.read())
     out = {}
     for node in tree.body:
@@ -258,7 +258,7 @@ class NoDebugChannelMeansNoneIsJoined(unittest.TestCase):
     default."""
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_a_blank_value_puts_nothing_in_the_join(self):

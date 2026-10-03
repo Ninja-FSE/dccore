@@ -28,7 +28,7 @@ if REPO_ROOT not in sys.path:
 
 def live_assignments(path):
     """{name: value} for every uncommented `NAME = <literal>` in `path`."""
-    with io.open(os.path.join(REPO_ROOT, path), encoding="utf-8") as handle:
+    with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", path), os.path.join(REPO_ROOT, "conf", path), os.path.join(REPO_ROOT, path)) if os.path.exists(p)), os.path.join(REPO_ROOT, path))), encoding="utf-8") as handle:
         tree = ast.parse(handle.read())
     found = {}
     for node in tree.body:

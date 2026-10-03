@@ -56,7 +56,7 @@ IMPLICIT_MODULE_NAMES = {
 
 def daemon_modules():
     """Every .py the daemon is built from. admin_config.py is the operator's."""
-    return sorted(name for name in os.listdir(REPO_ROOT)
+    return sorted(name for name in (os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src")))
                   if name.endswith(".py") and name != "admin_config.py")
 
 
@@ -95,7 +95,7 @@ class EveryNameAFunctionReadsExists(unittest.TestCase):
     def test_no_module_reads_a_name_nothing_defines(self):
         offenders = []
         for name in daemon_modules():
-            with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+            with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
                 source = handle.read()
             for where, missing in unresolvable_names(source, name):
                 offenders.append("%s: %s reads %r, which nothing defines"

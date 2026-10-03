@@ -24,7 +24,7 @@ if REPO_ROOT not in sys.path:
 
 
 def read(relative):
-    with io.open(os.path.join(REPO_ROOT, relative), encoding="utf-8") as handle:
+    with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", relative), os.path.join(REPO_ROOT, "conf", relative), os.path.join(REPO_ROOT, relative)) if os.path.exists(p)), os.path.join(REPO_ROOT, relative))), encoding="utf-8") as handle:
         return handle.read()
 
 
@@ -45,7 +45,7 @@ FOLLOW_UPS = [
     ('input("  Reachable from other devices on your LAN', "LAN"),
     ('input("  Install it now (pip install -r requirements-web.txt)?', "install it now"),
     ('input("Generate it now? [Y/n]: ")', "generate the file list now"),
-    ('ask("Import them now? [y/N]: ")', "import your OmenServe totals"),
+    ('ask("Import them now? [y/N]: ")', "import your OmenServe or KeepTrack totals"),
 ]
 
 

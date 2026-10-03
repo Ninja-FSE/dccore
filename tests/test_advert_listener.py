@@ -1647,7 +1647,7 @@ class TheListenerIsActuallyWired(unittest.TestCase):
     """
 
     def _source(self, name):
-        with open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+        with open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
             return [line for line in handle.read().splitlines()
                     if not line.strip().startswith("#")]
 

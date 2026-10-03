@@ -30,7 +30,10 @@ from exported_tree import internal_file_or_skip  # noqa: E402
 
 
 def read(*parts):
-    with io.open(os.path.join(REPO_ROOT, *parts), encoding="utf-8") as handle:
+    _p = os.path.join(REPO_ROOT, "src", *parts)
+    if not os.path.exists(_p):
+        _p = os.path.join(REPO_ROOT, *parts)
+    with io.open(_p, encoding="utf-8") as handle:
         return handle.read()
 
 

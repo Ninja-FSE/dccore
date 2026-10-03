@@ -266,9 +266,9 @@ class TheBurstNeverRunsOnTheEmittingThread(DCCoreTestCase):
         """The hazard is real, not hypothetical: pinned so that a future
         status_lines() that drops live_speed() does not quietly make the
         test above meaningless."""
-        with io.open(os.path.join(REPO_ROOT, "stats_mgr.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "stats_mgr.py"), encoding="utf-8") as handle:
             self.assertIn("with dcc.queue_lock:", handle.read())
-        with io.open(os.path.join(REPO_ROOT, "adminchat.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "adminchat.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source.split("def status_lines(", 1)[1].split("\ndef ", 1)[0]
         self.assertIn("stats_mgr.live_speed()", body)
@@ -512,7 +512,7 @@ class Pairing(DCCoreTestCase):
         reads the token store - the whole reason tokens exist."""
         token, _ = self.pair()
         self.assertFalse(adminchat.verify_password(config.ADMIN_PASSWORD_HASH, token))
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
             source = handle.read()
         self.assertNotIn("_token_matches", source)
         self.assertNotIn("load_admin_tokens", source)
@@ -552,7 +552,7 @@ class Pairing(DCCoreTestCase):
         through the channel command set."""
         self.assertIn("pair", adminchat.COMMANDS)
         self.assertIn("unpair", adminchat.COMMANDS)
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             self.assertNotIn("!pair", handle.read())
 
 
@@ -631,7 +631,7 @@ class TheResumeIsRecordedOnTheRow(unittest.TestCase):
         import io
         import os
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with io.open(os.path.join(root, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(root, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         start = source.index("tx['bytes_sent'] = resume_offset")
         self.assertIn("tx['resume_offset'] = resume_offset", source[start:start + 400])

@@ -270,7 +270,7 @@ class OnceRegisteredTheOldRuleStands(unittest.TestCase):
     the text."""
 
     def handler(self):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = handle.read()
         return code.split("refused_nick = parse_nick_refusal(line)", 1)[1][:3000]
 

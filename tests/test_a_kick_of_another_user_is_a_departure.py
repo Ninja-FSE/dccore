@@ -148,7 +148,7 @@ class TheReadLoopIsWired(unittest.TestCase):
     helpers never called."""
 
     def source(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def kick_branch(self):

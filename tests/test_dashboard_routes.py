@@ -635,7 +635,7 @@ class WhenTheConsoleIsOnByDefault(DCCoreTestCase):
     def test_the_routes_ask_the_same_question(self):
         """Reading the setting directly in the route would keep the old flat
         default alive on the only paths that actually gate the feature."""
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
             code = handle.read()
         gate = code.split("def _console_is_available():", 1)[1][:400]
 
@@ -691,7 +691,7 @@ class OpeningTheDashboardOnStartup(DCCoreTestCase):
         self.assertIn("still running at", chr(10).join(said))
 
     def test_startup_calls_it(self):
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
             code = handle.read()
 
         self.assertIn("_open_in_browser(host, port)", code)

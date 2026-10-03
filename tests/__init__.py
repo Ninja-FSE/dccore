@@ -25,7 +25,23 @@ unittest.TestCase. Importing this package is the one thing every run does.
 
 Calls are RECORDED rather than dropped, so a test can still assert that the
 dashboard would have been opened - see BROWSER_OPENS.
+
+EVERY DAEMON MODULE LIVES IN src/ now (#959) - one plain directory, not a
+package, so the modules still only ever import each other by bare name,
+never a package prefix, exactly as when they all sat at the repository
+root. A test file's own "import irc" or "import defaults as config" needs
+src/ on sys.path, and this is the one place that puts it there: importing
+this package is the one thing every run does (see the browser guard's own
+note above), so a test file never has to set this up itself - 345 of them
+used to, identically, before this. One fact, one place, not repeated.
 """
+
+import os as _os
+import sys as _sys
+
+_SRC = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "src")
+if _SRC not in _sys.path:
+    _sys.path.insert(0, _SRC)
 
 import webbrowser as _webbrowser
 

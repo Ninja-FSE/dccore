@@ -354,7 +354,7 @@ class FailuresAreReportedWhereSuccessesAre(unittest.TestCase):
     """Every failure site goes through one reporter, which reaches the console."""
 
     def test_no_bare_dcc_fail_print_remains_in_the_send_path(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def start_dcc_send("):]
         end = body.find("\ndef ", 10)
@@ -365,7 +365,7 @@ class FailuresAreReportedWhereSuccessesAre(unittest.TestCase):
                          "operator; go through _report_transfer_failure")
 
     def test_the_reporter_uses_the_fail_category(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def _report_transfer_failure("):]
         body = body[:body.index("\nclass ", 10)]

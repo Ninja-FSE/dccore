@@ -158,7 +158,7 @@ class TheJoinUsesIt(unittest.TestCase):
     def test_the_join_thread_is_handed_the_normalised_list(self):
         import io
 
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn("args=(s, channels_we_should_be_in())",

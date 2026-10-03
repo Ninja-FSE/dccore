@@ -42,7 +42,7 @@ class TheMessageNamesTheModule(unittest.TestCase):
         # By listing, not by a literal path: the referenced-files sweep
         # reads every filename the tree opens and would call the absent one
         # "missing".
-        top = sorted(name for name in os.listdir(REPO_ROOT) if name.endswith(".py"))
+        top = sorted(name for name in (os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src"))) if name.endswith(".py"))
 
         self.assertIn("defaults.py", top)
         self.assertNotIn("con" + "fig.py", top)

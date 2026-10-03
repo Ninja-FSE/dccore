@@ -49,6 +49,12 @@
 # `git archive` is how the public tree is extracted, and export-ignore is
 # the only thing that makes "internal only" mean anything to it. Without a
 # rule here, a file is internal by intention and public in fact.
+#
+# docs/UPDATES.md is the full internal changelog: 50KB, written against
+# this repository's own PR and issue numbers and branch names, none of
+# which resolve anywhere outside it. docs/UPDATES-PUBLIC.md is the version
+# that ships. Before this rule the internal one was in the archive, and it
+# still named a real channel.
 
 # docs/PUBLIC-REPO-WORKFLOW.md documents this split itself: it names this
 # repository directly, by handle, and references internal issue and PR

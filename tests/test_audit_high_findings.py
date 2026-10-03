@@ -215,7 +215,7 @@ class OnlyOneRehashRunsAtATime(unittest.TestCase):
         runtime.py exists."""
         import io
 
-        with io.open(os.path.join(REPO_ROOT, "commands.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
 

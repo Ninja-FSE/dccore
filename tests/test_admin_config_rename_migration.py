@@ -119,7 +119,7 @@ class ItRunsBeforeTheOverrideImport(unittest.TestCase):
     already have been skipped."""
 
     def source(self, name):
-        with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+        with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
             return handle.read()
 
     def test_the_migration_runs_before_the_admin_config_import(self):

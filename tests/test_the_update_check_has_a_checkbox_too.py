@@ -24,6 +24,7 @@ Three pieces, one round trip:
 
 import io
 import os
+import re
 import sys
 import time
 import unittest
@@ -273,8 +274,10 @@ class TheVersionIsBumped(unittest.TestCase):
         text = script()
         # 1.4 for the checkbox, 1.5 for its guard before the bot has spoken,
         # 1.6 for DCCore Chat (#371), 1.7 for the console feed's own
-        # checkbox (#1006 follow-up) - moved on from 913's, never back.
-        self.assertIn("alias dccore.ver { return 1.7 }", text)
+        # checkbox (#1006 follow-up), 1.8 for the Downloading panel (#1019) -
+        # moved on from 913's, never back.
+        match = re.search(r"alias dccore\.ver \{ return ([0-9.]+) \}", text)
+        self.assertGreaterEqual(tuple(int(p) for p in match.group(1).split(".")), (1, 8))
 
 
 class TheMenuHasAToggleToo(unittest.TestCase):

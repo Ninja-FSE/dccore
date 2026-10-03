@@ -417,7 +417,7 @@ class TheServer(DCCoreTestCase):
         """werkzeug's server calls sys.exit(1) on a bind failure; the daemon
         must not inherit that - pinned on the source since the test above
         would simply die if it did."""
-        source = io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8").read()
+        source = io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8").read()
         body = source.split("def run_setup_until_configured(", 1)[1].split("\ndef ", 1)[0]
         self.assertIn("except (OSError, SystemExit)", body)
 
@@ -461,7 +461,7 @@ class TheServer(DCCoreTestCase):
     def test_the_decision_reads_the_setting_and_nothing_else(self):
         """The everywhere half of the test above, which needs loopback: the
         guard is the setting, read with the shipped default of True."""
-        source = io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8").read()
+        source = io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8").read()
         body = source.split("def run_setup_until_configured(", 1)[1].split("\ndef ", 1)[0]
         self.assertIn('if getattr(config, "WEBUI_OPEN_BROWSER", True):', body)
 

@@ -340,7 +340,7 @@ class TheOutboundTextDidNotChange(DCCoreTestCase):
     def test_both_callers_go_through_the_builders(self):
         """A second copy of either template would be the drift this was
         extracted to prevent."""
-        with io.open(os.path.join(REPO_ROOT, "announce.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "announce.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
 

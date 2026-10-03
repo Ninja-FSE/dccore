@@ -53,7 +53,7 @@ def without_comments(js):
     return "\n".join(re.sub(r"//.*$", "", line) for line in js.split("\n"))
 
 
-class QueueIsPartOfStats(unittest.TestCase):
+class QueueIsPartOfLiveTransfers(unittest.TestCase):
 
     def test_there_is_no_queue_tab(self):
         html = read("index.html")
@@ -61,21 +61,25 @@ class QueueIsPartOfStats(unittest.TestCase):
         self.assertNotIn('data-view="queue"', html)
         self.assertNotIn('id="view-queue"', html)
 
-    def test_the_queue_table_moved_into_the_stats_view(self):
+    def test_the_queue_table_moved_into_the_live_transfers_view(self):
         """Moved, not deleted: renderQueueTable() still targets these ids, and
-        the sidebar status card reads the same endpoint on every view."""
+        the sidebar status card reads the same endpoint on every view. It is
+        on Live Transfers (#1117) with the speed, not on Stats."""
         html = read("index.html")
+        live = html.split('id="view-live"', 1)[1].split("</section>", 1)[0]
         stats = html.split('id="view-stats"', 1)[1].split("</section>", 1)[0]
 
         for element_id in ("queue-body", "queue-table", "stat-slots",
-                           "stat-files", "stat-users"):
+                           "stat-files", "stat-users", "st-speed", "st-record",
+                           "st-sending", "st-queued", "st-uptime"):
             with self.subTest(element_id=element_id):
-                self.assertIn(f'id="{element_id}"', stats)
+                self.assertIn(f'id="{element_id}"', live)
+                self.assertNotIn(f'id="{element_id}"', stats)
 
     def test_the_queue_poll_refreshes_the_table_where_it_now_lives(self):
         """The poll refreshes the visible table only when it is the one
         showing, so a background poll never clobbers what is being read. That
-        condition had to follow the table to Stats."""
+        condition had to follow the table to Live Transfers."""
         js = without_comments(read("app.js"))
 
         self.assertNotIn('state.active === "queue"', js)
@@ -83,7 +87,7 @@ class QueueIsPartOfStats(unittest.TestCase):
         # renderSidebarStatus(), and the first occurrence is the one-shot load
         # at init, which has no active-view condition to find.
         block = js.split('setInterval(function () {', 1)[1][:600]
-        self.assertIn('state.active === "stats"', block)
+        self.assertIn('state.active === "live"', block)
 
     def test_nothing_still_tries_to_load_a_queue_view(self):
         js = without_comments(read("app.js"))
@@ -123,15 +127,15 @@ class TheTabsAreNamedForWhatTheyDo(unittest.TestCase):
         nav = html.split('<nav class="nav">', 1)[1].split("</nav>", 1)[0]
         order = re.findall(r'data-view="([a-z]+)"', nav)
 
-        self.assertEqual(order[:5],
-                         ["search", "download", "filelists", "tools", "stats"],
+        self.assertEqual(order[:6],
+                         ["search", "download", "filelists", "tools", "live", "stats"],
                          "the daily work belongs at the top and Stats is a "
                          "glance; Settings and Console are occasional")
         # Messages sits with the glances rather than with the daily work:
         # somebody messaging the bot is common enough to want a standing
         # place, and rare enough that putting it above the List Browser would
         # push the day's work down for something looked at once a day.
-        self.assertEqual(order[5:], ["messages", "settings", "console"])
+        self.assertEqual(order[6:], ["messages", "settings", "console"])
 
 
 class ShiftClickExtendsTheSelection(unittest.TestCase):

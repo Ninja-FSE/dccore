@@ -147,7 +147,7 @@ class TheTwoFlagsMeanDifferentThings(unittest.TestCase):
     """The point of the change, stated where a reader will find it."""
 
     def test_the_transfer_gate_reads_update_inprogress(self):
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
         gate = source[source.index("The global maintenance gate"):][:1400]
 
@@ -157,7 +157,7 @@ class TheTwoFlagsMeanDifferentThings(unittest.TestCase):
 
     def test_search_inprogress_still_exists_for_search_exclusion(self):
         """It was not deleted - one search at a time is still wanted."""
-        with io.open(os.path.join(REPO_ROOT, "list.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "list.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertIn("config.search_inprogress = True", source)

@@ -426,7 +426,7 @@ class TheHandlersAskThatQuestion(ListCase):
     all, and that a channel bound to nothing is answered with silence."""
 
     def source(self, name):
-        with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+        with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
             return handle.read()
 
     def test_every_folder_lookup_in_the_request_path_is_scoped(self):
@@ -564,7 +564,7 @@ class TheAdvertFollowsTheChannel(ListCase):
     it just read the same ones every time."""
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as fh:
+        with io.open(os.path.join(REPO_ROOT, "src", "announce.py"), encoding="utf-8") as fh:
             return fh.read()
 
     def test_the_figures_are_read_for_that_channels_list(self):

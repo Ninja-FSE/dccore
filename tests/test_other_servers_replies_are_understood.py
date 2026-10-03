@@ -228,7 +228,7 @@ class TheRepliesReachIt(unittest.TestCase):
     to dcc_fetch.handle_bot_reply()."""
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_private_notices(self):

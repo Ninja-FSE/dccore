@@ -109,7 +109,7 @@ class TheWriteCleansUpAfterACtrlC(unittest.TestCase):
             "import os, sys; sys.path.insert(0, %r); import db, platform_compat\n"
             "platform_compat.replace_with_retry = lambda a, b: os._exit(1)\n"
             "db._atomic_write(%r, '{}')\n"
-        ) % (REPO_ROOT, os.path.join(directory, "dcc_queue.txt"))
+        ) % (os.path.join(REPO_ROOT, "src"), os.path.join(directory, "dcc_queue.txt"))
         done = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
         self.assertEqual(done.returncode, 1)
         self.assertEqual(len(swaps_in(directory)), 1, os.listdir(directory))

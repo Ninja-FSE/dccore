@@ -68,6 +68,13 @@ if [ "$1" = "check" ]; then
     exit $?
 fi
 
+# --- stop the bot running from this folder (#1065) ------------------------
+# oserve.py asks it to stop itself (data/dccore.stop) and waits until it has.
+if [ "$1" = "stop" ]; then
+    "$PY" oserve.py --stop
+    exit $?
+fi
+
 # --- the setup questions, in this terminal ------------------------------------
 # Used on a first run when the browser page was declined or is out of reach,
 # and again when the daemon could not serve it (below). Fails when setup did
@@ -87,7 +94,10 @@ ask_the_questions_here() {
 # settings.conf is fully first-class (see scripts/setup_check.py's own note) -
 # the daemon starts fine from it alone, so this only refuses when NEITHER
 # override exists.
-if [ ! -f "admin_config.py" ] && [ ! -f "settings.conf" ]; then
+# At the root, or in conf/ (#959) - where the daemon moves them the first
+# time it starts, so a second start would otherwise look like a first run.
+if [ ! -f "admin_config.py" ] && [ ! -f "settings.conf" ] \
+        && [ ! -f "conf/admin_config.py" ] && [ ! -f "conf/settings.conf" ]; then
     # An upgrading install has neither, but is NOT unconfigured: #170 renamed
     # local_config.py to admin_config.py, and that file is gitignored, so the
     # pull renamed defaults.py for them and could not touch theirs.

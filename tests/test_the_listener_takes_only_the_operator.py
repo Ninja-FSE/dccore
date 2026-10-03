@@ -130,7 +130,7 @@ class ARealListener(DCCoreTestCase):
 class TheListenModeBranchHandsTheAddressOn(unittest.TestCase):
 
     def test_the_thread_is_started_with_the_ctcps_ip(self):
-        body = io.open(os.path.join(REPO_ROOT, "adminchat.py"), encoding="utf-8").read()
+        body = io.open(os.path.join(REPO_ROOT, "src", "adminchat.py"), encoding="utf-8").read()
         branch = body[body.index("ADMIN_CHAT_MODE is 'listen'; offering the connection"):][:700]
 
         self.assertIn("args=(irc_sock, nick, host, token, ip)", branch)

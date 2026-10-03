@@ -262,7 +262,7 @@ class TheCardsAreBuiltNotFixed(unittest.TestCase):
 
     def test_the_render_is_called_from_the_stats_render(self):
         code = read_app_js()
-        self.assertIn("renderLibrary(lib);", code)
+        self.assertIn("renderLibrary(data.library || {});", code)
 
     def test_names_and_figures_are_written_as_text_not_markup(self):
         """A list's name is whatever the operator typed on the Library page."""

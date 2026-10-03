@@ -63,7 +63,7 @@ def daemon_modules():
     an IRC socket, and `tests/` stand-ins deliberately implement both `send`
     and `sendall` so that a test can prove which one production called.
     """
-    for name in sorted(os.listdir(REPO_ROOT)):
+    for name in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src")))):
         if name.endswith(".py") and not name.startswith("_"):
             yield name
 
@@ -72,7 +72,7 @@ def send_calls():
     """(module, line, receiver) for every `<something>.send(...)` call."""
     found = []
     for name in daemon_modules():
-        with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+        with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
             tree = ast.parse(handle.read(), filename=name)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -88,7 +88,7 @@ def send_calls():
 def sendall_calls():
     total = 0
     for name in daemon_modules():
-        with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+        with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
             tree = ast.parse(handle.read(), filename=name)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
@@ -162,7 +162,7 @@ class WhatGoesOnTheWire(unittest.TestCase):
         import ast as _ast
 
         for name in daemon_modules():
-            with io.open(os.path.join(REPO_ROOT, name), encoding="utf-8") as handle:
+            with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
                 tree = _ast.parse(handle.read(), filename=name)
             for node in _ast.walk(tree):
                 if not (isinstance(node, _ast.Call)
@@ -183,7 +183,7 @@ class WhatGoesOnTheWire(unittest.TestCase):
         encode. Raising on the send would take down whichever thread is
         holding the socket, so every site that encodes a str does it the way
         announce.py's drain always has."""
-        with io.open(os.path.join(REPO_ROOT, "dcc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read(), filename="dcc.py")
 
         encodes = 0

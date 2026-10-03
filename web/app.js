@@ -51,6 +51,7 @@
     download:  { title: "view.download.title",   sub: "view.download.sub" },
     filelists: { title: "view.filelists.title",  sub: "view.filelists.sub" },
     tools:     { title: "view.tools.title",      sub: "view.tools.sub" },
+    live:      { title: "view.live.title",       sub: "view.live.sub" },
     // Reached from the badge in the status panel, not from the nav rail:
     // it is somewhere you are SENT when something happened, not somewhere
     // you go looking. A permanent nav entry for a page that is empty almost
@@ -69,7 +70,7 @@
     lang: {}, langFallback: {},
     // The last version check and stats payload drawn, redrawn when a
     // language finishes loading (#976).
-    lastVersionInfo: null, lastStats: null,
+    lastVersionInfo: null, lastStats: null, lastRecord: null,
     // What the previewed OmenServe import would write, held between the
     // preview and the confirm so the button sends exactly what was shown -
     // not a second parse that could have moved on from it.
@@ -89,7 +90,7 @@
     folders: null, foldersSource: "", foldersDraft: null, foldersNote: null,
     downloads: [],
     lists: null, listsSource: "", listsDraft: null, listsNote: null,
-    onConnect: null, onConnectNote: null,
+    onConnect: null, onConnectNote: null, onConnectDraft: null,
     // The folder picker (#164 step 5). `browse` is null when the panel is
     // closed; open, it carries the row it will write back into.
     foldersBrowserEnabled: false, browse: null,
@@ -179,7 +180,11 @@
     broadcastWrap:       document.getElementById("broadcast-wrap"),
     broadcastBody:       document.getElementById("broadcast-body"),
     downloadSelectedBtn: document.getElementById("download-selected-btn"),
-    downloadsBody:       document.getElementById("downloads-body"),
+    downloadsBoxes:      document.getElementById("downloads-boxes"),
+    downloadsPageSize:   document.getElementById("downloads-pagesize"),
+    downloadsSummary:    document.getElementById("downloads-summary"),
+    downloadsClearComplete: document.getElementById("downloads-clear-complete"),
+    downloadsClearFailed:   document.getElementById("downloads-clear-failed"),
     bulkFetchForm:       document.getElementById("bulk-fetch-form"),
     bulkFetchTextarea:   document.getElementById("bulk-fetch-textarea"),
     bulkFetchErrors:     document.getElementById("bulk-fetch-errors"),
@@ -217,12 +222,6 @@
     stQueued:              document.getElementById("st-queued"),
     stQueuedLabel:         document.getElementById("st-queued-label"),
     stUptime:              document.getElementById("st-uptime"),
-    stSentTotal:           document.getElementById("st-sent-total"),
-    stSentToday:           document.getElementById("st-sent-today"),
-    stSentYesterday:       document.getElementById("st-sent-yesterday"),
-    stSentTotalFiles:      document.getElementById("st-sent-total-files"),
-    stSentTodayFiles:      document.getElementById("st-sent-today-files"),
-    stSentYesterdayFiles:  document.getElementById("st-sent-yesterday-files"),
     stLibrary:             document.getElementById("st-library"),
     stFoot:                document.getElementById("st-foot"),
     stTopFiles:            document.getElementById("st-top-files"),
@@ -236,6 +235,27 @@
     importPreview:         document.getElementById("import-preview"),
     importWarning:         document.getElementById("import-warning"),
     importConfirm:         document.getElementById("import-confirm"),
+    importSource:          document.getElementById("import-source"),
+    ktdataFile:            document.getElementById("ktdata-file"),
+    ktdataStatus:          document.getElementById("ktdata-status"),
+    ktdataPreview:         document.getElementById("ktdata-preview"),
+    ktdataConfirm:         document.getElementById("ktdata-confirm"),
+    ktdataApply:           document.getElementById("ktdata-apply"),
+    ktdataCancel:          document.getElementById("ktdata-cancel"),
+    recordPeriods:         document.getElementById("record-periods"),
+    recordStatus:          document.getElementById("record-status"),
+    recordBody:            document.getElementById("record-body"),
+    recordCards:           document.getElementById("record-cards"),
+    recordPeriodBox:       document.getElementById("record-period-box"),
+    recordSent:            document.getElementById("record-sent"),
+    recordTopSent:         document.getElementById("record-top-sent"),
+    recordTopReceived:     document.getElementById("record-top-received"),
+    recordImported:        document.getElementById("record-imported"),
+    recordNickInput:       document.getElementById("record-nick-input"),
+    recordNickShow:        document.getElementById("record-nick-show"),
+    recordNickResult:      document.getElementById("record-nick-result"),
+    recordExport:          document.getElementById("record-export"),
+    recordForgetAll:       document.getElementById("record-forget-all"),
     importApply:           document.getElementById("import-apply"),
     importCancel:          document.getElementById("import-cancel"),
     stTopAlbums:           document.getElementById("st-top-albums"),
@@ -253,6 +273,8 @@
     verifyRunBtn:         document.getElementById("verify-run-btn"),
     verifyStatus:         document.getElementById("verify-status"),
     verifyResults:        document.getElementById("verify-results"),
+    stopBotRunBtn:        document.getElementById("stop-bot-run-btn"),
+    stopBotStatus:        document.getElementById("stop-bot-status"),
     settingsRail:         document.getElementById("settings-rail"),
     settingsFields:       document.getElementById("settings-fields"),
     settingsSaveBtn:      document.getElementById("settings-save-btn"),
@@ -354,7 +376,8 @@
       if (!state.filelistsLoaded) { loadFilelists(); }
     }
     if (name === "settings" && !state.settingsLoaded) { loadSettings(); }
-    if (name === "stats") { loadStats(); }
+    if (name === "live") { loadLive(); loadQueue(); }
+    if (name === "stats") { loadStats(); loadRecord(); }
     if (name === "tools") { loadUpdateListSchedule(); }
     // Loaded here rather than in the badge's own handler, so every way into
     // this view draws it - the badge is the usual one, not the only one.
@@ -788,7 +811,7 @@
   // fetched file? This cannot be undone." warning, about a file that did
   // not exist.
   function fetchRowNotStarted(state) {
-    return state === "pending" || state === "queued";
+    return state === "pending" || state === "queued" || state === "offered";
   }
 
   function loadDownloads() {
@@ -835,6 +858,13 @@
     var again;
     if (row.request_type === "list") {
       again = postJson("/api/filelists/fetch", { bot: row.bot });
+    } else if (row.request_type === "folder") {
+      // By the folder route (#1040): posted as a file, "!rar <folder>" became a
+      // file row matched by name, and the pack the other bot sent back was
+      // refused as unsolicited.
+      var folder = String(row.requested_filename || "").replace(/^!rar\s+/i, "");
+      if (!folder) { button.disabled = false; return; }
+      again = postJson("/api/filelists/fetch-folder-rar", { bot: row.bot, folder: folder });
     } else {
       // requested_filename, not filename: for a folder row the second is the
       // name the OTHER bot eventually advertised, and for a failed one it may
@@ -861,9 +891,9 @@
     });
   }
 
-  // Delegated: renderDownloads() rebuilds the table's innerHTML on every
+  // Delegated: renderDownloads() rebuilds the tables' innerHTML on every
   // poll, which would silently drop a listener attached to any one row.
-  el.downloadsBody.addEventListener("click", function (evt) {
+  el.downloadsBoxes.addEventListener("click", function (evt) {
     var retry = evt.target.closest ? evt.target.closest(".fetch-retry-btn") : null;
     if (retry) {
       redownloadFetchRow(retry);
@@ -885,10 +915,15 @@
       : t("download.confirmDeleteFile");
     if (!window.confirm(prompt)) { return; }
     btn.disabled = true;
-    postJson("/api/fetch/" + encodeURIComponent(requestId) + "/delete", {}).then(function (res) {
+    // Cancel asks for a request that has not started and nothing else
+    // (#1046): one that finished while this dialog was open is refused with a
+    // 409, and its file stays.
+    var body = btn.dataset.pending ? { only_waiting: true } : {};
+    postJson("/api/fetch/" + encodeURIComponent(requestId) + "/delete", body).then(function (res) {
       if (!res.ok) {
         window.alert(t("download.couldNotDelete").replace("{error}", (res.data && res.data.error) || ("HTTP " + res.status)));
         btn.disabled = false;
+        if (res.status === 409) { loadDownloads(); }
         return;
       }
       loadDownloads();
@@ -898,12 +933,202 @@
     });
   });
 
-  function renderDownloads(rows) {
-    if (!rows.length) {
-      el.downloadsBody.innerHTML = emptyRow(5, t("download.nothingQueued"));
-      return;
+  // Sort and page (#1019, #1021): the download list is three boxes and each one
+  // sorts and pages on its own. The rows are all here already (the server keeps
+  // at most FETCH_HISTORY_MAX_ROWS finished ones), so this is done on the page
+  // and needs no new request. Sort and page size are remembered per browser.
+  var DOWNLOADS_SORT_KEY = "dccore-downloads-sort";
+  var DOWNLOADS_PAGE_SIZE_KEY = "dccore-downloads-page-size";
+  var DOWNLOADS_PAGE_SIZES = [10, 15, 20, 50, 100];
+  var DOWNLOAD_QUEUE_STATES = ["pending", "offered", "queued", "listening", "receiving"];
+  var DOWNLOAD_BOXES = [
+    { id: "queue", empty: "download.nothingQueued", match: function (row) {
+      return DOWNLOAD_QUEUE_STATES.indexOf(row.state || "pending") !== -1;
+    } },
+    { id: "finished", empty: "download.box.finishedEmpty", match: function (row) {
+      return row.state === "complete";
+    } },
+    { id: "failed", empty: "download.box.failedEmpty", match: function (row) {
+      return row.state === "failed";
+    } }
+  ];
+  // Running ones first when sorted by state, then waiting, then finished.
+  var DOWNLOAD_STATE_RANK = {
+    receiving: 0, listening: 1, offered: 2, queued: 3, pending: 4,
+    failed: 5, rejected: 6, complete: 7
+  };
+
+  function readStored(key) {
+    try { return localStorage.getItem(key); } catch (err) { return null; }
+  }
+  function writeStored(key, value) {
+    try { localStorage.setItem(key, value); } catch (err) { /* not remembered */ }
+  }
+
+  state.downloadSort = {};
+  state.downloadPages = {};
+  state.downloadPageSize = 15;
+  DOWNLOAD_BOXES.forEach(function (box) {
+    var id = box.id;
+    box.body = document.getElementById("downloads-" + id + "-body");
+    box.count = document.getElementById("downloads-" + id + "-count");
+    box.prev = document.getElementById("downloads-" + id + "-prev");
+    box.next = document.getElementById("downloads-" + id + "-next");
+    box.pageInfo = document.getElementById("downloads-" + id + "-pageinfo");
+    box.table = document.getElementById("downloads-" + id + "-table");
+    box.lastHtml = null;
+    state.downloadSort[id] = { key: "", dir: 1 };
+    state.downloadPages[id] = 0;
+    var parts = String(readStored(DOWNLOADS_SORT_KEY + "-" + id) || "").split(":");
+    if (["bot", "file", "state", "progress"].indexOf(parts[0]) !== -1 &&
+        (parts[1] === "asc" || parts[1] === "desc")) {
+      state.downloadSort[id] = { key: parts[0], dir: parts[1] === "asc" ? 1 : -1 };
     }
-    el.downloadsBody.innerHTML = rows.map(function (row) {
+  });
+  (function restoreDownloadsPageSize() {
+    var size = parseInt(readStored(DOWNLOADS_PAGE_SIZE_KEY), 10);
+    if (DOWNLOADS_PAGE_SIZES.indexOf(size) !== -1) { state.downloadPageSize = size; }
+    el.downloadsPageSize.value = String(state.downloadPageSize);
+  })();
+
+  function downloadDisplayState(row) {
+    return row.list_processing_error ? "rejected" : (row.state || "pending");
+  }
+
+  function downloadSortValue(row, key) {
+    if (key === "bot") { return String(row.bot || "").toLowerCase(); }
+    if (key === "file") {
+      return String(row.filename || row.requested_filename || row.bot || "").toLowerCase();
+    }
+    if (key === "state") {
+      var rank = DOWNLOAD_STATE_RANK[downloadDisplayState(row)];
+      return rank === undefined ? 99 : rank;
+    }
+    return row.total_size ? (row.bytes_received || 0) / row.total_size : (row.bytes_received || 0);
+  }
+
+  // The server sends newest first; equal values keep that order.
+  function sortedDownloads(rows, boxId) {
+    var sort = state.downloadSort[boxId];
+    if (!sort.key) { return rows; }
+    return rows.map(function (row, index) { return { row: row, index: index }; })
+      .sort(function (a, b) {
+        var left = downloadSortValue(a.row, sort.key);
+        var right = downloadSortValue(b.row, sort.key);
+        if (left < right) { return -sort.dir; }
+        if (left > right) { return sort.dir; }
+        return a.index - b.index;
+      })
+      .map(function (item) { return item.row; });
+  }
+
+  function renderDownloadsBoxControls(box, total, pages, finishedCounts) {
+    var sort = state.downloadSort[box.id];
+    Array.prototype.forEach.call(box.table.querySelectorAll("th[data-sort-col]"), function (th) {
+      th.setAttribute("aria-sort", th.getAttribute("data-sort-col") === sort.key
+        ? (sort.dir === 1 ? "ascending" : "descending") : "none");
+    });
+    var page = state.downloadPages[box.id];
+    box.count.textContent = total ? "(" + total + ")" : "";
+    box.prev.disabled = page <= 0;
+    box.next.disabled = page >= pages - 1;
+    box.pageInfo.textContent = total > state.downloadPageSize
+      ? t("download.pageOf").replace("{page}", page + 1)
+          .replace("{pages}", pages).replace("{count}", total)
+      : "";
+    if (box.id === "finished") {
+      el.downloadsClearComplete.textContent =
+        t("download.clearComplete").replace("{count}", finishedCounts.complete);
+      el.downloadsClearComplete.disabled = !finishedCounts.complete;
+    } else if (box.id === "failed") {
+      el.downloadsClearFailed.textContent =
+        t("download.clearFailed").replace("{count}", finishedCounts.failed);
+      el.downloadsClearFailed.disabled = !finishedCounts.failed;
+    }
+  }
+
+  function clearDownloads(which, count) {
+    if (!count || !window.confirm(t("download.confirmClear").replace("{count}", count))) { return; }
+    postJson("/api/fetch/clear", { which: which }).then(function (res) {
+      if (!res.ok) {
+        window.alert(t("download.couldNotClear").replace("{error}",
+          (res.data && res.data.error) || ("HTTP " + res.status)));
+        return;
+      }
+      loadDownloads();
+    }).catch(function (err) {
+      window.alert(t("download.couldNotClear").replace("{error}", err.message));
+    });
+  }
+
+  function redrawDownloads() { renderDownloads(state.downloads || []); }
+
+  DOWNLOAD_BOXES.forEach(function (box) {
+    Array.prototype.forEach.call(box.table.querySelectorAll(".sort-btn"), function (button) {
+      button.addEventListener("click", function () {
+        var key = button.getAttribute("data-sort");
+        var sort = state.downloadSort[box.id];
+        // Ascending, then descending, then back to the server's newest-first.
+        if (sort.key !== key) { state.downloadSort[box.id] = { key: key, dir: 1 }; }
+        else if (sort.dir === 1) { state.downloadSort[box.id] = { key: key, dir: -1 }; }
+        else { state.downloadSort[box.id] = { key: "", dir: 1 }; }
+        var now = state.downloadSort[box.id];
+        writeStored(DOWNLOADS_SORT_KEY + "-" + box.id,
+          now.key ? now.key + ":" + (now.dir === 1 ? "asc" : "desc") : "");
+        state.downloadPages[box.id] = 0;
+        redrawDownloads();
+      });
+    });
+    box.prev.addEventListener("click", function () {
+      state.downloadPages[box.id] = Math.max(0, state.downloadPages[box.id] - 1);
+      redrawDownloads();
+    });
+    box.next.addEventListener("click", function () {
+      state.downloadPages[box.id] += 1;
+      redrawDownloads();
+    });
+  });
+  el.downloadsPageSize.addEventListener("change", function () {
+    var size = parseInt(el.downloadsPageSize.value, 10);
+    if (DOWNLOADS_PAGE_SIZES.indexOf(size) === -1) { return; }
+    state.downloadPageSize = size;
+    writeStored(DOWNLOADS_PAGE_SIZE_KEY, String(size));
+    DOWNLOAD_BOXES.forEach(function (box) { state.downloadPages[box.id] = 0; });
+    redrawDownloads();
+  });
+  el.downloadsClearComplete.addEventListener("click", function () {
+    clearDownloads("complete", (state.downloads || []).filter(function (row) {
+      return row.state === "complete";
+    }).length);
+  });
+  el.downloadsClearFailed.addEventListener("click", function () {
+    clearDownloads("failed", (state.downloads || []).filter(function (row) {
+      return row.state === "failed";
+    }).length);
+  });
+
+  function renderDownloads(allRows) {
+    var finishedCounts = { complete: 0, failed: 0 };
+    allRows.forEach(function (row) {
+      if (row.state === "complete") { finishedCounts.complete += 1; }
+      else if (row.state === "failed") { finishedCounts.failed += 1; }
+    });
+    renderDownloadsSummary(allRows);
+    DOWNLOAD_BOXES.forEach(function (box) {
+      var mine = allRows.filter(box.match);
+      var pages = Math.max(1, Math.ceil(mine.length / state.downloadPageSize));
+      if (state.downloadPages[box.id] > pages - 1) { state.downloadPages[box.id] = pages - 1; }
+      renderDownloadsBoxControls(box, mine.length, pages, finishedCounts);
+      if (!mine.length) {
+        setDownloadsBody(box, emptyRow(5, t(box.empty)));
+        return;
+      }
+      var start = state.downloadPages[box.id] * state.downloadPageSize;
+      var rows = sortedDownloads(mine, box.id).slice(start, start + state.downloadPageSize);
+      setDownloadsBody(box, rows.map(downloadRowHtml).join(""));
+    });
+
+    function downloadRowHtml(row) {
       var state = row.state || "pending";
       // dcc_fetch.py records a refused list archive on the row explicitly
       // "for the dashboard", and /api/fetch/status serves it - but nothing
@@ -938,7 +1163,7 @@
       // A request the other bot queued (#926) can be let go as well: nothing
       // is moving yet, and forgetting it is all there is to do.
       var deletable = (state === "complete" || state === "failed" || state === "pending" ||
-                       state === "queued");
+                       state === "queued" || state === "offered");
       // "Cancel" for a row that has not started - calling it Delete would
       // suggest a downloaded file is being thrown away when none exists.
       var notStarted = fetchRowNotStarted(state);
@@ -979,7 +1204,7 @@
           encodeURIComponent(row.id) + "\">" + t("download.resumeBot") + "</button> " + deleteBtn;
       } else if (state === "pending") {
         action = deleteBtn;
-      } else if (state === "queued") {
+      } else if (state === "queued" || state === "offered") {
         // #926: what the other bot said, and a way to let the request go.
         action = (row.reply ? "<span class=\"col-dim\">" + escapeHtml(row.reply) + "</span> " : "") + deleteBtn;
       } else {
@@ -1008,7 +1233,44 @@
         "<td class=\"col-mono\">" + escapeHtml(progress) + "</td>" +
         "<td>" + action + "</td>" +
         "</tr>";
+    }
+  }
+
+  // The tables are rebuilt on every poll. A click needs mousedown and mouseup on
+  // the same element, so a rebuild between the two swallowed it: Cancel
+  // sometimes did nothing. Leave the DOM alone when nothing changed.
+  function setDownloadsBody(box, html) {
+    if (html === box.lastHtml) { return; }
+    box.lastHtml = html;
+    box.body.innerHTML = html;
+  }
+
+  // What the download queue holds, by where each request stands. The table
+  // shows one row each; this says how many are running, waiting on another
+  // bot, or still to be asked.
+  var DOWNLOAD_SUMMARY_GROUPS = [
+    { states: ["receiving", "listening"], label: "download.summary.downloading" },
+    { states: ["offered"], label: "download.summary.asked" },
+    { states: ["queued"], label: "download.summary.queuedThere" },
+    { states: ["pending"], label: "download.summary.waiting" }
+  ];
+
+  function renderDownloadsSummary(allRows) {
+    var open = allRows.filter(function (row) {
+      return ["receiving", "listening", "offered", "queued", "pending"].indexOf(row.state) !== -1;
+    });
+    if (!open.length) {
+      el.downloadsSummary.innerHTML = "";
+      return;
+    }
+    var html = DOWNLOAD_SUMMARY_GROUPS.map(function (group) {
+      var n = open.filter(function (row) { return group.states.indexOf(row.state) !== -1; }).length;
+      return "<span class=\"summary-item\"><span class=\"summary-count\">" + n + "</span>" +
+        "<span class=\"col-dim\">" + escapeHtml(t(group.label)) + "</span></span>";
     }).join("");
+    html = "<span class=\"summary-item\"><span class=\"summary-count\">" + open.length + "</span>" +
+      "<span class=\"col-dim\">" + escapeHtml(t("download.summary.inQueue")) + "</span></span>" + html;
+    if (el.downloadsSummary.innerHTML !== html) { el.downloadsSummary.innerHTML = html; }
   }
 
   // ---------------------------------------------------------------- Queue
@@ -3272,6 +3534,9 @@
 
   function resetImportPreview() {
     state.importValues = null;
+    state.importPayload = null;
+    el.importSource.hidden = true;
+    el.importSource.innerHTML = "";
     el.importPreviewWrap.hidden = true;
     el.importPreview.innerHTML = "";
     el.importWarning.hidden = true;
@@ -3289,7 +3554,14 @@
       "Files sent (packed)": "total_files",
       "Files sent (plain)": "total_files",
       "Bytes sent": "total_bytes",
-      "Speed record": "speed_record"
+      "Speed record": "speed_record",
+      // KeepTrack's (#1062). Its sent totals share the targets above but are
+      // never added to them: the server keeps the sources apart, and the
+      // choice below decides which one "after" shows and the import writes.
+      "Files sent (KeepTrack)": "total_files",
+      "Bytes sent (KeepTrack)": "total_bytes",
+      "Files received (KeepTrack)": "received_files",
+      "Bytes received (KeepTrack)": "received_bytes"
     };
     // The label the server sent is what byTarget above matches on, so it
     // stays untranslated there; this only decides what to SHOW for the ones
@@ -3299,7 +3571,11 @@
       "Files sent (packed)": "stats.filesSentPacked",
       "Files sent (plain)": "stats.filesSentPlain",
       "Bytes sent": "stats.bytesSentImport",
-      "Speed record": "stats.speedRecordImport"
+      "Speed record": "stats.speedRecordImport",
+      "Files sent (KeepTrack)": "stats.filesSentKeepTrack",
+      "Bytes sent (KeepTrack)": "stats.bytesSentKeepTrack",
+      "Files received (KeepTrack)": "stats.filesReceivedKeepTrack",
+      "Bytes received (KeepTrack)": "stats.bytesReceivedKeepTrack"
     };
 
     var body = "";
@@ -3330,6 +3606,8 @@
     el.importPreview.innerHTML = body;
     el.importPreviewWrap.hidden = false;
     state.importValues = values;
+    state.importPayload = payload;
+    renderImportSourceChoice(payload);
 
     // OVERWRITTEN, NOT COMBINED - and said only when it matters. On a fresh
     // install nobody reads that sentence; on a used one it is the only thing
@@ -3345,6 +3623,63 @@
     el.importConfirm.hidden = false;
     showImportStatus("");
   }
+
+  // WHICH SENT TOTALS (#1062). The OmenServe add-ons and KeepTrack counted
+  // the same sends, so when the file has both the operator picks one; they
+  // are never added together. Picking redraws the "after" column from the
+  // server's own figures for that source and is what the import then posts.
+  function renderImportSourceChoice(payload) {
+    var sources = payload.sent_sources || [];
+    if (sources.length < 2) {
+      el.importSource.hidden = true;
+      el.importSource.innerHTML = "";
+      return;
+    }
+    // Built as elements, values set as properties: nothing from the server
+    // is concatenated into an attribute (the rule this page keeps everywhere).
+    el.importSource.innerHTML = "";
+    var question = document.createElement("p");
+    question.textContent = t("stats.sentSourceQuestion");
+    el.importSource.appendChild(question);
+    sources.forEach(function (source) {
+      var label = document.createElement("label");
+      label.className = "import-source-option";
+      var input = document.createElement("input");
+      input.type = "radio";
+      input.name = "import-sent-source";
+      input.value = source.name;
+      input.checked = source.name === payload.sent_source;
+      label.appendChild(input);
+      label.appendChild(document.createTextNode(" " + t("stats.sentSourceOption")
+        .replace("{source}", source.label)
+        .replace("{files}", Number(source.total_files || 0).toLocaleString())));
+      el.importSource.appendChild(label);
+    });
+    el.importSource.hidden = false;
+  }
+
+  function chooseImportSource(name) {
+    var payload = state.importPayload;
+    if (!payload) { return; }
+    var source = (payload.sent_sources || []).filter(function (s) { return s.name === name; })[0];
+    if (!source) { return; }
+    var values = {};
+    Object.keys(payload.values || {}).forEach(function (key) {
+      if (key !== "total_files" && key !== "total_bytes") { values[key] = payload.values[key]; }
+    });
+    ["total_files", "total_bytes"].forEach(function (key) {
+      if (source[key] !== undefined) { values[key] = source[key]; }
+    });
+    payload.values = values;
+    payload.sent_source = name;
+    renderImportPreview(payload);
+  }
+
+  el.importSource.addEventListener("change", function (evt) {
+    if (evt.target && evt.target.name === "import-sent-source") {
+      chooseImportSource(evt.target.value);
+    }
+  });
 
   function previewImportText(text) {
     if (!String(text || "").trim()) {
@@ -3427,6 +3762,106 @@
     });
   });
 
+  // ---------------------------- KeepTrack's per-nick history (#1064)
+
+  // The file's text goes to the bot's own dashboard, which reads it and keeps
+  // nicks and totals only - never the hosts in it. Preview first, then the
+  // import sends the same text again: the server reads it afresh rather than
+  // trusting a figure the page hands back.
+  var ktdata = { text: null };
+
+  function showKTDataStatus(text, isError) {
+    el.ktdataStatus.hidden = !text;
+    el.ktdataStatus.textContent = text || "";
+    el.ktdataStatus.classList.toggle("is-error", !!isError);
+  }
+
+  function resetKTDataPreview() {
+    ktdata.text = null;
+    el.ktdataPreview.hidden = true;
+    el.ktdataPreview.innerHTML = "";
+    el.ktdataConfirm.hidden = true;
+  }
+
+  function ktdataLine(text) {
+    var line = document.createElement("p");
+    line.textContent = text;
+    el.ktdataPreview.appendChild(line);
+  }
+
+  function renderKTDataPreview(payload) {
+    var figures = payload.figures || {};
+    var sent = figures.sent || {}, received = figures.received || {};
+    el.ktdataPreview.innerHTML = "";
+    ktdataLine(t("stats.ktdataSummary")
+      .replace("{sentNicks}", Number(sent.nicks || 0).toLocaleString())
+      .replace("{sentFiles}", Number(sent.files || 0).toLocaleString())
+      .replace("{receivedNicks}", Number(received.nicks || 0).toLocaleString())
+      .replace("{receivedFiles}", Number(received.files || 0).toLocaleString()));
+    [["sent", "stats.ktdataTopSent"], ["received", "stats.ktdataTopReceived"]].forEach(function (pair) {
+      var top = (figures[pair[0]] || {}).top || [];
+      if (!top.length) { return; }
+      ktdataLine(t(pair[1]) + " " + top.map(function (row) {
+        return row.nick + " (" + Number(row.files).toLocaleString() + ")";
+      }).join(", "));
+    });
+    var skipped = payload.skipped || {};
+    var reasons = Object.keys(skipped);
+    if (reasons.length) {
+      ktdataLine(t("stats.ktdataSkipped")
+        .replace("{count}", reasons.reduce(function (n, r) { return n + skipped[r]; }, 0))
+        .replace("{reasons}", reasons.map(function (r) { return r + " (" + skipped[r] + ")"; }).join(", ")));
+    }
+    var replaces = payload.replaces || {};
+    if ((replaces.sent || 0) + (replaces.received || 0) > 0) {
+      ktdataLine(t("stats.ktdataReplaces"));
+    }
+    el.ktdataPreview.hidden = false;
+    el.ktdataConfirm.hidden = !((sent.nicks || 0) + (received.nicks || 0));
+  }
+
+  el.ktdataFile.addEventListener("change", function () {
+    var file = el.ktdataFile.files && el.ktdataFile.files[0];
+    if (!file) { return; }
+    var reader = new FileReader();
+    reader.onload = function () {
+      var text = String(reader.result || "");
+      postJson("/api/stats/import-ktdata/preview", { text: text }).then(function (res) {
+        if (!res.ok) {
+          resetKTDataPreview();
+          showKTDataStatus((res.data && res.data.error) || ("HTTP " + res.status), true);
+          return;
+        }
+        ktdata.text = text;
+        showKTDataStatus("");
+        renderKTDataPreview(res.data);
+      });
+    };
+    reader.onerror = function () { showKTDataStatus(t("stats.couldNotReadThatFile"), true); };
+    reader.readAsText(file);
+    el.ktdataFile.value = "";
+  });
+
+  el.ktdataCancel.addEventListener("click", function () {
+    resetKTDataPreview();
+    showKTDataStatus("");
+  });
+
+  el.ktdataApply.addEventListener("click", function () {
+    if (ktdata.text === null) { return; }
+    el.ktdataApply.disabled = true;
+    postJson("/api/stats/import-ktdata", { text: ktdata.text }).then(function (res) {
+      el.ktdataApply.disabled = false;
+      if (!res.ok) {
+        showKTDataStatus((res.data && res.data.error) || ("HTTP " + res.status), true);
+        return;
+      }
+      resetKTDataPreview();
+      showKTDataStatus(t("stats.ktdataImported").replace("{rows}", Number(res.data.imported || 0).toLocaleString()));
+      loadStats();
+    });
+  });
+
   // ---------------------------------------------------------------- Tools
 
   // Rebuilding the list is the dashboard's own equivalent of !update -
@@ -3444,8 +3879,18 @@
     showUpdateListStatus(t("tools.starting"), false);
     postJson("/api/tools/update-list", {}).then(function (res) {
       if (!res.ok) {
-        el.updateListRunBtn.disabled = false;
-        showUpdateListStatus(res.data.error || ("HTTP " + res.status), true);
+        // Refused - and "already running" means one started elsewhere, which
+        // is worth following rather than only saying so (#1023). Asked of
+        // /status, not read off the 409: "another scan" is a 409 too.
+        var refused = (res.data && res.data.error) || ("HTTP " + res.status);
+        fetchJson("/api/tools/update-list/status").then(function (payload) {
+          if (followRunningUpdate(payload)) { return; }
+          el.updateListRunBtn.disabled = false;
+          showUpdateListStatus(refused, true);
+        }).catch(function () {
+          el.updateListRunBtn.disabled = false;
+          showUpdateListStatus(refused, true);
+        });
         return;
       }
       startUpdateListPolling();
@@ -3532,9 +3977,23 @@
   // #776: when LIST_REBUILD_SCHEDULE will next rebuild, or that none is set.
   // Read each time the Tools view opens - the same status payload the Run
   // button polls, which carries the schedule and its next time.
+  // A REBUILD STARTED ANYWHERE ELSE IS FOLLOWED TOO (#1023). Only this page's
+  // own button used to start the bar, so one started by the console's
+  // `update`, by !update in IRC or by LIST_REBUILD_SCHEDULE ran unseen here -
+  // and the button then said only "already running". Now the page follows
+  // whatever is running: when Tools is opened, while it is open (the refresh
+  // tick below), and when the button is refused. True when it took it up.
+  function followRunningUpdate(payload) {
+    if (!payload || !payload.running || updateList.pollTimer) { return false; }
+    el.updateListRunBtn.disabled = true;
+    startUpdateListPolling();
+    return true;
+  }
+
   function loadUpdateListSchedule() {
     if (!el.updateListSchedule) { return; }
     fetchJson("/api/tools/update-list/status").then(function (payload) {
+      followRunningUpdate(payload);
       var schedule = payload && payload.schedule;
       var text;
       if (!schedule) {
@@ -3665,6 +4124,23 @@
       .then(function () {
         el.verifyRunBtn.disabled = false;
       });
+  });
+
+  // Stop the bot (#1065): the same stop as Ctrl-C in its window.
+  el.stopBotRunBtn.addEventListener("click", function () {
+    if (!window.confirm(t("tools.stopBotConfirm"))) { return; }
+    el.stopBotRunBtn.disabled = true;
+    el.stopBotStatus.classList.remove("is-error");
+    postJson("/api/tools/stop", {}).then(function (res) {
+      if (res.ok) {
+        el.stopBotStatus.textContent = t("tools.stopBotStopping");
+        return;
+      }
+      el.stopBotStatus.textContent = t("tools.couldNotStopBot").replace(
+        "{error}", (res.data && res.data.error) || ("HTTP " + res.status));
+      el.stopBotStatus.classList.add("is-error");
+      el.stopBotRunBtn.disabled = false;
+    });
   });
 
   // ------------------------------------------------------------- Settings
@@ -4095,6 +4571,7 @@
     LIST_AUDIO_INFO_THREADS: "settings.field.LIST_AUDIO_INFO_THREADS",
     LIST_SCAN_THREADS: "settings.field.LIST_SCAN_THREADS",
     DOWNLOAD_COUNTS_FILE: "settings.field.DOWNLOAD_COUNTS_FILE",
+    TRANSFER_LOG_FILE: "settings.field.TRANSFER_LOG_FILE",
     FETCHED_BOT_LISTS_FILE: "settings.field.FETCHED_BOT_LISTS_FILE",
     FETCH_HISTORY_FILE: "settings.field.FETCH_HISTORY_FILE",
     NOTICES_FILE: "settings.field.NOTICES_FILE",
@@ -4123,6 +4600,7 @@
     CUSTOM_THEME_ACCENT: "settings.field.CUSTOM_THEME_ACCENT",
     ANNOUNCE_TRANSFERS: "settings.field.ANNOUNCE_TRANSFERS",
     REJOIN_ATTEMPTS: "settings.field.REJOIN_ATTEMPTS",
+    ON_CONNECT_CHECK_MINUTES: "settings.field.ON_CONNECT_CHECK_MINUTES",
     ANNOUNCE_INTERVAL: "settings.field.ANNOUNCE_INTERVAL",
     BROADCAST_SEARCH_CHANNEL: "settings.field.BROADCAST_SEARCH_CHANNEL",
     BROADCAST_SEARCH_COOLDOWN: "settings.field.BROADCAST_SEARCH_COOLDOWN",
@@ -4158,6 +4636,10 @@
     CONSOLE_SHOW_SEARCHES: "settings.field.CONSOLE_SHOW_SEARCHES",
     DEBUG_CHANNEL_FEED: "settings.field.DEBUG_CHANNEL_FEED",
     CONSOLE_TIMESTAMP_FORMAT: "settings.field.CONSOLE_TIMESTAMP_FORMAT",
+    CONSOLE_LOG_FILE: "settings.field.CONSOLE_LOG_FILE",
+    CONSOLE_LOG_MAX_MB: "settings.field.CONSOLE_LOG_MAX_MB",
+    CONSOLE_LOG_KEEP: "settings.field.CONSOLE_LOG_KEEP",
+    BOT_WINDOW: "settings.field.BOT_WINDOW",
     PROJECT_URL: "settings.field.PROJECT_URL"
   };
 
@@ -4452,17 +4934,33 @@
       '<div class="served-folder-actions">' +
         '<button type="button" class="btn btn-accent on-connect-save">' +
         t("settings.saveOnConnectCommands") + "</button>" +
+        // Beside Save (#1066): the saved commands, sent to the server now.
+        '<button type="button" class="btn on-connect-resend" title="' +
+        escapeHtml(t("settings.resendOnConnectTitle")) + '">' +
+        t("settings.resendOnConnectCommands") + "</button>" +
       "</div>" + note + "</div>";
   }
 
+  // What is typed in the box outlives a re-render until a save succeeds
+  // (#1090). The panel is rebuilt for every note - Resend's "save first",
+  // a refused save - and filling the box from the SAVED set then threw the
+  // typing away, right beside the advice to save it.
   function attachOnConnectRows() {
     var data = state.onConnect || { commands: [], delay_seconds: 2 };
     var box = el.settingsFields.querySelector(".on-connect-commands");
     var delay = el.settingsFields.querySelector(".on-connect-delay-input");
     if (!box || !delay) { return; }
 
-    box.value = (data.commands || []).join("\n");
-    delay.value = data.delay_seconds === undefined ? 2 : data.delay_seconds;
+    var draft = state.onConnectDraft;
+    box.value = draft ? draft.commands : (data.commands || []).join("\n");
+    delay.value = draft ? draft.delay
+      : (data.delay_seconds === undefined ? 2 : data.delay_seconds);
+
+    function keepDraft() {
+      state.onConnectDraft = { commands: box.value, delay: delay.value };
+    }
+    box.addEventListener("input", keepDraft);
+    delay.addEventListener("input", keepDraft);
   }
 
   function loadOnConnect() {
@@ -4492,6 +4990,7 @@
           delay_seconds: res.data.delay_seconds,
           max_delay_seconds: (state.onConnect || {}).max_delay_seconds
         };
+        state.onConnectDraft = null;
         state.onConnectNote = { ok: true, text: res.data.message || t("settings.saved") };
       } else {
         // Every fault at once, newline separated, the same way the folder and
@@ -4504,6 +5003,25 @@
           problems: parts.length > 1 ? parts : []
         };
       }
+      renderSettingsCategory();
+    });
+  }
+
+  // Sends what is SAVED (#1066). A box that differs from it is said rather
+  // than sent: the operator would think the edited lines went out.
+  function resendOnConnect() {
+    var box = el.settingsFields.querySelector(".on-connect-commands");
+    var saved = ((state.onConnect || {}).commands || []).join("\n");
+    if (box && box.value.split("\n").map(function (line) { return line.trim(); })
+          .filter(Boolean).join("\n") !== saved) {
+      state.onConnectNote = { ok: false, text: t("settings.resendSaveFirst") };
+      renderSettingsCategory();
+      return;
+    }
+    return postJson("/api/on-connect/resend", {}).then(function (res) {
+      state.onConnectNote = res.ok
+        ? { ok: true, text: res.data.message }
+        : { ok: false, text: (res.data && res.data.error) || ("HTTP " + res.status) };
       renderSettingsCategory();
     });
   }
@@ -5312,6 +5830,10 @@
       saveOnConnect();
       return;
     }
+    if (evt.target.closest(".on-connect-resend")) {
+      resendOnConnect();
+      return;
+    }
 
     var listButton = evt.target.closest(
       ".served-list-add, .served-list-save, .served-list-remove, " +
@@ -5475,10 +5997,10 @@
     fetchJson("/api/queue").then(function (rows) {
       markConnection(true);
       renderSidebarStatus(rows);
-      // The queue table lives on Stats now (#133). Same rule as before -
-      // refresh the visible table only when it is the one showing, so a
-      // background poll never clobbers what the operator is reading.
-      if (state.active === "stats") {
+      // The queue table lives on Live Transfers (#133, #1117). Same rule as
+      // before - refresh the visible table only when it is the one showing,
+      // so a background poll never clobbers what the operator is reading.
+      if (state.active === "live") {
         renderQueueStats(rows);
         renderQueueTable(rows);
       }
@@ -5490,11 +6012,17 @@
   // reasoning as the sidebar status card above.
   setInterval(loadDownloads, DOWNLOADS_POLL_MS);
 
-  // Only while Stats is the view on screen. Speed now and the queue counters
-  // move second to second; the rest of the page does not, and polling a view
+  // Only while Live Transfers is the view on screen. Speed now and the queue
+  // counters move second to second; Stats does not, and polling a view
   // nobody is looking at is the 401 storm in miniature.
   setInterval(function () {
-    if (state.active === "stats") { loadStats(); }
+    if (state.active === "live") { loadLive(); }
+  }, REFRESH_MS);
+
+  // A rebuild started elsewhere while Tools is on screen is picked up within
+  // a tick (#1023); once it is followed, its own faster poll takes over.
+  setInterval(function () {
+    if (state.active === "tools" && !updateList.pollTimer) { loadUpdateListSchedule(); }
   }, REFRESH_MS);
 
   // A list-fetch (Download tab, or the File Lists fetch box) can complete
@@ -5558,14 +6086,21 @@
   function renderStats(data) {
     // Kept, so a language that arrives later can redraw it (#976).
     state.lastStats = data;
-    var tr = data.transfer || {};
-    var s = data.sent || {};
-    var lib = data.library || {};
+    renderTransfer(data.transfer);
+    renderLibrary(data.library || {});
 
-    // Every figure is rendered server-side by the same helpers the channel
-    // advert and the admin console use, so the page cannot disagree with the
-    // advert about how the same number reads. The raw values are in the
-    // payload too, for anything that is not this page.
+    // Once the record has answered, the tables belong to its period; this
+    // payload's all-time lists are only for a bot with the record off, and
+    // for the moment before the record has loaded.
+    if (!recordIsOn()) { renderTopDownloads(data.top); }
+    setStat(el.stFoot, data.version || "");
+  }
+
+  // The Live Transfers figures. Every one is rendered server-side by the same
+  // helpers the channel advert and the admin console use, so the page cannot
+  // disagree with the advert about how the same number reads.
+  function renderTransfer(tr) {
+    tr = tr || {};
     setStat(el.stSpeed, tr.speed_now_text || "0k/s");
     setStat(el.stRecord, tr.record_text || "0k/s");
     setStat(el.stSending, (tr.sending || 0) + " / " + (tr.slots || 0));
@@ -5576,21 +6111,6 @@
                   .replace("{count}", tr.queued_users)
               : ""));
     setStat(el.stUptime, tr.uptime_text || "0 Min");
-
-    setStat(el.stSentTotal, s.total_text || "0B");
-    setStat(el.stSentToday, s.today_text || "0B");
-    setStat(el.stSentYesterday, s.yesterday_text || "0B");
-    setStat(el.stSentTotalFiles, t("stats.labelledFileCount")
-      .replace("{label}", t("common.total")).replace("{count}", (s.total_files || 0).toLocaleString()));
-    setStat(el.stSentTodayFiles, t("stats.labelledFileCount")
-      .replace("{label}", t("common.today")).replace("{count}", (s.today_files || 0).toLocaleString()));
-    setStat(el.stSentYesterdayFiles, t("stats.labelledFileCount")
-      .replace("{label}", t("common.yesterday")).replace("{count}", (s.yesterday_files || 0).toLocaleString()));
-
-    renderLibrary(lib);
-
-    renderTopDownloads(data.top);
-    setStat(el.stFoot, data.version || "");
   }
 
   // #952: the Library cards, built rather than fixed because how many there are
@@ -5654,6 +6174,239 @@
       renderStats(data);
     }).catch(function () { markConnection(false); });
   }
+
+  // What Live Transfers polls (#1123): its own figures only. The whole
+  // payload also ranked the download counts and counted the RAR list on
+  // every poll - seconds on a big bot - for tables this page does not show.
+  // state.lastStats is left alone: it is the Stats page's.
+  function loadLive() {
+    fetchJson("/api/stats?parts=transfer").then(function (data) {
+      markConnection(true);
+      renderTransfer(data.transfer);
+    }).catch(function () { markConnection(false); });
+  }
+
+  // ------------------------------------------------------ Transfer record
+  //
+  // What transfer_log.py has written for every finished transfer (#1102).
+  // Asked for when Stats opens and when the period changes, never on the
+  // poll above: these are queries over every row. Nicks and file names are
+  // other people's text, so every one of them goes in as textContent.
+
+  var record = { period: "all" };
+
+  // Every {name} filled in ONE pass. A chain of .replace() calls read a nick
+  // put in by an earlier one as a placeholder: "{sent}" is a legal nick, and
+  // looked up it came back as "5: {sent} file(s)...".
+  function fillIn(template, values) {
+    return template.replace(/\{(\w+)\}/g, function (whole, name) {
+      return Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : whole;
+    });
+  }
+
+  function recordNote(text, isError) {
+    el.recordStatus.hidden = !text;
+    el.recordStatus.textContent = text || "";
+    el.recordStatus.classList.toggle("is-error", !!isError);
+  }
+
+  function recordCell(row, text, numeric) {
+    var cell = document.createElement("td");
+    if (numeric) { cell.className = "col-num"; }
+    cell.textContent = text;
+    if (!numeric) { cell.title = text; }   // the name column truncates
+    row.appendChild(cell);
+  }
+
+  function recordTable(body, rows, columns, emptyText) {
+    body.textContent = "";
+    if (!rows || !rows.length) {
+      var empty = document.createElement("tr");
+      empty.className = "empty-row";
+      var cell = document.createElement("td");
+      cell.colSpan = columns.length;
+      cell.textContent = emptyText;
+      empty.appendChild(cell);
+      body.appendChild(empty);
+      return;
+    }
+    rows.forEach(function (item) {
+      var row = document.createElement("tr");
+      columns.forEach(function (column, index) {
+        recordCell(row, String(column(item)), index > 0);
+      });
+      body.appendChild(row);
+    });
+  }
+
+  // False until the record has answered, and while it is off: then the
+  // Most downloaded tables show /api/stats' all-time lists instead.
+  function recordIsOn() {
+    return !!(state.lastRecord && state.lastRecord.enabled !== false);
+  }
+
+  function renderRecord(data) {
+    // Kept, so a language that arrives later can redraw it (#976).
+    state.lastRecord = data;
+    if (!data || data.enabled === false) {
+      el.recordBody.hidden = true;
+      el.recordSent.hidden = true;
+      el.recordPeriodBox.hidden = true;
+      recordNote(t("stats.recordOff"), false);
+      if (state.lastStats) { renderTopDownloads(state.lastStats.top); }
+      return;
+    }
+    recordNote("", false);
+    el.recordBody.hidden = false;
+    el.recordSent.hidden = false;
+    el.recordPeriodBox.hidden = false;
+    var s = data.summary || {};
+    var cards = [
+      [(s.files_sent || 0).toLocaleString(), "stats.recordFilesSent"],
+      [s.bytes_sent_text || "0B", "stats.recordBytesSent"],
+      [(s.lists_sent || 0).toLocaleString(), "stats.recordListsSent"],
+      [s.top_speed_text || "0k/s", "stats.recordTopSpeed"],
+      [s.average_speed_text || "0k/s", "stats.recordAverageSpeed"],
+      [s.queue_wait_text || "—", "stats.recordQueueWait"],
+      [(s.files_received || 0).toLocaleString(), "stats.recordFilesReceived"],
+      [s.bytes_received_text || "0B", "stats.recordBytesReceived"]
+    ];
+    el.recordCards.textContent = "";
+    cards.forEach(function (card) {
+      var box = document.createElement("div");
+      box.className = "stat-card";
+      var value = document.createElement("div");
+      value.className = "stat-value";
+      value.textContent = card[0];
+      var label = document.createElement("div");
+      label.className = "stat-label";
+      label.textContent = t(card[1]);
+      box.appendChild(value);
+      box.appendChild(label);
+      el.recordCards.appendChild(box);
+    });
+    var nickColumns = [
+      function (r) { return r.nick; },
+      function (r) { return (r.files || 0).toLocaleString(); },
+      function (r) { return r.bytes_text; }
+    ];
+    renderTopDownloads({
+      files: data.top_files,
+      albums: data.top_albums,
+      albums_enabled: data.albums_enabled
+    });
+    recordTable(el.recordTopSent, data.top_sent, nickColumns, t("stats.recordNoNicks"));
+    recordTable(el.recordTopReceived, data.top_received, nickColumns, t("stats.recordNoNicks"));
+    el.recordImported.hidden = !data.includes_imported;
+  }
+
+  function loadRecord() {
+    var asked = record.period;
+    return fetchJsonAllowingError("/api/stats/record?period=" + encodeURIComponent(asked))
+      .then(function (res) {
+        // A slow "All time" answering after "24 hours" was chosen would be
+        // drawn under the wrong button.
+        if (asked !== record.period) { return; }
+        if (!res.ok) {
+          recordNote(t("stats.recordCouldNotLoad").replace("{error}",
+            (res.data && res.data.error) || ("HTTP " + res.status)), true);
+          return;
+        }
+        renderRecord(res.data);
+      })
+      .catch(function (err) {
+        recordNote(t("stats.recordCouldNotLoad").replace("{error}", err.message), true);
+      });
+  }
+
+  function chooseRecordPeriod(period) {
+    record.period = period;
+    el.recordPeriods.querySelectorAll(".record-period").forEach(function (button) {
+      button.classList.toggle("is-active", button.getAttribute("data-period") === period);
+    });
+    el.recordExport.href = "/api/stats/record.csv?period=" + encodeURIComponent(period);
+    el.recordNickResult.hidden = true;
+    loadRecord();
+  }
+
+  function renderRecordNick(data) {
+    var box = el.recordNickResult;
+    box.textContent = "";
+    var f = data.figures || {};
+    var line = document.createElement("p");
+    line.className = "import-status";
+    line.textContent = data.found
+      ? fillIn(t("stats.recordNickLine"), {
+          nick: data.nick,
+          sent: (f.files_sent || 0).toLocaleString(),
+          sentSize: f.bytes_sent_text || "0B",
+          lists: (f.lists_sent || 0).toLocaleString(),
+          received: (f.files_received || 0).toLocaleString(),
+          receivedSize: f.bytes_received_text || "0B"
+        })
+      : fillIn(t("stats.recordNickUnknown"), { nick: data.nick });
+    box.appendChild(line);
+    // Offered whether or not this period holds the nick: forgetting is for
+    // all of it, and another period may.
+    var forget = document.createElement("button");
+    forget.type = "button";
+    forget.className = "btn btn-small btn-danger record-forget-nick";
+    forget.textContent = fillIn(t("stats.forgetNick"), { nick: data.nick });
+    forget.addEventListener("click", function () { forgetRecord({ nick: data.nick }); });
+    box.appendChild(forget);
+    box.hidden = false;
+  }
+
+  function lookUpRecordNick() {
+    var nick = el.recordNickInput.value.trim();
+    if (!nick) { return; }
+    var asked = record.period;
+    fetchJsonAllowingError("/api/stats/record/nick?nick=" + encodeURIComponent(nick) +
+                           "&period=" + encodeURIComponent(asked))
+      .then(function (res) {
+        if (asked !== record.period) { return; }
+        if (!res.ok) {
+          recordNote((res.data && res.data.error) || ("HTTP " + res.status), true);
+          return;
+        }
+        recordNote("", false);
+        renderRecordNick(res.data);
+      })
+      .catch(function (err) {
+        recordNote(fillIn(t("stats.recordCouldNotLoad"), { error: err.message }), true);
+      });
+  }
+
+  // Asked first, as Clear failed is: nothing about a forget can be undone.
+  function forgetRecord(what) {
+    var question = what.everyone
+      ? t("stats.confirmForgetEveryone")
+      : fillIn(t("stats.confirmForgetNick"), { nick: what.nick });
+    if (!window.confirm(question)) { return; }
+    return postJson("/api/stats/record/forget", what).then(function (res) {
+      if (!res.ok) {
+        recordNote((res.data && res.data.error) || ("HTTP " + res.status), true);
+        return;
+      }
+      el.recordNickResult.hidden = true;
+      return loadRecord().then(function () {
+        recordNote(fillIn(what.everyone ? t("stats.forgotEveryone") : t("stats.forgotNick"), {
+          nick: res.data.nick || "",
+          count: (res.data.removed || 0).toLocaleString()
+        }), false);
+      });
+    });
+  }
+
+  el.recordPeriods.addEventListener("click", function (evt) {
+    var button = evt.target.closest(".record-period");
+    if (button) { chooseRecordPeriod(button.getAttribute("data-period")); }
+  });
+  el.recordNickShow.addEventListener("click", lookUpRecordNick);
+  el.recordNickInput.addEventListener("keydown", function (evt) {
+    if (evt.key === "Enter") { lookUpRecordNick(); }
+  });
+  el.recordForgetAll.addEventListener("click", function () { forgetRecord({ everyone: true }); });
 
   // -------------------------------------------------------------- Console
   //
@@ -5954,6 +6707,9 @@
     document.querySelectorAll("[data-i18n-title]").forEach(function (node) {
       node.title = t(node.getAttribute("data-i18n-title"));
     });
+    document.querySelectorAll("[data-i18n-aria-label]").forEach(function (node) {
+      node.setAttribute("aria-label", t(node.getAttribute("data-i18n-aria-label")));
+    });
     // The active view's header is set as text in activateView() rather
     // than through data-i18n, since which view is current decides it -
     // redone here so a language change updates it without a re-navigation.
@@ -6024,6 +6780,7 @@
       // a language switch left it, and the Stats cards, in the old one.
       if (state.lastVersionInfo) { renderVersion(state.lastVersionInfo); }
       if (state.lastStats) { renderStats(state.lastStats); }
+      if (state.lastRecord) { renderRecord(state.lastRecord); }
     });
   }
 

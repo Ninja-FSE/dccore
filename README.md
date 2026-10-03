@@ -1,6 +1,6 @@
 # DCCore
 
-**v1.13.2** · Python 3.10+ · Linux, Windows and macOS
+**v1.14.0** · Python 3.10+ · Linux, Windows and macOS
 
 An IRC DCC file-sharing daemon — a modern reimplementation of OmenServe, the mIRC script that has run these channels for twenty years.
 
@@ -54,7 +54,7 @@ Full guide, including configuring it by hand and upgrading from an older install
 
 ## How it is put together
 
-`oserve.py` wires everything and owns the threads. `irc.py` is the network loop and command parser; `dcc.py` sends files and `dcc_fetch.py` receives them. `list.py` and `update_list.py` build and search the catalogue, `announce.py` owns everything the channel sees, and `commands.py` handles what users type. `db.py` persists state, `security.py` decides who is allowed, and `platform_compat.py` holds the handful of genuine Linux/Windows differences so nothing else has to care. `defaults.py` declares every setting; `settings_file.py` lets an operator override them without editing Python.
+`oserve.py` wires everything and owns the threads; it, `configure.py` and `update_list.py` are at the top, the modules below are in `src/`, and your own `settings.conf` and `admin_config.py` are in `conf/`. `irc.py` is the network loop and command parser; `dcc.py` sends files and `dcc_fetch.py` receives them. `list.py` and `update_list.py` build and search the catalogue, `announce.py` owns everything the channel sees, and `commands.py` handles what users type. `db.py` persists state, `security.py` decides who is allowed, and `platform_compat.py` holds the handful of genuine Linux/Windows differences so nothing else has to care. `defaults.py` declares every setting; `settings_file.py` lets an operator override them without editing Python.
 
 The optional dashboard is `webserver.py` and `web/`, and disables itself cleanly if Flask is absent.
 

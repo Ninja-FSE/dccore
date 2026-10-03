@@ -768,6 +768,30 @@ html, body {
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
 }
 
+/* The Sent row on Stats (#1117): eight cards on ONE row, so the figures that
+   belong together are read together. Narrower, four then two a row - never a
+   lone card left over. */
+.stat-row.is-eight {
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+}
+
+.stat-row.is-eight .stat-card {
+  padding: 14px 12px;
+}
+
+.stat-row.is-eight .stat-value {
+  font-size: 19px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+  .stat-row.is-eight { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+@media (max-width: 500px) {
+  .stat-row.is-eight { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 .stat-group-label {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -1916,6 +1940,81 @@ mark.filter-hit {
   color: var(--danger);
 }
 
+/* Which sent totals to keep, when both OmenServe and KeepTrack counted them (#1062). */
+.import-source {
+  margin: 10px 0;
+  font-size: 13px;
+}
+
+.import-source-option {
+  display: block;
+  margin: 4px 0;
+}
+
+/* The transfer record on the Stats page (#1102). The period buttons read as
+   tabs, so the chosen one is filled like .filelists-list-tab.is-active. */
+.record-periods {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.record-period.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+/* Three tables rather than .stat-top-grid's two; one column on a narrow screen. */
+.record-top-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 12px;
+}
+
+@media (max-width: 900px) {
+  .record-top-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.record-nick-table .col-num {
+  width: 72px;
+}
+
+.record-nick,
+.record-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 14px 0;
+}
+
+.record-nick .search-input {
+  max-width: 260px;
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.record-nick-result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.record-nick-result[hidden] {
+  display: none;
+}
+
+.record-nick-result .import-status {
+  margin: 0;
+}
+
 .tool-status.is-error {
   color: var(--danger);
 }
@@ -2734,4 +2833,98 @@ mark.filter-hit {
   line-height: 1.6;
   margin: 0 0 12px;
   padding: 10px 12px;
+}
+
+
+/* Downloads page (#1019): page size, pager, Clear, and sortable headings. */
+.downloads-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.downloads-summary:empty {
+  display: none;
+}
+
+.downloads-summary .summary-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.9em;
+}
+
+.downloads-summary .summary-count {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.downloads-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 20px;
+  margin: 0 0 10px;
+}
+
+.downloads-pagesize {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+.downloads-pager,
+.downloads-clear {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.downloads-clear {
+  margin-left: auto;
+}
+
+.downloads-box {
+  margin: 0 0 22px;
+}
+
+.downloads-boxbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 20px;
+  margin: 0 0 8px;
+}
+
+.downloads-box-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.sort-btn {
+  all: unset;
+  cursor: pointer;
+  text-transform: inherit;
+  letter-spacing: inherit;
+}
+
+.sort-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.data-table th[aria-sort="ascending"] .sort-btn::after {
+  content: " \25B2";
+}
+
+.data-table th[aria-sort="descending"] .sort-btn::after {
+  content: " \25BC";
 }

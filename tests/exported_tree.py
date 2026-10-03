@@ -69,7 +69,7 @@ def _this_is_an_export(test_case):
     missing with no export-ignore rule to explain it - that combination is
     not an export, it is a fault, and the two must never read the same.
     """
-    if os.path.exists(os.path.join(REPO_ROOT, WORKFLOW_DOC)):
+    if os.path.exists((next((p for p in (os.path.join(REPO_ROOT, "src", WORKFLOW_DOC), os.path.join(REPO_ROOT, "conf", WORKFLOW_DOC), os.path.join(REPO_ROOT, WORKFLOW_DOC)) if os.path.exists(p)), os.path.join(REPO_ROOT, WORKFLOW_DOC)))):
         return False
     if not _is_export_ignored(WORKFLOW_DOC):
         test_case.fail(
@@ -92,7 +92,7 @@ def internal_file_or_skip(test_case, relative_path):
         test_case.skipTest(
             f"{WORKFLOW_DOC} is export-ignored and absent, so this is an "
             f"extracted public tree rather than the development repository.")
-    full = os.path.join(REPO_ROOT, relative_path)
+    full = (next((p for p in (os.path.join(REPO_ROOT, "src", relative_path), os.path.join(REPO_ROOT, "conf", relative_path), os.path.join(REPO_ROOT, relative_path)) if os.path.exists(p)), os.path.join(REPO_ROOT, relative_path)))
     if not os.path.exists(full):
         test_case.fail(
             f"{relative_path} is missing from the development repository.")

@@ -105,7 +105,7 @@ class TheChannelLineUsesIt(DCCoreTestCase):
                 self.assertIn(f"{colour}[{label}]", self.channel_line(cat))
 
     def test_the_old_chain_is_gone(self):
-        with io.open(os.path.join(REPO_ROOT, "announce.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "announce.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def send_debug("):]
         self.assertNotIn('category.upper() == "FAIL"', body, "a second copy of the table is back")
@@ -146,7 +146,7 @@ class TheConsoleLine(DCCoreTestCase):
 
     def test_the_dashboard_sink_still_strips(self):
         """The note that was wrong for the chat is right for the browser."""
-        with io.open(os.path.join(REPO_ROOT, "webserver.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def _console_debug_sink("):]
         body = body[:body.index("\ndef ", 10)]

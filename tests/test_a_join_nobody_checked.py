@@ -45,7 +45,7 @@ def join_body():
     and comments are stripped because the paragraph above it describes the old
     behaviour it replaced, in the same words a test would search for.
     """
-    with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+    with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
         code = handle.read()
     body = code.split("def delayed_join(", 1)[1].split("activation_watchdog", 1)[0]
     return re.sub(chr(35) + "[^" + chr(10) + "]*", "", body)
@@ -231,7 +231,7 @@ class AChannelThatNeverLetUsIn(DCCoreTestCase):
 class TheWatchdogSaysSoWhereItIsRead(unittest.TestCase):
 
     def watchdog_body(self):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code.split("def activation_watchdog(", 1)[1].split("while True:", 1)[0]
         return re.sub(chr(35) + "[^" + chr(10) + "]*", "", body)
@@ -265,7 +265,7 @@ class TheWatchdogSaysSoWhereItIsRead(unittest.TestCase):
     def test_activation_still_does_not_wait_on_the_debug_channel(self):
         """The other half. One broken debug channel must not silence every
         advert - which is what gating activation on the wider set would do."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = re.sub(chr(35) + "[^" + chr(10) + "]*", "", handle.read())
 
         self.assertIn("if target_channels.issubset(channels_confirmed):", code)
@@ -285,7 +285,7 @@ class WhatTheServerSaidIsNoLongerDiscarded(unittest.TestCase):
     def test_it_gets_its_own_wording(self):
         """"Gave up after 3 attempts" would send the operator looking for a
         fault on the channel's side. The fault is their channel count."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = re.sub(chr(35) + "[^" + chr(10) + "]*", "", handle.read())
 
         self.assertIn("if numeric == JOIN_REFUSED_AT_THE_LIMIT:", code)
@@ -295,7 +295,7 @@ class WhatTheServerSaidIsNoLongerDiscarded(unittest.TestCase):
         retried, deliberately - so a refusal at CONNECT time was discarded in
         silence, which is most of why serving eleven of fourteen channels
         looked like nothing had happened."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = handle.read()
         # 3000, not 2000: #632 put the 477 wording between the count and
         # the uncounted branch this looks for.

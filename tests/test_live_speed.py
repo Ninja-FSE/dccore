@@ -194,9 +194,13 @@ class TheDashboardCanReadItWithoutTheDaemon(unittest.TestCase):
             "         if m in sys.modules]\n"
             "print(','.join(heavy) or 'NONE')\n"
         )
+        # PYTHONPATH: webserver/runtime live in src/ now (#959), and cwd
+        # alone no longer finds them.
+        env = dict(os.environ)
+        env["PYTHONPATH"] = os.path.join(REPO_ROOT, "src") + os.pathsep + env.get("PYTHONPATH", "")
         result = subprocess.run([sys.executable, "-c", code],
                                 cwd=REPO_ROOT, capture_output=True,
-                                text=True, timeout=120)
+                                text=True, timeout=120, env=env)
 
         self.assertEqual(result.returncode, 0, result.stderr.strip()[-1500:])
         self.assertEqual(
@@ -220,7 +224,7 @@ class TheRateIsKeptCurrent(unittest.TestCase):
 
     def test_the_queue_worker_samples_the_rate(self):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(repo_root, "queue_mgr.py"), encoding="utf-8") as handle:
+        with open(os.path.join(repo_root, "src", "queue_mgr.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         calls = [line.strip() for line in source.splitlines()
@@ -237,7 +241,7 @@ class TheRateIsKeptCurrent(unittest.TestCase):
         """One sampler. Two would each measure part of the movement and both
         would report a fraction of the real speed."""
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(repo_root, "announce.py"), encoding="utf-8") as handle:
+        with open(os.path.join(repo_root, "src", "announce.py"), encoding="utf-8") as handle:
             source = handle.read()
 
         self.assertNotIn(

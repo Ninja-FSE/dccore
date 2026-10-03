@@ -153,7 +153,7 @@ class EveryMessageSaysTheSameThing(DCCoreTestCase):
         """
         import ast
 
-        with io.open(os.path.join(REPO_ROOT, "security.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "security.py"), encoding="utf-8") as handle:
             tree = ast.parse(handle.read())
 
         docstrings = set()

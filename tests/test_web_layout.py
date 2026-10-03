@@ -145,11 +145,11 @@ class ItAppliesEverywhereItShould(unittest.TestCase):
             if "<table" in html[m.start():html.find("</section>", m.start())])
 
         # "queue" left this list when the Queue tab was folded into Stats
-        # (#133). The table itself did not go anywhere - it is inside the
-        # stats view now, and inside a .table-wrap there, which the assertion
-        # above checks for every table in the page.
+        # (#133), and the table moved on to Live Transfers (#1117). It is
+        # inside a .table-wrap there, which the assertion above checks for
+        # every table in the page.
         self.assertEqual(with_tables,
-                         ["download", "filelists", "search", "stats"])
+                         ["download", "filelists", "live", "search", "stats"])
 
 
 if __name__ == "__main__":

@@ -62,6 +62,7 @@ os.environ["DCCORE_SETTINGS_FILE"] = conf
 os.makedirs(os.path.join(work, "data"), exist_ok=True)
 os.chdir(work)
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "src"))  # #959
 
 result = {"stage": "import"}
 try:

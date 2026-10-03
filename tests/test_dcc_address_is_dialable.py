@@ -173,7 +173,7 @@ class TheConnectNeverInventsAnAddress(unittest.TestCase):
     """irc.py's half. The fallback is the origin of the whole defect."""
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             return handle.read()
 
     def test_no_loopback_literal_is_assigned_to_the_dcc_address(self):

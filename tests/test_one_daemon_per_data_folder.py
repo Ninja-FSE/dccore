@@ -51,7 +51,7 @@ class TheLock(unittest.TestCase):
         self.addCleanup(platform_compat.release_instance_lock)
 
     def other_process_holding(self):
-        child = subprocess.Popen([sys.executable, "-c", HOLD % (REPO_ROOT, self.path)],
+        child = subprocess.Popen([sys.executable, "-c", HOLD % (os.path.join(REPO_ROOT, "src"), self.path)],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.addCleanup(child.wait, 10)
         self.addCleanup(lambda: child.stdin.close() if not child.stdin.closed else None)
@@ -94,7 +94,7 @@ class TheDaemonRefusesASecondCopy(boot.BootCase):
     def test_startup_exits_with_its_own_code_and_says_so(self):
         lock_path = os.path.join(os.path.dirname(os.path.abspath(config.DCC_QUEUE_FILE)), "dccore.lock")
         os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-        child = subprocess.Popen([sys.executable, "-c", HOLD % (REPO_ROOT, lock_path)],
+        child = subprocess.Popen([sys.executable, "-c", HOLD % (os.path.join(REPO_ROOT, "src"), lock_path)],
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.addCleanup(child.wait, 10)
         self.addCleanup(child.stdin.close)

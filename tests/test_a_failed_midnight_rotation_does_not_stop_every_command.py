@@ -86,7 +86,7 @@ class TheRotationCheck(unittest.TestCase):
 class TheReadLoop(unittest.TestCase):
 
     def test_the_message_block_uses_the_guarded_call(self):
-        with open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn("rotate_the_day_without_stopping_the_bot()\n", source)
         calls = [line for line in source.splitlines() if line.strip() == "db.check_and_rotate_day()"]

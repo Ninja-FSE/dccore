@@ -195,7 +195,7 @@ class TheFetchRecordsIt(unittest.TestCase):
     """
 
     def source(self):
-        with io.open(os.path.join(REPO_ROOT, "list_fetch.py"),
+        with io.open(os.path.join(REPO_ROOT, "src", "list_fetch.py"),
                      encoding="utf-8") as handle:
             return handle.read()
 
@@ -519,7 +519,7 @@ class ActivationWakesTheSweepToo(unittest.TestCase):
     dcc.py's presence decisions do."""
 
     def body(self):
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
         block = source[source.index("def delayed_activate("):]
         return block[:block.index("def background_nick_monitor(")]

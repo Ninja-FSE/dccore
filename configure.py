@@ -47,14 +47,14 @@ same read-modify-write-and-verify path the dashboard's own settings route
 uses, not a hand-rolled file write. ADMIN_PASSWORD_HASH is different: a
 credential, never meant to be edited from a web form running under the
 password it protects, so it goes to admin_config.py (Python, gitignored)
-instead - matching what running `python3 adminchat.py` directly has always
+instead - matching what running `python3 src/adminchat.py` directly has always
 told an operator to do with the hash it prints.
 
 WHY THE PASSWORD STEP REUSES adminchat.py RATHER THAN REPROMPTING
 
 adminchat.make_password_hash() and adminchat._read_password() are imported
 and called directly, in-process - not by shelling out to
-`python3 adminchat.py` as a subprocess and parsing its printed output, which
+`python3 src/adminchat.py` as a subprocess and parsing its printed output, which
 would mean two ways to get a password into this process (once through this
 script's own prompt, once through whatever adminchat.py's subprocess did
 with its inherited stdin) and a fragile text-scrape of a line meant for a
@@ -81,18 +81,23 @@ import re
 import subprocess
 import sys
 
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+# Every daemon module this script needs (platform_compat included) lives in
+# src/ (#959); this file stays at the repository root, next to oserve.py -
+# an operator runs it by hand (README/INSTALL.md both say "python3
+# configure.py"), the same reason oserve.py itself was never moved.
+SRC_DIR = os.path.join(REPO_ROOT, "src")
+if SRC_DIR not in sys.path:
+    sys.path.insert(0, SRC_DIR)
+SCRIPTS_DIR = os.path.join(REPO_ROOT, "scripts")
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
+
 import platform_compat
 
 # See update_list.py's own note: this is an entry point of its own,
 # so it needs the guard oserve.py installs for the daemon.
 platform_compat.install_console_encoding_guard()
-
-REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-SCRIPTS_DIR = os.path.join(REPO_ROOT, "scripts")
-if SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, SCRIPTS_DIR)
 
 import adminchat  # noqa: E402
 import defaults as config  # noqa: E402
@@ -218,7 +223,7 @@ def collect_answers():
 
     print()
     print("Admin console password (for the DCC CHAT console - see")
-    print("docs/ADMIN-CONSOLE.md). Same prompt as running adminchat.py by itself.")
+    print("docs/ADMIN-CONSOLE.md). Same prompt as running src/adminchat.py by itself.")
     while True:
         first = adminchat._read_password("Password: ")
         second = adminchat._read_password("Again: ")
@@ -410,11 +415,12 @@ NEW_ADMIN_CONFIG_HEADER = """\
 # admin_config.py - created by the DCCore setup.
 #
 # The setup writes only the console/dashboard password here. Everything else
-# it asked for went to settings.conf, which defaults.py applies AFTER this
-# file - so a setting present in both takes settings.conf's value, and a
+# it asked for went to conf/settings.conf, which defaults.py applies AFTER
+# this file - so a setting present in both takes settings.conf's value, and a
 # line added here for a name settings.conf also sets does nothing (the daemon
 # says so at startup). Edit settings.conf, or the dashboard's Settings page,
-# for those. admin_config.py.sample explains what else can go in this file.
+# for those. admin_config.py.sample, right here in conf/, explains what else
+# can go in this file.
 """
 
 
@@ -427,7 +433,7 @@ def write_admin_config_password(password_hash, path=None):
     all. `path` overrides the real repo location - tests use it, real runs
     never pass it.
     """
-    path = path or os.path.join(REPO_ROOT, "admin_config.py")
+    path = path or os.path.join(REPO_ROOT, "conf", "admin_config.py")
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as handle:
             existing_text = handle.read()
@@ -535,10 +541,10 @@ def offer_to_import_omenserve_stats(ask=input, log=print):
     import webserver
 
     log("")
-    log("Coming from OmenServe? Your files-sent and bytes-sent totals and your")
-    log("speed record are in mIRC's scripts/vars.ini, written by whichever")
-    log("add-ons you ran. They can be brought across now, or later from the")
-    log("dashboard's Stats page - this is the same import either way.")
+    log("Coming from OmenServe or KeepTrack? Your files-sent and bytes-sent totals,")
+    log("your speed record and KeepTrack's received totals are in mIRC's")
+    log("scripts/vars.ini, written by whichever add-ons you ran. They can be brought")
+    log("across now, or later from the dashboard's Stats page - the same import.")
     if str(ask("Import them now? [y/N]: ")).strip().lower() not in ("y", "yes"):
         return False
 
@@ -573,6 +579,19 @@ def offer_to_import_omenserve_stats(ask=input, log=print):
     if not values:
         log("  Nothing in that file could be imported. Skipped.")
         return False
+
+    # Both OmenServe's add-ons and KeepTrack counted the sends (#1062): the
+    # same sends twice, so one is kept and never both. The same choice the
+    # Stats page offers.
+    sources = preview.get("sent_sources") or []
+    if len(sources) > 1:
+        for number, source in enumerate(sources, start=1):
+            log(f"  [{number}] {source['label']}: {source.get('total_files', 0)} files sent")
+        answer = str(ask(f"  Which sent totals should DCCore keep? [1-{len(sources)}, default 1]: ")).strip()
+        picked = sources[int(answer) - 1] if answer.isdigit() and 1 <= int(answer) <= len(sources) else sources[0]
+        values = {k: v for k, v in values.items() if k not in ("total_files", "total_bytes")}
+        values.update({k: picked[k] for k in ("total_files", "total_bytes") if k in picked})
+        log(f"  Keeping {picked['label']}'s sent totals.")
 
     if str(ask("  Write these figures? [y/N]: ")).strip().lower() not in ("y", "yes"):
         log("  Left alone.")

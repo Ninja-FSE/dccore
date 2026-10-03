@@ -126,7 +126,7 @@ class WhatIsSafeToShow(OnConnectCase):
     def test_the_connect_path_logs_only_that(self):
         """Read out of irc.py: the log line is built from redacted(), and the
         raw command never reaches print()."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = handle.read()
         # "join_batches(" is where the JOIN begins (#510). The marker used to
         # be "JOIN {channels}" - one line sending every channel at once, which
@@ -147,7 +147,7 @@ class WhenTheyAreSent(OnConnectCase):
         """On Undernet, X login takes +x and +x replaces the host every person
         in the channel sees. Joining first puts the real host in front of
         everybody already there, and no later mode change takes it back."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code.split("def delayed_join(", 1)[1]
 
@@ -163,7 +163,7 @@ class WhenTheyAreSent(OnConnectCase):
         Asserted as a SEQUENCE - the sleep sits between the loop and the send -
         because a sleep before the loop and a sleep inside it look identical to
         a check for "is there a sleep"."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code.split("def delayed_join(", 1)[1].split("join_batches(", 1)[0]
         loop = body.split("for index, command in enumerate(commands):", 1)
@@ -178,7 +178,7 @@ class WhenTheyAreSent(OnConnectCase):
     def test_a_failure_there_does_not_stop_the_join(self):
         """A bot that will not join because one optional line was refused is
         worse off than one that joined without its usermode."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code.split("def delayed_join(", 1)[1].split("join_batches(", 1)[0]
 
@@ -263,7 +263,7 @@ class TheMsgShorthandBecomesPrivmsg(unittest.TestCase):
     def test_the_connect_path_normalizes_before_expanding_and_sending(self):
         """Read out of irc.py: normalize() has to actually run in the send
         loop, not just exist as a function nothing calls."""
-        with io.open(os.path.join(REPO_ROOT, "irc.py"), encoding="utf-8") as handle:
+        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code.split("def delayed_join(", 1)[1].split("join_batches(", 1)[0]
 
