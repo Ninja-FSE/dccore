@@ -265,11 +265,13 @@ CHOICES = {
     # the default. The operator who wrote "lisen" got automatic mode and no
     # indication their setting had not taken. Found by audit.
     "ADMIN_CHAT_MODE": ("auto", "listen", "connect"),
-    # mIRC's own packet-size menu, in bytes: 4, 8, 16, 32, 64, 128 KB. A list
-    # rather than a free number because that is what an operator is comparing
-    # against - "the same setting mIRC has" - and because the six of them are
-    # the only values anyone actually wants to try.
-    "DCC_BLOCK_SIZE": ("4096", "8192", "16384", "32768", "65536", "131072"),
+    # mIRC's own packet-size menu, in bytes: 4, 8, 16, 32, 64, 128 KB, plus
+    # 256 KB, which costs the least CPU per GB sent and is worth it on a fast
+    # seedbox (#1139). A list rather than a free number because that is what
+    # an operator is comparing against - "the same setting mIRC has" - and
+    # because these are the only values anyone actually wants to try.
+    "DCC_BLOCK_SIZE": ("4096", "8192", "16384", "32768", "65536", "131072",
+                       "262144"),
     # start-dccore.bat reads it (#1065); anything else would quietly be "normal".
     "BOT_WINDOW": ("normal", "minimised", "hidden"),
 }

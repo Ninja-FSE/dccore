@@ -28,6 +28,10 @@ class TheRotationCheck(unittest.TestCase):
     def setUp(self):
         irc._day_rotation_failed_at = None
         self.addCleanup(setattr, irc, "_day_rotation_failed_at", None)
+        # Since #1132 a day that rolled over once is not checked again until
+        # the date changes. Every test here starts from a day not yet rolled.
+        irc._day_rotated_for = None
+        self.addCleanup(setattr, irc, "_day_rotated_for", None)
 
     def failing(self):
         return mock.patch.object(db, "check_and_rotate_day", side_effect=OSError(28, "No space left on device"))
@@ -75,7 +79,10 @@ class TheRotationCheck(unittest.TestCase):
             with mock.patch.object(db, "check_and_rotate_day") as rotate:
                 self.assertTrue(irc.rotate_the_day_without_stopping_the_bot())
                 self.assertTrue(irc.rotate_the_day_without_stopping_the_bot())
-            self.assertEqual(rotate.call_count, 2, "a working rotation is checked on every message again")
+            # #1132: once it has worked, the rest of the day's messages skip
+            # the check - the next one is the first message after midnight.
+            self.assertEqual(rotate.call_count, 1, "a working rotation is not retried the same day")
+            self.assertIsNone(irc._day_rotation_failed_at)
 
     def test_only_a_real_error_is_swallowed_not_a_keyboard_interrupt(self):
         with mock.patch.object(db, "check_and_rotate_day", side_effect=KeyboardInterrupt):

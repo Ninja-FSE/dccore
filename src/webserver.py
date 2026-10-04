@@ -1211,11 +1211,13 @@ def build_filelists_payload(offset=0, limit=None, name=None, q=""):
     is out of scope; this dedup is the trivial single-source case, collapsing
     only the same filename listed under two different folders.
 
-    Issue #76, option 3: still parses the ENTIRE list every call, exactly as
-    before (this bot's own list has no size cap of its own, so there is no
-    cheaper way to know how many rows exist or to dedup correctly) - only
-    what gets returned is now a page of it, `[offset:offset+limit]`, plus the
-    `total` row count, instead of the whole thing. `limit=None` (the route's
+    Issue #76, option 3: what gets returned is a page, `[offset:offset+limit]`
+    in folders, plus the `total` counts, never the whole list. Unfiltered, the
+    page comes from list.page_of_list_files() (#1128): a table of where each
+    folder is, built once per version of the lists, so a page parses only its
+    own folders - it used to parse the ENTIRE list for every page, 31 s and
+    2.1 GB at two million rows. A `q` search, and any list the table cannot
+    answer for, still parses the whole list as before. `limit=None` (the route's
     default when `?limit=` was omitted) means FILELISTS_DEFAULT_PAGE_SIZE, not
     "unlimited" - a caller that genuinely wants no cap must pass a `limit` up
     to FILELISTS_MAX_PAGE_SIZE explicitly.
@@ -1230,11 +1232,19 @@ def build_filelists_payload(offset=0, limit=None, name=None, q=""):
         limit = FILELISTS_DEFAULT_PAGE_SIZE
 
     search_words = split_list_search_words(q)
-    entries, _total = list_mod.find_matching_entries(search_words, limit=None, name=name)
-    rows = list_mod.entries_to_filelist_rows(entries, getattr(config, "NICKNAME", "?"))
-    groups = list_mod.group_rows_by_folder(rows)
-    page, total_folders, total_rows, row_capped = list_mod.page_folder_groups(
-        groups, offset, limit, max_rows=list_mod.FILELISTS_MAX_PAGE_ROWS)
+    source = getattr(config, "NICKNAME", "?")
+    answer = None
+    if not search_words:
+        answer = list_mod.page_of_list_files(
+            list_mod.all_list_paths(name), offset, limit, source,
+            max_rows=list_mod.FILELISTS_MAX_PAGE_ROWS)
+    if answer is None:
+        entries, _total = list_mod.find_matching_entries(search_words, limit=None, name=name)
+        rows = list_mod.entries_to_filelist_rows(entries, source)
+        groups = list_mod.group_rows_by_folder(rows)
+        answer = list_mod.page_folder_groups(
+            groups, offset, limit, max_rows=list_mod.FILELISTS_MAX_PAGE_ROWS)
+    page, total_folders, total_rows, row_capped = answer
     return {
         "folders": page,
         "total": total_folders,
@@ -2316,8 +2326,9 @@ def build_fetched_bot_list_payload(nick, offset=0, limit=None, list_marker="", q
 
     Issue #76, options 2 and 3 together: the fetched bot's rows are no longer
     kept in memory at all (see list_fetch.process_fetched_list_zip()) - this
-    re-parses the stored list_path FRESH on every call, via
-    list_fetch.get_fetched_bot_page(), then returns one page of the result.
+    reads one page of the stored list_path on every call, via
+    list_fetch.get_fetched_bot_page(), which parses only that page's folders
+    (#1128).
     "entries" is in the EXACT same row shape build_filelists_payload() returns
     for this bot's own list (both go through list.entries_to_filelist_rows()),
     so the frontend's File Lists table rendering needs no changes to display
@@ -2905,6 +2916,15 @@ def build_update_list_status_payload():
     progress = read_list_progress()
     if progress:
         payload["progress"] = progress
+    # The background audio reading (#1182): running after a rebuild has
+    # published, or alone from the Read audio info button. Its progress is the
+    # same file's, phase "reading"; `last` is how the last one ended, for the
+    # page to say - "nothing new to read" included.
+    payload["audio"] = {
+        "enabled": bool(getattr(config, "LIST_SHOW_AUDIO_INFO", False)),
+        "running": runtime.audio_reading is not None,
+        "last": runtime.audio_reading_last,
+    }
     return payload
 
 
@@ -2978,6 +2998,8 @@ def read_list_progress():
         "files": whole("files"),
         "percent": percent,
         "elapsed": elapsed,
+        # Files a second, while the background audio reading runs (#1182).
+        "rate": whole("rate"),
     }
 
 
@@ -3010,6 +3032,29 @@ def start_list_update():
     commands.handle_list_update_request(
         WEB_DASHBOARD_SOURCE, WEB_DASHBOARD_SOURCE, authorised=True)
     return 200, {"update": "started"}
+
+
+def start_audio_info_reading():
+    """POST /api/tools/audio-info's pure logic (#1182): the Read audio info
+    button. Starts a reading-only run - the audio files the published list
+    has no length for, read and written in - through the same
+    commands.handle_audio_info_request() the console's `audioinfo` uses.
+
+    200 when it started, or when one is already running (the page follows
+    it); 409 when a rebuild runs (it reads by itself once it has published)
+    or the setting is off. Whether there is anything to read is the run's to
+    find out: "nothing new to read" comes back as its result in the status.
+
+    Returns (http_status, payload_dict).
+    """
+    import commands
+    status, message = commands.handle_audio_info_request(
+        WEB_DASHBOARD_SOURCE, WEB_DASHBOARD_SOURCE, authorised=True)
+    if status in ("started", "running"):
+        return 200, {"reading": status, "message": message}
+    if status in ("rebuilding", "off"):
+        return 409, {"error": message, "reason": status}
+    return 500, {"error": message}
 
 
 # ==========================================================================
@@ -3243,7 +3288,7 @@ SETTINGS_LABELS = {
     "LIST_INDEX_FILE": "Cross-list search index",
     "LIST_AUDIO_INFO_CACHE": "Audio info cache",
     "LIST_SHOW_AUDIO_INFO": "Length and quality in the list",
-    "LIST_AUDIO_INFO_MINUTES": "Time limit for reading audio files",
+    "LIST_AUDIO_INFO_MINUTES": "Time limit for reading audio files (no longer used)",
     "LIST_AUDIO_INFO_THREADS": "Audio files read at once",
     "LIST_SCAN_THREADS": "Folders scanned at once",
     "DOWNLOAD_COUNTS_FILE": "Download counts file",
@@ -3352,7 +3397,7 @@ SETTINGS_UNITS = {
 # as the stored choice and gains readable text beside each one.
 CHOICE_LABELS = {
     "DCC_BLOCK_SIZE": {str(1024 * n): f"{n} KB"
-                       for n in (4, 8, 16, 32, 64, 128)},
+                       for n in (4, 8, 16, 32, 64, 128, 256)},
 }
 
 
@@ -4705,6 +4750,29 @@ def build_console_command_result(command_text, remote_addr=None):
 
 if HAVE_FLASK:
 
+    def _keep_json_key_order(app):
+        """Turn off Flask's key sorting for every JSON answer (#1143).
+
+        Sorting every key of every dict was most of what /api/fetch/status
+        cost to serialise, and the Downloads view polls it every few seconds.
+        Nothing reads the keys in sorted order: the page looks fields up by
+        name and json.loads gives the same dict either way.
+
+        app.json, the provider object, arrived in Flask 2.2; 2.0 and 2.1 (the
+        floor requirements-web.txt allows) read app.config["JSON_SORT_KEYS"]
+        instead, which 2.3 dropped. So the setting goes wherever the installed
+        Flask looks for it.
+
+        ensure_ascii is left on deliberately. Off, a filename os.listdir()
+        returned as a lone surrogate is written out raw, Werkzeug cannot
+        encode the body, and the whole route answers 500.
+        """
+        provider = getattr(app, "json", None)
+        if provider is not None and hasattr(provider, "sort_keys"):
+            provider.sort_keys = False
+        else:
+            app.config["JSON_SORT_KEYS"] = False
+
     def create_app():
         # Flask resolves a relative static_folder against this module's OWN
         # directory (its root_path) - now src/, not the repository root - so
@@ -4725,6 +4793,7 @@ if HAVE_FLASK:
         # ceiling applies before authentication, where the daemon has the
         # least reason to trust what it is being handed.
         app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
+        _keep_json_key_order(app)
 
         @app.before_request
         def require_login():
@@ -4955,6 +5024,12 @@ if HAVE_FLASK:
         @app.route("/api/tools/update-list/status")
         def api_tools_update_list_status():
             return jsonify(build_update_list_status_payload())
+
+        # #1182: Read audio info. Its progress is in the status above.
+        @app.route("/api/tools/audio-info", methods=["POST"])
+        def api_tools_audio_info():
+            status, result = start_audio_info_reading()
+            return jsonify(result), status
 
         # #572: what the version check last found, and a check on request.
         @app.route("/api/version-check")

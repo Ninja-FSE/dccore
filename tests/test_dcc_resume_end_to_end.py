@@ -34,11 +34,13 @@ import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 import runtime  # noqa: E402
 
+from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
 
 USER = "someuser"
-PORT_START = 51200
-PORT_END = 51210
+# Through dcc_ports(): in a parallel run each shard moves it into a window
+# of its own, so no two shards ever listen on one port (#1146).
+PORT_START, PORT_END = dcc_ports(51200, 51210)
 # Distinctive rather than random: a wrong offset shows up as a readable
 # mismatch in the failure message instead of a wall of identical bytes.
 CONTENT = bytes(range(256)) * 400          # 102,400 bytes

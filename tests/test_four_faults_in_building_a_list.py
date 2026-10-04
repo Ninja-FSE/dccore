@@ -27,6 +27,8 @@ if REPO_ROOT not in sys.path:
 
 import runtime  # noqa: E402
 
+from tests.support import temp_dir  # noqa: E402
+
 
 def source(name):
     with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
@@ -64,10 +66,8 @@ class APermanentlyDeniedFolderIsNotFatal(unittest.TestCase):
         return err
 
     def test_denied_but_still_there_is_excluded(self):
-        import tempfile
-
         self.assertEqual(
-            self.classify(self.error(PermissionError, tempfile.mkdtemp())),
+            self.classify(self.error(PermissionError, temp_dir(self))),
             "excluded")
 
     def test_denied_and_gone_still_aborts(self):
@@ -79,10 +79,8 @@ class APermanentlyDeniedFolderIsNotFatal(unittest.TestCase):
             "aborts")
 
     def test_any_other_error_still_aborts(self):
-        import tempfile
-
         # errno 5 (EIO), not 13: OSError(13, ...) is a PermissionError.
-        err = self.error(OSError, tempfile.mkdtemp(), errno=5)
+        err = self.error(OSError, temp_dir(self), errno=5)
         self.assertNotIsInstance(err, PermissionError)
 
         self.assertEqual(self.classify(err), "aborts")

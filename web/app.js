@@ -270,6 +270,10 @@
     updateListSchedule:   document.getElementById("update-list-schedule"),
     updateListBar:        document.getElementById("update-list-bar"),
     updateListBarFill:    document.getElementById("update-list-bar-fill"),
+    audioInfoRunBtn:      document.getElementById("audio-info-run-btn"),
+    audioInfoStatus:      document.getElementById("audio-info-status"),
+    audioInfoBar:         document.getElementById("audio-info-bar"),
+    audioInfoBarFill:     document.getElementById("audio-info-bar-fill"),
     verifyRunBtn:         document.getElementById("verify-run-btn"),
     verifyStatus:         document.getElementById("verify-status"),
     verifyResults:        document.getElementById("verify-results"),
@@ -2215,19 +2219,30 @@
     return row && row.nick ? String(row.nick) : nickOfSource(source);
   }
 
-  // Every row currently held for one bot, wherever state.filelistsBots put
-  // them - not a separate map kept in step by hand, so it can never disagree
-  // with what the sidebar last rendered from the same rows.
-  function entriesForNick(nick) {
-    var nickLower = String(nick || "").toLowerCase();
-    var out = [];
+  // Every row currently held in state.filelistsBots, grouped by the lower-cased
+  // nick the sidebar shows it under, in one pass. Built fresh from the same
+  // rows each time it is asked for and never kept between calls, so it can
+  // never disagree with what the sidebar last rendered. Null-prototype, so a
+  // bot named "constructor" or "__proto__" is just another key.
+  function entriesByNick() {
+    var byNick = Object.create(null);
     Object.keys(state.filelistsBots).forEach(function (key) {
       var row = state.filelistsBots[key];
-      if (String(row.nick || row.bot || "").toLowerCase() === nickLower) {
-        out.push(row);
-      }
+      var nickLower = String(row.nick || row.bot || "").toLowerCase();
+      (byNick[nickLower] || (byNick[nickLower] = [])).push(row);
     });
-    return out;
+    return byNick;
+  }
+
+  // Every row currently held for one bot, wherever state.filelistsBots put
+  // them - not a separate map kept in step by hand, so it can never disagree
+  // with what the sidebar last rendered from the same rows. A caller asking
+  // for many nicks at once passes one entriesByNick() it built for that call
+  // (#1141): scanning every bot once per sidebar row was O(rows x bots), over
+  // a second per filter answer with the registry near its 2,000-bot cap.
+  function entriesForNick(nick, byNick) {
+    var group = (byNick || entriesByNick())[String(nick || "").toLowerCase()];
+    return group ? group.slice() : [];
   }
 
   // The ?list= for a source key, or "" for the primary.
@@ -3062,6 +3077,10 @@
       payload.empty.forEach(function (name) { empty[String(name).toLowerCase()] = true; });
     }
     var hidden = 0;
+    // One pass over the held rows for the whole sidebar, built here and
+    // dropped when this call returns (#1141): asking entriesForNick() to scan
+    // every bot again for each row made a filter answer O(rows x bots).
+    var byNick = entriesByNick();
     for (var i = 0; i < rows.length; i++) {
       var row = rows[i];
       var bot = String(row.dataset.bot || "").toLowerCase();
@@ -3070,7 +3089,7 @@
       // it reads as having "nothing" only if NONE of them matched - one
       // matching list is reason enough to keep the row on screen, even
       // though the tab open on it right now might be a different, empty one.
-      var group = entriesForNick(nick);
+      var group = entriesForNick(nick, byNick);
       var groupKeys = group.length
         ? group.map(function (entry) { return String(entry.bot).toLowerCase(); })
         : [bot];
@@ -3806,7 +3825,9 @@
       }).join(", "));
     });
     var skipped = payload.skipped || {};
-    var reasons = Object.keys(skipped);
+    // Sorted here (#1143): the server sends dict keys in the order it built
+    // them, and this list read alphabetically only because it used to sort.
+    var reasons = Object.keys(skipped).sort();
     if (reasons.length) {
       ktdataLine(t("stats.ktdataSkipped")
         .replace("{count}", reasons.reduce(function (n, r) { return n + skipped[r]; }, 0))
@@ -3933,12 +3954,6 @@
     var parts = [];
     if (progress.phase === "writing") {
       parts.push(t("tools.writingList"));
-    } else if (progress.phase === "audio") {
-      // #914: reading length and quality - folder_index/folder_count carry
-      // files read / files to read, so the bar below follows it too.
-      parts.push(t("tools.readingAudioInfo")
-        .replace("{done}", (progress.folder_index || 0).toLocaleString())
-        .replace("{total}", (progress.folder_count || 0).toLocaleString()));
     } else if (progress.folder_count) {
       parts.push(t("tools.scanningFolder")
         .replace("{index}", progress.folder_index).replace("{total}", progress.folder_count));
@@ -3994,6 +4009,7 @@
     if (!el.updateListSchedule) { return; }
     fetchJson("/api/tools/update-list/status").then(function (payload) {
       followRunningUpdate(payload);
+      followRunningAudioInfo(payload);
       var schedule = payload && payload.schedule;
       var text;
       if (!schedule) {
@@ -4026,6 +4042,9 @@
       clearInterval(updateList.pollTimer);
       updateList.pollTimer = null;
       el.updateListRunBtn.disabled = false;
+      // The rebuild has published; its audio reading (#1182) may just have
+      // begun, and the Read audio info card takes it up at once.
+      followRunningAudioInfo(payload);
       // #224: "running" alone cannot tell a rebuild that worked from one
       // that failed - this used to say "Done" unconditionally the moment
       // running flipped false, whichever it was.
@@ -4049,6 +4068,145 @@
       updateList.pollTimer = null;
       el.updateListRunBtn.disabled = false;
       showUpdateListStatus(t("tools.lostTrackOfUpdate").replace("{error}", err.message), true);
+    });
+  }
+
+  // ------------------------------------------------- Read audio info (#1182)
+  //
+  // A rebuild with "Length and quality in the list" on publishes first and
+  // reads the audio files' lengths afterwards, in the background; this card
+  // follows that reading however it was started - after a rebuild, from the
+  // console's `audioinfo`, from dccore.mrc - and its button starts one on its
+  // own. Its progress is the same status payload's: `audio.running`, and the
+  // progress file's phase "reading" (folder_index read of folder_count, rate
+  // a second). `audio.last` is how the last one ended.
+  var audioInfo = { pollTimer: null };
+
+  if (el.audioInfoRunBtn) {
+    el.audioInfoRunBtn.addEventListener("click", function () {
+      el.audioInfoRunBtn.disabled = true;
+      showAudioInfoStatus(t("tools.starting"), false);
+      postJson("/api/tools/audio-info", {}).then(function (res) {
+        if (!res.ok) {
+          el.audioInfoRunBtn.disabled = false;
+          var data = res.data || {};
+          showAudioInfoStatus(data.reason === "off" ? t("tools.audioOff")
+            : data.reason === "rebuilding" ? t("tools.audioRebuilding")
+            : (data.error || ("HTTP " + res.status)), true);
+          return;
+        }
+        startAudioInfoPolling();
+      }).catch(function (err) {
+        el.audioInfoRunBtn.disabled = false;
+        showAudioInfoStatus(t("common.requestFailed").replace("{error}", err.message), true);
+      });
+    });
+  }
+
+  function showAudioInfoStatus(text, isError) {
+    if (!el.audioInfoStatus) { return; }
+    el.audioInfoStatus.textContent = text;
+    el.audioInfoStatus.classList.toggle("is-error", !!isError);
+    if (el.audioInfoBar) { el.audioInfoBar.style.display = "none"; }
+  }
+
+  function showAudioInfoProgress(progress) {
+    if (!progress || progress.phase !== "reading") {
+      // Reading the list to find what to read (#1189: not "writing"), or
+      // writing the lengths in.
+      var writing = progress && ["rewriting", "packing", "publishing"].indexOf(progress.phase) >= 0;
+      showAudioInfoStatus(writing ? t("tools.audioWriting") : t("tools.audioFinding"), false);
+      return;
+    }
+    var done = progress.folder_index || 0;
+    var total = progress.folder_count || 0;
+    var parts = [t("tools.readingAudioInfo")
+      .replace("{done}", done.toLocaleString()).replace("{total}", total.toLocaleString())];
+    if (progress.rate) {
+      parts.push(t("tools.audioRate").replace("{rate}", progress.rate.toLocaleString()));
+    }
+    if (progress.elapsed !== null && progress.elapsed !== undefined) {
+      parts.push(describeDuration(progress.elapsed));
+    }
+    showAudioInfoStatus(parts.join(" · "), false);
+    if (!el.audioInfoBar || !total) { return; }
+    el.audioInfoBar.style.display = "block";
+    el.audioInfoBar.classList.remove("is-indeterminate");
+    el.audioInfoBarFill.style.width = Math.min(100, Math.floor(done * 100 / total)) + "%";
+  }
+
+  // How the last reading ended, in the page's language. The bot's own English
+  // line (`message`) only when the outcome is one this page does not know.
+  function describeAudioResult(last) {
+    if (!last) { return ""; }
+    var read = Number(last.read) || 0;
+    var unreadable = Number(last.unreadable) || 0;
+    if (last.outcome === "nothing") { return t("tools.audioNothing"); }
+    if (last.outcome === "off") { return t("tools.audioOff"); }
+    if (last.outcome === "busy") { return t("tools.audioBusy"); }
+    if (last.outcome === "stopped") {
+      return t("tools.audioStopped").replace("{read}", read.toLocaleString())
+        .replace("{total}", (Number(last.total) || 0).toLocaleString());
+    }
+    if (last.outcome === "done" && (last.unwritten || []).length) {
+      return t("tools.audioUnwritten").replace("{read}", (read - unreadable).toLocaleString());
+    }
+    if (last.outcome === "done") {
+      return t((last.updated || []).length ? "tools.audioDone" : "tools.audioDoneUnchanged")
+        .replace("{read}", (read - unreadable).toLocaleString())
+        .replace("{unreadable}", unreadable.toLocaleString());
+    }
+    return t("tools.audioFailed").replace("{error}", last.message || last.error || t("tools.unknownError"));
+  }
+
+  function audioResultIsError(last) {
+    return !!last && (last.outcome === "failed" || last.outcome === "stalled");
+  }
+
+  // Taken up when Tools opens, on its refresh tick, and after the button
+  // (#1023's rule for the rebuild, applied to the reading). Otherwise the card
+  // says how the last one ended, or that the setting is off.
+  function followRunningAudioInfo(payload) {
+    var audio = (payload && payload.audio) || {};
+    if (audio.running) {
+      if (audioInfo.pollTimer) { return true; }
+      if (el.audioInfoRunBtn) { el.audioInfoRunBtn.disabled = true; }
+      startAudioInfoPolling();
+      return true;
+    }
+    if (audioInfo.pollTimer) { return false; }
+    if (!audio.enabled) {
+      showAudioInfoStatus(t("tools.audioOff"), false);
+    } else if (audio.last) {
+      showAudioInfoStatus(describeAudioResult(audio.last), audioResultIsError(audio.last));
+    }
+    return false;
+  }
+
+  function startAudioInfoPolling() {
+    if (audioInfo.pollTimer) { clearInterval(audioInfo.pollTimer); }
+    pollAudioInfoStatus();
+    audioInfo.pollTimer = setInterval(pollAudioInfoStatus, UPDATE_LIST_POLL_MS);
+  }
+
+  function stopAudioInfoPolling() {
+    clearInterval(audioInfo.pollTimer);
+    audioInfo.pollTimer = null;
+    if (el.audioInfoRunBtn) { el.audioInfoRunBtn.disabled = false; }
+  }
+
+  function pollAudioInfoStatus() {
+    fetchJson("/api/tools/update-list/status").then(function (payload) {
+      var audio = payload.audio || {};
+      if (audio.running) {
+        showAudioInfoProgress(payload.progress);
+        return;
+      }
+      stopAudioInfoPolling();
+      showAudioInfoStatus(describeAudioResult(audio.last), audioResultIsError(audio.last));
+    }).catch(function (err) {
+      stopAudioInfoPolling();
+      showAudioInfoStatus(t("tools.lostTrackOfUpdate").replace("{error}", err.message), true);
     });
   }
 
@@ -6007,10 +6165,17 @@
     }).catch(function () { markConnection(false); });
   }, REFRESH_MS);
 
-  // Downloads can complete while the operator is looking at a different
-  // view, so this polls independently of which tab is active - same
-  // reasoning as the sidebar status card above.
-  setInterval(loadDownloads, DOWNLOADS_POLL_MS);
+  // Only while Downloads is the view on screen (#1142). Nothing outside
+  // #view-download draws what /api/fetch/status returns - the summary and
+  // both tables live inside it, and the always-visible status card and
+  // connection dot are fed by the /api/queue tick above - while the payload
+  // runs to hundreds of KB with a full history. activateView("download")
+  // fetches it fresh the moment the view opens, so a transfer that finished
+  // meanwhile is there on arrival. A hidden browser tab is not on screen
+  // either.
+  setInterval(function () {
+    if (state.active === "download" && !document.hidden) { loadDownloads(); }
+  }, DOWNLOADS_POLL_MS);
 
   // Only while Live Transfers is the view on screen. Speed now and the queue
   // counters move second to second; Stats does not, and polling a view
@@ -6025,16 +6190,22 @@
     if (state.active === "tools" && !updateList.pollTimer) { loadUpdateListSchedule(); }
   }, REFRESH_MS);
 
-  // A list-fetch (Download tab, or the File Lists fetch box) can complete
-  // while the operator is on any other view - keep the switcher's options
-  // fresh regardless of which tab is showing, same reasoning as above.
-  setInterval(pollFilelistsBots, FILELISTS_BOTS_POLL_MS);
+  // Only while the List Browser is the view on screen (#1142). Everything
+  // that reads state.filelistsBots - the sidebar, the tabs, the freshness
+  // banner, the purge and re-download buttons - lives in #view-filelists,
+  // and activateView("filelists") polls on the way in, so a list fetched
+  // while the operator was elsewhere is in the sidebar the moment it opens.
+  // That entry poll also redraws the sidebar in a language chosen meanwhile.
+  setInterval(function () {
+    if (state.active === "filelists" && !document.hidden) { pollFilelistsBots(); }
+  }, FILELISTS_BOTS_POLL_MS);
 
-  // Runs continuously regardless of which view is active, the same as
-  // loadDownloads above: the buffer this polls (webserver._console_log) is
-  // bounded server-side either way, and a console that is already caught up
-  // when the operator switches to it is worth more than the handful of
-  // requests saved by only polling while the tab is visible.
+  // Runs continuously regardless of which view is active, unlike the
+  // Downloads and List Browser polls above: the buffer this polls
+  // (webserver._console_log) is bounded server-side either way, and a
+  // console that is already caught up when the operator switches to it is
+  // worth more than the handful of requests saved by only polling while the
+  // tab is visible.
   pollConsoleLog();
   consoleLogTimer = setInterval(pollConsoleLog, CONSOLE_LOG_POLL_MS);
   pollFilelistsBots();

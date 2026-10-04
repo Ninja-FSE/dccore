@@ -570,13 +570,52 @@ def script_draws_rebuild(version):
     return theirs is not None and theirs >= ours
 
 
-def rebuild_lines(now=None):
+# The first script that draws the background audio reading (#1182). An older
+# one would draw `DCCORE REBUILD reading 3200 12000 230 ...` as a rebuild on
+# folder 3200 of 12000, so it is sent nothing while only a reading runs.
+AUDIO_SCRIPT_VERSION = "1.12"
+
+
+def script_draws_audio(version):
+    ours = _version_tuple(AUDIO_SCRIPT_VERSION)
+    theirs = _version_tuple(version)
+    return theirs is not None and theirs >= ours
+
+
+# The phases only the background audio reading writes (#1182).
+AUDIO_PHASES = ("reading", "finding", "rewriting")
+
+
+def _audio_rebuild_line(progress):
+    """The REBUILD line of a background audio reading."""
+    if progress.get("phase") == "reading":
+        return (f"DCCORE REBUILD reading {_num(progress.get('folder_index'))} "
+                f"{_num(progress.get('folder_count'))} {_num(progress.get('rate'))} "
+                f"{_num(progress.get('elapsed'))}")
+    # Writing the lengths in - or, before anything is read, finding what to
+    # read: a reading-only run reads the whole list first, and calling that
+    # "writing the list" told the operator the wrong thing (#1189).
+    writing = progress.get("phase") in ("rewriting", "packing", "publishing")
+    return (f"DCCORE REBUILD {'rewriting' if writing else 'finding'} 0 0 0 "
+            f"{_num(progress.get('elapsed'))}")
+
+
+def rebuild_lines(now=None, reading=False):
     """`DCCORE REBUILD <phase> <folder_index> <folder_count> <files> <elapsed>`
     while a master-list rebuild runs, however it was started (console, !update,
     the dashboard, the schedule): all of them set config.update_inprogress and
     all of them write the progress file the dashboard's bar reads. Nothing
-    when none runs. Before the first progress write the phase is "starting"."""
-    if not getattr(config, "update_inprogress", False):
+    when none runs. Before the first progress write the phase is "starting".
+
+    With `reading` - a script that draws it (#1182) - the background audio
+    reading too, once the rebuild is over or when it was started alone:
+    `DCCORE REBUILD reading <read> <to_read> <files_a_second> <elapsed>`,
+    `finding 0 0 0 <elapsed>` while a reading-only run reads the list to find
+    what to read, and `rewriting 0 0 0 <elapsed>` while it writes the
+    lengths into the list."""
+    import runtime
+    rebuilding = bool(getattr(config, "update_inprogress", False))
+    if not rebuilding and not (reading and runtime.audio_reading is not None):
         return []
     progress = None
     try:
@@ -585,6 +624,17 @@ def rebuild_lines(now=None):
     except Exception as err:
         print(f"[ADMINCHAT] Rebuild progress unavailable: {err}")
     progress = progress or {}
+    if not rebuilding:
+        return [_audio_rebuild_line(progress)]
+    # A rebuild, but the progress file is a reading's: the rebuild has just
+    # handed over (the bot notices on its next tick, then counts the lists),
+    # or it is stopping a reading first. The audio shape to a script that
+    # draws it; to an older one a phase it draws right, never "reading" in
+    # the folder fields - "Rebuilding reading, folder 37/12000" (#1182 audit).
+    if progress.get("phase") in AUDIO_PHASES:
+        if reading:
+            return [_audio_rebuild_line(progress)]
+        return [f"DCCORE REBUILD publishing 0 0 0 {_num(progress.get('elapsed'))}"]
     phase = _clean(progress.get("phase") or "starting", token=True)
     return [f"DCCORE REBUILD {phase} {_num(progress.get('folder_index'))} "
             f"{_num(progress.get('folder_count'))} {_num(progress.get('files'))} "
@@ -765,7 +815,7 @@ def fetching_lines(now=None):
     return lines
 
 
-def status_lines(now=None, fetching=False, rebuild=False):
+def status_lines(now=None, fetching=False, rebuild=False, reading=False):
     """The STATUS burst (#550, step 3): what the client's title bar and side
     panel are drawn from, read from what the daemon already holds.
 
@@ -842,7 +892,7 @@ def status_lines(now=None, fetching=False, rebuild=False):
     if fetching:
         lines.extend(fetching_lines(now))
     if rebuild:
-        lines.extend(rebuild_lines(now))
+        lines.extend(rebuild_lines(now, reading=reading))
     return lines
 
 
@@ -894,6 +944,7 @@ class Session:
         self.structured = False
         self.draws_fetching = False   # the script said it can draw FETCHING lines (#1019)
         self.draws_rebuild = False    # ... and REBUILD lines (#1024)
+        self.draws_audio = False      # ... and the background audio reading in them (#1182)
         self._rebuild_sent_at = 0.0
         self._rebuild_shown = False   # a REBUILD line is on the script's panel
         self.draws_downloads = False  # ... and the Downloads window's rows (#1022)
@@ -977,7 +1028,8 @@ class Session:
             def compute():
                 try:
                     lines.extend(status_lines(fetching=self.draws_fetching,
-                                              rebuild=self.draws_rebuild))
+                                              rebuild=self.draws_rebuild,
+                                              reading=self.draws_audio))
                 except Exception as err:
                     print(f"[ADMINCHAT] Status burst failed: {err}")
 
@@ -1004,7 +1056,7 @@ class Session:
         now = time.time()
         if now - self._rebuild_sent_at < REBUILD_INTERVAL:
             return
-        lines = rebuild_lines(now)
+        lines = rebuild_lines(now, reading=self.draws_audio)
         if not lines and not self._rebuild_shown:
             return
         self._rebuild_sent_at = now
@@ -1548,6 +1600,25 @@ def _cmd_update(session, args):
         session.nick, CONSOLE_SOURCE, authorised=True))
 
 
+def _cmd_audioinfo(session, args):
+    """Read the length and quality of the audio files the list has none for
+    yet, and write them in (#1182) - the same run as the dashboard's Read
+    audio info and dccore.mrc's Library menu.
+
+    THE ANSWER IS WHAT HAPPENED (#1182 audit): started, refused while a
+    rebuild runs, already reading (with how far it has got), or off. It used
+    to say "Reading ..." first whatever came next, and a refusal reached the
+    window only through the debug feed - not at all with the feed or its
+    info lines off. Its end ("nothing new to read" included) comes through
+    the debug feed. How far a reading has got is in the @DCCore panel (1.12
+    and later), on the dashboard and in the bot's own window - not in the
+    feed, where an hours-long reading would post a line every minute to the
+    debug channel too - and `audioinfo` asked again while one runs says it."""
+    import commands
+    _run_detached(session, "audioinfo", lambda: session.send(commands.handle_audio_info_request(
+        session.nick, CONSOLE_SOURCE, authorised=True)[1]))
+
+
 # LIST FRESHNESS AND FETCH (#750). The List Browser in the dashboard shows, for
 # every bot whose list we hold, whether their own advert says it has moved on
 # since we took our copy, and the automatic refresh asks again; the console had
@@ -1829,6 +1900,7 @@ def _cmd_hello(session, args):
     session.structured = True
     session.draws_fetching = script_draws_fetching(version)
     session.draws_rebuild = script_draws_rebuild(version)
+    session.draws_audio = script_draws_audio(version)
     session.draws_downloads = script_draws_downloads(version)
     session.reads_peers = script_reads_peers(version)
     session.send(hello_line())
@@ -2006,6 +2078,7 @@ COMMANDS = {
     "clearqueue": (_cmd_clearqueue, "force-clear another user's queue",  "clearqueue <nick>"),
     "rehash":     (_cmd_rehash,     "reload modules in place",           "rehash"),
     "update":     (_cmd_update,     "rebuild the MasterList",            "update"),
+    "audioinfo":  (_cmd_audioinfo,  "read audio lengths the list lacks", "audioinfo"),
     "verify":     (_cmd_verify,     "filenames listed in two folders",   "verify"),
     "lists":      (_cmd_lists,      "held bot lists, and which have changed", "lists"),
     "fetch":      (_cmd_fetch,      "ask the bots whose lists changed",  "fetch [bot]"),

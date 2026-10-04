@@ -29,6 +29,7 @@ import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 
 from tests import test_path_security as security  # noqa: E402
+from tests.support import temp_dir  # noqa: E402
 
 
 class AFailedRarRun(security.PoisonedQueueRowTests):
@@ -112,8 +113,7 @@ for _name in [n for n in dir(security.PoisonedQueueRowTests) if n.startswith("te
 class TheHelperOnItsOwn(unittest.TestCase):
 
     def test_a_missing_file_is_nothing_and_a_present_one_is_named(self):
-        import tempfile
-        directory = tempfile.mkdtemp(prefix="dccore-partial-")
+        directory = temp_dir(self, prefix="dccore-partial-")
         path = os.path.join(directory, "x.rar")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

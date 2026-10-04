@@ -2418,8 +2418,8 @@ def _handle_completed_list_fetch(row, zip_path):
 
     THE ZIP IS REMOVED ON SUCCESS. List Browser reads exclusively from
     list_fetch.py's own extracted copy under FETCHED_FILES_DIR/lists/<bot>/
-    (get_fetched_bot_page() re-parses that file fresh on every view - see
-    its own docstring) - nothing anywhere re-opens the raw zip once
+    (get_fetched_bot_page() reads each page from that file - see its own
+    docstring) - nothing anywhere re-opens the raw zip once
     process_fetched_list_zip() has returned True, including a re-fetch,
     which downloads a fresh one rather than touching the old. Reported
     live: an operator downloaded one of these zips to their own machine and

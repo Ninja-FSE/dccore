@@ -47,13 +47,16 @@ import sys
 import tempfile
 import unittest
 
+from tests.support import remove_tree
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 DRIVER = '''
 import io, json, os, sys, tempfile, time
 
 REPO, OUT = sys.argv[1], sys.argv[2]
-work = tempfile.mkdtemp(prefix="rehash-e2e-")
+# Inside the parent's folder, which the parent removes (#1149).
+work = tempfile.mkdtemp(prefix="rehash-e2e-", dir=os.path.dirname(OUT))
 
 conf = os.path.join(work, "settings.conf")
 io.open(conf, "w", encoding="utf-8").write(
@@ -176,6 +179,8 @@ class ARealRehash(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         work = tempfile.mkdtemp(prefix="rehash-e2e-parent-")
+        # The driver's own working folder is made inside this one (#1149).
+        cls.addClassCleanup(remove_tree, work)
         driver = os.path.join(work, "driver.py")
         out = os.path.join(work, "result.json")
         with io.open(driver, "w", encoding="utf-8") as handle:

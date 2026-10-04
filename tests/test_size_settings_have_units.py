@@ -113,14 +113,16 @@ class ThePacketSizeMenuReadsInKilobytes(DCCoreTestCase):
         field = self.field()
 
         self.assertEqual(field["choice_labels"],
-                         ["4 KB", "8 KB", "16 KB", "32 KB", "64 KB", "128 KB"])
+                         ["4 KB", "8 KB", "16 KB", "32 KB", "64 KB", "128 KB",
+                          "256 KB"])
 
     def test_the_values_are_still_the_byte_counts(self):
         """The label is what changes; the value saved is untouched."""
         field = self.field()
 
         self.assertEqual([str(c) for c in field["choices"]],
-                         ["4096", "8192", "16384", "32768", "65536", "131072"])
+                         ["4096", "8192", "16384", "32768", "65536", "131072",
+                          "262144"])
 
     def test_there_is_one_label_per_choice(self):
         """A short list would silently pair the wrong text with a value."""

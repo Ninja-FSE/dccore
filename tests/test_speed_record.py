@@ -26,7 +26,7 @@ if REPO_ROOT not in sys.path:
 import db  # noqa: E402
 import stats_mgr  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 
 class KeepingTheBestSpeed(DCCoreTestCase):
@@ -165,7 +165,7 @@ class EveryPersistedValueHasAWriterInTheDaemon(unittest.TestCase):
     def writers(self):
         """db.py functions that put something on disk."""
         import ast
-        tree = ast.parse(self.db_source())
+        tree = parse_source(self.db_source())
         found = []
         for node in tree.body:
             if not isinstance(node, ast.FunctionDef):
@@ -193,7 +193,7 @@ class EveryPersistedValueHasAWriterInTheDaemon(unittest.TestCase):
         # Then anything those call, transitively, inside db.py itself.
         bodies = {}
         import ast
-        for node in ast.parse(source).body:
+        for node in parse_source(source).body:
             if isinstance(node, ast.FunctionDef):
                 bodies[node.name] = {n.func.id for n in ast.walk(node)
                                      if isinstance(n, ast.Call)

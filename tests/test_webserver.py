@@ -34,7 +34,8 @@ import list as list_mod  # noqa: E402
 import settings_file  # noqa: E402
 import webserver  # noqa: E402
 
-from tests.support import DCCoreTestCase, queue_row, silence_debug  # noqa: E402
+from tests.support import (DCCoreTestCase, hold_threads_until_the_test_ends, queue_row,  # noqa: E402
+                           silence_debug, parse_source)
 
 WEBUI_TEST_PASSWORD = "test-password"
 
@@ -482,6 +483,10 @@ class BroadcastSearchTests(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
+        # Each accepted search starts a _close_window thread that sleeps out
+        # the whole BROADCAST_SEARCH_WINDOW, half a minute, in whatever tests
+        # run after this one. Its sleep ends with the test instead.
+        hold_threads_until_the_test_ends(self, ("_close_window",))
         self.oserve.irc_connection = "fake-connected-socket"
         config.CHANNEL = "#dccore-test,#dccore-test2"
         config.BROADCAST_SEARCH_CHANNEL = "#dccore-test"
@@ -697,7 +702,7 @@ class ListUpdateToolTests(DCCoreTestCase):
 
     def test_a_paused_system_scan_is_rejected_when_the_whole_rebuild_pauses(self):
         config.search_inprogress = True
-        config.PAUSE_ON_UPDATE = True
+        self.set_config(PAUSE_ON_UPDATE=True)
         config.PAUSE_FOR_WHOLE_UPDATE = True
         self.addCleanup(setattr, config, "PAUSE_FOR_WHOLE_UPDATE", False)
         status, result = webserver.start_list_update()
@@ -708,7 +713,7 @@ class ListUpdateToolTests(DCCoreTestCase):
         """#923: by default searches run through the scan, so one running now
         is no reason to refuse the rebuild."""
         config.search_inprogress = True
-        config.PAUSE_ON_UPDATE = True
+        self.set_config(PAUSE_ON_UPDATE=True)
         status, _result = webserver.start_list_update()
         self.assertEqual(status, 200)
 
@@ -718,7 +723,7 @@ class ListUpdateToolTests(DCCoreTestCase):
         so this route must not invent a stricter gate than the command it
         wraps enforces."""
         config.search_inprogress = True
-        config.PAUSE_ON_UPDATE = False
+        self.set_config(PAUSE_ON_UPDATE=False)
         status, _result = webserver.start_list_update()
         self.assertEqual(status, 200)
 
@@ -1460,6 +1465,10 @@ class CrlfInjectionHttpRouteTests(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
+        # Each accepted search starts a _close_window thread that sleeps out
+        # the whole BROADCAST_SEARCH_WINDOW, half a minute, in whatever tests
+        # run after this one. Its sleep ends with the test instead.
+        hold_threads_until_the_test_ends(self, ("_close_window",))
         self.oserve.irc_connection = "fake-connected-socket"
         config.CHANNEL = "#dccore-test,#dccore-test2"
         config.BROADCAST_SEARCH_CHANNEL = "#dccore-test"
@@ -3001,7 +3010,7 @@ class WebuiFallbacksMatchWhatConfigShips(unittest.TestCase):
     def shipped_defaults(self):
         path = os.path.join(REPO_ROOT, "src", "defaults.py")
         with io.open(path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
         shipped = {}
         for node in tree.body:
             target = value = None
@@ -3024,7 +3033,7 @@ class WebuiFallbacksMatchWhatConfigShips(unittest.TestCase):
             path = (next((p for p in (os.path.join(REPO_ROOT, "src", filename), os.path.join(REPO_ROOT, "conf", filename), os.path.join(REPO_ROOT, filename)) if os.path.exists(p)), os.path.join(REPO_ROOT, filename)))
             with io.open(path, encoding="utf-8") as handle:
                 source = handle.read()
-            for node in ast.walk(ast.parse(source)):
+            for node in ast.walk(parse_source(source)):
                 if not isinstance(node, ast.Call):
                     continue
                 if not (isinstance(node.func, ast.Name) and node.func.id == "getattr"):

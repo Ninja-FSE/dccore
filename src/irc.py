@@ -91,6 +91,17 @@ def _release_socket():
         oserve_mod.irc_connection = None
 
 
+# #1144: the read loop asks is_server_numeric() and is_user_event() about a
+# dozen and a half times for EVERY line from the server, and each call built
+# its pattern string again and looked it up in re's own cache before matching.
+# The compiled pattern is kept here per code instead - the very same pattern,
+# so the anchoring (#433, #513) is untouched. Every caller passes a fixed
+# code, so these stay a few entries each. A !rehash reload starts them empty,
+# which only costs one compile per code.
+_SERVER_NUMERIC_PATTERNS = {}
+_USER_EVENT_PATTERNS = {}
+
+
 def is_server_numeric(line, code):
     """True only when `line` is a genuine server numeric with this code.
 
@@ -104,7 +115,11 @@ def is_server_numeric(line, code):
     and "PONG" in line` let anyone make the daemon emit unthrottled raw PONGs
     straight to the socket, bypassing queue_mgr's pacing entirely.
     """
-    return re.match(r"^:\S+\s+" + code + r"\s+\S+", line) is not None
+    pattern = _SERVER_NUMERIC_PATTERNS.get(code)
+    if pattern is None:
+        pattern = re.compile(r"^:\S+\s+" + code + r"\s+\S+")
+        _SERVER_NUMERIC_PATTERNS[code] = pattern
+    return pattern.match(line) is not None
 
 
 def configured_channels():
@@ -491,7 +506,11 @@ def is_user_event(line, command):
     freezes their queue and hands it to the five-minute delete timer, for the
     crime of looking for a song.
     """
-    return re.match(r"^:\S+!\S+\s+" + command + r"(\s|$)", line) is not None
+    pattern = _USER_EVENT_PATTERNS.get(command)
+    if pattern is None:
+        pattern = re.compile(r"^:\S+!\S+\s+" + command + r"(\s|$)")
+        _USER_EVENT_PATTERNS[command] = pattern
+    return pattern.match(line) is not None
 
 
 def event_source_nick(line):
@@ -657,11 +676,32 @@ def _report_recent_lines(recent_lines):
 DAY_ROTATION_RETRY_SECONDS = 60.0
 _day_rotation_failed_at = globals().get("_day_rotation_failed_at")
 
+# The local date ("%Y-%m-%d", the form db._rotate_day_unlocked() compares) that
+# db.check_and_rotate_day() last succeeded for (#1132). Every channel line
+# reaches the rotation check, not only commands, and each check took
+# runtime.disk_lock and read stats.txt just to compare a date. disk_lock is the
+# one lock behind every db.py write, so a slow record_download() holding it
+# stalled the IRC read thread on the next line of plain chatter - half a second
+# with a large download_counts.json. Once the day is known to be rolled over,
+# the rest of that day's lines skip the check entirely; the first line after
+# local midnight runs it again. A failure leaves this alone, so the
+# once-a-minute retry above works exactly as before. Kept across a !rehash
+# reload the same way _day_rotation_failed_at is; starting empty would only
+# cost one check.
+_day_rotated_for = globals().get("_day_rotated_for")
+
 
 def rotate_the_day_without_stopping_the_bot():
     """db.check_and_rotate_day(), except that a failure is reported and the
-    message goes on being handled. Returns True if the rotation check ran."""
-    global _day_rotation_failed_at
+    message goes on being handled. Returns True when the day is known to be
+    rolled over: the check ran now, or already succeeded earlier today."""
+    global _day_rotation_failed_at, _day_rotated_for
+    # Read BEFORE the rotation runs, never after: a check that starts at
+    # 23:59:59 and finishes after midnight must not be recorded as the new
+    # day's, or the new day would never be rolled over from here.
+    today = time.strftime("%Y-%m-%d")
+    if today == _day_rotated_for:
+        return True
     now = time.monotonic()
     if (_day_rotation_failed_at is not None
             and now - _day_rotation_failed_at < DAY_ROTATION_RETRY_SECONDS):
@@ -675,6 +715,7 @@ def rotate_the_day_without_stopping_the_bot():
               f"Commands carry on; trying again in {int(DAY_ROTATION_RETRY_SECONDS)} s.")
         return False
     _day_rotation_failed_at = None
+    _day_rotated_for = today
     return True
 
 
@@ -701,7 +742,16 @@ def parse_privmsg(line):
     `ident_host` is the raw "ident@host" between "!" and the command word,
     for security.check_user_status()'s hostmask-pattern matching - not the
     same as event_source_host(), which strips the ident and lowercases.
+
+    Every line from the server is offered to this, and to parse_kick() and
+    parse_notice() below. Each starts with a plain substring test for its
+    command word (#1144): the anchored pattern needs that exact word, so a
+    line without it can never match, and most lines are not this command.
+    The test is the bare word with no spaces around it - the pattern takes
+    any whitespace there, not only a space.
     """
+    if "PRIVMSG" not in line:
+        return None
     match = re.match(r"^:([^!\s]+)!(\S*)\s+PRIVMSG\s+(\S+)\s+:(.+)$", line)
     if not match or not is_valid_irc_target(match.group(3)):
         return None
@@ -761,7 +811,12 @@ def parse_kick(line):
     `\S+` for the channel, not a character class. A channel with an "&" or a
     "^" in its name is legal (RFC 2812) and six parsers here used to drop it
     silently - see is_valid_irc_target().
+
+    The substring test first is only a shortcut (#1144) - see
+    parse_privmsg()'s docstring.
     """
+    if "KICK" not in line:
+        return None
     match = re.match(r"^:([^!\s]+)!\S*\s+KICK\s+(\S+)\s+(\S+)", line)
     if not match:
         return None
@@ -1369,7 +1424,12 @@ def gave_up_on(limit=None):
 def parse_notice(line):
     """(nick, target, message) for a well-formed NOTICE line, or None. See
     parse_privmsg()'s docstring for why the anchoring matters - the same
-    greedy-`.* ` and unanchored-nick problems applied here identically."""
+    greedy-`.* ` and unanchored-nick problems applied here identically.
+
+    The substring test first is only a shortcut (#1144) - see
+    parse_privmsg()'s docstring."""
+    if "NOTICE" not in line:
+        return None
     match = re.match(r"^:([^!\s]+)!\S*\s+NOTICE\s+(\S+)\s+:(.+)$", line)
     if not match or not is_valid_irc_target(match.group(2)):
         return None

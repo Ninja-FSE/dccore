@@ -43,7 +43,7 @@ class DamagedIndexCase(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
-        self.index_dir = tempfile.mkdtemp(prefix="dccore-damaged-index-")
+        self.index_dir = self.make_temp_dir(prefix="dccore-damaged-index-")
         self.path = os.path.join(self.index_dir, "idx.db")
         self.set_config(LIST_INDEX_FILE=self.path)
         list_index.reset_for_tests()

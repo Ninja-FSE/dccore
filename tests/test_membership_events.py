@@ -214,6 +214,15 @@ def _evaluate(condition, line, **names):
 class GuardsAreWiredToTheRightHandlers(unittest.TestCase):
     """Evaluate the real conditions, so a swapped or inverted guard fails."""
 
+    def setUp(self):
+        # The JOIN guard compares against config.NICKNAME, which ships blank.
+        # This class used to borrow whatever nick an earlier module had left
+        # there, and failed when run on its own or in a shard of the parallel
+        # runner that had no such module before it (#1146).
+        import defaults as config
+        self.addCleanup(setattr, config, "NICKNAME", config.NICKNAME)
+        config.NICKNAME = "SomeBot"
+
     # --- the three membership handlers -----------------------------------
 
     def test_the_quit_handler_is_gated_on_quit(self):

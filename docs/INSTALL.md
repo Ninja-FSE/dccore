@@ -140,7 +140,7 @@ Three things are deliberately *not* required:
 
 ### Disk the dashboard uses
 
-The List Browser lists the bots it has seen advertising in your channels; a bot that never advertises can be added by nick in the sidebar (**Add a bot that does not advertise**), and stays until you use **Forget**. The List Browser's filter searches every bot list you have downloaded at once, which needs a search index at `data/list_index.db`. It is built as each list is fetched and is roughly the size of the lists again — ten large lists can mean several hundred megabytes. `LIST_INDEX_FILE` moves it. Deleting it is safe: the filter stops working until the next fetch rebuilds it, and nothing else uses it. If the file is ever damaged (a torn restore, a disk error), DCCore moves it aside as `list_index.db.corrupt-<timestamp>`, starts a fresh one and re-indexes the lists you hold at the next filter query; the log says so, and the moved copy can be deleted.
+The List Browser lists the bots it has seen advertising in your channels; a bot that never advertises can be added by nick in the sidebar (**Add a bot that does not advertise**), and stays until you use **Forget**. The List Browser's filter searches every bot list you have downloaded at once, which needs a search index at `data/list_index.db`. It is built as each list is fetched and is about three times the size of the lists themselves — ten large lists can mean a few gigabytes. An index made by an earlier version has no prefix index for the filter's short prefixes and stores every folder name once per file, so the first start after the upgrade rebuilds it once from the lists you hold: about a minute per million files, before the bot connects, and the log says so. Going back to an earlier version afterwards: delete `data/list_index.db` first, with the bot stopped. An older version would show folder numbers instead of folder names in the filter's results. With the file gone, an older version indexes only each bot's main list again; its RAR and video lists come back into the filter when they are fetched again. `LIST_INDEX_FILE` moves it. Deleting it, with the bot stopped, is safe: the next start indexes the lists you hold again - a while with big lists - and nothing else uses it. If the file is ever damaged (a torn restore, a disk error), DCCore moves it aside as `list_index.db.corrupt-<timestamp>`, starts a fresh one and re-indexes the lists you hold at the next filter query; the log says so, and the moved copy can be deleted.
 
 The Stats page follows one period, and its figures come from the **transfer record**, which reads `data/transfers.db`: one small row for every finished transfer, with the nick it went to or came from (no host, no channel). Pick a period - 24 hours, 7 days, 30 days or all time - to see the files and lists sent, the size, the top and average speed, the average wait in the queue, what was received, the files and albums sent most and the nicks sent to and received from most. All time also counts any KeepTrack totals you imported, which have no date, and what the bot sent before the record began. Speed, slots and the queue are on the **Live Transfers** page. **Look up** shows one nick. If somebody asks to be forgotten, look them up and use **Forget**: every row with that nick goes, imported figures included, and the file is wiped, not just unlinked. **Forget everyone** empties the record. Both ask first and cannot be undone. **Export CSV** saves the chosen period as a spreadsheet. `TRANSFER_LOG_FILE` moves the file; empty turns the record off.
 
@@ -261,13 +261,40 @@ Two settings decide how the result is split up:
 
 **`LIST_SHOW_AUDIO_INFO`** (off by default) adds each MP3 and FLAC file's length and quality after its size -
 `::INFO:: 10.3MB 4m31s 320/44.1/JS`, the way other servers' lists show it (`~245` is a VBR average). Every audio
-file has to be read once. The files are read several at a time (`LIST_AUDIO_INFO_THREADS`, 64), and each rebuild
-spends at most `LIST_AUDIO_INFO_MINUTES` (5) on it, so a first pass never holds a rebuild for long: on a large library,
-or one on a network drive, the first few rebuilds each publish with part of the library read and the rest showing
-its size alone, until everything has been read once. After that only new files are read, and a rebuild costs what
-it did without the setting. What was read is kept in `data/audio_info.db`; deleting it is safe - the files are
-read again. The rebuild's last line says how fast the files were read; if raising `LIST_AUDIO_INFO_THREADS`
-further does not raise that number, you have found the server's own limit rather than the setting's.
+file has to be read once, and no rebuild waits for it:
+
+- **The rebuild publishes first**, with what is already known. A file not read yet shows its size alone.
+- **Then, in a rebuild the bot runs** (`!update`, the dashboard, the console, the schedule), **the same rebuild reads
+  the rest in the background**, several at a time (`LIST_AUDIO_INFO_THREADS`, 64), with no time limit. Searches and
+  downloads carry on meanwhile. What it reads is saved as it goes, so a reading that is stopped keeps what it read.
+- **When it is done, the lengths are written into the published list** - no new scan, the same quick swap, and the
+  list keeps its date, so other bots that fetch lists by their date do not fetch it twice. Searches and requests
+  pause only for that swap, as for a rebuild's, and a list download that is still running is waited for (a few
+  minutes at most; if it is still running then, the bot writes the lengths in as soon as it ends). If nothing new
+  had a length to show, the list is left alone.
+
+**`python3 update_list.py` run by hand** - the first list above, `configure.py`, a cron job - publishes and stops
+there: it prints how many files are still to read and how to read them, rather than sitting in your terminal for
+hours. `python3 update_list.py --read-audio-info` reads them in the foreground, with a progress line every 30
+seconds; Ctrl-C stops it and keeps what was read. Or leave it to the running bot (below).
+
+On a large library, or one on a network drive, the first reading can take hours; after that only new files are
+read. Its progress is in the console (`Audio info: 3,200 of 12,000 read, 230/s`), in the @DCCore window's panel and
+on the dashboard's **Tools** page, and its last line says how it ended (`done: 11,980 read, 20 unreadable, list
+updated`) and how fast the files were read; if raising `LIST_AUDIO_INFO_THREADS` further does not raise that number,
+you have found the server's own limit rather than the setting's.
+
+One rebuild or reading runs at a time, however it was started. A new rebuild started while a reading runs stops it
+(nothing read is lost), publishes, and starts a fresh reading - even a reading started by hand, or one left running by
+a bot that ended without its shutdown (the next start of the bot stops that one too). **Tools > Read audio info**, the
+console's `audioinfo` and **Library > Read audio info** in `dccore.mrc` run the reading on its own, for the files the
+list has no length for yet, and write in any length already read that the list does not show yet - after a reading
+was stopped, for instance. They say "nothing new to read" when there is nothing, and are refused while a rebuild runs
+(it starts its own reading) or while another reading runs. What was read is kept in `data/audio_info.db`; deleting it
+is safe - the files are read again.
+
+`LIST_AUDIO_INFO_MINUTES`, which used to cap the reading each rebuild did, is no longer used. A `settings.conf` that
+still sets it loads without complaint, and the value is ignored.
 
 ### If your users queue with AutoQ
 

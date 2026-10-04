@@ -312,7 +312,7 @@ const fn = (name) => {
   if (i < 0 || j < 0) { throw new Error("missing " + name); }
   return src.slice(i, j + 4);
 };
-const code = ["splitFetchedSource", "nickOfSource", "displayNickOfSource", "entriesForNick",
+const code = ["splitFetchedSource", "nickOfSource", "displayNickOfSource", "entriesByNick", "entriesForNick",
               "renderFilelistsTabs", "markFilelistsActiveBot"].map(fn).join(NL);
 function node() {
   const cls = new Set(), attrs = {};

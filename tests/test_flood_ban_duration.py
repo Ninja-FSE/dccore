@@ -45,7 +45,7 @@ import security  # noqa: E402
 
 import announce  # noqa: E402
 
-from tests.support import DCCoreTestCase, silence_debug  # noqa: E402
+from tests.support import DCCoreTestCase, silence_debug, parse_source  # noqa: E402
 
 
 class TheBanLastsWhatTheSettingSays(DCCoreTestCase):
@@ -154,7 +154,7 @@ class EveryMessageSaysTheSameThing(DCCoreTestCase):
         import ast
 
         with io.open(os.path.join(REPO_ROOT, "src", "security.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
 
         docstrings = set()
         for node in ast.walk(tree):

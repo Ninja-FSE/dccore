@@ -134,6 +134,142 @@ def is_over_broad_hard_ban_pattern(pattern):
     return not residue
 
 
+# #1131: hard_bans.txt used to be opened, read and every pattern re.escape()d
+# and compiled again for EVERY channel message, because check_user_status()
+# runs before anything knows whether a line is a command. Past about 512
+# patterns that also overflowed re's own compile cache, so every pattern was
+# recompiled from scratch on every line: at 2000 bans the read thread could
+# handle about four messages a second.
+#
+# The parsed rules are now kept here, keyed on the file's stat (path,
+# st_mtime_ns, st_size, st_ino), and the file is read again only when that key
+# changes. db.add_hard_ban() and db.remove_hard_ban() also drop this cache
+# explicitly after every write (see forget_hard_ban_rules()), so a !ban or
+# !unban never relies on the key alone.
+#
+# A stat key on its own can go stale: a same-size rewrite IN PLACE, done
+# quickly enough, keeps mtime, size and inode identical - an operator's editor
+# or a test helper can do that. So a version is only trusted on its key once
+# its mtime is safely older than the moment it was stat'ed (the "racy" rule git
+# uses for its index). Any later write then gets a different mtime. Until then
+# every message reads the file again, as before, and compares the TEXT: only a
+# changed text is parsed and compiled again.
+#
+# One tuple, (signature, trusted, text, rules), replaced in a single
+# assignment and never mutated, so a reader can never pair one version's key
+# with another version's rules. No lock: both callers are on the IRC read
+# thread, and two parses racing would only both produce the same answer. A
+# !rehash reload starts this empty again, which only costs one re-read.
+_hard_ban_cache = None
+
+# How much older than "now" an mtime must be before its stat key is trusted.
+# Comfortably above the coarsest common timestamp resolution (FAT's 2 s).
+_HARD_BAN_RACY_NS = 3 * 1000 * 1000 * 1000
+
+
+def forget_hard_ban_rules():
+    """Drop the parsed hard_bans.txt so the next check reads the file again.
+
+    Called by db.add_hard_ban() and db.remove_hard_ban() after they write,
+    so neither depends on the stat key noticing the change (#1131)."""
+    global _hard_ban_cache
+    _hard_ban_cache = None
+
+
+def _parse_hard_ban_rules(text, hard_file):
+    """The rules in `text`, in file order, as (pattern, is_full_mask,
+    is_host_pattern, match) tuples. Over-broad patterns are left out and
+    reported here, once per version of the file (#1131)."""
+    import re
+
+    rules = []
+    # The file is read in text mode, so "\r\n" and "\r" are already "\n" -
+    # the same lines `for line in f` used to give, unlike str.splitlines(),
+    # which would also split on NEL (U+0085), U+2028 and friends.
+    for line in text.split("\n"):
+        pattern = line.strip().lower()
+        if not pattern or pattern.startswith("#"):
+            continue
+
+        # BREADTH GUARD: a pattern made only of stars/separators
+        # would lock out the whole channel. Skip it and say so
+        # loudly in the log - see is_over_broad_hard_ban_pattern()'s
+        # own docstring for why the check is a full hostmask's
+        # worth of separators, not just "*".
+        if is_over_broad_hard_ban_pattern(pattern):
+            print(f"[SECURITY WARNING] Ignored an over-broad pattern in {hard_file}: {pattern!r}")
+            continue
+
+        regex_pattern = "^" + re.escape(pattern).replace(r"\*", ".*") + "$"
+        # THREE shapes of pattern, and they match three different
+        # things. A nick can never contain "!", "@", "." or ":" -
+        # RFC 2812 allows letters, digits and the specials
+        # []\\`_^{|} and nothing else - so what a pattern contains
+        # says what it is about.
+        #
+        #   contains "!" or "@"  -> a full hostmask; match the mask
+        #   contains "." or ":"  -> a host or IP; match the HOST
+        #   otherwise            -> a nick; match the nick
+        #
+        # THE MIDDLE ONE IS THE FIX. Only "!" and "@" counted, so
+        # an admin who typed the obvious thing -
+        #
+        #     !ban *.dialup.example.com
+        #
+        # got a pattern matched against the bare NICK, which can
+        # never contain a dot and so could never match. !ban
+        # accepted it, reported success, and db.load_hard_bans()
+        # listed it among the active bans for ever, while the host
+        # it names walked straight in. Found by audit; the same
+        # shape as #225, where the confirmation and the
+        # enforcement disagreed silently.
+        #
+        # Matched against the HOST and not the whole mask, which
+        # is the difference between working and appearing to. A
+        # full mask is "nick!ident@host", so "192.168.1.*" anchored
+        # over the whole of it cannot match anything -
+        # "*.dialup.example.com" only appeared to work because its
+        # leading star happened to swallow the "nick!ident@" part.
+        is_full_mask = "!" in pattern or "@" in pattern
+        is_host_pattern = not is_full_mask and any(
+            ch in pattern for ch in ".:")
+        rules.append((pattern, is_full_mask, is_host_pattern,
+                      re.compile(regex_pattern).match))
+    return tuple(rules)
+
+
+def _hard_ban_rules(hard_file):
+    """The parsed rules of `hard_file`, or None when it does not exist.
+
+    None is decided exactly as os.path.exists() used to decide it (any
+    OSError or ValueError from stat). A failed READ raises, as it always
+    did, so the caller's fail-open path is unchanged (#1131)."""
+    global _hard_ban_cache
+    # Taken BEFORE the stat: a version is only trusted if its mtime is older
+    # than this by a margin, so any write after the stat must carry a newer one.
+    stat_started_ns = time.time_ns()
+    try:
+        st = os.stat(hard_file)
+    except (OSError, ValueError):
+        return None
+    signature = (hard_file, st.st_mtime_ns, st.st_size, st.st_ino)
+
+    cached = _hard_ban_cache
+    if cached is not None and cached[1] and cached[0] == signature:
+        return cached[3]
+
+    with open(hard_file, "r", encoding="utf-8", errors="ignore") as f:
+        text = f.read()
+
+    if cached is not None and cached[0][0] == hard_file and cached[2] == text:
+        rules = cached[3]
+    else:
+        rules = _parse_hard_ban_rules(text, hard_file)
+    trusted = st.st_mtime_ns < stat_started_ns - _HARD_BAN_RACY_NS
+    _hard_ban_cache = (signature, trusted, text, rules)
+    return rules
+
+
 def check_user_status(user, hostmask=None):
     """Check the user against the timed bans in memory and against hard_bans.txt.
 
@@ -149,8 +285,6 @@ def check_user_status(user, hostmask=None):
 
     Returns False if the user should be ignored entirely, otherwise True.
     """
-    import os
-    import re
     import time
     import defaults as config
     import announce
@@ -207,87 +341,48 @@ def check_user_status(user, hostmask=None):
     # read raised, this stays False and we must not treat "no match" as "definitely clean".
     hard_check_ok = False
     matched_pattern = None
-    hard_file_existed = os.path.exists(hard_file)
-    if hard_file_existed:
-        try:
-            # #162 finding #25: the match used to be reported (return _deny(...),
-            # which prints and calls announce.send_debug()) from INSIDE this
-            # `with` block, holding the file handle open across that work. On
-            # Windows, db._atomic_write()'s os.replace() during an admin's
-            # concurrent !ban/!unban raises PermissionError against any handle
-            # still open on this same path - so the longer this one stayed open,
-            # the likelier a write landed inside that window. During exactly
-            # that window, hard_check_ok below would end up False (the read that
-            # is happening right now would itself fail on its NEXT open, not
-            # this one - see the loop below) and a hard-banned nick would be
-            # admitted for that one message: this scan fails OPEN by design (see
-            # hard_check_ok's own comment), so any read failure - not just a
-            # missing file - takes that path. Closing the handle (leaving the
-            # `with` block) before ever calling _deny() shrinks that window to
-            # exactly the file read itself, nothing more.
-            with open(hard_file, "r", encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    pattern = line.strip().lower()
-                    if not pattern or pattern.startswith("#"):
-                        continue
-
-                    # BREADTH GUARD: a pattern made only of stars/separators
-                    # would lock out the whole channel. Skip it and say so
-                    # loudly in the log - see is_over_broad_hard_ban_pattern()'s
-                    # own docstring for why the check is a full hostmask's
-                    # worth of separators, not just "*".
-                    if is_over_broad_hard_ban_pattern(pattern):
-                        print(f"[SECURITY WARNING] Ignored an over-broad pattern in {hard_file}: {pattern!r}")
-                        continue
-
-                    regex_pattern = "^" + re.escape(pattern).replace(r"\*", ".*") + "$"
-                    # THREE shapes of pattern, and they match three different
-                    # things. A nick can never contain "!", "@", "." or ":" -
-                    # RFC 2812 allows letters, digits and the specials
-                    # []\\`_^{|} and nothing else - so what a pattern contains
-                    # says what it is about.
-                    #
-                    #   contains "!" or "@"  -> a full hostmask; match the mask
-                    #   contains "." or ":"  -> a host or IP; match the HOST
-                    #   otherwise            -> a nick; match the nick
-                    #
-                    # THE MIDDLE ONE IS THE FIX. Only "!" and "@" counted, so
-                    # an admin who typed the obvious thing -
-                    #
-                    #     !ban *.dialup.example.com
-                    #
-                    # got a pattern matched against the bare NICK, which can
-                    # never contain a dot and so could never match. !ban
-                    # accepted it, reported success, and db.load_hard_bans()
-                    # listed it among the active bans for ever, while the host
-                    # it names walked straight in. Found by audit; the same
-                    # shape as #225, where the confirmation and the
-                    # enforcement disagreed silently.
-                    #
-                    # Matched against the HOST and not the whole mask, which
-                    # is the difference between working and appearing to. A
-                    # full mask is "nick!ident@host", so "192.168.1.*" anchored
-                    # over the whole of it cannot match anything -
-                    # "*.dialup.example.com" only appeared to work because its
-                    # leading star happened to swallow the "nick!ident@" part.
-                    is_full_mask = "!" in pattern or "@" in pattern
-                    is_host_pattern = not is_full_mask and any(
-                        ch in pattern for ch in ".:")
-
-                    if is_full_mask and full_mask_lower:
-                        candidate = full_mask_lower
-                    elif is_host_pattern and full_mask_lower and "@" in full_mask_lower:
-                        candidate = full_mask_lower.split("@", 1)[1]
-                    else:
-                        # No mask supplied by this caller, or a plain nick
-                        # pattern. Same fallback as before this existed.
-                        candidate = user_lower
-                    if re.match(regex_pattern, candidate):
-                        matched_pattern = pattern
-                        break
+    hard_file_existed = True
+    try:
+        # #162 finding #25: the match used to be reported (return _deny(...),
+        # which prints and calls announce.send_debug()) from INSIDE the
+        # `with open(hard_file)` block, holding the file handle open across
+        # that work. On Windows, db._atomic_write()'s os.replace() during an
+        # admin's concurrent !ban/!unban raises PermissionError against any
+        # handle still open on this same path - so the longer this one stayed
+        # open, the likelier a write landed inside that window. During exactly
+        # that window, hard_check_ok below would end up False and a
+        # hard-banned nick would be admitted for that one message: this scan
+        # fails OPEN by design (see hard_check_ok's own comment), so any read
+        # failure - not just a missing file - takes that path. The file is
+        # read whole and closed inside _hard_ban_rules(), before _deny() is
+        # ever reached, and since #1131 it is only opened at all when it may
+        # have changed, which shrinks that window further still.
+        rules = _hard_ban_rules(hard_file)
+        if rules is None:
+            hard_file_existed = False
+        else:
+            # The candidate for each shape of pattern - see the comment in
+            # _parse_hard_ban_rules() for why a host pattern is matched
+            # against the HOST and a full mask against the whole mask.
+            host_lower = (full_mask_lower.split("@", 1)[1]
+                          if full_mask_lower and "@" in full_mask_lower else None)
+            # File order, first match wins: the pattern reported is the
+            # same one the old line-by-line scan reported.
+            for pattern, is_full_mask, is_host_pattern, match in rules:
+                if is_full_mask and full_mask_lower:
+                    candidate = full_mask_lower
+                elif is_host_pattern and host_lower is not None:
+                    candidate = host_lower
+                else:
+                    # No mask supplied by this caller, or a plain nick
+                    # pattern. Same fallback as before this existed.
+                    candidate = user_lower
+                if match(candidate):
+                    matched_pattern = pattern
+                    break
             hard_check_ok = True
-        except Exception as e:
-            print(f"[SECURITY ERROR] Could not read {hard_file}: {e}")
+    except Exception as e:
+        print(f"[SECURITY ERROR] Could not read {hard_file}: {e}")
 
     if matched_pattern is not None:
         return _deny(f"matched banned pattern '{matched_pattern}'", "BAN")

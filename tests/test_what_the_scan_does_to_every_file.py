@@ -191,9 +191,13 @@ class ABackslashIsNotASeparator(unittest.TestCase):
         separate equal copy each, and the relpath/join calls go from one per
         file to one per directory. Asserted by INDENTATION, because that is
         what "which loop is it in" means here - twelve spaces is the
-        per-directory body, twenty is the per-file one."""
+        per-directory body, twenty is the per-file one.
+
+        relative_folder() since #1138: relpath()'s answer, sliced off the
+        string where that cannot differ - see
+        test_the_scan_lowercases_each_name_once.py."""
         code = code_only("update_list.py")
-        statement = "rel_dir = os.path.relpath(root, scan_root)"
+        statement = "rel_dir = relative_folder(root, scan_root)"
 
         self.assertIn(chr(10) + " " * 12 + statement + chr(10), code,
                       "the relative path is not computed in the per-directory "

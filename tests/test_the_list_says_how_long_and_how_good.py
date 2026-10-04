@@ -424,27 +424,33 @@ class TheList(FileCase):
         self.write("Example Artist - 02 - Closing.flac", flac(), folder="Album")
         self.write("Front.jpg", b"\xff\xd8" + b"\x00" * 500, folder="Album")
         self.write("Broken.mp3", b"not audio at all", folder="Album")
+        # As the bot starts it (#1182): a run by hand does not read in the background.
+        from unittest import mock
+        patcher = mock.patch.dict(os.environ, {update_list.RUN_TOKEN_ENV: "a-run-of-the-bot"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def rows(self, _clock=None, **overrides):
+    def rows(self, stop=None, **overrides):
+        """One rebuild the way update_list.py's __main__ runs it since #1182:
+        publish first, then the background reading of what is left."""
         self.set_config(**overrides)
         buffer = io.StringIO()
-        real = audio_info.Cache.read_pending
-        if _clock is not None:
-            ticks = iter(_clock)
-
-            def with_clock(cache, **kwargs):
-                return real(cache, clock=lambda: next(ticks), **kwargs)
-            audio_info.Cache.read_pending = with_clock
-        try:
-            with redirect_stdout(buffer):
-                built = update_list.generate_master_list()
-        finally:
-            audio_info.Cache.read_pending = real
+        jobs = []
+        with redirect_stdout(buffer):
+            built = update_list.generate_master_list(reading_jobs=jobs)
+            if jobs:
+                if stop is None:
+                    update_list.run_audio_reading(jobs)
+                else:
+                    update_list.read_audio_info(jobs, stop=stop)
         self.assertTrue(built, buffer.getvalue())
+        return self.published(), buffer.getvalue()
+
+    def published(self):
         path = list_mod.find_latest_list()
         with open(path, encoding="utf-8") as handle:
             return {line.split("  ::INFO:: ")[0].split(" ", 1)[1]: line.rstrip("\n").split("  ::INFO:: ")[1]
-                    for line in handle if line.startswith("!")}, buffer.getvalue()
+                    for line in handle if line.startswith("!")}
 
     def test_on_the_audio_rows_carry_it_and_nothing_else_does(self):
         rows, said = self.rows(LIST_SHOW_AUDIO_INFO=True)
@@ -452,10 +458,14 @@ class TheList(FileCase):
         self.assertRegex(rows["Example Artist - 02 - Closing.flac"], r"^\S+ 0m2s 1115/44\.1/S$")
         self.assertNotIn(" ", rows["Front.jpg"])
         self.assertNotIn(" ", rows["Broken.mp3"], "unreadable: size only")
-        # make_tree() ships a few audio files of its own; every one is read.
-        self.assertRegex(said, r"\[LIST-GEN\] Audio info: [1-9]\d* file\(s\) read, 0 unchanged")
-        self.assertRegex(said, r"Read at [\d,]+ files a second, 64 at a time\.")
-        self.assertRegex(said, r"Reading the length and quality of [1-9]\d* new or changed audio file\(s\), 64 at a time, for at most 5 minute\(s\)")
+        # make_tree() ships a few audio files of its own; every one is read,
+        # after the list is published (#1182).
+        self.assertRegex(said, r"\[LIST-GEN\] Audio info: 0 file\(s\) unchanged since the last "
+                               r"rebuild, [1-9]\d* new or changed to read in the background\.")
+        self.assertRegex(said, r"\[AUDIO-INFO\] Audio info: reading [1-9]\d* file\(s\) in the "
+                               r"background, 64 at a time\.")
+        self.assertRegex(said, r"\[AUDIO-INFO\] Audio info: done: [1-9]\d* read, [1-9]\d* unreadable, "
+                               r"list updated\.")
 
     def test_off_nothing_is_opened_and_the_rows_are_as_before(self):
         rows, said = self.rows(LIST_SHOW_AUDIO_INFO=False)
@@ -466,8 +476,9 @@ class TheList(FileCase):
     def test_the_second_rebuild_reads_nothing(self):
         self.rows(LIST_SHOW_AUDIO_INFO=True)
         rows, said = self.rows(LIST_SHOW_AUDIO_INFO=True)
-        self.assertRegex(said, r"\[LIST-GEN\] Audio info: 0 file\(s\) read, [1-9]\d* unchanged")
-        self.assertNotIn("files a second", said, "no rate when nothing was read")
+        self.assertRegex(said, r"\[LIST-GEN\] Audio info: [1-9]\d* file\(s\) unchanged since the "
+                               r"last rebuild\.")
+        self.assertNotIn("AUDIO-INFO", said, "nothing to read, so no reading at all")
         self.assertRegex(rows["Example Artist - 01 - Opening.mp3"], r" 0m26s 128/44\.1/JS$")
 
     def test_a_published_rebuild_forgets_a_removed_file(self):
@@ -481,16 +492,17 @@ class TheList(FileCase):
         self.assertTrue(any(key.endswith("Opening.mp3") for key in keys), keys)
         self.assertFalse(any(key.endswith("Closing.flac") for key in keys), keys)
 
-    def test_a_rebuild_out_of_time_publishes_and_the_next_one_finishes(self):
-        rows, said = self.rows(LIST_SHOW_AUDIO_INFO=True, LIST_AUDIO_INFO_THREADS=1,
-                               LIST_AUDIO_INFO_MINUTES=1, _clock=[0, 0] + [999] * 200)
-        # One read started before the clock ran out; which file it was is the
-        # walk's order, and make_tree() has audio files of its own.
-        self.assertIn("not read within LIST_AUDIO_INFO_MINUTES = 1", said)
-        self.assertRegex(said, r"Audio info: 1 file\(s\) read, 0 unchanged since the last "
-                               r"rebuild, [1-9]\d* left for the next one\.")
-        self.assertLessEqual(len([tail for tail in rows.values() if " " in tail]), 1)
-        rows, said = self.rows(LIST_SHOW_AUDIO_INFO=True, LIST_AUDIO_INFO_MINUTES=0)
+    def test_a_stopped_reading_publishes_and_the_next_rebuild_finishes(self):
+        """Stopped after its first reads (#1182, replacing #914's time limit):
+        the list stays as the rebuild published it, and the next rebuild
+        reads only what is left."""
+        answers = iter([False, False] + [True] * 500)
+        rows, said = self.rows(stop=lambda: next(answers), LIST_SHOW_AUDIO_INFO=True,
+                               LIST_AUDIO_INFO_THREADS=1)
+        self.assertTrue(all(" " not in tail for tail in rows.values()), rows)
+        rows, said = self.rows(LIST_SHOW_AUDIO_INFO=True)
+        self.assertRegex(said, r"\[LIST-GEN\] Audio info: [12] file\(s\) unchanged since the last "
+                               r"rebuild, [1-9]\d* new or changed to read in the background\.")
         self.assertRegex(rows["Example Artist - 01 - Opening.mp3"], r" 0m26s 128/44\.1/JS$")
         self.assertRegex(rows["Example Artist - 02 - Closing.flac"], r" 0m2s 1115/44\.1/S$")
 

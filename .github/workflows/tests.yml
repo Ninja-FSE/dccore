@@ -65,4 +65,7 @@ jobs:
         run: python -m compileall -q .
 
       - name: Run the regression suite
-        run: python -m unittest discover -s tests -t . -v
+        # Four processes at once, balanced by tests/module_durations.json and
+        # reported as one run (#1146): the same tests and the same total as
+        # `python -m unittest discover -s tests -t . -v`, in a third of the time.
+        run: python scripts/run_tests_in_parallel.py -v

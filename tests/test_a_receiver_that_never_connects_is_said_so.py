@@ -38,14 +38,16 @@ import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 import runtime  # noqa: E402
 
+from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
 from tests.test_dcc_resume_end_to_end import RecordingIrcSocket, loopback_is_usable  # noqa: E402
 
 USER = "someuser"
 FILE = "Some_Album.zip"
 CONTENT = bytes(range(256)) * 40          # 10,240 bytes
-PORT_START = 51320
-PORT_END = 51330
+# Through dcc_ports(): in a parallel run each shard moves it into a window
+# of its own, so no two shards ever listen on one port (#1146).
+PORT_START, PORT_END = dcc_ports(51320, 51330)
 
 
 class TheWindow(unittest.TestCase):

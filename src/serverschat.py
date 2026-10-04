@@ -117,6 +117,12 @@ RECENT_MAX = 50
 
 # Past this many tracked nicks the stale ones are dropped.
 _TRACK_MAX = 200
+# ...and if that is not enough, the oldest, down to this many (#1145). Trimming
+# only back to _TRACK_MAX left the table AT the cap, so during a netjoin -
+# hundreds of strangers inside one window - every following JOIN filtered and
+# sorted all 200 entries under chat_lock to drop exactly one. Trimming to three
+# quarters means the next 50 JOINs do neither.
+_TRACK_KEEP = _TRACK_MAX * 3 // 4
 
 _FORMATTING = re.compile(r"\x03(\d{1,2}(,\d{1,2})?)?|[\x02\x0f\x16\x1d\x1e\x1f]")
 # The characters that change the DIRECTION text is drawn in (#958 review):
@@ -229,8 +235,9 @@ def _limited(table, key, most, per, now, count=1):
 def _prune(now):
     """Keep the limit tables bounded: past _TRACK_MAX nicks, drop the ones
     whose window is over, and if that is not enough - many nicks inside one
-    window - the oldest, until it is back at _TRACK_MAX. Forgetting a nick's
-    count early only ever lets it through; the all-senders cap still holds."""
+    window - the oldest, until it is down to _TRACK_KEEP (#1145). Forgetting
+    a nick's count early only ever lets it through; the all-senders cap and
+    the JOIN-WHO cap still hold."""
     if len(runtime.chat_rate) > _TRACK_MAX:
         for key in [k for k, (start, _n) in runtime.chat_rate.items()
                     if now - start >= INBOUND_PER and k not in (_ALL, _JOIN_WHO_ALL)]:
@@ -238,7 +245,7 @@ def _prune(now):
     if len(runtime.chat_rate) > _TRACK_MAX:
         oldest = sorted((start, k) for k, (start, _n) in runtime.chat_rate.items()
                         if k not in (_ALL, _JOIN_WHO_ALL))
-        for _start, key in oldest[:len(runtime.chat_rate) - _TRACK_MAX]:
+        for _start, key in oldest[:len(runtime.chat_rate) - _TRACK_KEEP]:
             runtime.chat_rate.pop(key, None)
     for key in [k for k, until in runtime.chat_muted.items() if until <= now]:
         runtime.chat_muted.pop(key, None)
@@ -322,17 +329,22 @@ def note_join(nick, chan):
 def note_gone(nick, chan=None, now=None):
     """A peer left `chan` (or the network, with no channel).
 
-    Prints either way (#982 follow-up): a departure this never even
-    considered a peer is as useful to see, live, as one it removed - the
-    one way to tell "was never known" from "removed but nothing reflects
-    it" apart without guessing."""
+    The #982 follow-up made this print either way: a departure this never
+    even considered a peer is as useful to see, live, as one it removed -
+    the one way to tell "was never known" from "removed but nothing
+    reflects it" apart without guessing. But nearly every PART and QUIT is
+    an ordinary user's, so that line became most of the console log, and at
+    a few departures a second it rotated half a day's diagnostics away
+    (#1145). The "was not a known peer" line now prints
+    only under DEBUG_MODE; a known peer's departure is said as before."""
     key = str(nick or "").lower()
     touched = []
     with runtime.chat_lock:
         seen = runtime.chat_peers.get(key)
         if seen is None:
-            print(f"[CHAT] {key} left{f' {chan}' if chan else ' the network'}, "
-                  f"but was not a known DCCore Chat peer - nothing to remove.")
+            if getattr(config, "DEBUG_MODE", False):
+                print(f"[CHAT] {key} left{f' {chan}' if chan else ' the network'}, "
+                      f"but was not a known DCCore Chat peer - nothing to remove.")
             return
         if chan is None:
             touched = list(seen.keys())

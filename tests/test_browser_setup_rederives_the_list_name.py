@@ -59,6 +59,7 @@ class AfterTheSetupPage(DCCoreTestCase):
         super().setUp()
         self.tmp = tempfile.mkdtemp(prefix="dccore-setup-list-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.keep_every_setting()   # apply_setup() changes SERVER and the rest too (#1146)
         self.set_config(NICKNAME=config.SHIPPED_DEFAULTS["NICKNAME"], ADMIN_PASSWORD_HASH="",
                         LIST_BASE_NAME="DCCore")
 

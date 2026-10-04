@@ -28,6 +28,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -38,12 +39,14 @@ import defaults as config  # noqa: E402
 import runtime  # noqa: E402
 import announce  # noqa: E402
 
+from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
 from tests.test_dcc_resume_end_to_end import RecordingIrcSocket, loopback_is_usable  # noqa: E402
 
 USER = "someuser"
-PORT_START = 51300
-PORT_END = 51310
+# Through dcc_ports(): in a parallel run each shard moves it into a window
+# of its own, so no two shards ever listen on one port (#1146).
+PORT_START, PORT_END = dcc_ports(51300, 51310)
 CONTENT = bytes(range(256)) * 400          # 102,400 bytes
 
 
@@ -340,14 +343,32 @@ class ARealReceiver(DCCoreTestCase):
 
     def test_the_fixed_settling_sleep_is_gone(self):
         """A completed transfer returns when the ack arrives, not 1.5 s later.
-        Measured: with instant acks the whole exchange is well under that."""
-        irc, sender = self.start_send()
-        client = self.connect(irc.port())
-        started = time.time()
-        self.receive(client)
-        sender.join(30)
-        self.assertLess(time.time() - started, 1.4,
-                        "the send thread held its slot for a fixed sleep after completion")
+
+        The sleeps the send thread asks for are recorded, not the wall clock
+        timed: timing the whole exchange against 1.4 s failed on loaded CI
+        runners (2.7 s, 5.4 s) with nothing wrong in the code, and would pass
+        a fixed sleep on a fast machine just as well as it failed a correct
+        send on a slow one."""
+        asked = []
+        real_time = dcc.time
+
+        class Recording:
+            """dcc's `time`, with every sleep it asks for written down."""
+            def __getattr__(self, name):
+                return getattr(real_time, name)
+
+            def sleep(self, seconds):
+                asked.append(seconds)
+                real_time.sleep(seconds)
+
+        with mock.patch.object(dcc, "time", Recording()):
+            irc, sender = self.start_send()
+            client = self.connect(irc.port())
+            self.receive(client)
+            sender.join(30)
+        self.assertFalse(sender.is_alive(), "the send did not finish")
+        self.assertEqual([s for s in asked if s >= 0.5], [],
+                         "the send thread held its slot for a fixed sleep after completion")
 
 
 class FailuresAreReportedWhereSuccessesAre(unittest.TestCase):

@@ -23,6 +23,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -340,12 +341,18 @@ class AsyncCommandsAcknowledgeRatherThanWaitForTheResult(ConsoleCase):
         './data/hard_bans.txt', is relative to the real repository, the same
         hazard tests/test_bans_and_flood.py's setUp already redirects for
         every test in that file."""
-        ban_dir = tempfile.mkdtemp(prefix="dccore-console-ban-test-")
-        self.addCleanup(shutil.rmtree, ban_dir, True)
+        ban_dir = self.make_temp_dir(prefix="dccore-console-ban-test-")
         self.set_config(HARD_BANS_FILE=os.path.join(ban_dir, "hard_bans.txt"))
 
+        already_running = set(threading.enumerate())
         status, result = webserver.build_console_command_result(
             "ban *!*@spammer.example")
+        # The ban is written on that background thread. Let it finish before
+        # its folder is removed and HARD_BANS_FILE is put back: it wrote the
+        # file into a folder already gone, which left it behind (#1149).
+        # Registered last, so these run first.
+        for thread in set(threading.enumerate()) - already_running:
+            self.addCleanup(thread.join, 10)
 
         self.assertEqual(status, 200)
         self.assertEqual(len(result["lines"]), 1)

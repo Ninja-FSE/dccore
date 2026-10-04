@@ -22,6 +22,7 @@ if os.path.join(REPO_ROOT, "tests") not in sys.path:
     sys.path.insert(0, os.path.join(REPO_ROOT, "tests"))
 
 import adminchat  # noqa: E402
+from tests import dcc_ports  # noqa: E402
 import defaults as config  # noqa: E402
 import irc  # noqa: E402
 
@@ -119,12 +120,90 @@ def wait_for(predicate, timeout=5.0, interval=0.02):
     return False
 
 
+def keep_the_console_settings(test):
+    """Put back the settings these tests give the console when the test ends.
+
+    They were assigned directly and never restored, so every later test in
+    the process ran with a console password, an admin host mask and a
+    loopback MY_IP_OR_DOCK it never set: the "no password configured"
+    refusal, webserver.start() and the first-run setup page all answered
+    differently depending on which module had run before."""
+    for name in ("ADMIN_HOSTMASKS", "ADMIN_PASSWORD_HASH", "MY_IP_OR_DOCK", "ADMIN_CHAT_MODE"):
+        if hasattr(config, name):
+            value = getattr(config, name)
+            test.addCleanup(setattr, config, name, list(value) if isinstance(value, list) else value)
+
+
+class _ListenerThatEndsWithTheTest:
+    """The console's listening socket as _listen_and_serve_locked() sees it in
+    these tests: the real socket and the real LISTEN_TIMEOUT, except that
+    accept() gives up as soon as the test that opened it has ended.
+
+    A passive or fallback offer the test never dials waited out the whole
+    LISTEN_TIMEOUT, a minute, holding a port of the shard's configured DCC
+    range: six of eleven, after this module, with the threads serving them.
+    When each one timed out its finally cleared the one-listener flag in the
+    middle of whatever test was running by then."""
+
+    def __init__(self, sock, ended):
+        self._sock = sock
+        self._ended = ended
+        self._timeout = None
+
+    def settimeout(self, seconds):
+        self._timeout = seconds
+
+    def accept(self):
+        deadline = None if self._timeout is None else time.monotonic() + self._timeout
+        while True:
+            if self._ended.is_set():
+                raise socket.timeout("the test that opened this listener has ended")
+            wait = 0.05 if deadline is None else min(0.05, deadline - time.monotonic())
+            if wait <= 0:
+                raise socket.timeout("timed out")
+            self._sock.settimeout(wait)
+            try:
+                return self._sock.accept()
+            except socket.timeout:
+                continue
+
+    def __getattr__(self, name):
+        return getattr(self._sock, name)
+
+
+def end_the_console_listeners_with_the_test(test):
+    """Close every console listener `test` opens when it ends, and wait for
+    the threads that dialled or listened for it. Register it after the
+    cleanup that resets adminchat, so it runs first."""
+    ended = threading.Event()
+    real_open = adminchat._open_chat_listener
+    before = set(threading.enumerate())
+
+    def open_one():
+        sock, port = real_open()
+        if sock is None:
+            return sock, port
+        return _ListenerThatEndsWithTheTest(sock, ended), port
+
+    def end():
+        ended.set()
+        adminchat._open_chat_listener = real_open
+        for thread in threading.enumerate():
+            target = getattr(getattr(thread, "_target", None), "__name__", "")
+            if thread not in before and target in ("_listen_and_serve", "_connect_and_serve"):
+                thread.join(10.0)
+
+    adminchat._open_chat_listener = open_one
+    test.addCleanup(end)
+
+
 class HostMatching(unittest.TestCase):
     """The gate. Everything else is depth behind this."""
 
     def setUp(self):
         adminchat.reset_state_for_tests()
         self.addCleanup(adminchat.reset_state_for_tests)
+        keep_the_console_settings(self)
         config.ADMIN_HOSTMASKS = ["*!*@SysOp.users.undernet.org"]
 
     def test_the_configured_host_matches(self):
@@ -448,6 +527,8 @@ class PassiveOfferWithToken(unittest.TestCase):
         """
         adminchat.reset_state_for_tests()
         self.addCleanup(adminchat.reset_state_for_tests)
+        keep_the_console_settings(self)
+        end_the_console_listeners_with_the_test(self)
         config.ADMIN_HOSTMASKS = ["*!*@SysOp.users.undernet.org"]
         config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash(PASSWORD, iterations=1000)
         config.MY_IP_OR_DOCK = "127.0.0.1"
@@ -489,6 +570,8 @@ class ConnectFailureFallsBackToListening(unittest.TestCase):
     def setUp(self):
         adminchat.reset_state_for_tests()
         self.addCleanup(adminchat.reset_state_for_tests)
+        keep_the_console_settings(self)
+        end_the_console_listeners_with_the_test(self)
         config.ADMIN_HOSTMASKS = ["*!*@SysOp.users.undernet.org"]
         config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash(PASSWORD, iterations=1000)
         config.MY_IP_OR_DOCK = "127.0.0.1"
@@ -674,8 +757,9 @@ class ListenerUsesTheConfiguredRange(unittest.TestCase):
         #
         # A hundred ports of its own, away from 55000-55010, removes the
         # competition rather than hoping to win it.
-        config.DCC_PORT_START = 55100
-        config.DCC_PORT_END = 55199
+        # Through dcc_ports(), so a parallel run's shards each get a hundred
+        # of their own (#1146).
+        config.DCC_PORT_START, config.DCC_PORT_END = dcc_ports(55100, 55199)
 
     def test_the_listener_binds_inside_the_range(self):
         sock, port = adminchat._open_chat_listener()
@@ -755,6 +839,8 @@ class ListenModeEndToEnd(unittest.TestCase):
     def setUp(self):
         adminchat.reset_state_for_tests()
         self.addCleanup(adminchat.reset_state_for_tests)
+        keep_the_console_settings(self)
+        end_the_console_listeners_with_the_test(self)
         config.ADMIN_HOSTMASKS = ["*!*@SysOp.users.undernet.org"]
         config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash(PASSWORD, iterations=1000)
         config.MY_IP_OR_DOCK = "127.0.0.1"
@@ -871,6 +957,8 @@ class TheListenerFlagReleasesBeforeTheSessionBlocks(unittest.TestCase):
     def setUp(self):
         adminchat.reset_state_for_tests()
         self.addCleanup(adminchat.reset_state_for_tests)
+        keep_the_console_settings(self)
+        end_the_console_listeners_with_the_test(self)
         config.ADMIN_HOSTMASKS = ["*!*@SysOp.users.undernet.org"]
         config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash(PASSWORD, iterations=1000)
         config.MY_IP_OR_DOCK = "127.0.0.1"
@@ -988,6 +1076,7 @@ class TheRequestGate(unittest.TestCase):
     def setUp(self):
         adminchat.reset_state_for_tests()
         self.addCleanup(adminchat.reset_state_for_tests)
+        keep_the_console_settings(self)
         config.ADMIN_HOSTMASKS = ["*!*@SysOp.users.undernet.org"]
         config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash(PASSWORD, iterations=1000)
 
@@ -1153,6 +1242,7 @@ class EndToEndOverLoopback(unittest.TestCase):
     def setUp(self):
         adminchat.reset_state_for_tests()
         self.addCleanup(adminchat.reset_state_for_tests)
+        keep_the_console_settings(self)
         config.ADMIN_HOSTMASKS = ["*!*@SysOp.users.undernet.org"]
         config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash(PASSWORD, iterations=1000)
 

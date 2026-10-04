@@ -11,6 +11,7 @@ import tempfile
 import zipfile
 import time
 import json
+import collections
 
 # This script is an entry point of its own (README/INSTALL.md say "python3
 # update_list.py"), and stays at the repository root for that reason - but
@@ -203,6 +204,13 @@ def walk_with_sizes(top, onerror=None, workers=None):
     the order directories come back in changes, and the caller sorts before
     writing anything (#443). onerror is called here, on the caller's thread,
     never from a worker. One worker is the walk as it always was.
+
+    Finished directories are collected through a queue (#1124): each one's
+    future puts itself on it when done, and the caller takes them off one at
+    a time. Waiting with concurrent.futures.wait() on every outstanding
+    directory instead rescanned - and locked - all of them on each
+    completion, which made the walk quadratic in the number of directories:
+    41 s against 3 s on 137k files, and 16 workers slower than one.
     """
     if workers is None:
         workers = scan_workers()
@@ -270,23 +278,36 @@ def walk_with_sizes(top, onerror=None, workers=None):
                 yield current, files
         return
 
-    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+    import queue
+    from concurrent.futures import ThreadPoolExecutor
     pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="list-scan")
+    # Each directory's future puts (directory, future) here when it is done,
+    # so taking the next finished one costs the same however many are still
+    # outstanding (#1124). SimpleQueue does its own locking.
+    finished = queue.SimpleQueue()
+
+    def submit(directory):
+        future = pool.submit(list_one, directory)
+        future.add_done_callback(lambda done, path=directory: finished.put((path, done)))
+
     try:
-        running = {pool.submit(list_one, top): top}
-        while running:
-            finished, _ = wait(running, return_when=FIRST_COMPLETED)
-            for future in finished:
-                current = running.pop(future)
-                files, subdirs, errors = future.result()
-                report(errors)
-                for subdir in subdirs:
-                    running[pool.submit(list_one, subdir)] = subdir
-                if files is not None:
-                    yield current, files
+        submit(top)
+        outstanding = 1
+        while outstanding:
+            current, future = finished.get()
+            outstanding -= 1
+            files, subdirs, errors = future.result()
+            report(errors)
+            for subdir in subdirs:
+                submit(subdir)
+            outstanding += len(subdirs)
+            if files is not None:
+                yield current, files
     finally:
         # A caller that stops early - an exception mid-scan - must not leave
-        # workers listing a library nobody is reading any more.
+        # workers listing a library nobody is reading any more. The futures
+        # this cancels still run their done-callback and land in `finished`,
+        # which nobody reads any more; that is harmless.
         pool.shutdown(wait=True, cancel_futures=True)
 
 
@@ -391,6 +412,44 @@ def has_backslash_component(relative_path, separator=None):
     return any("\\" in part for part in flattened.split("/"))
 
 
+def relative_folder(root, scan_root, paths=None):
+    """os.path.relpath(root, scan_root), for a `root` the walk produced.
+
+    THE WALK BUILDS EVERY ROOT FROM scan_root ITSELF (#1138): each directory
+    is its parent's path, a separator and the entry's name, so the relative
+    path is simply what follows scan_root - a slice. relpath() made each one
+    absolute and normalised both paths first, about 10-20 us a directory on
+    Windows for an answer the string already held.
+
+    The slice is taken only where relpath() could not answer differently:
+    `root` must begin with scan_root and a separator, and what follows must
+    be plain names - nothing empty, no "." or "..", and on Windows no forward
+    slash, no colon (a drive or a stream to relpath(); no Windows name holds
+    one) and no name ending in a dot or a space, which Windows'
+    normalisation strips. Anything else asks relpath(), exactly as before.
+
+    `paths` is for the tests, like has_backslash_component()'s `separator`:
+    ntpath or posixpath, so both platforms' rules are checked on either.
+    Production passes nothing and gets os.path.
+    """
+    paths = os.path if paths is None else paths
+    if root == scan_root:
+        return "."
+    sep = paths.sep
+    prefix = scan_root if scan_root.endswith((sep, paths.altsep or sep)) else scan_root + sep
+    if root.startswith(prefix):
+        rest = root[len(prefix):]
+        names = rest.split(sep)
+        if paths.altsep:
+            plain = paths.altsep not in rest and ":" not in rest and all(
+                name and name[-1] not in ". " for name in names)
+        else:
+            plain = all(name and name != "." and name != ".." for name in names)
+        if plain:
+            return rest
+    return paths.relpath(root, scan_root)
+
+
 def is_listed_file(name, ignored=None):
     """Does this file go into the list? Everything does, unless it is skipped.
 
@@ -434,9 +493,36 @@ def _one_line(text):
     UTF-8 encoder. Sanitised here rather than left to fail at the write: one
     bad name in a library of thousands now costs a mangled-but-valid name in
     the list, not the entire rebuild.
+
+    Almost no name needs either change, so one regex search decides first
+    (#1125): the per-character pass below cost about 15 us per row, and the
+    largest share of a rebuild's writing time. The pattern is exactly the
+    characters the slow path changes - the controls and DEL it flattens, and
+    the lone surrogates that the UTF-8 'replace' round trip turns into "?",
+    which is the only thing that round trip changes.
     """
-    text = str(text).encode("utf-8", "replace").decode("utf-8")
+    text = str(text)
+    if _NEEDS_ONE_LINE_CLEANING.search(text) is None:
+        return text
+    text = text.encode("utf-8", "replace").decode("utf-8")
     return "".join(" " if ch < " " or ch == "\x7f" else ch for ch in text)
+
+
+# What _one_line() would change: a control character, DEL, or a lone
+# surrogate (#1125). A name with none of them is returned as it is.
+_NEEDS_ONE_LINE_CLEANING = re.compile("[\x00-\x1f\x7f\ud800-\udfff]")
+
+
+def _heading_text(folder):
+    """The heading line a folder gets in the list, exactly as written.
+
+    One function for the music list and for the rewrite of its length and
+    quality (#1182), which finds each row's cache entry by the heading above
+    it: two copies of this expression could drift, and a row would then miss
+    its suffix in one and not the other."""
+    import list as list_mod
+    raw = f"{list_mod.LIST_FOLDER_PREFIX}{folder}\\" if folder else list_mod.LIST_FOLDER_PREFIX
+    return _one_line(raw.replace("/", "\\"))
 
 
 def _discard_temp_lists(*paths):
@@ -787,12 +873,14 @@ def _migrate_one_list_directory(directory, log=print):
     return moved
 
 
-def _artifact_paths(fmt, date_str, directory=None):
-    """Where the download artifact for `fmt` is published, and staged."""
+def _artifact_paths(fmt, date_str, directory=None, staging=".new"):
+    """Where the download artifact for `fmt` is published, and staged. The
+    audio reading's rewrite stages under its own suffix (#1182).
+    """
     import list as list_mod
     final = os.path.join(directory or config.LOCAL_LIST_DIR,
                          list_mod.list_artifact_name(fmt, date_str))
-    return final, final + ".new"
+    return final, final + staging
 
 
 def _write_text_artifact(tmp_path, members):
@@ -928,7 +1016,7 @@ def progress_path():
 
 
 def write_progress(phase, folder="", folder_index=0, folder_count=0,
-                   files=0, force=False):
+                   files=0, force=False, rate=None):
     """Report the current step, for the dashboard to poll.
 
     NEVER RAISES AND NEVER BLOCKS THE SCAN. This is a progress bar: a full
@@ -937,6 +1025,13 @@ def write_progress(phase, folder="", folder_index=0, folder_count=0,
 
     Throttled to PROGRESS_WRITE_SECONDS, except when `force` marks a step an
     operator would notice missing - the start, each folder, and the end.
+
+    `token` is the one the bot gave this run (#1182, RUN_TOKEN_ENV): the bot
+    hands a rebuild over to the background reading only when THIS child
+    reports "reading", never on a file a stopped reading left behind - by the
+    token and not the pid, which a launcher such as a Windows venv's
+    python.exe does not share with the script. `pid` is for display. `rate`
+    is the reading's files a second.
     """
     now = time.time()
     if not force and (now - _progress_last_write[0]) < PROGRESS_WRITE_SECONDS:
@@ -944,7 +1039,10 @@ def write_progress(phase, folder="", folder_index=0, folder_count=0,
     _progress_last_write[0] = now
     payload = {"phase": phase, "folder": folder, "folder_index": folder_index,
                "folder_count": folder_count, "files": files, "at": now,
-               "started_at": _started_at}
+               "started_at": _started_at, "pid": os.getpid(),
+               "token": os.environ.get("DCCORE_RUN_TOKEN", "")}
+    if rate is not None:
+        payload["rate"] = rate
     try:
         path = progress_path()
         directory = os.path.dirname(os.path.abspath(path))
@@ -960,23 +1058,62 @@ def write_progress(phase, folder="", folder_index=0, folder_count=0,
         pass
 
 
-# The phases in which the published list is untouched (#923): the scan, the
-# audio-info reading and the writing all work on temporary names. Anything
-# else - "publishing", which covers the swap and the prune after it, or no
-# phase at all - is a moment searches and file requests wait out.
-PHASES_BEFORE_THE_SWAP = ("scanning", "audio", "writing")
+# The phases in which the published list is untouched (#923): the scan and
+# the writing work on temporary names, and so do the background audio reading
+# and the rewrite of its rows (#1182) - "reading" and "rewriting". Anything
+# else - "packing" and "publishing", which cover building the archive and the
+# swap, or no phase at all - is a moment searches and file requests wait out.
+PHASES_BEFORE_THE_SWAP = ("scanning", "writing", "reading", "rewriting")
+
+# The phase of the background audio reading (#1182), after the list is
+# published. The daemon hands a rebuild over to it on seeing this.
+READING_PHASE = "reading"
+
+
+def read_progress():
+    """The progress file as written, or None when there is nothing readable."""
+    try:
+        with io.open(platform_compat.long_path(progress_path()), encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        return loaded if isinstance(loaded, dict) else None
+    except (OSError, ValueError):
+        return None
 
 
 def read_phase():
     """The phase the running rebuild last reported, or None when it reported
     nothing readable. The daemon asks this; the rebuild is another process."""
+    loaded = read_progress()
+    phase = loaded.get("phase") if loaded else None
+    return str(phase) if phase else None
+
+
+def stop_request_path():
+    """The file that asks a background audio reading to stop (#1182). A file
+    rather than a signal: it means the same on Windows, and it reaches a
+    reading whichever process started it."""
+    return progress_path() + ".stop"
+
+
+def request_stop():
+    """Ask the reading to stop. True when the request was written."""
     try:
-        with io.open(platform_compat.long_path(progress_path()), encoding="utf-8") as handle:
-            loaded = json.load(handle)
-        phase = loaded.get("phase") if isinstance(loaded, dict) else None
-        return str(phase) if phase else None
-    except (OSError, ValueError):
-        return None
+        with io.open(platform_compat.long_path(stop_request_path()), "w", encoding="utf-8") as handle:
+            handle.write("stop\n")
+        return True
+    except OSError:
+        return False
+
+
+def stop_requested():
+    return os.path.exists(platform_compat.long_path(stop_request_path()))
+
+
+def clear_stop_request():
+    try:
+        os.remove(platform_compat.long_path(stop_request_path()))
+    except OSError:
+        pass
 
 
 def clear_progress():
@@ -1101,7 +1238,7 @@ def _write_rar_artifact(tmp_path, members, directory=None):
         shutil.rmtree(staging, ignore_errors=True)
 
 
-def build_list_artifact(fmt, members, date_str, directory=None):
+def build_list_artifact(fmt, members, date_str, directory=None, staging=".new"):
     """Build what a user downloads. Returns (fmt_used, tmp_path, final_path).
 
     `fmt_used` is not always `fmt`: "rar" falls back to "zip" when the binary
@@ -1110,12 +1247,12 @@ def build_list_artifact(fmt, members, date_str, directory=None):
     would take it off the air; the fallback is loud, and the operator still
     has something to serve while they sort the binary out.
     """
-    final, tmp = _artifact_paths(fmt, date_str, directory)
+    final, tmp = _artifact_paths(fmt, date_str, directory, staging)
     if fmt == "rar":
         if _write_rar_artifact(tmp, members, directory):
             return fmt, tmp, final
         fmt = "zip"
-        final, tmp = _artifact_paths(fmt, date_str, directory)
+        final, tmp = _artifact_paths(fmt, date_str, directory, staging)
 
     if fmt == "txt":
         _write_text_artifact(tmp, members)
@@ -1280,8 +1417,12 @@ def _neutralise_banner(text, log=print):
     return "\n".join(safe).rstrip("\n")
 
 
-def generate_master_list(list_name=None):
+def generate_master_list(list_name=None, reading_jobs=None):
     """Scan one list's folders, clear its old files first, and build its lists.
+
+    `reading_jobs`, a list, collects what is left for the background audio
+    reading once this list is published (#1182): an AudioReadingJob when
+    LIST_SHOW_AUDIO_INFO is on and new or changed audio files were listed.
 
     `list_name` picks which list to build; without one this is the primary,
     which on a single-list install is the only one there is - so every existing
@@ -1535,7 +1676,10 @@ def generate_master_list(list_name=None):
             # would mean an operator who adds a second folder after weeks of
             # serving changes every path anyone already saved; doing it once,
             # at the upgrade, is one break instead of two.
-            rel_dir = os.path.relpath(root, scan_root)
+            #
+            # relative_folder() rather than os.path.relpath(): the same
+            # answer, sliced off the string when it safely can be (#1138).
+            rel_dir = relative_folder(root, scan_root)
             if rel_dir == ".":
                 rel_dir = ""
             rel_dir = (os.path.join(scan_folder.name, rel_dir)
@@ -1575,12 +1719,24 @@ def generate_master_list(list_name=None):
             # first. is_listed_file() is not consulted here on purpose - a
             # video the operator has ignored still says what kind of folder
             # this is.
+            #
+            # EACH NAME IS LOWER-CASED ONCE (#1138). is_listed_file(),
+            # is_packable_file(), belongs_in_video_list() and
+            # audio_info.is_audio() each lower-cased the name again - up to
+            # five times a file - and rebuilt a tuple of the extensions each
+            # time. The checks below are those helpers' own, made on `low`
+            # against the tuples resolved once per scan; an empty tuple
+            # matches nothing, as it did there. The helpers stay, for every
+            # other caller. A folder's packable flag is likewise added once,
+            # after its files, instead of once per packable file.
             folder_has_video = split_video and any(
-                is_video_file(name, video_exts) for name, _bytes in files)
+                str(name).lower().endswith(video_exts) for name, _bytes in files)
+            packable_here = False
 
             # Keep every track under its exact, complete path on disk
             for file, file_bytes in files:
-                if is_listed_file(file, ignored):
+                low = str(file).lower()
+                if not low.endswith(ignored):
                     if file_bytes is None:
                         full_file_path = os.path.join(root, file)
                         # #228: a bare `except: pass` left file_bytes at 0 and
@@ -1604,22 +1760,28 @@ def generate_master_list(list_name=None):
                     # remembered per folder. A folder earns its !rar row from
                     # holding something worth packing, not from holding
                     # anything at all - see RAR_EXTENSIONS.
-                    if is_packable_file(file, packable_exts):
-                        packable_folders.add(rel_dir)
+                    if low.endswith(packable_exts):
+                        packable_here = True
 
                     # WHICH list the row goes in. With the split off, video
                     # lands in the same list as everything else, which is the
                     # behaviour this had before the setting existed.
-                    if split_video and belongs_in_video_list(file, folder_has_video, video_exts, companion_exts):
+                    if split_video and (low.endswith(video_exts) or (
+                            folder_has_video and low.endswith(companion_exts))):
                         video_files_data.append((rel_dir, file, file_bytes))
                     else:
                         all_files_data.append((rel_dir, file, file_bytes))
-                        if audio is not None and audio_info.is_audio(file):
+                        if audio is not None and low.endswith(audio_info.AUDIO_EXTENSIONS):
                             # No request here: an unchanged file is answered
                             # from the cache by its size, the rest are read
-                            # after the walk, many at once (#914).
+                            # after the walk, many at once (#914). The path
+                            # goes as (root, name), joined only for a file
+                            # that is read - on an unchanged library that is
+                            # almost none of them (#1138).
                             audio.note(audio_info.row_key(rel_dir, file),
-                                       os.path.join(root, file), file_bytes)
+                                       (root, file), file_bytes)
+            if packable_here:
+                packable_folders.add(rel_dir)
 
     if walk_errors:
         print(f"[LIST-GEN ERROR] {len(walk_errors)} part(s) of the library could not be "
@@ -1628,28 +1790,11 @@ def generate_master_list(list_name=None):
             audio.close()
         return False
 
-    # The audio files new or changed since the last rebuild (#567, #914).
-    # After the walk rather than inside it: read several at once, where on a
-    # network mount the time is round trips, and within LIST_AUDIO_INFO_MINUTES
-    # - the rebuild is pausing every search and request meanwhile.
-    if audio is not None and audio.pending:
-        workers = max(1, min(128, int(getattr(config, "LIST_AUDIO_INFO_THREADS", 64) or 1)))
-        minutes = max(0, int(getattr(config, "LIST_AUDIO_INFO_MINUTES", 5) or 0))
-        listed = len(all_files_data) + len(video_files_data)
-        print(f"[LIST-GEN] Reading the length and quality of {len(audio.pending):,} new or changed "
-              f"audio file(s), {workers} at a time"
-              f"{f', for at most {minutes} minute(s)' if minutes else ''}...")
-        audio.read_pending(workers=workers, budget=minutes * 60,
-                           progress=lambda done, total: write_progress(
-                               "audio", folder_index=done, folder_count=total, files=listed))
-        if audio.unread:
-            print(f"[LIST-GEN] {len(audio.unread):,} audio file(s) could not be read this time "
-                  f"(a network or sharing error): they show their size alone, and the next "
-                  f"rebuild tries them again.")
-        if audio.left_count:
-            print(f"[LIST-GEN] {audio.left_count:,} audio file(s) not read within "
-                  f"LIST_AUDIO_INFO_MINUTES = {minutes}: they show their size alone this "
-                  f"time, and the next rebuild reads them.")
+    # The audio files new or changed since the last rebuild (#567, #914) are
+    # NOT read here any more (#1182). The list is written with what the cache
+    # already knows - a file not read yet shows its size alone - and they are
+    # read after every list is published, in the background, by
+    # run_audio_reading(). Nothing waits for them, and nothing is paused.
 
     if denied_dirs:
         # Said once, with the count, because it is a standing condition rather
@@ -1809,16 +1954,24 @@ def generate_master_list(list_name=None):
             # (#69). One pass over rows already in memory; the heading is
             # written before its rows, so the total has to be known first.
             music_totals = folder_totals(all_files_data)
+            # ONCE PER BUILD, AND ONE WRITE PER FOLDER (#1125). The nick is
+            # the same for every row of one build - a rebuild is its own
+            # process and nothing changes the config under it - so asking
+            # list_nick() per row only cost time. Each folder's heading and
+            # rows are gathered in `chunk` and written together: one write()
+            # per row was a measurable share of a million-row list.
+            row_head = f"!{list_nick()} "
+            rar_head = f"!{list_nick()} !rar "
+            chunk = []
 
             for folder, filename, bytes_size in all_files_data:
                 if folder != current_folder:
                     current_folder = folder
+                    if chunk:
+                        f.write("".join(chunk))
+                        chunk = []
                     
                     # The text list gets the complete subfolder (e.g. \Digital Media 1\)
-                    raw_folder_str = (f"{list_mod.LIST_FOLDER_PREFIX}{folder}\\"
-                                      if folder else list_mod.LIST_FOLDER_PREFIX)
-                    display_folder = raw_folder_str.replace("/", "\\")
-                    
                     # The rule is drawn to the width of the folder line it wraps, not
                     # to a fixed 53 characters. Against the real library every one of
                     # the 4,107 folder headers is wider than 53 - they run 54 to 136,
@@ -1827,13 +1980,13 @@ def generate_master_list(list_name=None):
                     #
                     # Measured on _one_line()'s output rather than the raw string:
                     # that is what actually gets written, and it flattens control
-                    # characters, which changes the length.
-                    folder_line = _one_line(display_folder)
+                    # characters, which changes the length. _heading_text() is
+                    # the one spelling of it, shared with the rewrite of the
+                    # length and quality (#1182).
+                    folder_line = _heading_text(folder)
                     folder_rule = "=" * len(folder_line)
-                    f.write(f"\n{folder_rule}\n")
-                    f.write(f"{folder_line}\n")
-                    f.write(f"{folder_rule}\n")
-                    f.write(folder_summary_line(*music_totals[folder], format_size_human) + "\n")
+                    chunk.append(f"\n{folder_rule}\n{folder_line}\n{folder_rule}\n")
+                    chunk.append(folder_summary_line(*music_totals[folder], format_size_human) + "\n")
                     
                     # Strip multi-disc suffixes, for the !rar album list ONLY.
                     #
@@ -1955,7 +2108,7 @@ def generate_master_list(list_name=None):
                         # (*.mp3 and *.rar), not the tail. See defaults.py's note
                         # above LIST_IGNORED_EXTENSIONS for the quoted source.
                         if display_rar_folder not in written_rar_folders:
-                            f_rar.write(f"!{list_nick()} !rar {_one_line(display_rar_folder)}\n")
+                            f_rar.write(f"{rar_head}{_one_line(display_rar_folder)}\n")
                             written_rar_folders.add(display_rar_folder)
                 single_file_size = format_size_human(bytes_size)
                 # "4m31s 320/44.1/JS" after the size (#567), or nothing. After
@@ -1965,7 +2118,9 @@ def generate_master_list(list_name=None):
                     tail = audio.suffix(audio_info.row_key(folder, filename))
                     if tail:
                         single_file_size = f"{single_file_size} {tail}"
-                f.write(f"!{list_nick()} {_one_line(filename)}  ::INFO:: {single_file_size}\n")
+                chunk.append(f"{row_head}{_one_line(filename)}  ::INFO:: {single_file_size}\n")
+            if chunk:
+                f.write("".join(chunk))
 
         # The film and series list. Written after the music one and from the
         # same walk, exactly as the album list is - a separate file with its
@@ -2000,18 +2155,27 @@ def generate_master_list(list_name=None):
 
                 video_folder = None
                 video_totals = folder_totals(video_files_data)
+                # As in the music list above (#1125): the nick once, and one
+                # write per folder.
+                row_head = f"!{list_nick()} "
+                chunk = []
                 for folder, filename, bytes_size in video_files_data:
                     if folder != video_folder:
                         video_folder = folder
+                        if chunk:
+                            f_video.write("".join(chunk))
+                            chunk = []
                         raw = (f"{list_mod.LIST_FOLDER_PREFIX}{folder}\\"
                                if folder else list_mod.LIST_FOLDER_PREFIX)
                         line = _one_line(raw.replace("/", "\\"))
                         rule = "=" * len(line)
-                        f_video.write(f"\n{rule}\n{line}\n{rule}\n")
-                        f_video.write(folder_summary_line(*video_totals[folder], format_size_human) + "\n")
-                    f_video.write(
-                        f"!{list_nick()} {_one_line(filename)}"
+                        chunk.append(f"\n{rule}\n{line}\n{rule}\n")
+                        chunk.append(folder_summary_line(*video_totals[folder], format_size_human) + "\n")
+                    chunk.append(
+                        f"{row_head}{_one_line(filename)}"
                         f"  ::INFO:: {format_size_human(bytes_size)}\n")
+                if chunk:
+                    f_video.write("".join(chunk))
             print(f"[LIST-GEN] Film & series list created: {tmp_video_path}")
 
         print(f"[LIST-GEN] Text list created: {tmp_txt_path}")
@@ -2224,11 +2388,13 @@ def generate_master_list(list_name=None):
             except (sqlite3.Error, OSError) as cache_err:
                 print(f"[LIST-GEN] The list is published, but the audio info cache could not be "
                       f"updated ({cache_err}): the next rebuild reads again what it could not keep.")
-            rate = audio.rate()
-            print(f"[LIST-GEN] Audio info: {audio.read_count:,} file(s) read, "
-                  f"{audio.reused_count:,} unchanged since the last rebuild"
-                  f"{f', {audio.left_count:,} left for the next one' if audio.left_count else ''}."
-                  f"{f' Read at {rate:,.0f} files a second, {audio.workers} at a time.' if rate else ''}")
+            # What is left to read goes to the background reading (#1182),
+            # which starts once every list is published.
+            if audio.pending and reading_jobs is not None:
+                reading_jobs.append(AudioReadingJob(list_name, audio.scope, list(audio.pending)))
+            print(f"[LIST-GEN] Audio info: {audio.reused_count:,} file(s) unchanged since the "
+                  f"last rebuild"
+                  f"{f', {len(audio.pending):,} new or changed to read in the background' if audio.pending else ''}.")
         return True
             
     except Exception as e:
@@ -2251,8 +2417,625 @@ def generate_master_list(list_name=None):
         if audio is not None:
             audio.close()
 
-def generate_all_lists(log=print):
+# ---------------------------------------------------------------------------
+# THE BACKGROUND AUDIO READING (#1182).
+#
+# A rebuild with LIST_SHOW_AUDIO_INFO on used to read every new or changed
+# audio file before writing the list, capped by LIST_AUDIO_INFO_MINUTES, with
+# one line at the start, one at the end, and nobody able to tell how far it had
+# got. Now:
+#
+#   1. The rebuild publishes first, with what the cache already knows.
+#   2. Started by the bot, the same process then reads what is left, with no
+#      time limit, saving to the cache in batches as it goes - so a reading
+#      that is stopped keeps what it read. Run by hand (a terminal, cron,
+#      configure.py), it publishes and says how to read them instead: an
+#      unattended hours-long wait in a terminal is not what anybody asked for.
+#   3. When it is done, and only if a row's length and quality changed, those
+#      rows are rewritten into the CURRENT published list: no new scan (the
+#      slow part on a network drive), the same atomic swap, the archive built
+#      the way a rebuild builds it, and the list's date kept - other bots
+#      decide to fetch a list again by that date (#286), so they do not fetch
+#      it twice.
+#
+# `update_list.py --read-audio-info` runs 2 and 3 alone, for the lists as they
+# are published, and writes in any length the cache holds and the list does
+# not show yet - a rewrite that could not be swapped in last time. The
+# dashboard's Tools page, the console's `audioinfo` and dccore.mrc's Library
+# menu start it; by hand it reads in the foreground with progress lines.
+#
+# ONE AT A TIME, ACROSS PROCESSES. Every run holds the list lock beside the
+# progress file (an OS lock: it dies with its process). A rebuild that finds a
+# reading holding it asks that reading to stop - whoever started it, the bot,
+# a terminal or a bot that has since died - and waits for it; a rebuild that
+# finds another rebuild, or a reading-only run that finds anything, does not
+# start. The reading's rewrite stages under its own names (".audio.new"), so
+# it and a rebuild could never write the same temporary file anyway.
+# ---------------------------------------------------------------------------
+
+# One published list's audio files left to read: the list (None for the only
+# one), its cache scope, and (key, path, size) for each file - the size None
+# when the file was named by the published list rather than by a walk.
+AudioReadingJob = collections.namedtuple("AudioReadingJob", "list_name scope pending")
+
+# How many files are read between two saves to the cache. A stopped or killed
+# reading loses at most this many reads, and a save is one transaction.
+AUDIO_SAVE_EVERY = 200
+
+# Seconds between two progress lines printed by the reading itself.
+AUDIO_PRINT_SECONDS = 30.0
+
+# How long a rebuild waits for a reading it asked to stop.
+AUDIO_STOP_WAIT = 60.0
+
+# How long the rewrite keeps trying to swap the list in while something still
+# holds the old one open (#1182 audit). On Windows a list archive that a DCC
+# send started before the swap holds it; new sends are refused from the
+# rewrite on, so the running ones can only drain. Past this, the result says
+# which list it could not write, and the bot tries again once no list send is
+# running.
+READING_SWAP_WAIT = 600.0
+
+# The staging suffix of the reading's rewrite: never a rebuild's ".new".
+AUDIO_STAGING = ".audio.new"
+
+# What the rewrite answers.
+REWRITE_UPDATED = "updated"
+REWRITE_UNCHANGED = "unchanged"
+REWRITE_FAILED = "failed"
+REWRITE_STOPPED = "stopped"
+
+# What the rewrite looks for in a file row: the size and anything after it.
+_INFO_SEPARATOR = "  ::INFO:: "
+
+# Set by the bot in the environment of the update_list.py it starts: a token
+# its progress file then carries, so the bot knows the report is its own child's
+# whatever launcher stands between them (a Windows venv's python.exe starts the
+# real interpreter as a second process, with another pid), and the bot's own
+# pid, so a reading whose bot has gone stops by itself.
+RUN_TOKEN_ENV = "DCCORE_RUN_TOKEN"
+DAEMON_PID_ENV = "DCCORE_DAEMON_PID"
+
+# Seconds between two checks that the bot that started the reading is alive.
+DAEMON_CHECK_SECONDS = 10.0
+
+_list_lock = [None]
+
+
+def run_token():
+    """The token the bot gave this run, or "" for a run started by hand."""
+    return os.environ.get(RUN_TOKEN_ENV, "")
+
+
+def started_by_the_bot():
+    return bool(run_token())
+
+
+def list_lock_path():
+    return progress_path() + ".lock"
+
+
+def list_lock_holder():
+    """(pid, "rebuild" or "reading") of the run holding the list lock, or None
+    when no run does. Asked by the bot before it starts a reading."""
+    path = list_lock_path()
+    if not os.path.exists(platform_compat.long_path(path)):
+        return None
+    try:
+        held = platform_compat.file_lock_held(platform_compat.long_path(path))
+    except OSError:
+        return None
+    if not held:
+        return None
+    return platform_compat.file_lock_note(platform_compat.long_path(path))
+
+
+def take_list_lock(kind, log=print, wait=None, clock=time.monotonic, sleep=time.sleep):
+    """Hold the list lock for this run, as `kind`. Returns None when it is
+    held, else the holder's (pid, kind) it could not take it from.
+
+    A rebuild asks a reading that holds it to stop, and waits up to
+    AUDIO_STOP_WAIT for it to let go: what the reading read is saved."""
+    path = platform_compat.long_path(list_lock_path())
+    try:
+        _list_lock[0] = platform_compat.take_file_lock(path, kind)
+        # Nobody else holds the list, so a stop request lying about was meant
+        # for a run that has ended: it must not stop this one at its start.
+        clear_stop_request()
+        return None
+    except platform_compat.AlreadyRunning:
+        holder = platform_compat.file_lock_note(path)
+    if kind != "rebuild" or holder[1] != "reading":
+        return holder
+    log(f"[LIST-GEN] An audio reading (pid {holder[0]}) holds the list; asking it to stop. "
+        f"What it read is kept.")
+    request_stop()
+    deadline = clock() + (AUDIO_STOP_WAIT if wait is None else wait)
+    try:
+        while clock() < deadline:
+            sleep(0.5)
+            try:
+                _list_lock[0] = platform_compat.take_file_lock(path, kind)
+                return None
+            except platform_compat.AlreadyRunning:
+                continue
+        return platform_compat.file_lock_note(path)
+    finally:
+        clear_stop_request()
+
+
+def mark_list_lock(kind):
+    """Say, in the held lock, what this run is doing now."""
+    if _list_lock[0] is not None:
+        platform_compat.set_file_lock_note(_list_lock[0], kind)
+
+
+def release_list_lock():
+    platform_compat.release_file_lock(_list_lock[0])
+    _list_lock[0] = None
+
+
+def reading_should_stop(clock=time.monotonic, _state={"checked": 0.0, "gone": False}):
+    """The reading's stop question: a stop was asked, or the bot that started
+    it is no longer running (#1182 audit) - a bot that crashed or whose window
+    was closed ran no shutdown to ask. The bot's liveness is checked every
+    DAEMON_CHECK_SECONDS, not on every read."""
+    if stop_requested():
+        return True
+    daemon = os.environ.get(DAEMON_PID_ENV, "")
+    if not daemon:
+        return False
+    if not _state["gone"] and clock() - _state["checked"] >= DAEMON_CHECK_SECONDS:
+        _state["checked"] = clock()
+        _state["gone"] = not platform_compat.pid_alive(daemon)
+    return _state["gone"]
+
+
+def _scope_of(list_name):
+    """The audio cache scope of a list: its own name, the primary's for the
+    only list (#979) - the same as generate_master_list() opens.
+    """
+    return list_name or library.primary_list().name
+
+
+def _published_list_names():
+    """The list name to give rewrite_audio_info() for each configured list:
+    None for the only one, each name when there are several."""
+    every = library.lists()
+    return [None] if len(every) == 1 else [entry.name for entry in every]
+
+
+def _is_rule(line):
+    return bool(line) and not line.strip("=")
+
+
+def _list_lines(path):
+    """(body, ending, heading) for each line of a published music list, the
+    heading being the folder heading the line sits under (None above the
+    first). Opened with newline="" so the line endings come back exactly as
+    written - the rewrite must not turn a Windows list's CRLF into LF."""
+    heading = None
+    back2 = back1 = None
+    with io.open(platform_compat.long_path(path), encoding="utf-8", newline="") as handle:
+        for raw in handle:
+            body = raw.rstrip("\r\n")
+            ending = raw[len(body):]
+            if not body.startswith("!") and _is_rule(body) and _is_rule(back2) \
+                    and back1 is not None and not _is_rule(back1):
+                heading = back1
+            yield body, ending, heading
+            back2, back1 = back1, body
+
+
+def _row_name(body):
+    """(name, tail) of a file row - the tail being its size and anything
+    after it - or None for any other line. The nick never holds a space, and
+    the tail never holds the separator, so the first space and the LAST
+    separator bound the name whatever it contains."""
+    if not body.startswith("!"):
+        return None
+    space = body.find(" ")
+    at = body.rfind(_INFO_SEPARATOR)
+    if space < 0 or at <= space:
+        return None
+    return body[space + 1:at], body[at + len(_INFO_SEPARATOR):]
+
+
+# The phase while a reading-only run reads the published list to find what to
+# read - before any file is opened.
+FINDING_PHASE = "finding"
+
+
+def unread_audio_jobs(log=print):
+    """The reading-only run's work: in each published list, the audio rows
+    the cache has no entry for.
+
+    No walk: the rows are the published list's, each heading is turned back
+    into its folder - the label first (#164), then the path below it - and a
+    file's size is asked for only when it is read. A row whose folder label
+    is no longer configured is left alone; the next rebuild drops it."""
+    import list as list_mod
+
+    write_progress(FINDING_PHASE, force=True)
+    every = library.lists()
+    primary = library.primary_list().name
+    jobs = []
+    for entry in every:
+        list_name = None if len(every) == 1 else entry.name
+        path = list_mod.find_latest_list(list_name)
+        if not path:
+            continue
+        scope = _scope_of(list_name)
+        cache = audio_info.Cache.open(scope=scope, formerly="" if scope == primary else None, log=log)
+        if cache is None:
+            continue
+        known = cache.known
+        cache.close()
+        pending = []
+        resolved = {}
+        for body, _ending, heading in _list_lines(path):
+            row = _row_name(body)
+            if row is None or heading is None or not audio_info.is_audio(row[0]):
+                continue
+            if heading not in resolved:
+                parts = list_mod.list_heading_parts(heading)
+                folder = library.folder_for_label(parts[0], list_name) if parts else None
+                resolved[heading] = None if folder is None else (
+                    os.path.join(folder.name, *parts[1:]), os.path.join(folder.path, *parts[1:]))
+            where = resolved[heading]
+            if where is None:
+                continue
+            key = audio_info.row_key(where[0], row[0])
+            if key not in known:
+                pending.append((key, platform_compat.long_path(os.path.join(where[1], row[0])), None))
+        if pending:
+            jobs.append(AudioReadingJob(list_name, scope, pending))
+    return jobs
+
+
+def _rewrite_rows(source, target, suffixes):
+    """Write `source` to `target` with each audio row's length and quality
+    taken from `suffixes` ({heading: {name: suffix}}). Every other byte is
+    copied as it is. Returns how many rows changed."""
+    changed = 0
+    chunk = []
+    with io.open(platform_compat.long_path(target), "w", encoding="utf-8", newline="") as out:
+        for body, ending, heading in _list_lines(source):
+            row = _row_name(body)
+            if row is not None and audio_info.is_audio(row[0]):
+                name, tail = row
+                size = tail.split(" ", 1)[0]
+                suffix = suffixes.get(heading, {}).get(name, "")
+                wanted = f"{size} {suffix}" if suffix else size
+                if wanted != tail:
+                    body = body[:len(body) - len(tail)] + wanted
+                    changed += 1
+            chunk.append(body + ending)
+            if len(chunk) >= 4096:
+                out.write("".join(chunk))
+                chunk = []
+        out.write("".join(chunk))
+    return changed
+
+
+def _swap_waiting_for_readers(swaps, unchanged, stop, wait, clock, sleep, log):
+    """_publish_artifacts(), tried again while the old list is held open - a
+    list download already running when the reading reached its swap, on
+    Windows - for up to `wait` seconds. Each failed try has rolled back
+    completely, so trying again is safe; `unchanged()` and `stop()` are asked
+    before every try. Raises the last error when time runs out."""
+    deadline = clock() + wait
+    said = False
+    while True:
+        if stop() or not unchanged():
+            return False
+        write_progress("publishing", force=True)
+        try:
+            _publish_artifacts(swaps)
+            return True
+        except OSError as err:
+            if clock() >= deadline:
+                raise
+            if not said:
+                said = True
+                log(f"[AUDIO-INFO] The list is open elsewhere ({err}) - a download still running. "
+                    f"New ones wait; trying again for up to {int(wait)} s.")
+            sleep(5.0)
+
+
+def rewrite_audio_info(list_name=None, stop=None, log=print, swap_wait=None,
+                       clock=time.monotonic, sleep=time.sleep):
+    """Step 3: the length and quality the cache now holds, written into the
+    published list. Returns REWRITE_UPDATED when the list was swapped,
+    REWRITE_UNCHANGED when no row would change, REWRITE_STOPPED when a stop or
+    a rebuild that published meanwhile got there first, and REWRITE_FAILED
+    when it could not be written - the lengths stay in the cache, and the
+    next reading-only run writes them in.
+
+    The result is what a full rebuild with the same cache would publish: each
+    audio row's suffix is the cache's for that row, found by the heading and
+    name exactly as the rebuild writes them (_heading_text(), _one_line()).
+    The list's modification time, which is the date the advert gives it, is
+    put back afterwards."""
+    import list as list_mod
+
+    stop = stop or (lambda: False)
+    directory = list_mod.list_dir(list_name)
+    txt_path = list_mod.find_latest_list(list_name)
+    if not txt_path:
+        return REWRITE_UNCHANGED
+    base_name = os.path.basename(txt_path)
+    date_str = base_name[len(config.LIST_BASE_NAME) + 1:-len(".txt")]
+    try:
+        before = os.stat(platform_compat.long_path(txt_path))
+    except OSError:
+        return REWRITE_UNCHANGED
+
+    cache = audio_info.Cache.open(scope=_scope_of(list_name), log=log)
+    if cache is None:
+        return REWRITE_FAILED
+    known = cache.known
+    cache.close()
+    suffixes = {}
+    for key, (_size, suffix) in known.items():
+        if suffix:
+            folder, _sep, filename = key.partition("\x00")
+            suffixes.setdefault(_heading_text(folder), {})[_one_line(filename)] = suffix
+
+    # The archive in the format it was published in: a rebuild whose .rar
+    # fell back to .zip published a .zip, and that is the file to replace.
+    published = [fmt for fmt in list_mod.LIST_FORMATS
+                 if os.path.exists(_artifact_paths(fmt, date_str, directory)[0])]
+    if not published:
+        log(f"[AUDIO-INFO] {base_name} has no archive beside it; the list is left as it is.")
+        return REWRITE_FAILED
+    fmt = list_mod.list_format() if list_mod.list_format() in published else published[0]
+
+    def unchanged():
+        try:
+            now = os.stat(platform_compat.long_path(txt_path))
+        except OSError:
+            return False
+        return (now.st_mtime_ns, now.st_size) == (before.st_mtime_ns, before.st_size)
+
+    write_progress("rewriting", force=True)
+    tmp_txt = txt_path + AUDIO_STAGING
+    tmp_artifact = None
+    try:
+        changed = _rewrite_rows(txt_path, tmp_txt, suffixes)
+        if not changed:
+            _discard_temp_lists(tmp_txt)
+            return REWRITE_UNCHANGED
+        # The members a rebuild packs, in its order: this list, then the film
+        # list and the album list of the same build when they were published.
+        members = [(tmp_txt, base_name)]
+        for marker in (list_mod.VIDEO_LIST_MARKER, "RAR"):
+            other = os.path.join(directory, f"{config.LIST_BASE_NAME}-{marker}-{date_str}.txt")
+            if os.path.exists(other) and os.path.getsize(other) > 0:
+                members.append((other, os.path.basename(other)))
+        used, tmp_artifact, artifact_path = build_list_artifact(
+            fmt, members, date_str, directory, staging=AUDIO_STAGING)
+        if used != fmt:
+            log(f"[AUDIO-INFO] The .{fmt} archive could not be built again; the list is left as it is.")
+            _discard_temp_lists(tmp_txt, tmp_artifact)
+            return REWRITE_FAILED
+        artifact_before = os.stat(platform_compat.long_path(artifact_path))
+        swapped = _swap_waiting_for_readers(
+            [(tmp_artifact, artifact_path), (tmp_txt, txt_path)], unchanged, stop,
+            READING_SWAP_WAIT if swap_wait is None else swap_wait, clock, sleep, log)
+        if not swapped:
+            _discard_temp_lists(tmp_txt, tmp_artifact)
+            return REWRITE_STOPPED
+    except Exception as err:
+        log(f"[AUDIO-INFO] Could not write the length and quality into {base_name} ({err}); "
+            f"they are kept, and the bot writes them in once nothing holds the list.")
+        _discard_temp_lists(tmp_txt, tmp_artifact)
+        return REWRITE_FAILED
+
+    for path, stamp in ((txt_path, before), (artifact_path, artifact_before)):
+        try:
+            os.utime(platform_compat.long_path(path), ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+        except OSError:
+            pass
+    log(f"[AUDIO-INFO] {changed:,} row(s) of {base_name} now show their length and quality; "
+        f"the list keeps its date.")
+    return REWRITE_UPDATED
+
+
+def read_audio_info(jobs, stop=None, log=print, rewrite_all=False):
+    """Step 2, then step 3 for each list that gained a length: read every
+    job's files, with no time limit. Returns what happened:
+
+        {"outcome": "nothing" | "done" | "stopped", "read", "unreadable",
+         "total", "updated": [list names], "unwritten": [list names]}
+
+    `rewrite_all` (the reading-only run) also writes into every published
+    list the lengths the cache already holds - one a rewrite could not swap
+    in last time - even when nothing is left to read.
+
+    Progress goes to the progress file as phase "reading": folder_index is
+    the files read, folder_count the files to read, rate the files a second -
+    written when a read completes, so a mount that stops answering is a stall
+    the daemon can see (#968), and forced after each rewrite, so the swap's
+    "publishing" never outlives the swap into the next list's reading.
+    """
+    global _started_at
+
+    stop = reading_should_stop if stop is None else stop
+    total = sum(len(job.pending) for job in jobs)
+    result = {"outcome": "nothing", "read": 0, "unreadable": 0, "total": total,
+              "updated": [], "unwritten": []}
+    workers = max(1, min(128, int(getattr(config, "LIST_AUDIO_INFO_THREADS", 64) or 1)))
+    # The reading's own start, for the elapsed time the dashboard shows.
+    _started_at = time.time()
+    began = time.perf_counter()
+    printed = [time.monotonic()]
+
+    attempted = set()
+
+    def rewrite(list_name, offset):
+        answer = rewrite_audio_info(list_name, stop=stop, log=log)
+        name = _scope_of(list_name)
+        attempted.add(name)
+        if answer == REWRITE_UPDATED:
+            result["updated"].append(name)
+        elif answer == REWRITE_FAILED:
+            result["unwritten"].append(name)
+        # Whatever happened, the swap is over: "publishing" must not stay on
+        # disk into the next list's reading, where it would pause searches.
+        write_progress(READING_PHASE, folder_index=offset, folder_count=total, force=True)
+        return answer
+
+    if total:
+        where = "in the background" if started_by_the_bot() else "(Ctrl-C stops it; what was read is kept)"
+        log(f"[AUDIO-INFO] Audio info: reading {total:,} file(s) {where}, {workers} at a time.")
+        write_progress(READING_PHASE, folder_index=0, folder_count=total, rate=0, force=True)
+
+    read_before = 0
+    for job in jobs:
+        cache = audio_info.Cache.open(scope=job.scope, log=log)
+        if cache is None:
+            continue
+        cache.pending = list(job.pending)
+
+        def progress(done, _of, offset=read_before):
+            count = offset + done
+            elapsed = time.perf_counter() - began
+            rate = int(count / elapsed) if elapsed > 0 else 0
+            write_progress(READING_PHASE, folder_index=count, folder_count=total, rate=rate)
+            if time.monotonic() - printed[0] >= AUDIO_PRINT_SECONDS:
+                printed[0] = time.monotonic()
+                log(f"[AUDIO-INFO] Audio info: {count:,} of {total:,} read"
+                    f"{f', {rate:,}/s' if rate else ''}.")
+
+        try:
+            cache.read_pending(workers=workers, progress=progress, stop=stop,
+                               save_every=AUDIO_SAVE_EVERY)
+        finally:
+            cache.close()
+        result["read"] += cache.read_count
+        result["unreadable"] += cache.unreadable_count
+        read_before += cache.read_count
+        # What an operator compares to choose LIST_AUDIO_INFO_THREADS: the
+        # files a second over the whole reading, and how many at a time.
+        seconds = time.perf_counter() - began
+        result["rate"] = int(read_before / seconds) if seconds > 0 else 0
+        result["workers"] = workers
+        if cache.left_count or stop():
+            result["outcome"] = "stopped"
+            return result
+        # A row can only have changed if something was read with a length;
+        # rewrite_audio_info() then counts the rows that really did.
+        if any(suffix for _size, suffix in cache.fresh.values()):
+            if rewrite(job.list_name, read_before) == REWRITE_STOPPED:
+                result["outcome"] = "stopped"
+                return result
+
+    if rewrite_all:
+        for list_name in _published_list_names():
+            if _scope_of(list_name) in attempted:
+                continue
+            if rewrite(list_name, read_before) == REWRITE_STOPPED:
+                result["outcome"] = "stopped"
+                return result
+    if total or result["updated"] or result["unwritten"]:
+        result["outcome"] = "done"
+    return result
+
+
+def describe_audio_result(result):
+    """The reading's result as one line, for the console, the debug channel
+    and the @DCCore window. The daemon says it from the JSON the child
+    prints, so the wording lives here once."""
+    outcome = result.get("outcome")
+    read = int(result.get("read") or 0)
+    unreadable = int(result.get("unreadable") or 0)
+    total = int(result.get("total") or 0)
+    if outcome == "nothing":
+        return "Audio info: nothing new to read."
+    if outcome == "off":
+        return ("Audio info: length and quality are off (LIST_SHOW_AUDIO_INFO), "
+                "so there is nothing to read.")
+    if outcome == "busy":
+        return ("Audio info: a list rebuild or another reading is already running "
+                f"(pid {result.get('pid') or '?'}); not starting a second one.")
+    if outcome == "stopped":
+        return (f"Audio info: stopped: {read:,} of {total:,} read and kept; "
+                f"the rest are read next time.")
+    if outcome == "failed":
+        return f"Audio info: failed: {result.get('error') or 'unknown error'}."
+    updated = list(result.get("updated") or [])
+    unwritten = list(result.get("unwritten") or [])
+    if unwritten:
+        changed = ("the list is open elsewhere, so the lengths are written in later"
+                   if len(unwritten) == 1 else
+                   "these lists are open elsewhere, so the lengths are written in later: "
+                   + ", ".join(unwritten))
+    elif not updated:
+        changed = "the list did not change"
+    elif len(updated) == 1:
+        changed = "list updated"
+    else:
+        changed = "lists updated: " + ", ".join(updated)
+    if not total and not read:
+        return f"Audio info: nothing new to read; lengths read earlier: {changed}."
+    rate = result.get("rate")
+    speed = (f" Read at {rate:,} files a second, {result.get('workers')} at a time."
+             if rate else "")
+    return f"Audio info: done: {read - unreadable:,} read, {unreadable:,} unreadable, {changed}.{speed}"
+
+
+# The child's last line: the result, for the daemon to read back.
+AUDIO_RESULT_TAG = "[AUDIO-INFO-RESULT] "
+
+
+def run_audio_reading(jobs=None, log=print):
+    """Steps 2 and 3 from start to end, never raising: for a rebuild's jobs,
+    or - with none given - for the lists as they are published, writing in
+    too what the cache holds and the list does not show yet. Prints the
+    result line and the JSON the daemon reads back, and clears the progress
+    file when done."""
+    try:
+        if not getattr(config, "LIST_SHOW_AUDIO_INFO", False):
+            result = {"outcome": "off", "read": 0, "unreadable": 0, "total": 0, "updated": []}
+        else:
+            rewrite_all = jobs is None
+            if jobs is None:
+                jobs = unread_audio_jobs(log)
+            result = read_audio_info(jobs, log=log, rewrite_all=rewrite_all)
+    except Exception as err:
+        result = {"outcome": "failed", "error": str(err), "read": 0, "unreadable": 0,
+                  "total": 0, "updated": []}
+    finally:
+        clear_progress()
+    if result.get("outcome") == "stopped":
+        clear_stop_request()
+    log(f"[AUDIO-INFO] {describe_audio_result(result)}")
+    log(AUDIO_RESULT_TAG + json.dumps(result))
+    return result
+
+
+def read_audio_info_main(log=print):
+    """`update_list.py --read-audio-info`: the reading alone, under the list
+    lock - refused, not queued, when a rebuild or another reading holds it."""
+    holder = take_list_lock("reading", log=log)
+    if holder is not None:
+        result = {"outcome": "busy", "pid": holder[0], "read": 0, "unreadable": 0,
+                  "total": 0, "updated": []}
+        log(f"[AUDIO-INFO] {describe_audio_result(result)}")
+        log(AUDIO_RESULT_TAG + json.dumps(result))
+        return result
+    try:
+        return run_audio_reading(log=log)
+    finally:
+        release_list_lock()
+
+
+def generate_all_lists(log=print, reading_jobs=None):
     """Build every configured list. True only if every one of them succeeded.
+
+    `reading_jobs` collects each published list's audio files left to read
+    (#1182); see generate_master_list().
 
     On a single-list install this is one call to generate_master_list() with no
     name - byte for byte what running this script has always done. The loop is
@@ -2276,23 +3059,26 @@ def generate_all_lists(log=print):
     # from a finished run reads as a rebuild still in progress, and the
     # dashboard would show a bar that never moves.
     try:
-        return _generate_all_lists(log)
+        return _generate_all_lists(log, reading_jobs)
     finally:
         clear_progress()
 
 
-def _generate_all_lists(log):
+def _generate_all_lists(log, reading_jobs=None):
     import library
 
     every = library.lists()
+    # The jobs are passed only when asked for, so a caller that builds lists
+    # without the background reading calls generate_master_list() as before.
+    extra = {} if reading_jobs is None else {"reading_jobs": reading_jobs}
     if len(every) == 1:
-        return generate_master_list()
+        return generate_master_list(**extra)
 
     failed = []
     for entry in every:
         log(f"[LIST-GEN] Building {entry.name!r} ({len(entry.folders)} folder(s))...")
         try:
-            if not generate_master_list(entry.name):
+            if not generate_master_list(entry.name, **extra):
                 failed.append(entry.name)
         except Exception as err:
             # One list's unexpected failure is not every list's. The scan
@@ -2310,8 +3096,10 @@ def _generate_all_lists(log):
     return True
 
 
-if __name__ == "__main__":
-    print("--- Starting the scheduled weekly file-list update ---")
+def rebuild_main(log=print):
+    """`update_list.py` with no argument: rebuild every list, then - started
+    by the bot - read the audio lengths left. Returns the exit code."""
+    log("--- Starting the scheduled weekly file-list update ---")
     # FILE_DIRECTORY is not in settings_file.REQUIRED (see its own comment) -
     # a blank value is a supported "not chosen yet" state the daemon itself
     # boots fine with, so os.path.exists(None) here (a TypeError, not a
@@ -2324,27 +3112,71 @@ if __name__ == "__main__":
     # problem to report, not a reason to refuse the whole run.
     configured = [folder for entry in library.lists() for folder in entry.folders]
     if not configured:
-        print("[CRITICAL] No music directory configured yet - set FILE_DIRECTORY "
-              "from the web dashboard's Settings page, settings.conf, or "
-              "admin_config.py before running this.")
-        sys.exit(1)
+        log("[CRITICAL] No music directory configured yet - set FILE_DIRECTORY "
+            "from the web dashboard's Settings page, settings.conf, or "
+            "admin_config.py before running this.")
+        return 1
     # Every one missing, not any one: a single unavailable folder is skipped
     # during the scan with a warning, and only a library with nothing readable
     # in it at all is worth refusing to run for.
     if not any(os.path.isdir(platform_compat.long_path(f.path)) for f in configured):
-        print("[CRITICAL] None of the configured music folders exist: "
-              + ", ".join(f.path for f in configured))
-        sys.exit(1)
-        
+        log("[CRITICAL] None of the configured music folders exist: "
+            + ", ".join(f.path for f in configured))
+        return 1
+
+    # ONE AT A TIME (#1182 audit): a reading holding the list - the bot's, a
+    # terminal's, or one whose bot died - is asked to stop and waited for; a
+    # second rebuild is not started at all. Two of them wrote the same
+    # temporary files and could publish a list made of both.
+    holder = take_list_lock("rebuild")
+    if holder is not None:
+        log(f"[LIST-GEN ERROR] Another list rebuild is already running (pid {holder[0] or '?'}); "
+            f"not starting a second one.")
+        log("--- ERROR: could not generate the list. ---")
+        return 1
+
     # The file is removed whichever way the run ends, including the failure
     # branch: a leftover from a crashed or killed process reads as a rebuild
     # still in progress, and the dashboard would show a bar that never moves.
     # generate_all_lists() clears the progress file in its own finally, so a
     # crash inside it still leaves nothing behind for the dashboard to read.
-    success = generate_all_lists()
+    try:
+        return _rebuild_holding_the_lock(log)
+    finally:
+        release_list_lock()
+
+
+def _rebuild_holding_the_lock(log):
+    reading_jobs = []
+    success = generate_all_lists(log=log, reading_jobs=reading_jobs)
     if success:
-        print("--- The list was updated successfully. ---")
-        sys.exit(0)
+        log("--- The list was updated successfully. ---")
+        # Every list is published; what is left to read is read now, in this
+        # same process, while the bot serves the new list (#1182). The bot
+        # sees the "reading" phase and stops waiting for us. A rebuild that
+        # failed reads nothing: the next one, or a reading-only run, does.
+        # Run by hand (a terminal, cron, configure.py) it does not: hours of
+        # silent waiting there is nobody's intention, so it says how instead.
+        if reading_jobs and started_by_the_bot():
+            mark_list_lock("reading")
+            run_audio_reading(reading_jobs, log=log)
+        elif reading_jobs:
+            waiting = sum(len(job.pending) for job in reading_jobs)
+            log(f"[AUDIO-INFO] {waiting:,} audio file(s) have no length and quality in the list "
+                f"yet. The bot reads them: Tools > Read audio info on the dashboard, `audioinfo` "
+                f"in its console, Library > Read audio info in dccore.mrc - or run "
+                f"`update_list.py --read-audio-info`, which reads them here.")
+        return 0
     else:
-        print("--- ERROR: could not generate the list. ---")
-        sys.exit(1)
+        log("--- ERROR: could not generate the list. ---")
+        return 1
+
+
+if __name__ == "__main__":
+    # The reading-only run (#1182): the audio files the published lists have
+    # no length for yet, read and written in - no scan, no rebuild.
+    if "--read-audio-info" in sys.argv[1:]:
+        outcome = read_audio_info_main()["outcome"]
+        sys.exit(1 if outcome == "failed" else 0)
+
+    sys.exit(rebuild_main())

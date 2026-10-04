@@ -37,7 +37,7 @@ from tests.support import DCCoreTestCase  # noqa: E402
 class OneBadQueueEntryCostsOnlyItself(DCCoreTestCase):
 
     def write_queue(self, payload):
-        folder = tempfile.mkdtemp()
+        folder = self.make_temp_dir()
         db.DCC_QUEUE_FILE = os.path.join(folder, "dcc_queue.txt")
         with io.open(db.DCC_QUEUE_FILE, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(payload))
@@ -79,7 +79,7 @@ class OneBadQueueEntryCostsOnlyItself(DCCoreTestCase):
 class ANoticeIdHasToBeANumber(DCCoreTestCase):
 
     def write_notices(self, rows):
-        folder = tempfile.mkdtemp()
+        folder = self.make_temp_dir()
         db.NOTICES_FILE = os.path.join(folder, "notices.json")
         with io.open(db.NOTICES_FILE, "w", encoding="utf-8") as handle:
             handle.write(json.dumps({"notices": rows, "state": {"seen_id": 0}}))

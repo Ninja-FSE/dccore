@@ -24,11 +24,13 @@ if REPO_ROOT not in sys.path:
 
 import settings_file  # noqa: E402
 
+from tests.support import temp_dir  # noqa: E402
+
 
 class AnUpgradedInstall(unittest.TestCase):
 
     def apply(self, text):
-        path = os.path.join(tempfile.mkdtemp(prefix="dccore-legacy-"), "settings.conf")
+        path = os.path.join(temp_dir(self, prefix="dccore-legacy-"), "settings.conf")
         with io.open(path, "w", encoding="utf-8") as handle:
             handle.write(text)
         said = []

@@ -125,8 +125,8 @@ class ItRemovesAllThree(PurgeCase):
 
     def test_an_entry_written_before_archives_held_more_than_one_list(self):
         """No "lists" key at all - the shape on disk for anyone who fetched
-        before that field existed. The bare nick still has to go, which is
-        what the `| {""}` in forget_bot() is for."""
+        before that field existed. The bare nick still has to go, which
+        forget_bot() covers by dropping every name under the nick."""
         self.hold("SomeBot")
         del config.fetched_bot_lists["somebot"]["lists"]
 

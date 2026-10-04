@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import sys
 import datetime
 import heapq
 import sqlite3
@@ -167,10 +168,12 @@ def save_bans_to_file():
 # ---------------------------------------------------------------------------
 # hard_bans.txt - permanent wildcard patterns, edited live by !ban and !unban.
 #
-# security.check_user_status reads this file itself on every command. That hot
-# path is deliberately untouched; what follows exists because the two command
-# handlers have to READ-MODIFY-WRITE it, and doing that by hand went wrong in
-# three separate ways:
+# security.check_user_status reads this file itself, and since #1131 keeps it
+# parsed until the file changes. Both writers below drop that parsed copy
+# explicitly after they write (_forget_parsed_hard_bans), so a !ban or !unban
+# never depends on security noticing the change by its stat alone. What follows
+# exists because the two command handlers have to READ-MODIFY-WRITE the file,
+# and doing that by hand went wrong in three separate ways:
 #
 #   * !unban truncated the file with open(..., "w") and wrote the kept lines
 #     back one at a time. A crash, a full disk or a kill in between leaves it
@@ -194,6 +197,19 @@ def save_bans_to_file():
 
 def _hard_bans_path():
     return getattr(config, "HARD_BANS_FILE", os.path.join("data", "hard_bans.txt"))
+
+
+def _forget_parsed_hard_bans():
+    """Make security.check_user_status() read hard_bans.txt again (#1131).
+
+    It keeps the parsed patterns until the file's stat changes. os.replace()
+    does change it, but a writer here should not lean on that: drop the parsed
+    copy explicitly after every write. security imports db, so this looks the
+    module up instead of importing it; if it was never imported, there is no
+    parsed copy to drop."""
+    security = sys.modules.get("security")
+    if security is not None:
+        security.forget_hard_ban_rules()
 
 
 def _read_hard_bans_unlocked(path):
@@ -235,7 +251,10 @@ def add_hard_ban(pattern):
         if pattern in patterns:
             return False
         patterns.append(pattern)
-        _atomic_write(path, "".join(f"{p}\n" for p in patterns))
+        try:
+            _atomic_write(path, "".join(f"{p}\n" for p in patterns))
+        finally:
+            _forget_parsed_hard_bans()
     return True
 
 
@@ -249,7 +268,10 @@ def remove_hard_ban(pattern):
         patterns = _read_hard_bans_unlocked(path)
         if pattern not in patterns:
             return False
-        _atomic_write(path, "".join(f"{p}\n" for p in patterns if p != pattern))
+        try:
+            _atomic_write(path, "".join(f"{p}\n" for p in patterns if p != pattern))
+        finally:
+            _forget_parsed_hard_bans()
     return True
 
 
@@ -265,13 +287,14 @@ def remove_hard_ban(pattern):
 # nothing recomputes them and a lost update is permanent.
 #
 # Up to MAX_DCC_SLOTS transfers finish concurrently, each in its own thread,
-# and check_and_rotate_day() runs from the IRC read loop on every channel
-# message. Holding _disk_lock across only the WRITE - which is all
-# save_advanced_stats used to do - leaves the load-modify-save pair
-# unsynchronised: two completions that overlap both read the same row, and
-# whichever writes second discards the other's increment. A 300MB and a 7MB
-# transfer finishing together added one file and 300MB instead of two files
-# and 307MB.
+# and check_and_rotate_day() runs from the IRC read loop on the first channel
+# message of each local day, and once a minute while it keeps failing (#1132;
+# it used to run on every channel message). Holding _disk_lock across only the
+# WRITE - which is all save_advanced_stats used to do - leaves the
+# load-modify-save pair unsynchronised: two completions that overlap both read
+# the same row, and whichever writes second discards the other's increment.
+# A 300MB and a 7MB transfer finishing together added one file and 300MB
+# instead of two files and 307MB.
 #
 # The midnight case is worse than a miscount: a transfer thread that loaded
 # before check_and_rotate_day() rotated, and saves after it, writes the OLD

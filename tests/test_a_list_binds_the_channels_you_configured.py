@@ -67,7 +67,7 @@ class WhatOneMistypedCharacterCosts(DCCoreTestCase):
     is a convenience and should be argued for as one."""
 
     def bind(self, *channels):
-        directory = tempfile.mkdtemp()
+        directory = self.make_temp_dir()
         path = os.path.join(directory, "lists.json")
         with io.open(path, "w", encoding="utf-8") as handle:
             json.dump([{"name": "Music", "primary": True,
@@ -280,7 +280,7 @@ class TheServerStillDecidesWhatIsValid(DCCoreTestCase):
     does not change."""
 
     def test_a_channel_list_is_still_accepted_as_written(self):
-        directory = tempfile.mkdtemp()
+        directory = self.make_temp_dir()
         path = os.path.join(directory, "lists.json")
         with io.open(path, "w", encoding="utf-8") as handle:
             json.dump([{"name": "Music", "primary": True,
@@ -296,7 +296,7 @@ class TheServerStillDecidesWhatIsValid(DCCoreTestCase):
     def test_and_is_still_stored_folded(self):
         """The picker offers the operator's own spelling; the file keeps the
         normalised one, which is what list_for_channel() compares against."""
-        directory = tempfile.mkdtemp()
+        directory = self.make_temp_dir()
         path = os.path.join(directory, "lists.json")
         with io.open(path, "w", encoding="utf-8") as handle:
             json.dump([{"name": "Music", "primary": True,

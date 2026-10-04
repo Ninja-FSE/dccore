@@ -45,12 +45,14 @@ substring - this index is only the dashboard's cross-list filter.
 
 FAILURE POSTURE
 
-Every function here is best-effort. A missing, locked or old-schema database
-costs the filter bar and nothing else: the lists themselves are on disk, the
-browser still pages them, and each list is indexed again the next time it is
-fetched. A DAMAGED database is not left in place: sqlite3 refuses it on every
-open, and every caller - a fetch completing, the startup backfill, the filter
-bar - opens it the same way, so nothing would ever repair it. _connect() moves
+Every function here is best-effort. A missing or locked database costs the
+filter bar and nothing else: the lists themselves are on disk, the browser
+still pages them, and each list is indexed again the next time it is fetched.
+An index made before the prefix index (#1130) is rebuilt once, from the held
+lists, the way a damaged one is below. A DAMAGED database is not left in
+place: sqlite3 refuses it on every open, and every caller - a fetch
+completing, the startup backfill, the filter bar - opens it the same way, so
+nothing would ever repair it. _connect() moves
 it aside as `<file>.corrupt-<timestamp>`, starts a fresh one, and the held
 lists are re-indexed from disk on the next filter query. Nothing in the
 daemon's serving path reads this file, so it is never a reason to refuse to
@@ -74,6 +76,12 @@ _conn_lock = getattr(runtime, "list_index_lock", None)
 if _conn_lock is None:  # pragma: no cover - runtime always defines it
     _conn_lock = threading.Lock()
 
+# The readers' own lock, for their own connection (#1129). Always taken AFTER
+# _conn_lock when both are needed, never the other way round: see runtime.py.
+_read_lock = getattr(runtime, "list_index_read_lock", None)
+if _read_lock is None:  # pragma: no cover - runtime always defines it
+    _read_lock = threading.Lock()
+
 INDEX_FILE = getattr(config, "LIST_INDEX_FILE",
                      os.path.join("data", "list_index.db"))
 
@@ -83,12 +91,49 @@ INDEX_FILE = getattr(config, "LIST_INDEX_FILE",
 DEFAULT_SEARCH_LIMIT = 200
 MAX_SEARCH_LIMIT = 2000
 
-_SCHEMA_VERSION = 1
+# How many held lists one search statement names in its `bot IN (...)`. SQLite
+# before 3.32 refuses a statement with more than 999 parameters, and an
+# operator who grabs every list on a busy network can hold that many. Past it,
+# search() asks one batch after another until the page is full.
+_HELD_KEYS_PER_QUERY = 500
+
+# 2: the prefix index and folder ids below (#1130, #1135). One version for
+# both, so an upgrade rebuilds the index once and not twice.
+_SCHEMA_VERSION = 2
+
+# The FTS5 table's options. Kept as one string because _open() also looks for
+# it in the stored CREATE statement: CREATE ... IF NOT EXISTS keeps a table
+# made without them, so an index from before them would never get them.
+#
+# prefix='1 2 3 4' - THE PREFIX INDEX (#1130). build_match_query() puts a
+# wildcard on the word being typed, and without an index for prefixes FTS5
+# answers "al"* by merging the doclist of every token that starts with "al" -
+# and bots_with_a_match() asks that once per held list. Measured on 2.64M rows
+# in three lists, the keystroke "al" took about 2.8 s and a 19-keystroke
+# sequence 8.2 s; with prefix indexes for 1 to 4 characters, 2 ms and 0.1 s,
+# with the same rows answered in the same order. The 1 is for the last word
+# of a phrase, which gets its wildcard from its first letter on ("love m"*).
+# It costs disk - about 70% on its own, measured on 880k rows, and a third
+# with the folder ids below - and each list takes about twice as long to
+# index, which no longer holds the filter bar since #1129.
+#
+# columnsize=0 (#1135). FTS5 otherwise keeps a per-row record of each
+# column's token count, and nothing reads it but bm25() and rank, which
+# nothing here uses: search() has no ORDER BY. About 5% of the file.
+_FTS_OPTIONS = "tokenize='unicode61', prefix='1 2 3 4', columnsize=0"
 
 # One connection, reused. Opening a database per keystroke would be the
 # cheapest thing here to get wrong.
 _connection = None
 _connection_path = None
+# And one for the dashboard's readers, also reused (#1129). The writer above
+# held _conn_lock for the whole of a list being indexed, about nine seconds at
+# a realistic size, and every filter-bar keystroke waited behind it on the
+# same lock and connection. A second connection to the same WAL database,
+# under its own lock, answers from the last committed state instead. Only ever
+# opened after _connect() has made the schema, and closed with the writer.
+_read_connection = None
+_read_connection_path = None
 # Set by _connect() after it replaced a damaged file; consumed by the readers
 # through _prepare_to_read(). A flag and not a lock, so it lives here.
 _rebuild_pending = False
@@ -104,7 +149,10 @@ def _index_path():
 
 
 def _connect():
-    """The shared connection, opening and creating the schema if needed.
+    """The writers' connection, opening and creating the schema if needed.
+
+    The dashboard's readers have one of their own (#1129), opened only after
+    this one by _open_reader(). Caller holds _conn_lock.
 
     Returns None when the database cannot be opened at all - a read-only
     directory, a disk that is full, sqlite3 built without FTS5. The caller
@@ -172,21 +220,51 @@ def _open(path):
     file also stays locked until the object is collected, so the next attempt
     fails for a new reason and the log stops describing the original one -
     and the move-aside in _connect() could not rename it at all.
+
+    AN INDEX FROM BEFORE SCHEMA 2 IS REBUILT (#1130, #1135). FTS5 cannot add
+    a prefix index or drop the column sizes on an existing table, and its
+    folder column held text where it now holds an id, so the old table is
+    dropped and made again, in one transaction with the CREATE: the file
+    never holds no table at all. The rows come back the way a repaired file's
+    do - the held lists are indexed again from disk, by the startup backfill
+    or before the first filter query answers - so nothing a held list had is
+    lost for good. The check reads the table's own stored CREATE statement
+    rather than the meta row, which every earlier version wrote on every
+    open: an index the old code reopened keeps its options and is not
+    rebuilt twice.
     """
+    global _rebuild_pending
     conn = None
     try:
-        # check_same_thread=False: the dashboard answers on Flask's threads
-        # while a fetch completing writes from the transfer thread, and every
+        # check_same_thread=False: a fetch completing writes from the
+        # transfer thread and the startup backfill from its own, and every
         # caller here holds _conn_lock for the whole operation anyway.
         conn = sqlite3.connect(path, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("BEGIN")
+        stored = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'entries'").fetchone()
+        rebuilt = stored is not None and _FTS_OPTIONS not in str(stored[0])
+        if rebuilt:
+            conn.execute("DROP TABLE entries")
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5("
             # bot is INDEXED - that is the whole point. It lets the existence
             # question below be asked per bot and stop at the first hit,
             # instead of enumerating every match to find out who is missing.
+            # folder holds an id into `folders`, not the heading (#1135).
             "bot, filename, folder UNINDEXED, size UNINDEXED, "
-            "tokenize='unicode61')")
+            + _FTS_OPTIONS + ")")
+        # EACH FOLDER ONCE (#1135). Every row stored its full heading, which
+        # repeats about nine times per folder at the median, and the index was
+        # larger than the list text it indexes. A heading is stored here once
+        # per list, and the row holds its id. Keyed by the index name, as the
+        # rows are, so a list's folders go with its rows.
+        conn.execute("CREATE TABLE IF NOT EXISTS folders "
+                     "(id INTEGER PRIMARY KEY, bot TEXT, folder TEXT)")
+        conn.execute("CREATE INDEX IF NOT EXISTS folders_by_bot "
+                     "ON folders (bot)")
         conn.execute("CREATE TABLE IF NOT EXISTS meta "
                      "(key TEXT PRIMARY KEY, value TEXT)")
         conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema', ?)",
@@ -199,6 +277,16 @@ def _open(path):
             except Exception:
                 pass
         raise
+    if rebuilt:
+        print("[LIST-INDEX] Rebuilding the search index once, to make "
+              "short prefixes in the dashboard's filter fast: the lists you "
+              "hold are indexed again from disk, up to about a minute per "
+              "million files, and the file comes out about half as big again "
+              "as before. Browsing and @find are unaffected.")
+        # The same flag a repaired file sets: the readers run the backfill
+        # before they answer, so an emptied table is never reported as
+        # holding no match even when no startup backfill ran first.
+        _rebuild_pending = True
     return conn
 
 
@@ -257,31 +345,120 @@ def _prepare_to_read():
     """Open the index for a reader and run the rebuild a repair has flagged.
 
     Returns False when there is no index to read. Called by the dashboard's
-    readers BEFORE they take _conn_lock for their own query, because the
-    rebuild cannot run from inside _connect(): backfill_missing() takes the
-    lock per list itself. And it is the readers that must not answer from the
+    readers BEFORE they take _read_lock for their own query, because the
+    rebuild cannot run from inside _connect(): backfill_missing() takes
+    _conn_lock per list itself, so it runs here with neither lock held. And
+    it is the readers that must not answer from the
     fresh, empty index - bots_with_a_match() would report every held list as
     empty, which is the false claim its "no index" branch exists to avoid. A
     fetch completing does not need this; writing into an empty index is fine.
 
-    The connection this opens is the cached one the reader's own _connect()
-    then finds, so an unavailable index is still reported once per call, not
-    twice. Same cost as the startup backfill, paid once, on the first filter
-    query after the repair; the flag is cleared under the lock so two
-    dashboard threads do not both pay it.
+    Same cost as the startup backfill, paid once, on the first filter query
+    after the repair; the flag is cleared under the lock so two dashboard
+    threads do not both pay it.
+
+    THE ORDINARY KEYSTROKE TAKES NO WRITE LOCK (#1129). This took _conn_lock
+    on every call, so even with a read connection of its own every keystroke
+    still waited for a list being indexed to finish. _open_reader() only
+    takes it when the read connection is not open yet, and a repair always
+    closes that, so the flag can only be set when this goes the slow way.
     """
     global _rebuild_pending
-    with _conn_lock:
-        available = _connect() is not None
-        pending = _rebuild_pending
-        _rebuild_pending = False
+    available = _open_reader()
+    pending = False
+    if _rebuild_pending:
+        with _conn_lock:
+            pending = _rebuild_pending
+            _rebuild_pending = False
     if pending:
         backfill_missing(dict(getattr(config, "fetched_bot_lists", None) or {}))
     return available
 
 
+def _open_reader():
+    """Make sure the read connection is open for the configured path.
+
+    Returns False when there is no index to read. Called with neither lock
+    held. The usual answer comes from two module globals and costs nothing;
+    otherwise the writer's _connect() goes first, under _conn_lock, because it
+    is what creates the schema and repairs a damaged file - a reader opened
+    before it would create an empty database file of its own, and one opened
+    on a damaged file would hold it open where the move-aside must rename it.
+    Then the read connection is opened beside it, under _read_lock taken
+    inside _conn_lock: the lock order runtime.py states.
+    """
+    if _read_connection is not None and _read_connection_path == _index_path():
+        return True
+    with _conn_lock:
+        if _connect() is None:
+            return False
+        with _read_lock:
+            return _open_reader_locked()
+
+
+def _open_reader_locked():
+    """Open the read connection on the writer's file. Caller holds both locks.
+
+    query_only, because nothing on this connection should ever write: a
+    write here would contend with index_bot_list() for the database's own
+    write lock, which is the wait this connection exists to avoid.
+    """
+    global _read_connection, _read_connection_path
+    path = _connection_path
+    if _read_connection is not None and _read_connection_path == path:
+        return True
+    _close_reader_locked()
+    conn = None
+    try:
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.execute("PRAGMA query_only = ON")
+    except Exception as err:
+        # Closed before the error leaves, for the reason _open() gives.
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        print(f"[LIST-INDEX] Unavailable for reading ({err}); the cross-list "
+              f"filter is off until it can be opened. Browsing and @find are "
+              f"unaffected.")
+        return False
+    _read_connection = conn
+    _read_connection_path = path
+    return True
+
+
+def _reader():
+    """The read connection, or None if it was closed after _open_reader().
+    Caller holds _read_lock. A seam the tests replace, as they do _connect()."""
+    return _read_connection
+
+
+def _close_reader_locked():
+    global _read_connection, _read_connection_path
+    if _read_connection is not None:
+        try:
+            _read_connection.close()
+        except Exception:
+            pass
+    _read_connection = None
+    _read_connection_path = None
+
+
 def _close_locked():
+    """Close both connections. Caller holds _conn_lock.
+
+    The reader goes too, and FIRST, under its own lock - which waits for a
+    query in flight rather than closing the connection under it. Every path
+    that drops the writer comes through here: close(), a moved
+    LIST_INDEX_FILE and the repair in _connect(), which renames the file
+    straight after. On Windows a rename fails with a sharing violation while
+    any handle on the file is open, so a reader left open would turn every
+    repair into "could not be moved aside" (#1129).
+    """
     global _connection, _connection_path
+    with _read_lock:
+        _close_reader_locked()
     if _connection is not None:
         try:
             _connection.close()
@@ -292,7 +469,7 @@ def _close_locked():
 
 
 def close():
-    """Drop the cached connection. For tests, and for a rehash moving the file."""
+    """Drop the cached connections. For tests, and for a rehash moving the file."""
     with _conn_lock:
         _close_locked()
 
@@ -400,6 +577,10 @@ def index_bot_list(bot, rows):
     nothing in production. The tests missed it by building their own rows with
     a "filename" key instead of calling the producer.
 
+    `rows` may also be a one-pass stream of the same dicts - list.CountedRows
+    over list.iter_filelist_rows(), which is how a fetch hands them over
+    (#1134) - so they are counted as they go in rather than by len().
+
     Returns the number indexed, or 0 if the index is unavailable.
     """
     # NORMALISED, and the same normalisation on both sides of the delete.
@@ -415,26 +596,39 @@ def index_bot_list(bot, rows):
     name = str(bot or "").strip().lower()
     if not name:
         return 0
+    indexed = [0]
 
     with _conn_lock:
         conn = _connect()
         if conn is None:
             return 0
         try:
-            # THE LOCK IS HELD FOR THE WHOLE WRITE, deliberately. It is the
-            # transaction boundary as well as the connection guard: releasing
-            # it between the delete and the insert would let a search on
-            # Flask's thread read a list that had been emptied and not yet
-            # refilled, and report that bot as holding no match - the same
-            # false "empty" bots_with_a_match() takes care to avoid. A fetch
-            # completing is rare and a search is cheap; blocking one for the
-            # length of one write is the right side of that trade.
+            # A SEARCH NEVER SEES THE GAP between the delete and the insert:
+            # it would read a list emptied and not yet refilled, and report
+            # that bot as holding no match - the same false "empty"
+            # bots_with_a_match() takes care to avoid. That used to be
+            # guaranteed by readers waiting on this lock for the whole write,
+            # which held every filter-bar keystroke for as long as a list
+            # took to index (#1129). They now read on a connection of their
+            # own, and WAL gives each of their queries a snapshot of the last
+            # COMMITTED state: the old list until the commit below, the new
+            # one after it, never the half-replaced one in between. This lock
+            # still makes writers take turns on this connection.
             #
             # Delete first, in the same transaction as the insert: a refetch
             # that replaced a list must not leave the old rows searchable
             # beside the new ones, and a crash between the two must not leave
             # the bot indexed twice.
             conn.execute("DELETE FROM entries WHERE bot = ?", (name,))
+            # And its folders, or every refetch under a new set of headings
+            # would leave the old ones behind for good (#1135).
+            conn.execute("DELETE FROM folders WHERE bot = ?", (name,))
+            # The list's headings get ids as its rows go past, and are written
+            # after them, in the same transaction: one dict of this list's
+            # headings, never a second copy of its rows.
+            folder_ids = {}
+            next_id = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) + 1 FROM folders").fetchone()[0]
             conn.executemany(
                 "INSERT INTO entries (bot, filename, folder, size) "
                 "VALUES (?, ?, ?, ?)",
@@ -447,14 +641,16 @@ def index_bot_list(bot, rows):
                 # of the list in memory first - at the four million rows this
                 # index is measured against, hundreds of megabytes of tuples
                 # held for the length of the write and for no reason.
-                ((name,
-                  str(row.get("title") or row.get("filename") or ""),
-                  str(row.get("folder") or ""),
-                  str(row.get("size") or ""))
-                 for row in rows))
+                _counted_values(name, rows, indexed, folder_ids, next_id))
+            conn.executemany(
+                "INSERT INTO folders (id, bot, folder) VALUES (?, ?, ?)",
+                ((folder_id, name, folder)
+                 for folder, folder_id in folder_ids.items()))
             conn.commit()
             _checkpoint_locked(conn)
-            return len(rows)
+            # Counted as they went in, not len(rows): `rows` may be a stream
+            # with no length (#1134), and for a list the two are the same.
+            return indexed[0]
         except Exception as err:
             try:
                 conn.rollback()
@@ -463,6 +659,26 @@ def index_bot_list(bot, rows):
             print(f"[LIST-INDEX] Could not index {name}'s list ({err}); the "
                   f"cross-list filter will not see it. Browsing it still works.")
             return 0
+
+
+def _counted_values(name, rows, indexed, folder_ids, next_id):
+    """index_bot_list()'s INSERT parameters, counting each into indexed[0].
+
+    Each row's heading becomes an id (#1135): the one already given to that
+    exact text in this list, or the next free one, recorded in `folder_ids`
+    for the caller to write into `folders`. Exact text, case and all - two
+    headings that differ only in case are two folders, as they were when
+    each row carried its own."""
+    for row in rows:
+        indexed[0] += 1
+        folder = str(row.get("folder") or "")
+        folder_id = folder_ids.get(folder)
+        if folder_id is None:
+            folder_id = folder_ids[folder] = next_id + len(folder_ids)
+        yield (name,
+               str(row.get("title") or row.get("filename") or ""),
+               folder_id,
+               str(row.get("size") or ""))
 
 
 def drop_bot(bot):
@@ -476,11 +692,56 @@ def drop_bot(bot):
             return False
         try:
             conn.execute("DELETE FROM entries WHERE bot = ?", (name,))
+            # Its folders too (#1135): forget_bot() and a purge come through
+            # here, and a folder whose rows are gone is a leak, not a cache.
+            conn.execute("DELETE FROM folders WHERE bot = ?", (name,))
             conn.commit()
             _checkpoint_locked(conn)
             return True
         except Exception as err:
             print(f"[LIST-INDEX] Could not drop {name} from the index: {err}")
+            return False
+
+
+def drop_every_list_of(nick):
+    """Forget every list held from `nick`: the main one, indexed under the
+    bare nick, and each other one, under "<nick>/<marker>".
+
+    By the names in the index, not by the markers the held entry still
+    names. Forget dropped only those, so a list a refetch had already left
+    out - gone from the archive, empty now, or over the ceiling - kept its
+    rows and its folders for good, and nothing else ever removed them.
+
+    Compared with substr() and not LIKE: "_" is a LIKE wildcard and common in
+    a nick, so "some_bot/%" would also drop "somexbot/rar". "somebot2" is
+    never dropped with "somebot": it is neither the bare nick nor "somebot/"
+    and more.
+    """
+    name = str(nick or "").strip().lower()
+    if not name:
+        return False
+    prefix = name + "/"
+    with _conn_lock:
+        conn = _connect()
+        if conn is None:
+            return False
+        try:
+            # The same scan as drop_bot()'s `bot = ?`, which FTS5 answers by
+            # reading every row: once here, instead of once per marker.
+            for table in ("entries", "folders"):
+                conn.execute(f"DELETE FROM {table} WHERE bot = ? "
+                             f"OR substr(bot, 1, ?) = ?",
+                             (name, len(prefix), prefix))
+            conn.commit()
+            _checkpoint_locked(conn)
+            return True
+        except Exception as err:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            print(f"[LIST-INDEX] Could not drop {name}'s lists from the "
+                  f"index: {err}")
             return False
 
 
@@ -504,6 +765,12 @@ def _checkpoint_locked(conn):
     empty rather than leaving it at whatever size the last checkpoint grew
     it to (the default PASSIVE mode's own behaviour even when it succeeds).
 
+    The filter bar's queries run on their own connection (#1129), so one may
+    be in flight at this moment. TRUNCATE then waits for it, within the
+    connection's busy timeout - a query takes milliseconds - and if it is
+    still there, the checkpoint reports busy and returns rather than raising.
+    Either way the paragraph below holds.
+
     Never raises, and never rolled back into by the caller: the row change
     just committed is safe either way (in the main file or still in the
     WAL), so a checkpoint that fails costs disk space, not correctness - the
@@ -520,8 +787,10 @@ def _checkpoint_locked(conn):
 
 def indexed_bots():
     """Every bot with rows in the index, lower-cased for comparison."""
-    with _conn_lock:
-        conn = _connect()
+    if not _open_reader():
+        return set()
+    with _read_lock:
+        conn = _reader()
         if conn is None:
             return set()
         try:
@@ -559,8 +828,10 @@ def bots_with_a_match(terms, bots):
     # a different route: one sqlite error and a list that DOES match is shown
     # to the operator as one that does not.
     unknown = set()
-    with _conn_lock:
-        conn = _connect()
+    # The read connection under its own lock, never _conn_lock: a list being
+    # indexed holds that for the whole write (#1129).
+    with _read_lock:
+        conn = _reader()
         if conn is None:
             # No index is not "no bot matches": claiming every list is empty
             # would grey out the whole sidebar and read as a broken filter.
@@ -627,15 +898,16 @@ def search(terms, limit=None, bots=None):
     if query is None:
         return []
 
+    # The held names, _HELD_KEYS_PER_QUERY to a statement; [None] is no
+    # restriction at all.
+    batches = [None]
     if bots is not None:
         held = [str(b).strip() for b in bots if str(b).strip()]
         if not held:
             return []
-        # Same pre-filter, same reason - the equality check is below, on the
-        # rows that come back, because bot:"Bot" also matches "Bot-2".
-        held_keys = {b.strip().lower() for b in held}
-        query = ("(" + " OR ".join(f"bot:{_quote(b)}" for b in sorted(held_keys))
-                 + ") AND " + query)
+        held_keys = sorted({b.strip().lower() for b in held})
+        batches = [held_keys[i:i + _HELD_KEYS_PER_QUERY]
+                   for i in range(0, len(held_keys), _HELD_KEYS_PER_QUERY)]
 
     if limit is None:
         limit = DEFAULT_SEARCH_LIMIT
@@ -653,28 +925,60 @@ def search(terms, limit=None, bots=None):
 
     if not _prepare_to_read():
         return []
-    with _conn_lock:
-        conn = _connect()
+    # The read connection, as in bots_with_a_match() (#1129).
+    with _read_lock:
+        conn = _reader()
         if conn is None:
             return []
         try:
-            found = conn.execute(
-                "SELECT bot, filename, folder, size FROM entries "
-                "WHERE entries MATCH ? LIMIT ?", (query, limit)).fetchall()
+            # The heading comes back from `folders` in the SAME statement
+            # (#1135), so from the same snapshot: a second query after this
+            # one could see a refetch that committed in between, with the
+            # page's ids already deleted. A row whose folder column is not an
+            # id - written by an older version into a table it did not make -
+            # shows the text it holds, as it always did.
+            #
+            # THE HELD LISTS ARE CHOSEN IN THE QUERY, before the LIMIT. They
+            # were chosen in Python, on whatever rows the LIMIT had let
+            # through, and `bot:"somebot"` is a tokenised phrase that also
+            # matches "somebot-2", "somebot|away" and "somebot/rar". A list
+            # that is not held - offline under Online Only, or left in the
+            # index by anything - filled the page, and the held list's matches
+            # were not on it: none at all, behind 300 rows of a "SomeBot-2",
+            # with the sidebar showing SomeBot as matched and the page not
+            # marked as cut short. bots_with_a_match() already asked
+            # `bot = ?` in its query, for the same reason. The phrases stay
+            # as a pre-filter: they are what the full-text index answers
+            # quickly.
+            found = []
+            for keys in batches:
+                match = query
+                # A nick with no letters or digits is no phrase at all (#1091):
+                # `bot:"^_^"` matches no row, so with it in the OR the list's
+                # rows never came back, though the sidebar said it matched.
+                # Then the IN alone decides.
+                if keys is not None and all(_has_tokens(k) for k in keys):
+                    match = ("(" + " OR ".join(f"bot:{_quote(k)}" for k in keys)
+                             + ") AND " + query)
+                found += conn.execute(
+                    "SELECT bot, filename, "
+                    "CASE WHEN typeof(folder) = 'integer' THEN COALESCE("
+                    "(SELECT f.folder FROM folders f WHERE f.id = entries.folder), "
+                    "'') ELSE folder END, size FROM entries "
+                    "WHERE entries MATCH ?"
+                    + ("" if keys is None else
+                       " AND bot IN (" + ", ".join(["?"] * len(keys)) + ")")
+                    + " LIMIT ?",
+                    (match, *(keys or ()), limit - len(found))).fetchall()
+                if len(found) >= limit:
+                    break
         except Exception as err:
             print(f"[LIST-INDEX] Search failed ({err}); returning nothing "
                   f"rather than a partial answer.")
             return []
 
-    rows = [{"bot": row[0], "filename": row[1], "folder": row[2],
+    return [{"bot": row[0], "filename": row[1], "folder": row[2],
              "size": row[3]} for row in found]
-    if bots is not None:
-        # The MATCH above is a phrase filter; this is the equality. Without
-        # it, holding "Bot" would return "Bot-2"'s files and offer a download
-        # from a list we do not have.
-        rows = [row for row in rows
-                if str(row["bot"]).strip().lower() in held_keys]
-    return rows
 
 
 def _holds_rows_for(conn, bot):
@@ -702,6 +1006,28 @@ def _holds_rows_for(conn, bot):
         "SELECT 1 FROM entries WHERE entries MATCH ? AND lower(bot) = ? LIMIT 1",
         (f"bot:{_quote(wanted)}", wanted)).fetchone()
     return row is not None
+
+
+def _held_lists(bot, entry):
+    """[(index name, list path)] for every list a held archive has.
+
+    The main list under the bare nick and the others as "<nick>/<marker>",
+    the names list_fetch indexes them under at fetch time (#1122): backfill
+    went through the main list alone, so after an index was emptied or
+    repaired a bot's RAR list was never indexed again, and the filter bar
+    showed a list that does match as holding nothing. An entry written before
+    an archive could hold more than one list has no "lists", only its main
+    list's "list_path"."""
+    import list_fetch
+    out = []
+    lists = entry.get("lists")
+    if isinstance(lists, dict):
+        for marker, info in lists.items():
+            if isinstance(info, dict) and info.get("list_path"):
+                out.append((list_fetch.index_key(bot, marker), info["list_path"]))
+    if not any(name == bot for name, _path in out) and entry.get("list_path"):
+        out.insert(0, (bot, entry["list_path"]))
+    return out
 
 
 def backfill_missing(held, log=print):
@@ -737,32 +1063,37 @@ def backfill_missing(held, log=print):
         bot = str(entry.get("bot") or key).strip()
         if not bot:
             continue
-        # One question per held bot, answered from the index (#1071) - not a
-        # read of the whole table to list every bot first.
-        with _conn_lock:
-            conn = _connect()
-            if conn is None:
-                return done
-            try:
-                if _holds_rows_for(conn, bot):
+        for name, path in _held_lists(bot, entry):
+            # One question per held list, answered from the index (#1071) -
+            # not a read of the whole table to list every bot first.
+            with _conn_lock:
+                conn = _connect()
+                if conn is None:
+                    return done
+                try:
+                    if _holds_rows_for(conn, name):
+                        continue
+                except Exception as err:
+                    log(f"[LIST-INDEX] Could not check whether {name}'s list is "
+                        f"indexed ({err}); leaving it as it is.")
                     continue
-            except Exception as err:
-                log(f"[LIST-INDEX] Could not check whether {bot}'s list is "
-                    f"indexed ({err}); leaving it as it is.")
+            if not path or not os.path.exists(platform_compat.long_path(path)):
                 continue
-        path = entry.get("list_path")
-        if not path or not os.path.exists(platform_compat.long_path(path)):
-            continue
-        try:
-            entries, _total = list_mod.find_matching_entries(
-                [], limit=None, list_path=platform_compat.long_path(path))
-            rows = list_mod.entries_to_filelist_rows(entries, bot)
-        except Exception as err:
-            log(f"[LIST-INDEX] Could not re-read {bot}'s list to index it "
-                f"({err}); the filter will not see it until the next fetch.")
-            continue
-        if index_bot_list(bot, rows):
-            done += 1
+            # Streamed into the index, not built in memory first (#1134). A
+            # list that cannot be read fails inside the write, which rolls
+            # back, and CountedRows keeps the error to be reported here as it
+            # always was. Rows carry the bot's nick, as a fetch writes them;
+            # the list is told apart by the name it is indexed under (#1122).
+            rows = list_mod.CountedRows(list_mod.iter_filelist_rows(
+                platform_compat.long_path(path), bot))
+            indexed = index_bot_list(name, rows)
+            if rows.error is not None:
+                log(f"[LIST-INDEX] Could not re-read {name}'s list to index it "
+                    f"({rows.error}); the filter will not see it until the next "
+                    f"fetch.")
+                continue
+            if indexed:
+                done += 1
     if done:
         log(f"[LIST-INDEX] Indexed {done} held list(s) the search index did "
             f"not have.")

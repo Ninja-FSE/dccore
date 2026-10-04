@@ -26,6 +26,7 @@ import defaults as config
 import db
 import platform_compat
 import dcc
+from tests.support import parse_source  # noqa: E402
 
 
 def _tmp_residue(directory):
@@ -683,7 +684,7 @@ class TestStatsAndBansRoundTrip(PersistenceTestCase):
         import io as _io
 
         with _io.open(db.__file__, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
 
         sites = []
         for node in ast.walk(tree):

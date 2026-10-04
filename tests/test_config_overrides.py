@@ -42,7 +42,7 @@ if REPO_ROOT not in sys.path:
 
 import defaults as config  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 
 class AdminConfigOverrideTests(DCCoreTestCase):
@@ -175,7 +175,7 @@ class NoSettingIsDerivedBeforeOverridesLand(unittest.TestCase):
 
     def _parse(self):
         with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
-            return ast.parse(handle.read())
+            return parse_source(handle.read())
 
     def _override_lines(self, tree):
         """Every point where config.py's namespace is written from outside.
@@ -316,7 +316,7 @@ class NoSettingIsDerivedBeforeOverridesLand(unittest.TestCase):
             from admin_config import *
         """)
 
-        offenders = self.derived_above_override(ast.parse(source))
+        offenders = self.derived_above_override(parse_source(source))
 
         self.assertEqual(len(offenders), 1)
         self.assertIn("BROADCAST", offenders[0])
@@ -334,7 +334,7 @@ class NoSettingIsDerivedBeforeOverridesLand(unittest.TestCase):
             from admin_config import *
         """)
 
-        offenders = self.derived_above_override(ast.parse(source))
+        offenders = self.derived_above_override(parse_source(source))
 
         self.assertEqual(len(offenders), 1,
                          "an annotated derived setting was invisible to the scan")
@@ -349,7 +349,7 @@ class NoSettingIsDerivedBeforeOverridesLand(unittest.TestCase):
             BROADCAST: str = CHANNEL.split(",")[0]
         """)
 
-        self.assertEqual(self.derived_above_override(ast.parse(source)), [])
+        self.assertEqual(self.derived_above_override(parse_source(source)), [])
 
     def test_a_bare_annotation_derives_nothing(self):
         """`BROADCAST: str` declares a type and computes nothing, so it is not
@@ -360,7 +360,7 @@ class NoSettingIsDerivedBeforeOverridesLand(unittest.TestCase):
             from admin_config import *
         """)
 
-        self.assertEqual(self.derived_above_override(ast.parse(source)), [])
+        self.assertEqual(self.derived_above_override(parse_source(source)), [])
 
 
 if __name__ == "__main__":

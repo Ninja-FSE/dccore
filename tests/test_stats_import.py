@@ -66,7 +66,7 @@ class ImportCase(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
-        self.dir = tempfile.mkdtemp(prefix="dccore-stats-import-")
+        self.dir = self.make_temp_dir(prefix="dccore-stats-import-")
         # The two paths are reached differently, which is worth knowing when
         # redirecting them: db reads STATS_FILE off config on every call, and
         # holds SPEED_RECORD_FILE as a constant of its own.

@@ -34,7 +34,7 @@ import dcc  # noqa: E402
 import irc  # noqa: E402
 import defaults as config  # noqa: E402
 
-from tests.support import DCCoreTestCase, RecordingSocket  # noqa: E402
+from tests.support import DCCoreTestCase, RecordingSocket, parse_source  # noqa: E402
 
 # 8.8.8.8 rather than the usual 203.0.113.x: TEST-NET is classed as private by
 # the stdlib, which is correct and is exactly what this predicate refuses.
@@ -180,7 +180,7 @@ class TheConnectNeverInventsAnAddress(unittest.TestCase):
         """Parsed rather than grepped: the string "127.0.0.1" legitimately
         appears in irc.py's comments describing this very bug, so a substring
         search would either miss the assignment or trip on the explanation."""
-        tree = ast.parse(self.source())
+        tree = parse_source(self.source())
         offenders = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Assign):

@@ -149,6 +149,7 @@ class ApplyingIt(DCCoreTestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.settings = os.path.join(self.tmp, "settings.conf")
         self.admin = os.path.join(self.tmp, "admin_config.py")
+        self.keep_every_setting()   # apply_setup() changes SERVER and the rest too (#1146)
         self.set_config(NICKNAME=config.SHIPPED_DEFAULTS["NICKNAME"], ADMIN_PASSWORD_HASH="")
 
     def test_it_writes_both_files_as_configure_does_and_applies_them(self):
@@ -208,6 +209,7 @@ class TheApp(DCCoreTestCase):
             settings_path=os.path.join(self.tmp, "settings.conf"),
             admin_path=os.path.join(self.tmp, "admin_config.py"))
         self.addCleanup(setattr, webserver, "apply_setup", self._real_apply)
+        self.keep_every_setting()   # apply_setup() changes SERVER and the rest too (#1146)
         self.set_config(NICKNAME=config.SHIPPED_DEFAULTS["NICKNAME"], ADMIN_PASSWORD_HASH="")
 
     def get(self, path, host="127.0.0.1:8420"):
@@ -310,6 +312,7 @@ class TheServer(DCCoreTestCase):
             settings_path=os.path.join(self.tmp, "settings.conf"),
             admin_path=os.path.join(self.tmp, "admin_config.py"))
         self.addCleanup(setattr, webserver, "apply_setup", self._real_apply)
+        self.keep_every_setting()   # apply_setup() changes SERVER and the rest too (#1146)
         self.set_config(NICKNAME=config.SHIPPED_DEFAULTS["NICKNAME"], ADMIN_PASSWORD_HASH="",
                         WEBUI_OPEN_BROWSER=True)
 

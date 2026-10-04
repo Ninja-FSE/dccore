@@ -49,7 +49,7 @@ import defaults as config  # noqa: E402
 import library  # noqa: E402
 import list as list_mod  # noqa: E402
 
-from tests.support import DCCoreTestCase, RecordingSocket, silence_debug  # noqa: E402
+from tests.support import DCCoreTestCase, RecordingSocket, silence_debug, parse_source  # noqa: E402
 
 
 class SearchCase(DCCoreTestCase):
@@ -217,7 +217,7 @@ class AnUpdateOnlyClearsTheSearchFlagItRaised(DCCoreTestCase):
 
 def _function(module_name, function_name):
     with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", module_name), os.path.join(REPO_ROOT, "conf", module_name), os.path.join(REPO_ROOT, module_name)) if os.path.exists(p)), os.path.join(REPO_ROOT, module_name))), encoding="utf-8") as handle:
-        tree = ast.parse(handle.read())
+        tree = parse_source(handle.read())
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == function_name:
             return node

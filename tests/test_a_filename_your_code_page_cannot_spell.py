@@ -48,6 +48,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import platform_compat  # noqa: E402
+from tests.support import parse_source  # noqa: E402
 
 # A code page that cannot spell any of these. Chosen because it is the one the
 # report came from, and because it is nobody's default here - the assertions
@@ -220,7 +221,7 @@ class NoParentDecodesWithTheLocaleCodePage(unittest.TestCase):
 
     def captured_runs(self, name):
         """Every subprocess call in `name` that captures output, as AST."""
-        tree = ast.parse(source(name))
+        tree = parse_source(source(name))
         found = []
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):

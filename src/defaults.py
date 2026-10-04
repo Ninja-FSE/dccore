@@ -22,7 +22,7 @@ import runtime
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
-SCRIPT_VERSION: str = "DCCore v1.14.0"
+SCRIPT_VERSION: str = "DCCore v1.15.0"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
@@ -344,19 +344,30 @@ KNOWN_BOTS_FILE: str = "./data/known_bots.json"
 # per keystroke. sqlite3 is stdlib, so the no-third-party-packages property
 # holds. See list_index.py for why it is FTS5 specifically.
 #
-# EXPECT IT TO BE LARGE. Roughly the size of the lists again - four million
-# rows measured at 452MB. Built as each list is fetched, and safe to delete:
-# the filter stops working until the next fetch rebuilds it, and nothing else
-# reads it. A damaged one is moved aside as list_index.db.corrupt-<timestamp>
+# EXPECT IT TO BE LARGE: about three times the lists' own text (#1189:
+# 240 MB of lists, 778 MB of index).
+# Four million rows measured at 452MB before the prefix index that makes
+# short filter-bar prefixes fast (#1130); that adds about 70%, and storing
+# each folder heading once (#1135) takes back about a fifth of the result.
+# An index made before both is rebuilt once from the lists on disk. Built as
+# each list is fetched, and safe to delete with the bot stopped: the next
+# start indexes the lists on disk again, and nothing else reads it. A
+# damaged one is moved aside as list_index.db.corrupt-<timestamp>
 # and rebuilt from the lists on disk (#628); the copy can be deleted.
 LIST_INDEX_FILE: str = "./data/list_index.db"
 
 # Duration and quality after the size on the list's MP3 and FLAC rows (#567):
 # "::INFO:: 10.3MB 4m31s 320/44.1/JS" - the spelling other servers' lists use.
 # Off by default because it OPENS every audio file, where the scan otherwise
-# asks for nothing but sizes: the first rebuild with it on takes noticeably
-# longer. What it read is kept in LIST_AUDIO_INFO_CACHE, checked against each
-# file's size and modification time, so later rebuilds open only new or changed
+# asks for nothing but sizes. The rebuild never waits for it (#1182): the list
+# is published with what is already known, then the files not read yet are
+# read in the background, with no time limit, and their lengths written into
+# the published list once at the end - its date kept, so other bots do not
+# fetch it again. Searches and requests pause only for that swap, as for a
+# rebuild's. A rebuild run by hand (not by the bot) publishes and leaves the
+# reading to the bot or to `update_list.py --read-audio-info`. Tools > Read audio info (and the console's `audioinfo`)
+# runs that reading on its own. What it read is kept in LIST_AUDIO_INFO_CACHE,
+# checked against each file's size, so later rebuilds open only new or changed
 # files. Read with the standard library (audio_info.py); a file it cannot read
 # keeps its size and nothing more.
 LIST_SHOW_AUDIO_INFO: bool = False  # Put duration and bitrate after the size on MP3 and FLAC rows
@@ -368,23 +379,25 @@ LIST_AUDIO_INFO_CACHE: str = "./data/audio_info.db"
 # NFS library: one at a time 9.8 files a second, 16 about 73, 64 about 236 (the
 # last partly on a cache warmed by the run before). 64 by default - a plain
 # disk answers 64 requests as readily as it answers 16; on a very old drive
-# or a very small library, lower it. The rebuild's last line says the rate it
+# or a very small library, lower it. The reading's last line says the rate it
 # got, to compare. 1 to 128.
 LIST_AUDIO_INFO_THREADS: int = 64  # Audio files read at once for length and quality
 # How many folders the rebuild lists at once (#922). On a network mount every
 # directory listing and every file's size is a round trip, and one folder at a
 # time none of them overlap - about 80 s of every rebuild on a 64,136-file NFS
-# library, with searches paused. With 2 ms of simulated latency per request,
-# 16 at a time scanned 15 times as fast as one. On a local disk it makes no
-# difference worth measuring (a fraction of a second either way). 1 is the
-# scan as it always was. 1 to 64.
+# library. With 2 ms of simulated latency per request, 16 at a time
+# scanned 15 times as fast as one. On a local disk it makes no difference
+# worth measuring (a fraction of a second either way). Searches are answered
+# from the current list while the scan runs, unless PAUSE_FOR_WHOLE_UPDATE
+# is on. 1 is the scan as it always was. 1 to 64.
 LIST_SCAN_THREADS: int = 16  # Folders listed at once while the list is rebuilt
-# The most time one rebuild spends reading audio files it has not read before
-# (#914). A rebuild pauses searches and requests, and the first one with
-# LIST_AUDIO_INFO on has the whole library to read: past this, the list
-# publishes with what was read and the rest wait for the next rebuild. 0 = no
-# limit.
-LIST_AUDIO_INFO_MINUTES: int = 5  # Minutes one rebuild may spend reading new audio files; 0 = no limit
+# NO LONGER USED (#1182). It was the most time one rebuild spent reading audio
+# files it had not read before (#914), past which the list published without
+# them. The rebuild now publishes first and reads them afterwards, in the
+# background, with no time limit, so there is nothing left to cap. Still
+# declared, so a settings.conf that sets it loads without a warning; whatever
+# it says is ignored.
+LIST_AUDIO_INFO_MINUTES: int = 5  # No longer used: audio files are read in the background with no time limit
 
 # One row per thing this bot has ever sent, keyed by its relative path or
 # archive name, with its name, kind and count. Feeds the Stats page's "Most
@@ -717,19 +730,33 @@ LIST_PROGRESS_FILE: str = "./data/list_progress.json"
 # thing operators come here looking for is already on; this only exposes the
 # number.
 #
-# RAISING IT FURTHER USUALLY CHANGES NOTHING, and it is worth saying so rather
-# than implying a free win. Past a few tens of kilobytes the limit is TCP's own
-# window and the link, not how much this loop hands the kernel at a time - the
-# bytes are already in flight while the next read happens. Where it can help is
-# a very fast, very high-latency link; where it can hurt is memory, since each
-# concurrent transfer holds one buffer of this size.
+# The SPEED rarely changes with it: past a few tens of kilobytes the limit is
+# TCP's own window and the link, not how much this loop hands the kernel at a
+# time - the bytes are already in flight while the next read happens. What it
+# does change is CPU, because every block costs a read, a send and a check for
+# acks. On loopback (#1139) 256 KB used 30-40% less sender CPU per GB than
+# 64 KB, and 128 KB most of that. That is about 1% of a core at 100 Mbps and
+# close to 10% at a saturated 1 Gbps, so a bigger block is worth it on a fast
+# seedbox. 4-16 KB cost two to three times the CPU of 64 KB.
+#
+# The default stays 64 KB because a bigger block has a price. The live speed -
+# "Speed now" on the dashboard, "Speed:" in the channel advert - is sampled
+# once a second from the bytes sent, and those move one whole block at a time.
+# A transfer slower than about one block a second reads 0 in most samples and
+# a one-block jump in the rest. And a receiver that stops reading altogether
+# is given up on after 60 s at 64 KB and below, and 60 s per 64 KB above that:
+# 240 s at 256 KB, holding its slot all that time. The timeout grows with the
+# block (see dcc._send_timeout) so that a slow receiver that IS still reading
+# survives at any size. Each concurrent transfer also holds one buffer of this
+# size in memory.
 #
 # Clamped to 4 KB - 1 MB when read (see dcc.dcc_block_size), because a value
 # of 0 would busy-loop and a value of 500 MB would hold half a gigabyte per
 # transfer for no gain.
-DCC_BLOCK_SIZE: int = 65536      # 64 KB - one of 4096/8192/16384/32768/65536/131072
+DCC_BLOCK_SIZE: int = 65536      # 64 KB - one of 4096/8192/16384/32768/65536/131072/262144
 
-# The socket send buffer for a DCC transfer, in bytes. 0 leaves it to the OS.
+# The socket send buffer for a DCC transfer, in bytes. 0 is the per-platform
+# default below: 4 MB on Windows, the OS's own tuning elsewhere.
 #
 # THIS IS THE ONE THAT MATTERS ON A FAST, DISTANT LINK, and it is not the
 # packet size above. What bounds throughput on TCP is the bandwidth-delay
@@ -738,13 +765,16 @@ DCC_BLOCK_SIZE: int = 65536      # 64 KB - one of 4096/8192/16384/32768/65536/13
 # at roughly 5 Mbps no matter how big each write is - the writer simply waits
 # for the far end to acknowledge before it can put more on the wire.
 #
-# LEFT AT 0 BY DEFAULT, deliberately. Both Windows and Linux auto-tune this
-# buffer, and setting it explicitly TURNS THAT OFF - so a value chosen for one
-# link can be worse than the default on every other. It is here to be
-# experimented with on a link the operator knows, not to be set hopefully.
+# LEFT AT 0 BY DEFAULT, deliberately, and 0 is not the same on every platform
+# (see dcc._DEFAULT_SEND_BUFFER). Linux and macOS auto-tune this buffer, and
+# setting it explicitly TURNS THAT OFF - so a value chosen for one link can be
+# worse than the default on every other; there 0 leaves it to the OS. Windows
+# leaves it at a fixed 64 KB, which caps a distant transfer at a few MB/s, so
+# there 0 sets 4 MB. It is here to be experimented with on a link the operator
+# knows, not to be set hopefully.
 DCC_SEND_BUFFER: int = 0         # 0 = per-platform default (4MB on Windows, OS auto-tuning on Linux)
 DCC_PORT_START: int = 55000      # First port the bot listens on for outgoing DCC sends; forward this range if you are behind NAT
-DCC_PORT_END: int   = 55010      # Last port of that range; each simultaneous transfer needs one free port, so keep at least MAX_DCC_SLOTS
+DCC_PORT_END: int   = 55010      # Last port of that range; sends, passive fetches and a listen-mode admin console share it, so keep at least MAX_DCC_SLOTS + MAX_FETCH_SLOTS + 1
 
 # ---------------------------------------------------------------------
 # CROSS-BOT FILE FETCH (dcc_fetch.py - receiving files FROM other bots)
@@ -947,6 +977,10 @@ RAR_TIMEOUT: int    = 1800     # Longest a rar packing run may take, in seconds,
 # drive takes hours. Losing it at the thirty-minute mark costs the whole run
 # and leaves the old list in place, every time, with no setting an operator
 # could reasonably be expected to guess right.
+#
+# The same rule stops a background audio reading (#1182) that has gone silent:
+# it reports only when a read completes, so a mount that stopped answering is
+# silence. What it read is already saved.
 #
 # The child reports what it is doing to LIST_PROGRESS_FILE roughly twice a
 # second while scanning. So the question worth asking is not "how long has

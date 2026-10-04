@@ -180,7 +180,9 @@ class GroupMembershipReplacesExactKeyMatching(unittest.TestCase):
 
     def test_the_empty_check_considers_every_list_in_the_group(self):
         body = function_body(self.source(), "applyFilterHighlight")
-        self.assertIn("entriesForNick(nick)", body)
+        # #1141: through one entriesByNick() built per call, not a fresh
+        # scan of every bot for each row.
+        self.assertIn("var group = entriesForNick(nick, byNick);", body)
         self.assertIn(".every(", body)
 
     def test_the_pinned_check_is_by_nick(self):

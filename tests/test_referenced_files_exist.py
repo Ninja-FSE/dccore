@@ -40,6 +40,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from exported_tree import _this_is_an_export  # noqa: E402
+from tests.support import parse_source  # noqa: E402
 
 SKIP_DIRS = {".git", "__pycache__", ".claude", "node_modules"}
 
@@ -94,7 +95,7 @@ def opened_filenames():
         relative = os.path.relpath(path, REPO_ROOT)
         try:
             with io.open(path, encoding="utf-8") as handle:
-                tree = ast.parse(handle.read())
+                tree = parse_source(handle.read())
         except (OSError, SyntaxError, UnicodeDecodeError):
             continue
         for node in ast.walk(tree):
@@ -165,7 +166,7 @@ class EveryFilenameTheCodeOpensExists(unittest.TestCase):
         os.path.join for a file that is not there."""
         source = ('import os\n'
                   'io.open(os.path.join(REPO_ROOT, "vanished_module.py"))\n')
-        tree = ast.parse(source)
+        tree = parse_source(source)
 
         seen = []
         for node in ast.walk(tree):

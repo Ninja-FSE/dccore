@@ -37,7 +37,7 @@ if REPO_ROOT not in sys.path:
 import defaults as config  # noqa: E402
 import security  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 # Every spelling of "match everything". A hostmask is <nick>!<ident>@<host>,
 # so any pattern built only from wildcards and those separators (plus the dots
@@ -208,7 +208,7 @@ class TheSampleDoesNotPutTheDashboardOnTheLan(unittest.TestCase):
         import ast
         declared = {}
         with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
         for node in tree.body:
             if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 target, value = node.target.id, node.value

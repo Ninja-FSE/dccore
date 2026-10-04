@@ -45,7 +45,7 @@ if REPO_ROOT not in sys.path:
 
 import commands  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, remove_tree  # noqa: E402
 
 
 class ModulePairCase(unittest.TestCase):
@@ -70,11 +70,8 @@ class ModulePairCase(unittest.TestCase):
             sys.modules.pop(name, None)
         if self.dir in sys.path:
             sys.path.remove(self.dir)
-        for name in os.listdir(self.dir):
-            try:
-                os.remove(os.path.join(self.dir, name))
-            except OSError:
-                pass
+        # The directory too, and the __pycache__ an import wrote into it (#1149).
+        remove_tree(self.dir)
 
     def write(self, module, text):
         path = os.path.join(self.dir, module + ".py")

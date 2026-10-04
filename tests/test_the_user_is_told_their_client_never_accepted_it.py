@@ -30,6 +30,7 @@ import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 import runtime  # noqa: E402
 
+from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase, no_disk_writes  # noqa: E402
 from tests.test_a_receiver_that_never_connects_is_said_so import _NobodyEverConnects  # noqa: E402
 from tests.test_dcc_resume_end_to_end import RecordingIrcSocket  # noqa: E402
@@ -56,8 +57,10 @@ class WhatTheUserIsTold(DCCoreTestCase):
         config.dcc_queue.clear()
         self.tmp = tempfile.mkdtemp(prefix="dccore-told-")
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+        # A range of its own: a parallel run moves it into this shard's window (#1146).
+        port_start, port_end = dcc_ports(51340, 51350)
         self.set_config(active_transfers=[], MAX_DCC_SLOTS=3, MY_IP_OR_DOCK="8.8.8.8",
-                        DCC_PORT_START=51340, DCC_PORT_END=51350, DCC_ACCEPT_TIMEOUT=30)
+                        DCC_PORT_START=port_start, DCC_PORT_END=port_end, DCC_ACCEPT_TIMEOUT=30)
         runtime.dcc_send_offers.clear()
         self.addCleanup(runtime.dcc_send_offers.clear)
         self.sent = []

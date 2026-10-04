@@ -127,7 +127,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--size", type=int, default=256,
                         help="megabytes to push per run (default 256)")
-    parser.add_argument("--blocks", default="4096,8192,16384,32768,65536,131072",
+    parser.add_argument("--blocks", default="4096,8192,16384,32768,65536,131072,262144",
                         help="comma-separated block sizes to try")
     args = parser.parse_args()
 

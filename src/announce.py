@@ -989,6 +989,7 @@ NOTICE_EVENTS = (
     ("a list rebuild failed",           "commands.py", "External update_list.py failed",   "error"),
     ("a list rebuild stalled",          "commands.py", "The library it",                    "error"),
     ("a list rebuild timed out",        "commands.py", "Script execution timed out",       "error"),
+    ("the audio reading failed",        "commands.py", "The background audio reading failed or went silent", "error"),
     ("activated with channels missing", "irc.py",      "channel(s) never confirmed via NAMES", "error"),
     ("rejoined after a kick",           "irc.py",      "Rejoined {back.group(1)}",         "warning"),
     ("kicked from a channel",           "irc.py",      "Kicked from {kicked_chan}",        "warning"),

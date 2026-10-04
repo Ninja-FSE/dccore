@@ -32,6 +32,7 @@ if SCRIPTS not in sys.path:
     sys.path.insert(0, SCRIPTS)
 
 import setup_check  # noqa: E402
+from tests.support import parse_source  # noqa: E402
 
 SHIMS = {
     "linux": os.path.join(SCRIPTS, "linux", "check-setup.py"),
@@ -155,7 +156,7 @@ class NeitherLauncherCarriesChecks(unittest.TestCase):
     def test_each_launcher_calls_main_with_its_own_platform(self):
         expected = {"linux": "LINUX", "windows": "WINDOWS"}
         for name, path in SHIMS.items():
-            tree = ast.parse(source(path))
+            tree = parse_source(source(path))
             names = {node.attr for node in ast.walk(tree)
                      if isinstance(node, ast.Attribute)}
             self.assertIn(expected[name], names,

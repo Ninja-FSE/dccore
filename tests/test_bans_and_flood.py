@@ -108,11 +108,15 @@ class BanEnforcementTests(DCCoreTestCase):
         six channels. Star-only patterns are skipped, and the rest of the file is
         still applied."""
         self.write_hard_bans("*", "***", "lidx_*")
-        # The over-broad lines must not catch an unrelated user...
+        # The over-broad lines must not catch an unrelated user, and the
+        # operator is told about them. Since #1131 the file is parsed once per
+        # version, so the warning comes with the check that first reads it,
+        # not with every message after it.
         self.assertTrue(self.check("dave"))
+        self.assertIn("SECURITY WARNING", self.last_stdout)
         # ...and the scan must carry on to the legitimate pattern below them.
         self.assertFalse(self.check("lidx_abc"))
-        self.assertIn("SECURITY WARNING", self.last_stdout)
+        self.assertNotIn("SECURITY WARNING", self.last_stdout)
 
     def test_clean_user_is_allowed(self):
         """A nick matching nothing returns True - enforcement must not fail closed."""

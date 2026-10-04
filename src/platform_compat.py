@@ -677,6 +677,144 @@ def release_instance_lock():
     _instance_lock["path"] = None
 
 
+def _lock_handle(handle):
+    """Lock one open handle the way take_instance_lock() does. OSError when
+    another process holds it."""
+    if os.name == "nt":
+        import msvcrt
+        handle.seek(_LOCK_OFFSET)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def take_file_lock(path, note=""):
+    """An OS lock on `path`, separate from the instance lock: returns the open
+    handle that holds it, or raises AlreadyRunning. `note` is written at the
+    start of the file after the pid ("<pid> <note>"), for whoever is refused
+    - read it with file_lock_note(). Released by release_file_lock() or when
+    the process ends, so a crash leaves nothing stale (#1182: the list
+    rebuild's and the audio reading's lock)."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle = open(path, "a+", encoding="utf-8")
+    try:
+        _lock_handle(handle)
+    except OSError:
+        handle.close()
+        raise AlreadyRunning(os.path.abspath(path), _pid_in(path))
+    set_file_lock_note(handle, note)
+    return handle
+
+
+def set_file_lock_note(handle, note):
+    """Rewrite what a held lock file says about its holder."""
+    try:
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()} {note}".rstrip() + "\n")
+        handle.flush()
+    except OSError:
+        pass  # the lock is held either way
+
+
+def file_lock_note(path):
+    """(pid, note) a lock file's holder wrote, or (None, "")."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return None, ""
+    try:
+        text = os.read(fd, 256).decode("utf-8", "replace").strip()
+    except OSError:
+        return None, ""
+    finally:
+        os.close(fd)
+    head, _sep, note = text.partition(" ")
+    try:
+        return int(head) or None, note.strip()
+    except ValueError:
+        return None, ""
+
+
+def release_file_lock(handle):
+    """Let a take_file_lock() lock go. A second call is a no-op."""
+    if handle is None or handle.closed:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            handle.seek(_LOCK_OFFSET)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        handle.close()
+    except OSError:
+        pass
+
+
+def file_lock_held(path):
+    """Whether another process holds the lock on `path` - asked by taking it
+    and letting it go at once."""
+    try:
+        handle = take_file_lock_quietly(path)
+    except AlreadyRunning:
+        return True
+    release_file_lock(handle)
+    return False
+
+
+def take_file_lock_quietly(path):
+    """take_file_lock() without writing a note: for asking, not holding."""
+    directory = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle = open(path, "a+", encoding="utf-8")
+    try:
+        _lock_handle(handle)
+    except OSError:
+        handle.close()
+        raise AlreadyRunning(os.path.abspath(path), _pid_in(path))
+    return handle
+
+
+def pid_alive(pid):
+    """Whether process `pid` is still running. Never signals it: on Windows
+    os.kill() would END it, so the process is opened and waited on for zero
+    seconds instead; elsewhere signal 0 only asks."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        synchronize = 0x00100000
+        handle = kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            # 5 is access denied: it exists, it is just not ours to open.
+            return ctypes.GetLastError() == 5
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == 0x102  # WAIT_TIMEOUT
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def replace_with_retry(src, dst, attempts=5, base_delay=0.02):
     """os.replace(), retrying a bounded number of times with backoff on
     PermissionError.
@@ -685,7 +823,8 @@ def replace_with_retry(src, dst, attempts=5, base_delay=0.02):
     ([WinError 5]) when another handle has `dst` open at the exact instant of
     the rename - security.check_user_status() does exactly that, holding
     hard_bans.txt open (unlocked, no share-deny) on the IRC read thread for
-    every PRIVMSG. Measured under synthetic load: 256/300 replace attempts
+    every PRIVMSG (since #1131, only while the file may have changed: it is
+    kept parsed otherwise). Measured under synthetic load: 256/300 replace attempts
     failed with a reader active throughout. A bounded retry-with-backoff
     (total worst case here: ~0.3s across 4 sleeps) gives that brief per-line
     read window time to close without leaving a bad-actor open handle able to

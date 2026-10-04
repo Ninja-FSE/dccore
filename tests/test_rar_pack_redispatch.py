@@ -36,7 +36,7 @@ if REPO_ROOT not in sys.path:
 import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 
-from tests.support import DCCoreTestCase, RecordingSocket  # noqa: E402
+from tests.support import DCCoreTestCase, RecordingSocket, parse_source  # noqa: E402
 
 
 def pack_row(name="Album", user="dave"):
@@ -179,7 +179,7 @@ class EveryReleasePathWakesTheQueue(unittest.TestCase):
         import ast
 
         with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
         return {node.lineno for node in ast.walk(tree)
                 if isinstance(node, ast.Call)
                 and getattr(node.func, "id", None) == "redispatch_waiting_pack"}
