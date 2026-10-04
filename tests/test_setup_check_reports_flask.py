@@ -45,7 +45,7 @@ class TheCheckNamesTheInterpreterItLookedIn(DCCoreTestCase):
 
     def run_check(self, **settings):
         """The real script, in a subprocess, against a throwaway config."""
-        work = tempfile.mkdtemp(prefix="dccore-check-")
+        work = self.make_temp_dir(prefix="dccore-check-")
         conf = os.path.join(work, "settings.conf")
         lines = ["NICKNAME = TestBot", "CHANNEL = #x", "ADMIN_NICK = admin"]
         lines += [f"{name} = {value}" for name, value in settings.items()]

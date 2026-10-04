@@ -31,7 +31,10 @@ from tests.support import DCCoreTestCase  # noqa: E402
 class AByteOrderMarkDoesNotEatTheFirstSetting(DCCoreTestCase):
 
     def apply(self, text):
-        folder = tempfile.mkdtemp()
+        # apply_to() writes into the live config, and MAX_DCC_SLOTS is not one
+        # of the settings the harness resets: put every setting back.
+        self.keep_every_setting()
+        folder = self.make_temp_dir()
         path = os.path.join(folder, "settings.conf")
         with io.open(path, "w", encoding="utf-8") as handle:
             handle.write(text)

@@ -100,7 +100,9 @@ class AtSearchAndRequest(RebuildCase):
         self.assertIn("Search engine is temporarily paused", self.find())
 
     def test_a_request_during_the_scan_is_not_refused_for_the_rebuild(self):
-        self.phase("audio")
+        # "reading", the background audio reading (#1182), which replaced the
+        # rebuild's own "audio" phase: the published list is untouched.
+        self.phase("reading")
         self.assertNotIn("MasterList is currently rebuilding", self.request())
 
     def test_a_request_during_the_swap_is_told_seconds(self):

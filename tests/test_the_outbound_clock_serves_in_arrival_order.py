@@ -18,7 +18,6 @@ is who gets the next slot, which is now whoever asked first.
 """
 
 import collections
-import itertools
 import os
 import sys
 import threading
@@ -41,22 +40,63 @@ def wait_until(predicate, timeout=5.0):
     return predicate()
 
 
+class _TheClocksOwnRecord:
+    """The pacer's Condition, recording what happens under its own lock.
+
+    Every wait_for_slot() takes its ticket as the first thing it does inside
+    `with self._cond`, and the caller that is served calls notify_all()
+    while it still holds the lock. Logged right there, the order of the
+    entries is the order tickets were handed out, and the order of the
+    notifications is the order slots were served - not the order the lanes
+    got round to writing anything down afterwards."""
+
+    def __init__(self, cond):
+        self._cond = cond
+        self.asked = []
+        self.served = []
+
+    def __enter__(self):
+        entered = self._cond.__enter__()
+        self.asked.append(threading.current_thread().name)
+        return entered
+
+    def __exit__(self, *exc):
+        return self._cond.__exit__(*exc)
+
+    def wait(self, timeout=None):
+        return self._cond.wait(timeout)
+
+    def notify_all(self):
+        self.served.append(threading.current_thread().name)
+        self._cond.notify_all()
+
+
 class ThreeLanesHammeringIt(unittest.TestCase):
     """The audit's own probe: three threads looping on a fresh clock. It
     measured a longest streak of 11 slots without one of them; in arrival
-    order no lane can be skipped while it is waiting."""
+    order no lane can be skipped while it is waiting.
+
+    It used to assert that on the order the lanes appended to a list after
+    each slot - no lane three times in a row - and failed 4 runs in 5 on a
+    loaded machine while the clock was fair. Logged under the clock's own
+    lock, those runs served every slot in exactly the order its ticket was
+    taken. A lane that wins, then loses the CPU before it asks again, is not
+    waiting: the other two may rightly take the next slots without it. The
+    streak measured the scheduler. What is asserted now is the property
+    itself, and it holds however the threads are scheduled."""
 
     def test_nobody_is_skipped_while_waiting(self):
         pacer = runtime.OutboundPacer()
+        record = pacer._cond = _TheClocksOwnRecord(pacer._cond)
         wins, lock = [], threading.Lock()
 
-        def hammer(name, count=40):
+        def hammer(count=40):
             for _ in range(count):
                 pacer.wait_for_slot(0.004)
                 with lock:
-                    wins.append(name)
+                    wins.append(threading.current_thread().name)
 
-        threads = [threading.Thread(target=hammer, args=("lane%d" % i,)) for i in range(3)]
+        threads = [threading.Thread(target=hammer, name="lane%d" % i) for i in range(3)]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -64,11 +104,9 @@ class ThreeLanesHammeringIt(unittest.TestCase):
             self.assertFalse(thread.is_alive())
 
         self.assertEqual(collections.Counter(wins), {"lane0": 40, "lane1": 40, "lane2": 40})
-        longest = max(len(list(run)) for _name, run in itertools.groupby(wins))
-        # 2, not 1: a winner re-queues a hair after winning, and once per run
-        # that hair can fall behind the others' next win. Never 3 - that
-        # would be a waiting lane skipped, which is the defect.
-        self.assertLessEqual(longest, 2, wins)
+        self.assertEqual(len(record.served), 120, "a slot was given without being recorded")
+        # Served in the order asked: a lane holding a ticket is never passed over.
+        self.assertEqual(record.served, record.asked)
 
 
 class ArrivalOrderIsServiceOrder(unittest.TestCase):

@@ -571,6 +571,23 @@
       </div>
       <div class="tool-card">
         <div class="tool-head">
+          <h2 class="tool-name" data-i18n="tools.readAudioInfo">Read audio info</h2>
+          <button type="button" class="btn btn-accent" id="audio-info-run-btn" data-i18n="common.run">Run</button>
+        </div>
+        <p class="tool-what" data-i18n="tools.readAudioInfoWhat">
+          Reads the length and quality of the MP3 and FLAC files your list has
+          none for yet, and writes them into it - no new scan, and the list
+          keeps its date. A rebuild does this by itself once it has published;
+          this runs it on its own, for instance after a reading was stopped.
+          Only with Length and quality in the list on (Settings, Your list).
+        </p>
+        <p class="tool-status" id="audio-info-status"></p>
+          <div class="progress-bar" id="audio-info-bar" style="display:none;">
+            <div class="progress-bar-fill" id="audio-info-bar-fill"></div>
+          </div>
+      </div>
+      <div class="tool-card">
+        <div class="tool-head">
           <h2 class="tool-name" data-i18n="tools.verifyList">Verify list</h2>
           <button type="button" class="btn btn-accent" id="verify-run-btn" data-i18n="common.run">Run</button>
         </div>

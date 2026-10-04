@@ -1066,11 +1066,12 @@ def process_fetched_list_zip(bot, zip_path):
     parseable - a file that merely LOOKS like a valid master list but is
     actually garbage must still be caught here, same as before - and to get
     an accurate post-dedup row count for the dashboard switcher) but keeps
-    only that count afterward. get_fetched_bot_page() below re-parses
-    `list_path` fresh on every later request, exactly the way
-    webserver.build_filelists_payload() has always done for THIS bot's own
-    list - nothing about a fetched list is retained in memory between views
-    except this small summary dict.
+    only that count afterward. get_fetched_bot_page() below reads each later
+    page from `list_path` on disk - no rows of a fetched list are retained in
+    memory between views, only this small summary dict and, since #1128, a
+    table of where each folder starts (about 38 bytes per folder, and never
+    more than half the list's size or 1 MB, whichever is more: past that the
+    pages read the list whole).
 
     Returns (success, reason): reason is None on success, otherwise a short
     human-readable string suitable for logging/dashboard display. Never
@@ -1103,6 +1104,12 @@ def process_fetched_list_zip(bot, zip_path):
     """
     with _lock():
         result = _process_fetched_list_zip_unlocked(bot, zip_path)
+        # The files under this bot's directory were rewritten or put back:
+        # its folder tables describe what was there (#1128). Under the lock,
+        # so no page builds one from the files half way through. Keyed on
+        # mtime and size as well, but a same-size rewrite inside one tick of
+        # a coarse clock would keep both.
+        list_mod.forget_folder_tables(under=list_extract_dir(bot))
     # Outside the lock: telling a console can take a moment and nothing
     # else should wait for it (#750).
     try:
@@ -1213,10 +1220,13 @@ def _measure_extra_list(bot, marker, path):
               f"bytes, over the {max_list_text_size()}-byte ceiling.")
         return None
 
+    # Streamed into the index rather than built in memory first (#1134); see
+    # _install_fetched_list(). The first row is read here, so a list that
+    # cannot be parsed at all is caught before anything is written.
     try:
-        entries, _total = list_mod.find_matching_entries(
-            [], limit=None, list_path=platform_compat.long_path(path))
-        rows = list_mod.entries_to_filelist_rows(entries, str(bot).strip())
+        rows = list_mod.CountedRows(list_mod.iter_filelist_rows(
+            platform_compat.long_path(path), str(bot).strip()))
+        has_rows = rows.any_rows()
     except Exception as err:
         print(f"[LIST-FETCH] Skipping {bot}'s '{marker}' list: could not "
               f"parse it ({err}).")
@@ -1227,7 +1237,7 @@ def _measure_extra_list(bot, marker, path):
     # nothing, which is the noise this change is otherwise removing. The MAIN
     # list is exempt: it is the archive's identity, and an empty one is a fact
     # about that bot worth seeing rather than a file to ignore.
-    if not rows:
+    if not has_rows:
         print(f"[LIST-FETCH] Skipping {bot}'s '{marker}' list: no entries in "
               f"it.")
         return None
@@ -1236,7 +1246,15 @@ def _measure_extra_list(bot, marker, path):
     # bot's lists a match came from - and so re-fetching replaces that list's
     # rows rather than the whole bot's.
     list_index.index_bot_list(index_key(bot, marker), rows)
-    return {"list_path": path, "entry_count": len(rows),
+    try:
+        # Every row, whether or not the index took them: CountedRows drains
+        # what it did not, and raises what the list itself raised.
+        entry_count = rows.total()
+    except Exception as err:
+        print(f"[LIST-FETCH] Skipping {bot}'s '{marker}' list: could not "
+              f"parse it ({err}).")
+        return None
+    return {"list_path": path, "entry_count": entry_count,
             "file_name": os.path.basename(path)}
 
 
@@ -1339,14 +1357,13 @@ def _install_fetched_list(bot, zip_path, extract_dir):
     # outside the extraction guard, on a file that is plainly there.
     #
     # This is the ONE courtesy parse - see process_fetched_list_zip()'s
-    # docstring. `rows` was only ever used for its length; nothing keeps a
-    # reference to it (or to `entries`) once the count is taken and the index
-    # below has been written, so both are free to be garbage-collected as soon
-    # as this function returns.
-    entries, _total = list_mod.find_matching_entries(
-        [], limit=None, list_path=platform_compat.long_path(list_path))
-    rows = list_mod.entries_to_filelist_rows(entries, str(bot).strip())
-    entry_count = len(rows)
+    # docstring. The rows are only ever counted and written to the index, so
+    # they are STREAMED into it (#1134): this built a dict per row with the
+    # raw line in it and then a second dict per row, and held both lists for
+    # the whole write - about 412 MB at 378k rows, where streaming peaks at
+    # 143 MB. CountedRows counts them as the index takes them.
+    rows = list_mod.CountedRows(list_mod.iter_filelist_rows(
+        platform_compat.long_path(list_path), str(bot).strip()))
 
     # THE SEARCH INDEX (#133 step 5), written from the parse that was already
     # happening. The dashboard's filter bar searches every held list at once,
@@ -1362,6 +1379,11 @@ def _install_fetched_list(bot, zip_path, extract_dir):
     # the next fetch tries again. A fetch that succeeded must not be reported
     # as failed over it.
     indexed = list_index.index_bot_list(str(bot).strip(), rows)
+    # Taken AFTER the write, which is what consumed the rows. total() is
+    # still every row in the list when the index took none of them
+    # (unavailable) or stopped part-way: it drains the rest. A list that
+    # could not be parsed raises here, as the up-front parse did.
+    entry_count = rows.total()
     if indexed != entry_count:
         print(f"[LIST-FETCH] {bot}'s list was stored but only {indexed} of "
               f"{entry_count} entries reached the search index; the "
@@ -1385,6 +1407,7 @@ def _install_fetched_list(bot, zip_path, extract_dir):
             kept_lists[marker] = info
 
     store = _ensure_fetched_bot_lists()
+    previous = store.get(str(bot).strip().lower())
     store[str(bot).strip().lower()] = {
         "bot": str(bot).strip(),
         "fetched_at": time.time(),
@@ -1440,6 +1463,21 @@ def _install_fetched_list(bot, zip_path, extract_dir):
     # the File Lists switcher went blank until the next fetch.
     db.save_fetched_bot_lists(dict(store))
 
+    # A LIST THIS FETCH DID NOT KEEP LEAVES THE INDEX. The last copy may have
+    # held one this archive does not - or holds empty, or over the ceiling -
+    # and nothing removed its rows: not this, which indexes only the lists it
+    # keeps, and not forget_bot(), which went by the markers this entry
+    # names. They stayed for good, and as "<nick>/<marker>" they also match
+    # the bare nick's `bot:"<nick>"` pre-filter in every search.
+    # Compared as index names, which the index stores lower-cased: a marker
+    # that only changed case is the list just indexed, not one to drop.
+    old_lists = previous.get("lists") if isinstance(previous, dict) else None
+    if isinstance(old_lists, dict):
+        kept_names = {index_key(bot, marker).lower() for marker in kept_lists}
+        for marker in old_lists:
+            if index_key(bot, marker).lower() not in kept_names:
+                list_index.drop_bot(index_key(bot, marker))
+
     if len(kept_lists) > 1:
         detail = ", ".join(f"{marker or 'main'}: {info['entry_count']}"
                            for marker, info in kept_lists.items())
@@ -1457,11 +1495,13 @@ def get_fetched_bot_page(entry, offset, limit, search_words=None):
     """Issue #76, option 2's on-demand reader: given one
     config.fetched_bot_lists[...] entry (the dict process_fetched_list_zip()
     above builds - "bot", "fetched_at", "list_path", "entry_count",
-    "source_zip"), re-parse its `list_path` FRESH via
-    list.find_matching_entries() + list.entries_to_filelist_rows() - no
-    caching between calls, exactly like webserver.build_filelists_payload()
-    already does for this bot's own list - dedup, and return one page of the
-    result.
+    "source_zip"), read one page of its `list_path`. Unfiltered, from
+    list.page_of_list_files() (#1128): a table of where each folder is, built
+    once per version of the file, so a page parses only its own folders. It
+    used to re-parse the whole file for every page - 11 s and 412 MB at
+    378k rows. No rows are kept between calls, only the table. A search, or
+    a file the table cannot answer for, re-parses the whole file as before
+    via list.find_matching_entries() + list.entries_to_filelist_rows().
 
     `search_words`, when given, is passed straight through to
     find_matching_entries() - the same pre-split word list @find and the
@@ -1511,6 +1551,10 @@ def get_fetched_bot_page(entry, offset, limit, search_words=None):
     representation at a time" guarantee process_fetched_list_zip() already
     gives writers, extended to readers.
 
+    The folder table's own lock (runtime.list_folder_table_lock, #1128) is
+    taken inside this one, here and in the two places that drop tables under
+    it, and never the other way round: the own list's pages take it alone.
+
     No deadlock risk: this is the only other place in the codebase that
     acquires this lock, dcc_fetch.py's call into process_fetched_list_zip()
     happens with no other lock held (see _handle_completed_list_fetch()'s
@@ -1535,6 +1579,22 @@ def get_fetched_bot_page(entry, offset, limit, search_words=None):
             print(f"[LIST-FETCH] {reason}.")
             return [], 0, 0, False, reason
 
+        # Under the lock, the table's build and the stat that keys it too: a
+        # same-bot refetch rewrites this path in place, and a table built
+        # from a half-written file would be filed under the new file's key.
+        # A crafted list cannot hold the lock long with it: its build stops
+        # at the table's budget (list._folder_table_budget()) and the page is
+        # read whole, as before the table. Building outside this lock would
+        # not let a fetch install meanwhile either: the build holds the
+        # table lock, and an install drops tables under that lock while it
+        # holds this one.
+        if not search_words:
+            answer = list_mod.page_of_list_files(
+                [resolved_path], offset, limit, bot,
+                max_rows=list_mod.FILELISTS_MAX_PAGE_ROWS)
+            if answer is not None:
+                page, total_folders, total_rows, row_capped = answer
+                return page, total_folders, total_rows, row_capped, None
         try:
             entries, _total = list_mod.find_matching_entries(
                 search_words or [], limit=None, list_path=resolved_path)
@@ -1581,6 +1641,9 @@ def forget_bot(bot):
         if entry is None:
             return False
         db.save_fetched_bot_lists(dict(store))
+        # Its folder tables go with it (#1128): nothing can page this list
+        # again, and they would only hold a place among the few kept.
+        list_mod.forget_folder_tables(under=list_extract_dir(bot))
 
     # Off the lock: a slow rmtree on a network-mounted FETCHED_FILES_DIR must
     # not hold up an unrelated fetch that only needs the dict, and the entry
@@ -1605,17 +1668,18 @@ def forget_bot(bot):
     # - so dropping the bare nick alone leaves the films/series rows behind
     # forever, pointing at files this call has just deleted.
     #
-    # Not a correctness problem: search_index() already restricts its answer to
-    # lists currently held, so nothing wrong is ever returned. It is a DISK
-    # problem, and the whole point of purging - the index runs roughly as large
+    # search() answers only from lists currently held, so nothing wrong is
+    # returned from them. It is above all a DISK problem, and the whole point
+    # of purging - the index runs roughly as large
     # again as the lists it describes, so on a multi-list bot the leak is most
     # of the space the purge just claimed to free.
     #
-    # `| {""}` because an entry written before an archive could hold more than
-    # one list has no "lists" key at all, and the bare nick must still go.
-    markers = (entry.get("lists") or {}) if isinstance(entry, dict) else {}
-    for marker in set(markers) | {""}:
-        list_index.drop_bot(index_key(bot, marker))
+    # By every name in the index under this nick, not by the markers the
+    # entry names: a list an earlier refetch left out is not in them, and
+    # its rows outlived the Forget too. That also covers an entry written
+    # before an archive could hold more than one list, which has no "lists"
+    # key at all.
+    list_index.drop_every_list_of(bot)
 
     real_nick = entry.get("bot", bot) if isinstance(entry, dict) else bot
     print(f"[LIST-FETCH] Forgot {real_nick}'s fetched list.")

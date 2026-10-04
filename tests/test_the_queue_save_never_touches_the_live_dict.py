@@ -43,6 +43,7 @@ import defaults as config  # noqa: E402
 
 from tests.support import DCCoreTestCase, no_disk_writes, queue_row, silence_debug  # noqa: E402
 from tests import test_complete_means_the_receiver_acked_it as ack  # noqa: E402
+from tests.support import parse_source  # noqa: E402
 
 
 class TheSaveOnlyReadsTheLiveDict(DCCoreTestCase):
@@ -156,7 +157,7 @@ class TheWakeInTheFinallyIsGuarded(unittest.TestCase):
 
     def finally_body(self):
         with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
         func = next(node for node in ast.walk(tree)
                     if isinstance(node, ast.FunctionDef) and node.name == "start_dcc_send")
         # The outermost try/finally of the function body is the settlement.

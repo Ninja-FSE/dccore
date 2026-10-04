@@ -41,7 +41,7 @@ if REPO_ROOT not in sys.path:
 import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 
 class TheQueueTotalSurvivesAConcurrentMutation(DCCoreTestCase):
@@ -132,7 +132,7 @@ class TheAdvertLoopIsolatesEachChannel(unittest.TestCase):
         with io.open(os.path.join(REPO_ROOT, "src", "announce.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
-        tree = ast.parse(source)
+        tree = parse_source(source)
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "announce_worker":
                 return node

@@ -44,6 +44,7 @@ import ast
 import io
 import os
 import unittest
+from tests.support import parse_source  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -60,7 +61,7 @@ def module_name_literals(source):
     Returns [(module_name, lineno), ...].
     """
     found = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(parse_source(source)):
         if (isinstance(node, ast.For) and isinstance(node.iter, ast.List)
                 and isinstance(node.target, ast.Name)
                 and "mod" in node.target.id.lower()):

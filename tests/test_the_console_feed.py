@@ -116,6 +116,16 @@ class _RoutingCase(DCCoreTestCase):
                         CONSOLE_SHOW_REQUESTS=True, CONSOLE_SHOW_QUEUE=True,
                         CONSOLE_SHOW_SENDS=True, CONSOLE_SHOW_FAILURES=True,
                         CONSOLE_SHOW_SEARCHES=True)
+        # Only this case's own sink, whatever an earlier test left attached:
+        # the dashboard's console sink stays registered for the life of the
+        # process once any test has polled its log, and then the floor test
+        # below saw its line taken by it. It only showed once the suite ran
+        # in shards (#1146), where the module that used to detach it ran in
+        # another process. tests/test_debug_routing.py does the same.
+        saved_sinks = announce._debug_sinks[:]
+        announce._debug_sinks.clear()
+        self.addCleanup(lambda: (announce._debug_sinks.clear(),
+                                 announce._debug_sinks.extend(saved_sinks)))
         self.taken = []
         announce.add_debug_sink(self.sink)
         self.addCleanup(announce.remove_debug_sink, self.sink)

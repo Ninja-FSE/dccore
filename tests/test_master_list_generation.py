@@ -31,7 +31,7 @@ import list as list_mod  # noqa: E402
 import platform_compat  # noqa: E402
 import update_list  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, hold_threads_until_the_test_ends  # noqa: E402
 
 
 class MasterListCase(DCCoreTestCase):
@@ -1642,6 +1642,12 @@ class TheRequestTriggerIsStable(MasterListCase):
 
         subprocess.Popen = recorder
         self.addCleanup(setattr, subprocess, "Popen", real_popen)
+        # The handler's async_list_updater thread outlived this test: after
+        # the child it sleeps 2 s, then recounts whatever LOCAL_LIST_DIR is
+        # current and sets update_inprogress and last_list_update_ok - in the
+        # next test, over flags that test had set itself. Held to this test,
+        # and joined when it ends.
+        hold_threads_until_the_test_ends(self, ("async_list_updater",))
 
         commands.handle_list_update_request("operator", "#channel", authorised=True)
 

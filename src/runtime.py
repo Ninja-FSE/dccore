@@ -219,6 +219,14 @@ rehash_lock = threading.Lock()
 # two callers both believe they hold it.
 list_index_lock = threading.Lock()
 
+# The cross-list index's READ connection (#1129). The dashboard's filter
+# queries use a second connection of their own, so a list being indexed no
+# longer holds every keystroke for the whole write; this guards that one.
+# Lock order: list_index_lock first, then this one. A reader never takes
+# list_index_lock while it holds this, or a write closing the reader and a
+# reader opening one would wait on each other for ever.
+list_index_read_lock = threading.Lock()
+
 # transfer_log.py's database (#1068). One writer at a time, so two transfers
 # ending together never meet a locked file; here, not in that module, for the
 # reason every other lock in this file is.
@@ -240,6 +248,12 @@ download_counts_lock = threading.Lock()
 # reload costs one recount, which is harmless, where rebinding the lock is not.
 list_count_lock = threading.Lock()
 
+# list.py's folder tables for the List Browser's pages of our own list
+# (#1128). Here for the same reason as list_count_lock just above; the dict
+# stays in list.py, where a reload costs one rebuild of a table. Taken INSIDE
+# list_fetch's own lock for a fetched list's page, never around it.
+list_folder_table_lock = threading.Lock()
+
 # The automatic list refresh's start guard (#625). list_fetch.ensure_auto_
 # refetch_worker() starts the hourly loop from wherever AUTO_REFETCH_LISTS is
 # found on - boot, or the rehash a dashboard save fires - and must start it
@@ -258,6 +272,21 @@ auto_refetch_started = False
 rebuild_schedule_guard        = threading.Lock()
 rebuild_schedule_started      = False
 rebuild_schedule_last_attempt = None
+
+# The background audio reading (#1182): after a rebuild has published, the
+# same update_list.py process goes on reading audio lengths, and the daemon
+# stops waiting for it. audio_reading is that process's record while it runs
+# (an object with .process, .kind, .started and .done, set by commands.py), or
+# None; audio_reading_last is the last reading's result, for the dashboard.
+# Here because a !rehash reloads commands.py while a reading can run for
+# hours, and a reload must neither forget the process a new rebuild has to
+# stop nor build a second lock beside the one a waiting thread holds.
+audio_reading_lock = threading.Lock()
+audio_reading      = None
+audio_reading_last = None
+# True while commands.retry_audio_rewrite_when_free() waits for the list
+# downloads to finish, so one wait at a time (#1182 audit).
+audio_retry_waiting = False
 
 # Automatic list grabbing (#926 item 5), list_grab.py. Here for the same
 # reasons: a start guard a rehash cannot reset, and a wait in progress that a

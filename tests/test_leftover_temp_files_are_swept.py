@@ -32,7 +32,7 @@ if REPO_ROOT not in sys.path:
 import db  # noqa: E402
 import platform_compat  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, temp_dir  # noqa: E402
 
 
 def swaps_in(directory):
@@ -42,7 +42,7 @@ def swaps_in(directory):
 class TheSweep(unittest.TestCase):
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="dccore-swaps-")
+        self.dir = temp_dir(self, prefix="dccore-swaps-")
 
     def test_it_removes_the_leftovers_and_nothing_else(self):
         for name in (".tmp_abc.swap", ".tmp_def.swap"):
@@ -88,7 +88,7 @@ class TheWriteCleansUpAfterACtrlC(unittest.TestCase):
 
     def test_a_keyboard_interrupt_between_mkstemp_and_replace_leaves_nothing(self):
         """The audit's second probe: KeyboardInterrupt is not an Exception."""
-        directory = tempfile.mkdtemp(prefix="dccore-ctrlc-")
+        directory = temp_dir(self, prefix="dccore-ctrlc-")
         real = platform_compat.replace_with_retry
 
         def interrupted(_src, _dst):
@@ -104,7 +104,7 @@ class TheWriteCleansUpAfterACtrlC(unittest.TestCase):
     def test_a_hard_kill_leaves_one_and_the_next_start_sweeps_it(self):
         """The audit's first probe, end to end: a child dies between the two
         steps; the leftover is there; the sweep takes it."""
-        directory = tempfile.mkdtemp(prefix="dccore-kill-")
+        directory = temp_dir(self, prefix="dccore-kill-")
         script = (
             "import os, sys; sys.path.insert(0, %r); import db, platform_compat\n"
             "platform_compat.replace_with_retry = lambda a, b: os._exit(1)\n"
@@ -125,7 +125,7 @@ class TheWriteCleansUpAfterACtrlC(unittest.TestCase):
 class TheModeOfAWrittenFile(unittest.TestCase):
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="dccore-modes-")
+        self.dir = temp_dir(self, prefix="dccore-modes-")
 
     def mode(self, name):
         return stat.S_IMODE(os.stat(os.path.join(self.dir, name)).st_mode)

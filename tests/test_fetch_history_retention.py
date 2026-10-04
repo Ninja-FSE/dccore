@@ -38,7 +38,7 @@ if REPO_ROOT not in sys.path:
 import dcc_fetch  # noqa: E402
 import defaults as config  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 DAY = 86400
 
@@ -223,7 +223,7 @@ class ItRunsWithoutBeingAskedTo(DCCoreTestCase):
         import io as _io
 
         with _io.open(os.path.join(REPO_ROOT, "oserve.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
 
         calls = [n.lineno for n in ast.walk(tree)
                  if isinstance(n, ast.Call)

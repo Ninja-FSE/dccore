@@ -46,7 +46,7 @@ if os.path.join(REPO_ROOT, "tests") not in sys.path:
 import list_fetch  # noqa: E402
 import security  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, temp_dir  # noqa: E402
 
 
 class AHostShapedBanIsMatchedAgainstTheHost(DCCoreTestCase):
@@ -131,9 +131,7 @@ class ABotNickIsNotAPathComponent(unittest.TestCase):
                     self.assertNotIn(bad, name)
 
     def test_the_result_can_actually_be_created(self):
-        import tempfile
-
-        root = tempfile.mkdtemp()
+        root = temp_dir(self)
         for nick in ('Bot|Away', 'Bot*star', 'Bot"q', "Good_Bot", "Bot[EU]"):
             with self.subTest(nick=nick):
                 target = os.path.join(

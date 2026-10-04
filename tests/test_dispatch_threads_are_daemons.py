@@ -47,24 +47,28 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from tests.support import DCCoreTestCase, RecordingSocket  # noqa: E402
+from tests.support import DCCoreTestCase, RecordingSocket, parse_source, temp_dir  # noqa: E402
 
 
-def thread_calls():
-    """(module, line, is_daemon) for every threading.Thread(...) call."""
+def thread_calls(paths=None):
+    """(module, line, is_daemon) for every threading.Thread(...) call, in
+    `paths` or, by default, every module in the repository root and src/."""
     out = []
-    for name in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src")))):
-        if not name.endswith(".py"):
-            continue
-        path = (next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name)))
+    if paths is None:
+        paths = [(next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name)))
+                 for name in sorted((os.listdir(REPO_ROOT) + os.listdir(os.path.join(REPO_ROOT, "src"))))
+                 if name.endswith(".py")]
+    for path in paths:
+        name = os.path.basename(path)
         if not os.path.exists(path):
-            # Gone between listdir() and here. The control test below writes
-            # a tmp*.py into this very directory and removes it again, so two
-            # suite runs against one checkout make each other fail with a
-            # FileNotFoundError naming a file neither of them ships.
+            # Gone between listdir() and here. The control test below used to
+            # write a tmp*.py into this very directory (it writes into a temp
+            # folder now, #1146), and anything else running against this
+            # checkout still can: a file nobody ships is not worth a
+            # FileNotFoundError.
             continue
         with io.open(path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -111,21 +115,25 @@ class EveryStartedThreadIsADaemon(unittest.TestCase):
                   "threading.Thread(target=f).start()\n"
                   "threading.Thread(target=f, daemon=False).start()\n"
                   "threading.Thread(target=f, daemon=True).start()\n")
+        # Written into a temp folder, not the repository root (#1146): the
+        # suite's scanners walk the root, and with the suite split across
+        # processes one of them read this file half-written or saw it
+        # vanish mid-scan.
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False,
-                                         encoding="utf-8", dir=REPO_ROOT) as handle:
+                                         encoding="utf-8", dir=temp_dir(self)) as handle:
             handle.write(source)
             path = handle.name
-        self.addCleanup(os.remove, path)
 
-        mine = [(line, ok) for name, line, ok in thread_calls()
+        mine = [(line, ok) for name, line, ok in thread_calls([path])
                 if name == os.path.basename(path)]
 
         self.assertEqual(mine, [(2, False), (3, False), (4, True)])
 
     def test_a_file_that_vanishes_mid_scan_is_skipped(self):
-        """The control test above writes a tmp*.py into REPO_ROOT - the very
-        directory this scan walks - and removes it again on cleanup. So two
-        suite runs against one checkout used to fail each other with a
+        """The control test above wrote a tmp*.py into REPO_ROOT - the very
+        directory this scan walks - and removed it again on cleanup (it uses
+        a temp folder now, #1146). So two suite runs against one checkout
+        used to fail each other with a
         FileNotFoundError naming a file neither of them ships, which reads as
         a real defect and is not one.
 
@@ -149,7 +157,7 @@ class EveryStartedThreadIsADaemon(unittest.TestCase):
         """Named because they are the ones that were wrong, and because a
         future reader should be able to find the case from the test."""
         with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
 
         targets = []
         for node in ast.walk(tree):

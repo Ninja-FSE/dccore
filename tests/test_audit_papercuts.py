@@ -23,7 +23,7 @@ import commands  # noqa: E402
 import defaults as config  # noqa: E402
 import list as list_mod  # noqa: E402
 
-from tests.support import DCCoreTestCase, RecordingSocket  # noqa: E402
+from tests.support import DCCoreTestCase, RecordingSocket, parse_source  # noqa: E402
 
 
 class AMuteIsNotLabelledAsABan(unittest.TestCase):
@@ -169,7 +169,7 @@ class AFailedCleanupIsNotSilent(unittest.TestCase):
         import ast
 
         with io.open(os.path.join(REPO_ROOT, "src", "dcc_fetch.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
 
         guarded = []
         for node in ast.walk(tree):

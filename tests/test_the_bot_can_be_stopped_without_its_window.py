@@ -148,14 +148,16 @@ SLEEPER = textwrap.dedent("""
 
 class TheInterrupt(unittest.TestCase):
     def run_child(self, mode):
-        handle, path = tempfile.mkstemp(suffix=".py")
-        try:
+        # In a folder of its own, not loose in the temp folder (#1149): the
+        # script's folder is the child's sys.path[0], so every import it made
+        # listed the whole temp folder first, and a temp folder that has
+        # filled up made this test slow.
+        with tempfile.TemporaryDirectory(prefix="dccore-interrupt-") as folder:
+            handle, path = tempfile.mkstemp(suffix=".py", dir=folder)
             with os.fdopen(handle, "w", encoding="utf-8") as out:
                 out.write(SLEEPER)
             done = subprocess.run([sys.executable, path, os.path.join(support.REPO_ROOT, "src"), mode],
                                   capture_output=True, text=True, timeout=60)
-        finally:
-            os.unlink(path)
         self.assertEqual(done.returncode, 0, done.stderr)
         word, seconds = done.stdout.split()
         return word, float(seconds)

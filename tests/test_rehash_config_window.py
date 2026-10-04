@@ -783,12 +783,13 @@ class HowMuchGoesOutPerPass(DCCoreTestCase):
 
     def test_the_menu_is_the_one_mirc_offers(self):
         """4, 8, 16, 32, 64, 128 KB - what an operator is comparing against
-        when they say "the same setting mIRC has"."""
+        when they say "the same setting mIRC has" - plus 256 KB, for a fast
+        seedbox (#1139)."""
         import settings_file
 
         self.assertEqual(
             settings_file.CHOICES["DCC_BLOCK_SIZE"],
-            ("4096", "8192", "16384", "32768", "65536", "131072"))
+            ("4096", "8192", "16384", "32768", "65536", "131072", "262144"))
 
     def test_a_chosen_number_comes_back_as_a_number(self):
         """Every choice was a string until this one. Returning "65536" for a
@@ -842,7 +843,8 @@ class HowMuchGoesOutPerPass(DCCoreTestCase):
         field = webserver._settings_field("DCC_BLOCK_SIZE", int, 65536)
 
         self.assertEqual(field["choices"],
-                         ["4096", "8192", "16384", "32768", "65536", "131072"])
+                         ["4096", "8192", "16384", "32768", "65536", "131072",
+                          "262144"])
 
 
 class TheSocketSendBuffer(DCCoreTestCase):

@@ -38,6 +38,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import irc  # noqa: E402
+from tests.support import parse_source  # noqa: E402
 
 
 def names_burst(channels=12, nicks_per_line=60, lines_per_channel=4):
@@ -164,7 +165,7 @@ class BothLoopsUseIt(unittest.TestCase):
         still there."""
         import ast
 
-        tree = ast.parse(self.source())
+        tree = parse_source(self.source())
         return [node.args[0] for node in ast.walk(tree)
                 if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)

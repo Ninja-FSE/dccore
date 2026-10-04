@@ -1,6 +1,6 @@
 # DCCore
 
-**v1.14.0** · Python 3.10+ · Linux, Windows and macOS
+**v1.15.0** · Python 3.10+ · Linux, Windows and macOS
 
 An IRC DCC file-sharing daemon — a modern reimplementation of OmenServe, the mIRC script that has run these channels for twenty years.
 
@@ -28,6 +28,9 @@ python3 configure.py                    # a few questions
 ./scripts/linux/start-dccore.sh         # go
 python3 update_list.py                  # build the first list
 ```
+
+With track lengths in the list (`LIST_SHOW_AUDIO_INFO`), a hand-run `update_list.py` publishes and then says how to
+read the lengths: `update_list.py --read-audio-info`, or the running bot's **Read audio info**.
 
 On Windows, `py` rather than `python3` — a python.org install gives you `py` and `python`, not `python3`, and Windows ships an alias that makes `python3` open the Microsoft Store instead:
 
@@ -64,7 +67,11 @@ The optional dashboard is `webserver.py` and `web/`, and disables itself cleanly
 python3 -m unittest discover -s tests -t .
 ```
 
+Or, in four processes at once and in a third of the time, the way CI runs it: `python3 scripts/run_tests_in_parallel.py`.
+
 Thousands of them - the count is kept in [docs/FUTURE.md](docs/FUTURE.md) - stdlib-only, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14 in CI.
+
+To see what a running bot costs under load, `scripts/stress_test.py` points 40 simulated clients at it - a flood of searches, a storm of adverts, join/part churn, a mass quit, the dashboard - and prints the bot's CPU, memory and threads for each. Linux only, and only ever against a test bot on a private test server: the flood gets its nicks muted and banned. Its docstring says how to run it.
 
 ## Responsible use
 

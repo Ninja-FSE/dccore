@@ -37,6 +37,7 @@ import dcc  # noqa: E402
 
 from tests.support import (DCCoreTestCase, RecordingSocket, TempTree,  # noqa: E402
                            no_disk_writes, silence_debug)
+from tests.support import parse_source  # noqa: E402
 
 
 class AdminGate(DCCoreTestCase):
@@ -550,7 +551,7 @@ class RehashPreservesEveryRuntimeContainer(unittest.TestCase):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         path = os.path.join(repo_root, "src", "defaults.py")  # #959
         with open(path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
         names = []
         for node in tree.body:
             # `ADMIN_HOSTMASKS = [...]` is an ast.Assign, but

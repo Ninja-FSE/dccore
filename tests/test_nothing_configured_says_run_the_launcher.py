@@ -29,6 +29,7 @@ import defaults as config  # noqa: E402
 
 from tests import test_check_setup_numeric_sanity as check  # noqa: E402
 from tests import test_startup as boot  # noqa: E402
+from tests.support import temp_dir  # noqa: E402
 
 
 class TheCheckOnAnEmptyTree(unittest.TestCase):
@@ -37,8 +38,7 @@ class TheCheckOnAnEmptyTree(unittest.TestCase):
     checkout, and settings.conf is pointed at a path that does not exist."""
 
     def run_check(self):
-        import tempfile
-        empty = os.path.join(tempfile.mkdtemp(prefix="dccore-empty-"), "settings.conf")
+        empty = os.path.join(temp_dir(self, prefix="dccore-empty-"), "settings.conf")
         return check._run_with_admin_config("", extra_env={"DCCORE_SETTINGS_FILE": empty})
 
     def test_it_says_run_the_launcher_or_configure_py(self):

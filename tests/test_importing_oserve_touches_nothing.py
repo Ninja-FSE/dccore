@@ -88,13 +88,22 @@ class TheProgram(unittest.TestCase):
         log_install = "    platform_compat.install_console_log(_console_log_settings)"
         self.assertIn(log_install, stub)
         stub = stub.replace(log_install, "    pass")
+        # In a temp folder, not the repository root (#1146): the suite's
+        # scanners walk the root, and with the suite split across processes
+        # one of them could read this copy half-written or see it vanish.
+        # oserve.py finds src/ beside its own file, so the copy is told
+        # where the repository is, and the repository goes on the path
+        # where the copy's own folder used to put it (list.py imports oserve).
+        from tests.support import temp_dir
+        self.assertEqual(stub.count("os.path.dirname(os.path.abspath(__file__))"), 1)
+        stub = stub.replace("os.path.dirname(os.path.abspath(__file__))", repr(REPO_ROOT))
         with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False, encoding="utf-8",
-                                         dir=REPO_ROOT, prefix="_oserve_as_main_") as handle:
+                                         dir=temp_dir(self), prefix="_oserve_as_main_") as handle:
             handle.write(stub)
-        self.addCleanup(os.remove, handle.name)
+        path = os.pathsep.join(p for p in (REPO_ROOT, os.environ.get("PYTHONPATH")) if p)
         done = subprocess.run([sys.executable, handle.name], cwd=REPO_ROOT, capture_output=True,
                               text=True, encoding="utf-8", errors="replace", timeout=120,
-                              env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+                              env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONPATH=path))
 
         self.assertEqual(done.returncode, 0, done.stderr[-800:])
         reached = [l for l in done.stdout.splitlines() if "reached the entry point" in l]

@@ -42,7 +42,7 @@ if REPO_ROOT not in sys.path:
 import commands  # noqa: E402
 import defaults as config  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 # Names the daemon assigns to config at RUNTIME rather than reads from it, so
 # config.py has no declaration to compare against. ORIGINAL_NICK is set by
@@ -63,7 +63,7 @@ def modules():
 def declared_defaults():
     """Every setting config.py declares, and the value it declares."""
     with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
-        tree = ast.parse(handle.read())
+        tree = parse_source(handle.read())
     out = {}
     for node in tree.body:
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
@@ -85,7 +85,7 @@ def fallbacks():
     found = []
     for label, path in modules():
         with io.open(path, encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                     and node.func.id == "getattr" and len(node.args) == 3):
@@ -274,6 +274,9 @@ class NoDebugChannelMeansNoneIsJoined(unittest.TestCase):
         """
         import irc
 
+        # Put back: a plain TestCase, so nothing else does.
+        for name in ("CHANNEL", "DEBUG_CHANNEL"):
+            self.addCleanup(setattr, config, name, getattr(config, name))
         config.CHANNEL = "#alpha,#beta"
         config.DEBUG_CHANNEL = ""
 

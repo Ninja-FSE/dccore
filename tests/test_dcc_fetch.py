@@ -228,6 +228,9 @@ class FilenameSanitizationTests(unittest.TestCase):
         import tempfile
         tmp = tempfile.mkdtemp(prefix="dccore-fetch-test-")
         self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        # Put back: a plain TestCase, so nothing else does, and the next test
+        # to fetch anything would have written into this deleted folder.
+        self.addCleanup(setattr, config, "FETCHED_FILES_DIR", config.FETCHED_FILES_DIR)
         config.FETCHED_FILES_DIR = tmp
         dest_dir, stored_name = dcc_fetch._resolve_destination_path("abc123", "../../etc/passwd")
         self.assertIsNotNone(stored_name)

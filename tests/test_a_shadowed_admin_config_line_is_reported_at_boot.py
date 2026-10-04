@@ -38,12 +38,13 @@ import webserver  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
 from tests.test_set_it_up_in_the_browser import GOOD  # noqa: E402
+from tests.support import parse_source  # noqa: E402
 
 
 def _active_assignments(text):
     """{name: value} for every live (uncommented) assignment in `text`."""
     found = {}
-    for node in ast.parse(text).body:
+    for node in parse_source(text).body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 \
                 and isinstance(node.targets[0], ast.Name):
             found[node.targets[0].id] = ast.literal_eval(node.value)

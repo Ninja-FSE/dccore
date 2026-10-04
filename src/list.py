@@ -1,5 +1,8 @@
 # list.py - Slimmed down; scanning lives in update_list.py
+import array
+import bisect
 import os
+import zlib
 import time
 import datetime
 import defaults as config
@@ -494,7 +497,12 @@ def all_list_paths(name=None):
     return paths
 
 
-_INFO_MARKER_RE = re.compile(r'\s*::INFO::\s*', re.IGNORECASE)
+# The marker alone, without the r'\s*' either side it used to carry (#1136).
+# The leading one made re.split() retry the whitespace at every position of a
+# row before giving up, on every row of every list; strip_info_suffix() strips
+# both halves anyway, and str.strip() removes exactly the characters \s
+# matches, so the split lands in the same place.
+_INFO_MARKER_RE = re.compile('::INFO::', re.IGNORECASE)
 
 # The other family of size suffix seen in production, from bots that do not
 # use "::INFO::" at all: "SDFind v3.91 by SDSailor" writes
@@ -506,7 +514,7 @@ _INFO_MARKER_RE = re.compile(r'\s*::INFO::\s*', re.IGNORECASE)
 # to actually look like a size (digits, an optional decimal point, an
 # optional K/M/G/T, then B) - unlike "::INFO::", "----" is not a string that
 # only ever appears as this one bot's deliberate marker, so matching it
-# ANYWHERE (the way the marker split above safely can) would risk cutting a
+# ANYWHERE (the way the marker search above safely can) would risk cutting a
 # real filename that happens to contain a run of hyphens. Requiring a
 # size-shaped tail at the very end is what keeps this from firing on one.
 _DASH_SIZE_SUFFIX_RE = re.compile(
@@ -548,9 +556,9 @@ def strip_info_suffix(rest):
     trailing tag for part of the filename when it later requests that exact
     name back with `!<nick> <filename>`.
     """
-    parts = _INFO_MARKER_RE.split(rest, maxsplit=1)
-    if len(parts) == 2:
-        filename, size = parts
+    marker = _INFO_MARKER_RE.search(rest)
+    if marker:
+        filename, size = rest[:marker.start()], rest[marker.end():]
     else:
         dash_match = _DASH_SIZE_SUFFIX_RE.search(rest)
         if dash_match:
@@ -691,7 +699,28 @@ def find_matching_entries(search_words, limit=None, list_path=None, name=None):
 
     entries = []
     total_matches = 0
+    for line_strip, folder in _matching_lines(search_words, list_path):
+        total_matches += 1
+        if limit is None or len(entries) < limit:
+            filename, size = _split_entry_line(line_strip)
+            entries.append({
+                "line": line_strip,
+                "folder": folder,
+                "filename": filename,
+                "size": size,
+            })
+    return entries, total_matches
 
+
+def _matching_lines(search_words, list_path):
+    """Every "!" line of one list that matches, as (line, folder heading).
+
+    The scan itself, one row at a time (#1134): find_matching_entries()
+    collects it into a capped list, and iter_filelist_rows() hands it on
+    without collecting anything, so installing a fetched list no longer
+    holds every row of it in memory twice. One scan, so the two cannot
+    drift apart. Nothing for a missing file.
+    """
     # A tuple in the list is a quoted phrase (#774), compiled once per list
     # rather than once per line; a string is a word, matched as it always was.
     plain_words = [item for item in search_words if not isinstance(item, tuple)]
@@ -700,76 +729,93 @@ def find_matching_entries(search_words, limit=None, list_path=None, name=None):
 
     current_list_path = list_path
     if not current_list_path or not os.path.exists(current_list_path):
-        return entries, total_matches
+        return
 
+    with open(current_list_path, "r", encoding="utf-8", errors="replace") as f:
+        yield from _scan_lines(f, plain_words, phrase_patterns)
+
+
+def _scan_lines(lines, plain_words, phrase_patterns, state="none", on_heading=None):
+    """_matching_lines()'s parser, over any source of lines.
+
+    The List Browser's folder table (#1128) reads the same lists in binary,
+    to know where each folder is, and starts this part-way through a file -
+    at a heading, in the "open" state - so there is one parser and not two
+    that could drift. `on_heading` is called as each heading is taken.
+    """
     current_folder = None
     # "none" -> saw the opening rule line, now expecting the folder line ("open")
     # -> saw the folder line, now expecting the closing rule line ("folder_seen")
-    state = "none"
+    for line in lines:
+        line_strip = line.replace('\x00', '').strip()
+        if not line_strip:
+            continue
 
-    with open(current_list_path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line_strip = line.replace('\x00', '').strip()
-            if not line_strip:
+        # "Every character is =", asked without building a set of the
+        # line's characters (#1126). line_strip is not empty here, so
+        # stripping the "=" away leaves nothing exactly when that is all
+        # it held. The set cost about ten times as much and ran on every
+        # line of every list: most of the scan's time at two million rows.
+        is_rule = not line_strip.strip("=")
+        if state == "none":
+            if is_rule:
+                state = "open"
                 continue
-
-            is_rule = set(line_strip) == {"="}
-            if state == "none":
-                if is_rule:
-                    state = "open"
-                    continue
-            elif state == "open":
-                if is_rule:
-                    continue  # malformed doubled rule; keep waiting for the folder line
-                if line_strip.startswith("!"):
-                    # A FILE line where a folder heading was expected. The list
-                    # is malformed, and taking this as the heading loses the
-                    # file AND shifts every heading after it by one, so the
-                    # rest of the list is mis-attributed or swallowed too.
-                    #
-                    # Our own lists cannot reach this: update_list.py writes
-                    # every heading as "D:\MUSIC\<folder>\", which is never
-                    # all "=" and never starts with "!". A FETCHED list can -
-                    # list_fetch.py runs this same parser over a list another
-                    # bot wrote, and a folder there named "====" reads as a
-                    # second rule line, leaving this state machine waiting for
-                    # a heading that never comes. Found with a folder named
-                    # exactly that: every file after it, including files in
-                    # perfectly normal folders, vanished from search.
-                    #
-                    # A line starting with "!" is a file, whatever the state
-                    # machine expected, so the parser resynchronises here
-                    # instead of consuming it.
-                    state = "none"
-                else:
-                    current_folder = line_strip
-                    state = "folder_seen"
-                    continue
-            elif state == "folder_seen":
+        elif state == "open":
+            if is_rule:
+                continue  # malformed doubled rule; keep waiting for the folder line
+            if line_strip.startswith("!"):
+                # A FILE line where a folder heading was expected. The list
+                # is malformed, and taking this as the heading loses the
+                # file AND shifts every heading after it by one, so the
+                # rest of the list is mis-attributed or swallowed too.
+                #
+                # Our own lists cannot reach this: update_list.py writes
+                # every heading as "D:\MUSIC\<folder>\", which is never
+                # all "=" and never starts with "!". A FETCHED list can -
+                # list_fetch.py runs this same parser over a list another
+                # bot wrote, and a folder there named "====" reads as a
+                # second rule line, leaving this state machine waiting for
+                # a heading that never comes. Found with a folder named
+                # exactly that: every file after it, including files in
+                # perfectly normal folders, vanished from search.
+                #
+                # A line starting with "!" is a file, whatever the state
+                # machine expected, so the parser resynchronises here
+                # instead of consuming it.
                 state = "none"
-                if is_rule:
-                    continue  # the expected closing rule
-
-            if not line_strip.startswith("!"):
+            else:
+                current_folder = line_strip
+                state = "folder_seen"
+                if on_heading is not None:
+                    on_heading()
                 continue
+        elif state == "folder_seen":
+            state = "none"
+            if is_rule:
+                continue  # the expected closing rule
 
-            line_lower = line_strip.lower()
-            if plain_words and not all(word in line_lower for word in plain_words):
-                continue
-            if phrase_patterns and not all(pattern.search(line_lower) for pattern in phrase_patterns):
-                continue
+        if not line_strip.startswith("!"):
+            continue
 
-            total_matches += 1
-            if limit is None or len(entries) < limit:
-                filename, size = _split_entry_line(line_strip)
-                entries.append({
-                    "line": line_strip,
-                    "folder": current_folder,
-                    "filename": filename,
-                    "size": size,
-                })
+        line_lower = line_strip.lower()
+        # Plain loops, not all() over a generator (#1126): the generator
+        # was built afresh for every file line, and cost more than the
+        # substring tests it ran. Same order, same early stop.
+        matched = True
+        for word in plain_words:
+            if word not in line_lower:
+                matched = False
+                break
+        if matched:
+            for pattern in phrase_patterns:
+                if not pattern.search(line_lower):
+                    matched = False
+                    break
+        if not matched:
+            continue
 
-    return entries, total_matches
+        yield line_strip, current_folder
 
 
 # Every folder heading in the master list starts with this, whatever the
@@ -1063,8 +1109,112 @@ def entries_to_filelist_rows(entries, source):
     bot's nick) so the two surfaces can never drift in what a "row" looks
     like on the dashboard.
     """
+    return list(_filelist_rows(entries, source))
+
+
+def iter_filelist_rows(list_path, source):
+    """entries_to_filelist_rows() over the whole of one list, a row at a time.
+
+    For a caller that only counts the rows and writes them to the search
+    index (#1134): installing a fetched list, an extra list in its archive,
+    a backfill. find_matching_entries() with no limit built a dict per row,
+    raw line included, and entries_to_filelist_rows() a second, and both
+    lists stayed alive for the whole write - about 412 MB at 378k rows,
+    against 143 MB streamed. Same scan, same split, same dedup: only the
+    collecting is gone. Wrap it in CountedRows to know how many there were.
+    """
+    def entries():
+        for line_strip, folder in _matching_lines([], list_path):
+            filename, size = _split_entry_line(line_strip)
+            yield {"folder": folder, "filename": filename, "size": size}
+
+    return _filelist_rows(entries(), source)
+
+
+class CountedRows(object):
+    """Rows for list_index.index_bot_list() that count themselves as they pass.
+
+    One pass only, like the generator inside it. total() is the number of
+    rows in the whole list, not the number the index happened to take: it
+    drains whatever is left first. That matters because index_bot_list()
+    returns 0 WITHOUT iterating when the index is unavailable, and stops
+    part-way on an error, and a count of what it consumed would then be 0 or
+    partial - and list_fetch would store that as the list's size, or throw
+    away a good extra list as having "no entries" (#1134).
+
+    An error from the list itself is kept and raised again by total(), so a
+    list that cannot be read fails at the count as it did when it was parsed
+    up front - and not as a short count.
+
+    No __len__, on purpose: list() and other consumers ask an object with
+    one for its length before iterating, and here that would drain every
+    row before the first was handed over. bool() peeks at one row and keeps
+    it for the next pass.
+    """
+
+    def __init__(self, rows):
+        self._rows = iter(rows)
+        self._peeked = []
+        self._count = 0
+        self._done = False
+        self.error = None
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self._peeked:
+            self._count += 1
+            return self._peeked.pop()
+        if self._done:
+            raise StopIteration
+        try:
+            row = next(self._rows)
+        except StopIteration:
+            self._done = True
+            raise
+        except Exception as err:
+            self._done = True
+            self.error = err
+            raise
+        self._count += 1
+        return row
+
+    def any_rows(self):
+        """True if there is at least one row, without consuming it."""
+        if self._peeked:
+            return True
+        if self._done:
+            return False
+        try:
+            self._peeked.append(next(self._rows))
+        except StopIteration:
+            self._done = True
+            return False
+        except Exception as err:
+            self._done = True
+            self.error = err
+            raise
+        return True
+
+    __bool__ = any_rows
+
+    def total(self):
+        """How many rows the list has, draining any not yet consumed."""
+        if not self._done or self._peeked:
+            try:
+                for _row in self:
+                    pass
+            except Exception:
+                pass
+        if self.error is not None:
+            raise self.error
+        return self._count
+
+
+def _filelist_rows(entries, source):
+    """The rows entries_to_filelist_rows() returns, one at a time."""
     seen = set()
-    rows = []
     for entry in entries:
         filename = entry.get("filename", "?")
         size = entry.get("size", "")
@@ -1083,7 +1233,7 @@ def entries_to_filelist_rows(entries, source):
             continue
         seen.add(key)
         ext = os.path.splitext(filename)[1].lstrip(".").upper()
-        rows.append({
+        yield {
             "title": filename,
             "size": size,
             "format": ext,
@@ -1106,7 +1256,12 @@ def entries_to_filelist_rows(entries, source):
             # meant to be copied verbatim - that is what the header of every
             # such list tells the reader to do - so this adds a field beside
             # it rather than reformatting it.
-            "rar_folder": rar_folder_of(filename),
+            #
+            # Asked only of a title that starts with "!" (#1136): nothing
+            # else can match rar_folder_of()'s anchored "^!rar", and running
+            # the regex on every row of every list cost more than the answer.
+            "rar_folder": (rar_folder_of(filename)
+                           if filename.lstrip().startswith("!") else ""),
             # What we have already asked this bot for: "requested",
             # "received", or "" for neither. Declared HERE, empty, rather
             # than added by whichever payload happens to know - both this
@@ -1119,8 +1274,7 @@ def entries_to_filelist_rows(entries, source):
             # webserver.mark_rows_with_fetch_state() fills it in for the two
             # payloads where the question means something.
             "mark": "",
-        })
-    return rows
+        }
 
 
 def group_rows_by_folder(rows):
@@ -1229,11 +1383,558 @@ def page_folder_groups(groups, offset, limit, max_rows=None):
     return page, total_folders, total_rows, row_capped
 
 
+# THE FOLDER TABLE (#1128). The List Browser asks for one page of folders at
+# a time, and every page re-read the whole list to answer it - our own lists
+# here, a fetched one in list_fetch.get_fetched_bot_page(): a dict per row,
+# a second dict per row, every row grouped, and then 200 folders kept - 31 s
+# and 2.1 GB per page at two million rows of our own list, paid
+# again on every page change. So the first page of a list builds this table
+# instead: where each folder's rows are in the files, how many there are, and
+# which of them dedup drops. A page then seeks to its own folders and parses
+# only those. Nothing per ROW is kept, so the #76 rule that a list is not held
+# in memory still stands: about 38 bytes per folder - 133,000 folders come to
+# about 5 MB.
+#
+# AND NEVER MUCH MORE THAN THE LIST ITSELF. A fetched list is written by
+# somebody else, and a crafted one under the 128 MB text ceiling - two
+# headings alternating with one row each, or millions of copies of one row -
+# made the first version of this table hold about 30 times the list's size:
+# 526 MB for a 16.8 MB list, built in 21 s under list_fetch's lock (the
+# #1128 audit). So the rows dedup drops are kept as [start, stop) spans in
+# one flat array, and only for runs a group shows, and the build counts what
+# it stores as it goes: past _folder_table_budget() it gives up, and the
+# list is read whole for every page, as it was before there was a table.
+#
+# EXACTLY today's page, which is more than it looks:
+#  - dedup is (folder.lower(), filename.lower(), size) in FILE ORDER, across
+#    every file, and two headings that differ only in case share keys - so a
+#    page cannot recompute it from its own folders. The table records each
+#    dropped row by its position in its run;
+#  - a heading that appears twice is ONE group, at its first position, so a
+#    group can be several runs of rows, even in different files;
+#  - a group exists only if one of its rows survived dedup, so the table is
+#    grouped after dedup, as group_rows_by_folder() is;
+#  - rows before any heading are the '' group;
+#  - our own list is the master list AND the video list, read as one; a
+#    fetched list is one file, read the same way.
+#
+# Keyed on every file's (path, mtime, size), as count_request_lines() is, so
+# a rebuilt list is read again; commands.py also drops the tables when a
+# rebuild finishes. A page checks each file it opens against that key and
+# each run's rows against a checksum, so a rewrite landing between the stat
+# and the read, or a same-size one inside one mtime tick, costs a fallback to
+# the whole-list parse, never wrong rows. A refetch and a purge drop the
+# tables of that bot's files by name as well (forget_folder_tables(under=)).
+# The lock is runtime.py's; the dict starts empty after a !rehash, which
+# costs one rebuild of the table.
+#
+# At most _FOLDER_TABLES_KEPT, the least recently used dropped first: our own
+# list and the few fetched lists somebody is paging through. A fetched list
+# is rarely more than a few tens of thousands of folders, about 1 MB of table.
+_folder_table_lock = runtime.list_folder_table_lock
+_folder_tables = {}   # signature -> _FolderTable, or None when unusable
+_FOLDER_TABLES_KEPT = 8
+
+# The budget: a table may cost at most this share of its files' size, and
+# any list at least the floor, so a small list always gets one. A normal list
+# costs far less - about 3% of its size at two million rows of our own list,
+# where a folder holds a heading and a dozen rows of 60 bytes or more. Only a
+# list of tiny folders or of rows dedup drops, which is what a crafted list
+# is made of, comes near it.
+_FOLDER_TABLE_BUDGET_FLOOR = 1 << 20
+_FOLDER_TABLE_BUDGET_SHARE = 2       # a table costs at most size / 2
+
+# What the build counts against the budget, in bytes. A run: its six seg_
+# items and run_next (30), what the build alone keeps for it - its heading's
+# number, the next run with the same lower-cased heading, a slot for the
+# second dedup (12) - and, at most, the group it starts, with its last run
+# while built (12), the heading (4) and the lower-cased heading (8). A span of dropped rows: two numbers while
+# the build collects it and two in the table (16). A run with spans: its
+# number and where they start, while built and in the table (16). The heading
+# strings themselves are not counted: the build drops them, and there are no
+# more of them than runs.
+_RUN_BYTES = 66
+_SPAN_BYTES = 16
+_DUP_RUN_BYTES = 16
+
+
+def _folder_table_budget(signature):
+    """The most a table of the files in `signature` may cost, in bytes."""
+    size = sum(size for _path, _mtime, size in signature)
+    return max(_FOLDER_TABLE_BUDGET_FLOOR, size // _FOLDER_TABLE_BUDGET_SHARE)
+
+
+class _StaleFolderTable(Exception):
+    """A file no longer holds what its table says. The page falls back."""
+
+
+class _OverBudget(Exception):
+    """The table would cost more than _folder_table_budget(). Never kept."""
+
+
+class _FolderTable(object):
+    """Where each folder group of a set of list files is. See above."""
+
+    __slots__ = ("signature", "seg_file", "seg_start", "seg_open",
+                 "seg_end", "seg_rows", "seg_crc", "run_next", "dup_runs",
+                 "dup_from", "dup_spans", "group_first", "group_count",
+                 "total_rows")
+
+    def __init__(self, signature):
+        self.signature = signature
+        # One entry per RUN: consecutive rows of one file under one heading.
+        self.seg_file = array.array("B")
+        # Where to start reading it: the heading line, in the parser's "open"
+        # state, or the top of the file for rows before any heading.
+        self.seg_start = array.array("q")
+        self.seg_open = array.array("B")
+        self.seg_end = array.array("q")      # just past its last row
+        self.seg_rows = array.array("i")     # rows the parser yields in it
+        self.seg_crc = array.array("I")      # crc32 of those rows' lines
+        self.run_next = array.array("i")     # the next run of its group, or -1
+        # The rows dedup drops, for the runs a group shows (#1128's audit):
+        # those runs in order, where each one's spans start in dup_spans
+        # (one more entry at the end), and [start, stop) row positions in the
+        # run, in pairs. A run of a million copies of one row is one span.
+        self.dup_runs = array.array("i")
+        self.dup_from = array.array("i")
+        self.dup_spans = array.array("i")
+        self.group_first = array.array("i")  # a group's first run
+        self.group_count = array.array("i")  # rows it shows
+        self.total_rows = 0
+
+    def runs(self, group):
+        """The runs of `group`, in file order."""
+        runs = []
+        run = self.group_first[group]
+        while run != -1:
+            runs.append(run)
+            run = self.run_next[run]
+        return runs
+
+    def dups(self, run):
+        """The [start, stop) spans of rows dedup drops in `run`, flat."""
+        at = bisect.bisect_left(self.dup_runs, run)
+        if at == len(self.dup_runs) or self.dup_runs[at] != run:
+            return ()
+        return self.dup_spans[self.dup_from[at]:self.dup_from[at + 1]]
+
+    def nbytes(self):
+        """What the table keeps: the items of its arrays, which is all it
+        holds that grows with the list."""
+        arrays = (self.seg_file, self.seg_start, self.seg_open, self.seg_end,
+                  self.seg_rows, self.seg_crc, self.run_next, self.dup_runs,
+                  self.dup_from, self.dup_spans, self.group_first,
+                  self.group_count)
+        return sum(len(a) * a.itemsize for a in arrays)
+
+
+class _LoneCarriageReturn(Exception):
+    """A line ending the binary reader would not see as the text reader does."""
+
+
+def _binary_lines(handle, start, end, at, crc_line):
+    """Lines of `handle` from byte `start` up to `end` (None: the end).
+
+    Decoded as the text reader decodes them - utf-8, errors="replace", line
+    by line, which is the same because no byte of a multi-byte sequence can
+    be a newline. at[0], at[1] are set to each line's start and end; crc_line
+    gets its raw bytes. Text mode also ends a line at a lone "\\r", which
+    splitting on "\\n" does not, so such a file is refused, not misread.
+    """
+    handle.seek(start)
+    offset = start
+    for raw in handle:
+        if end is not None and offset >= end:
+            return
+        cr = raw.find(b"\r")
+        if cr != -1 and (cr != len(raw) - 2 or not raw.endswith(b"\n")):
+            raise _LoneCarriageReturn()
+        at[0] = offset
+        offset += len(raw)
+        at[1] = offset
+        crc_line[0] = raw
+        yield raw.decode("utf-8", "replace")
+
+
+def _build_folder_table(paths, signature):
+    """The folder table of `paths`, or None when it cannot be exact or would
+    cost more than _folder_table_budget().
+
+    Raises OSError when a file cannot be read, and _StaleFolderTable when one
+    changed while it was being read. A file rewritten between the signature
+    and this read is caught later, by the check each page makes as it opens
+    the file."""
+    if len(paths) > 255:
+        return None
+    try:
+        return _build_folder_table_within(paths, signature,
+                                          _folder_table_budget(signature))
+    except (_LoneCarriageReturn, _OverBudget):
+        # Nothing of the half-built table is kept: it is only ever returned
+        # whole.
+        return None
+
+
+def _span_append(runs, starts, spans, run, position):
+    """Mark row `position` of `run` dropped, in the flat span arrays; True
+    when that took a new span, which the caller counts."""
+    if runs and runs[-1] == run:
+        if spans[-1] == position:
+            spans[-1] = position + 1
+            return False
+    else:
+        runs.append(run)
+        starts.append(len(spans))
+    spans.append(position)
+    spans.append(position + 1)
+    return True
+
+
+def _build_folder_table_within(paths, signature, budget):
+    table = _FolderTable(signature)
+    # For the build only, per run: its heading's number in `keys`, and the
+    # next run whose heading is the same lower-cased (-1: none).
+    run_key = array.array("i")
+    next_same = array.array("i")
+    keys = {}                        # heading text -> its number
+    key_lower = array.array("i")     # per heading: its lower-cased one's number
+    lowers = {}                      # heading.lower() -> its number
+    lower_first = array.array("i")   # per lower-cased heading: its first run
+    lower_last = array.array("i")    # ... and its last
+    # The rows each run's own dedup drops, in run order, and those the second
+    # dedup below drops, in the order it reads runs - flat spans, as kept.
+    one_runs, one_from, one_spans = (array.array("i"), array.array("i"),
+                                     array.array("i"))
+    two_runs, two_from, two_spans = (array.array("i"), array.array("i"),
+                                     array.array("i"))
+
+    def check_budget():
+        cost = (len(run_key) * _RUN_BYTES
+                + (len(one_spans) + len(two_spans)) // 2 * _SPAN_BYTES
+                + (len(one_runs) + len(two_runs)) * _DUP_RUN_BYTES)
+        if cost > budget:
+            raise _OverBudget()
+
+    for file_index, path in enumerate(paths):
+        with open(path, "rb") as handle:
+            at = [0, 0]
+            raw = [b""]
+            heading = [0]   # where the heading in force started
+
+            def on_heading():
+                heading[0] = at[0]
+
+            run_folder = _NO_RUN
+            run = -1
+            seen = None
+            position = 0
+            crc = 0
+            for line_strip, folder in _scan_lines(
+                    _binary_lines(handle, 0, None, at, raw), [], [],
+                    on_heading=on_heading):
+                if run_folder is _NO_RUN or folder != run_folder:
+                    if run_folder is not _NO_RUN:
+                        table.seg_rows.append(position)
+                        table.seg_crc.append(crc)
+                    run_folder = folder
+                    run = len(table.seg_start)
+                    table.seg_file.append(file_index)
+                    table.seg_start.append(heading[0] if folder is not None else 0)
+                    table.seg_open.append(1 if folder is not None else 0)
+                    table.seg_end.append(0)
+                    key = folder or ""
+                    number = keys.get(key)
+                    if number is None:
+                        lower = key.lower()
+                        lower_number = lowers.get(lower)
+                        if lower_number is None:
+                            lower_number = lowers[lower] = len(lower_first)
+                            lower_first.append(run)
+                            lower_last.append(-1)
+                        number = keys[key] = len(key_lower)
+                        key_lower.append(lower_number)
+                    run_key.append(number)
+                    next_same.append(-1)
+                    lower_number = key_lower[number]
+                    if lower_last[lower_number] != -1:
+                        next_same[lower_last[lower_number]] = run
+                    lower_last[lower_number] = run
+                    check_budget()
+                    seen = set()
+                    position = 0
+                    crc = 0
+                crc = zlib.crc32(raw[0], crc)
+                table.seg_end[-1] = at[1]
+                filename, size = _split_entry_line(line_strip)
+                dedup_key = (filename.lower(), size)
+                if dedup_key in seen:
+                    if _span_append(one_runs, one_from, one_spans, run, position):
+                        check_budget()
+                else:
+                    seen.add(dedup_key)
+                position += 1
+            if run_folder is not _NO_RUN:
+                table.seg_rows.append(position)
+                table.seg_crc.append(crc)
+    seen = None
+    one_from.append(len(one_spans))
+
+    # A run is deduplicated on its own above, which is exact only when no
+    # other run shares its folder.lower(). Those that do - a repeated
+    # heading, two headings that differ only in case, rows before the
+    # first heading of each file - are done again together, in file order.
+    two_slot = array.array("i", [-1]) * len(run_key)
+    handles = {}
+    try:
+        for lower_number, first in enumerate(lower_first):
+            if first == lower_last[lower_number]:
+                continue
+            seen = set()
+            run = first
+            while run != -1:
+                for position, (line_strip, _folder) in enumerate(
+                        _run_lines(table, run, handles)):
+                    filename, size = _split_entry_line(line_strip)
+                    dedup_key = (filename.lower(), size)
+                    if dedup_key in seen:
+                        if not two_runs or two_runs[-1] != run:
+                            two_slot[run] = len(two_runs)
+                        if _span_append(two_runs, two_from, two_spans, run, position):
+                            check_budget()
+                    else:
+                        seen.add(dedup_key)
+                run = next_same[run]
+            seen = None
+    finally:
+        for handle in handles.values():
+            handle.close()
+    two_from.append(len(two_spans))
+
+    # Grouped AFTER dedup, by heading text, in first-seen order: a run whose
+    # every row was a duplicate starts no group, as in group_rows_by_folder(),
+    # and its spans are not kept - no page reads that run.
+    groups = {}                       # heading number -> its group
+    group_last = array.array("i")     # per group: its last run so far
+    table.run_next = array.array("i", [-1]) * len(run_key)
+    one_at = 0
+    for run, number in enumerate(run_key):
+        lower_number = key_lower[number]
+        spans = ()
+        if lower_first[lower_number] != lower_last[lower_number]:
+            slot = two_slot[run]
+            if slot != -1:
+                spans = two_spans[two_from[slot]:two_from[slot + 1]]
+        else:
+            while one_at < len(one_runs) and one_runs[one_at] < run:
+                one_at += 1
+            if one_at < len(one_runs) and one_runs[one_at] == run:
+                spans = one_spans[one_from[one_at]:one_from[one_at + 1]]
+        dropped = 0
+        for index in range(0, len(spans), 2):
+            dropped += spans[index + 1] - spans[index]
+        shown = table.seg_rows[run] - dropped
+        if not shown:
+            continue
+        if spans:
+            table.dup_runs.append(run)
+            table.dup_from.append(len(table.dup_spans))
+            table.dup_spans.extend(spans)
+        group = groups.get(number)
+        if group is None:
+            group = groups[number] = len(table.group_first)
+            table.group_first.append(run)
+            table.group_count.append(0)
+            group_last.append(run)
+        else:
+            table.run_next[group_last[group]] = run
+            group_last[group] = run
+        table.group_count[group] += shown
+        table.total_rows += shown
+    table.dup_from.append(len(table.dup_spans))
+    return table
+
+
+_NO_RUN = object()
+
+
+def _run_lines(table, run, handles):
+    """(line, folder) for every row the parser yields in one run, checked
+    against what the table recorded for it."""
+    file_index = table.seg_file[run]
+    handle = handles.get(file_index)
+    if handle is None:
+        path, mtime_ns, size = table.signature[file_index]
+        handle = open(path, "rb")
+        handles[file_index] = handle
+        st = os.fstat(handle.fileno())
+        if (st.st_mtime_ns, st.st_size) != (mtime_ns, size):
+            raise _StaleFolderTable()
+    at = [0, 0]
+    raw = [b""]
+    crc = 0
+    lines = _binary_lines(handle, table.seg_start[run], table.seg_end[run], at, raw)
+    for line_strip, folder in _scan_lines(
+            lines, [], [], state="open" if table.seg_open[run] else "none"):
+        crc = zlib.crc32(raw[0], crc)
+        yield line_strip, folder
+    if crc != table.seg_crc[run]:
+        raise _StaleFolderTable()
+
+
+def _folder_table(paths):
+    """The cached table for `paths` as they are now, built if needed."""
+    signature = _list_signature(paths)
+    if any(mtime is None for _path, mtime, _size in signature):
+        return None
+    with _folder_table_lock:
+        if signature in _folder_tables:
+            # To the back of the line: the dict's order is the use order.
+            table = _folder_tables.pop(signature)
+            _folder_tables[signature] = table
+            return table
+        try:
+            table = _build_folder_table(paths, signature)
+        except _StaleFolderTable:
+            # Rewritten while it was read: nothing kept, and the next page
+            # builds the table of the new file.
+            return None
+        except OSError as err:
+            print(f"[LIST] Could not index the list's folders ({err}); "
+                  f"reading it whole for this page.")
+            return None
+        # A None is kept too: a list over its budget, or with a lone
+        # carriage return, is the same list on the next page, which then
+        # reads it whole at once instead of building most of a table first.
+        while len(_folder_tables) >= _FOLDER_TABLES_KEPT:
+            _folder_tables.pop(next(iter(_folder_tables)))
+        _folder_tables[signature] = table
+        return table
+
+
+def forget_folder_tables(under=None):
+    """Drop the folder tables: every one, or those reading a file in `under`.
+
+    Every one when a rebuild of our own lists finishes; `under` a bot's
+    extract directory when its list is fetched again or purged, which
+    rewrites or removes files in place (#1128). Compared as long paths, the
+    form a fetched list's path is read in, so either spelling matches."""
+    with _folder_table_lock:
+        if under is None:
+            _folder_tables.clear()
+            return
+        prefix = os.path.normcase(platform_compat.long_path(
+            os.path.abspath(str(under)))).rstrip("\\/") + os.sep
+        for signature in list(_folder_tables):
+            if any(os.path.normcase(platform_compat.long_path(
+                    os.path.abspath(path))).startswith(prefix)
+                   for path, _mtime, _size in signature):
+                del _folder_tables[signature]
+
+
+def _forget_folder_table(signature):
+    with _folder_table_lock:
+        _folder_tables.pop(signature, None)
+
+
+def page_of_list_files(paths, offset, limit, source, max_rows=None):
+    """page_folder_groups() of the whole of `paths`, from the folder table.
+
+    The same (page, total_folders, total_rows, row_capped), parsing only the
+    folders the page holds. None when the table cannot answer - a file that
+    cannot be read, a lone carriage return, a file that changed under it, a
+    list whose table would cost more than its budget - and the caller then
+    reads the lists whole, as it always did.
+    """
+    paths = list(paths)
+    table = _folder_table(paths)
+    if table is None:
+        return None
+    total = len(table.group_first)
+    start = 0 if offset < 0 else offset
+    # The same slice page_folder_groups() takes, on group numbers.
+    window = range(total)[start:start + limit] if limit else range(total)[start:]
+
+    # Only the groups the page can hold are read. The valve stops at the
+    # first group that would carry the page past max_rows, and reads that
+    # one's rows only when it is the first (it is then cut, not dropped).
+    wanted = []
+    rows_so_far = 0
+    for group in window:
+        count = table.group_count[group]
+        if max_rows and wanted and rows_so_far + count > max_rows:
+            wanted.append((group, False))
+            break
+        wanted.append((group, True))
+        rows_so_far += count
+
+    handles = {}
+    try:
+        groups = []
+        for group, read in wanted:
+            entries = []
+            if read:
+                for run in table.runs(group):
+                    # Its dropped rows' spans, walked along with the rows:
+                    # both are in position order.
+                    spans = table.dups(run)
+                    span = 0
+                    for position, (line_strip, folder) in enumerate(
+                            _run_lines(table, run, handles)):
+                        while span < len(spans) and position >= spans[span + 1]:
+                            span += 2
+                        if span < len(spans) and position >= spans[span]:
+                            continue
+                        filename, size = _split_entry_line(line_strip)
+                        entries.append({"folder": folder, "filename": filename,
+                                        "size": size})
+            rows = list(_filelist_rows(entries, source))
+            if read and len(rows) != table.group_count[group]:
+                raise _StaleFolderTable()
+            groups.append({"folder": rows[0]["folder"] if rows else "",
+                           "count": table.group_count[group], "entries": rows})
+    except (_StaleFolderTable, _LoneCarriageReturn, OSError):
+        _forget_folder_table(table.signature)
+        return None
+    finally:
+        for handle in handles.values():
+            handle.close()
+
+    page, _folders, _rows, row_capped = page_folder_groups(
+        groups, 0, len(groups), max_rows=max_rows)
+    return page, total, table.total_rows, row_capped
+
+
 def rebuild_pauses_everything():
     """PAUSE_FOR_WHOLE_UPDATE's old behaviour: a rebuild pauses searching and
     sharing from its start to its end."""
     return (getattr(config, 'PAUSE_ON_UPDATE', True) is True
             and bool(getattr(config, 'PAUSE_FOR_WHOLE_UPDATE', False)))
+
+
+# The background audio reading's own swap (#1182): building the archive again
+# and moving the rewritten list and archive into place.
+READING_SWAP_PHASES = ("packing", "publishing")
+
+
+def list_archive_waits():
+    """Whether the list archive must not be sent right now - "@nick", and the
+    archive asked for by name (dcc.py), both ask this.
+
+    Through a whole rebuild (#971): the archive is the file its swap
+    replaces, and a slow send holding it open on Windows made the replace
+    give up and the rebuild roll back. And through a background audio reading
+    (#1182) in every phase but the reading itself - from its start, through
+    the rewrite of its rows, the packing and the swap - so a send cannot
+    start in the stretch that ends in its swap (#1182 audit). The reading,
+    which can last hours, leaves the archive free; a send still running when
+    it reaches the swap is waited for (update_list's READING_SWAP_WAIT)."""
+    if getattr(config, 'update_inprogress', False) is True:
+        return True
+    if runtime.audio_reading is None:
+        return False
+    import update_list
+    return update_list.read_phase() != update_list.READING_PHASE
 
 
 def rebuild_pauses_requests():
@@ -1248,11 +1949,18 @@ def rebuild_pauses_requests():
     that cannot report (a read-only data/) pauses the way it always did."""
     if getattr(config, 'PAUSE_ON_UPDATE', True) is not True:
         return False
+    import update_list
     if getattr(config, 'update_inprogress', False) is not True:
-        return False
+        # THE BACKGROUND AUDIO READING (#1182) swaps the list too, once, when
+        # it writes the lengths in: only then - while it packs the archive and
+        # swaps - and never for the reading itself, which can take hours. Not
+        # "any phase but a few" as for a rebuild: its progress file is absent
+        # while it starts and after it ends, and that is no reason to pause.
+        if runtime.audio_reading is None:
+            return False
+        return update_list.read_phase() in READING_SWAP_PHASES
     if rebuild_pauses_everything():
         return True
-    import update_list
     return update_list.read_phase() not in update_list.PHASES_BEFORE_THE_SWAP
 
 
@@ -1399,8 +2107,9 @@ def send_list_trigger_info(irc_sock, user):
 
 def send_file_list(irc_sock, user, channel):
     """Find the existing .zip list and start a DCC SEND, tracking the right channel."""
-    # If a list update is running, answer with the status rather than an error
-    if getattr(config, 'update_inprogress', False) is True:
+    # If a list update is running, answer with the status rather than an
+    # error - or the audio reading is swapping the list in (#1182).
+    if list_archive_waits():
         msg = f"NOTICE {user} :{config.C_BOLD}System Notice{config.C_RESET}: Master list is currently rebuilding. Please wait a few minutes and try again. \r\n"
         oserve.queue_message(user, msg)
         return

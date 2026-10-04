@@ -229,21 +229,47 @@ def _note_lookup_hit(key, path):
             del folders[:-LOOKUP_FOLDER_MEMORY]
 
 
+_SIZE_HINT_RE = re.compile(r"^(\d+)(?:\.(\d+))?([KMGTP]?B)$", re.IGNORECASE)
+_SIZE_HINT_POWER = {"B": 0, "KB": 1, "MB": 2, "GB": 3, "TB": 4, "PB": 5}
+
+
+def _size_fits_hint(size, word):
+    """Whether `size` bytes reads as the size `word` says, at the word's own
+    unit and precision - True, False, or None when `word` is not a size.
+
+    Read as a number, not compared as text (#1121): the list writes rows with
+    two decimals ("7.30MB") while update_list.format_size_human() gives one
+    ("7.3MB"), so a text comparison never matched a pasted row, and the #886
+    folder memory sent every one of them to a full list scan. Other bots, and
+    lists written by older versions, carry still other precisions ("6.32Mb",
+    "1.0KB"); each is taken at the precision it was written with."""
+    match = _SIZE_HINT_RE.match(word)
+    if not match:
+        return None
+    whole, decimals, unit = match.group(1), match.group(2) or "", match.group(3).upper()
+    # As the list writer gets it: a float divided by 1024.0 per step. Dividing
+    # by a power of two is exact, so this is the writer's number to the bit
+    # and the rounding at a ".xx5" boundary goes the same way.
+    value = float(size) / (1024.0 ** _SIZE_HINT_POWER[unit])
+    places = len(decimals)
+    return f"{value:.{places}f}" == f"{float(whole + '.' + (decimals or '0')):.{places}f}"
+
+
 def _matches_size_hint(path, size_hint):
     """Whether the file at `path` is the size a pasted `::INFO::` hint says.
 
-    The hint is what the list wrote after the name: the size as
-    update_list.format_size_human() writes it ("7.3MB"), then - with audio
-    info on - its length and quality. Only the first word is a size. No hint
-    matches anything; a file that cannot be read matches nothing."""
+    The hint is what the list wrote after the name: the size ("7.30MB"),
+    then - with audio info on - its length and quality. Only the first word
+    is a size. No hint matches anything; a file that cannot be read, or a
+    first word that is not a size, matches nothing."""
     words = str(size_hint or "").split()
     if not words:
         return True
     try:
-        actual = update_list.format_size_human(os.path.getsize(platform_compat.long_path(path)))
+        size = os.path.getsize(platform_compat.long_path(path))
     except OSError:
         return False
-    return actual.lower() == words[0].lower()
+    return bool(_size_fits_hint(size, words[0]))
 
 
 def _in_a_recent_folder(list_name, file_name, size_hint=""):
@@ -1214,6 +1240,11 @@ def redispatch_waiting_pack(irc_sock, just_finished=None):
     return owner
 
 FREEZE_TIMEOUT = 300.0   # seconds an absent user's queue is kept, counted only while the bot is online
+# How often the countdown wakes to look at the user again. A module constant,
+# read on every pass of user_queue_timer (#1148), so a test can make the
+# countdown wake quickly instead of waiting out a real ten-second step, and a
+# !rehash that changes it reaches a countdown that is already running.
+FREEZE_POLL_SECONDS = 10.0
 
 
 def pause_freeze_clock(now=None):
@@ -1328,7 +1359,7 @@ def freeze_absent_user(irc_sock, user, target_chan):
         # sweep can no longer delete what this countdown says has a minute
         # left.
         while elapsed < FREEZE_TIMEOUT:
-            time.sleep(10)
+            time.sleep(FREEZE_POLL_SECONDS)
 
             # A) Something else already thawed the queue (JOIN / NAMES / !rehash)
             if t_key not in getattr(config, 'frozen_queues', {}):
@@ -1358,7 +1389,7 @@ def freeze_absent_user(irc_sock, user, target_chan):
             try:
                 elapsed = time.time() - float(config.frozen_queues.get(t_key) or time.time())
             except (TypeError, ValueError):
-                elapsed += 10
+                elapsed += FREEZE_POLL_SECONDS
 
         # THE FREEZE IS TESTED AND TAKEN UNDER THE LOCK, IN ONE MOVE (#659,
         # audit M57). This used to test `t_key in frozen_queues` outside
@@ -1460,9 +1491,24 @@ def check_queue_and_send(irc_sock, completed_user):
     if getattr(config, 'bot_joined_channel', False):
         with queue_lock:
             current_time = time.time()
-            for f_user, freeze_timestamp in list(config.frozen_queues.items()):
+            frozen = list(config.frozen_queues.items())
+            # ONE READ OF THE CHANNEL LISTS PER SWEEP, not one per frozen nick
+            # (#1140). user_is_present_in_ram() walks every nick in every
+            # channel, and this runs under queue_lock on every finished
+            # transfer - after a netsplit, with a hundred queues frozen, that
+            # was a hundred full scans (about 180 ms) with requests waiting on
+            # the lock. The set compares exactly as that function does, both
+            # sides lowercased, so a nick stored in any case still matches. A
+            # single frozen nick keeps the early-exit scan, which is cheaper
+            # than building the whole set.
+            if len(frozen) > 1:
+                present = nicks_in_our_channels()
+                is_back = lambda nick: str(nick).lower() in present
+            else:
+                is_back = user_is_present_in_ram
+            for f_user, freeze_timestamp in frozen:
                 # THAW: the user is back in memory - release the freeze instead of deleting
-                if user_is_present_in_ram(f_user):
+                if is_back(f_user):
                     del config.frozen_queues[f_user]
                     print(f"[DCC FREEZE-THAW] {f_user} is back in the channel list. Their queue was saved.")
                     continue
@@ -2054,6 +2100,19 @@ def check_queue_and_send(irc_sock, completed_user):
 
 MIN_DCC_BLOCK_SIZE = 4096
 MAX_DCC_BLOCK_SIZE = 1024 * 1024
+# What a missing or unreadable DCC_BLOCK_SIZE falls back to: the shipped
+# default in defaults.py, 64 KB. A test holds the two together.
+DEFAULT_DCC_BLOCK_SIZE = 64 * 1024
+
+# How long one block's sendall() may take before the receiver is given up on,
+# at a 64 KB block. CPython applies a socket timeout to the WHOLE sendall()
+# call, not to each send() inside it, so the slowest link a send survives is
+# block / timeout: 64 KB a minute, about 1.1 KB/s. A bigger block with the same
+# 60 s would quietly raise that floor - 4.4 KB/s at 256 KB - so the timeout
+# grows with the block instead (#1139). A send() loop would not help: on
+# Windows one send() accepts the whole block at once.
+SEND_TIMEOUT_SECONDS = 60.0
+SEND_TIMEOUT_BLOCK = 64 * 1024
 
 
 # What "let the OS decide" is worth, per platform.
@@ -2370,10 +2429,22 @@ def dcc_block_size():
     thing is to use the nearest usable number and get on with the transfer.
     """
     try:
-        wanted = int(getattr(config, "DCC_BLOCK_SIZE", 65536))
+        wanted = int(getattr(config, "DCC_BLOCK_SIZE", DEFAULT_DCC_BLOCK_SIZE))
     except (TypeError, ValueError):
-        return 65536
+        return DEFAULT_DCC_BLOCK_SIZE
     return max(MIN_DCC_BLOCK_SIZE, min(MAX_DCC_BLOCK_SIZE, wanted))
+
+
+def _send_timeout(block):
+    """The data socket's timeout for a transfer sending `block` bytes a pass.
+
+    60 s up to 64 KB, exactly as before #1139, and in proportion above it, so
+    the slowest receiver a send survives stays 64 KB a minute whatever block
+    size is picked. The cost is that a peer which stops reading altogether is
+    noticed later - 240 s at 256 KB - while one that stops acknowledging is
+    still caught by ACK_STALL_SECONDS between blocks.
+    """
+    return SEND_TIMEOUT_SECONDS * max(1.0, block / float(SEND_TIMEOUT_BLOCK))
 
 
 def transfers_are_paused():
@@ -2873,8 +2944,9 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
             # the file the swap replaces. A slow send of a same-day archive
             # (a second rebuild keeps its name) started mid-scan held it
             # open, and on Windows the swap's replace gave up and the whole
-            # rebuild rolled back.
-            if getattr(config, 'update_inprogress', False) is True:
+            # rebuild rolled back. The background audio reading's own swap
+            # (#1182) waits the same way - list.list_archive_waits().
+            if list_mod.list_archive_waits():
                 oserve = sys.modules.get('oserve')
                 if oserve:
                     oserve.queue_message(user, f"NOTICE {user} :{config.C_BOLD}System Notice{config.C_RESET}: Master list is currently rebuilding. Please wait a few minutes and try again. \r\n")
@@ -3858,6 +3930,9 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
             # change mid-file, and a getattr in the inner loop of a 4 GB send
             # is a million lookups for one answer.
             block = dcc_block_size()
+            # The timeout covers one whole sendall() of `block` bytes, so it
+            # scales with the block; see SEND_TIMEOUT_SECONDS.
+            conn.settimeout(_send_timeout(block))
             while True:
                 chunk = f.read(block)
                 if not chunk: break

@@ -29,6 +29,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import defaults as config  # noqa: E402
+from tests.support import parse_source  # noqa: E402
 
 
 def shipped_default(name):
@@ -37,7 +38,7 @@ def shipped_default(name):
     applied over it, so it says what THIS machine is configured to, not what
     the project ships."""
     with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
-        tree = ast.parse(handle.read())
+        tree = parse_source(handle.read())
     for node in tree.body:
         target = None
         if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
@@ -64,7 +65,7 @@ class NothingIsShippedPointingAtAChannelWeOwn(unittest.TestCase):
         """The general rule, so the next setting to want a channel cannot
         reintroduce this. A shipped channel name is a shared room."""
         with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
         offenders = []
         for node in tree.body:
             target = None
@@ -117,6 +118,8 @@ class ABlankValueJoinsNothing(unittest.TestCase):
         """
         import irc
 
+        self.addCleanup(setattr, config, "CHANNEL", config.CHANNEL)
+        self.addCleanup(setattr, config, "DEBUG_CHANNEL", config.DEBUG_CHANNEL)
         config.CHANNEL = "#alpha,#beta"
         config.DEBUG_CHANNEL = ""
 
@@ -138,7 +141,7 @@ class ABlankValueJoinsNothing(unittest.TestCase):
         offenders = []
         for name in ("irc.py", "commands.py"):
             with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
-                tree = ast.parse(handle.read())
+                tree = parse_source(handle.read())
             for node in ast.walk(tree):
                 if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                         and node.func.id == "getattr" and len(node.args) == 3):
@@ -262,6 +265,8 @@ class AnOperatorWhoWantsOneStillGetsIt(unittest.TestCase):
         """
         import irc
 
+        self.addCleanup(setattr, config, "CHANNEL", config.CHANNEL)
+        self.addCleanup(setattr, config, "DEBUG_CHANNEL", config.DEBUG_CHANNEL)
         config.CHANNEL = "#alpha,#beta"
         config.DEBUG_CHANNEL = "#thedebug"
 

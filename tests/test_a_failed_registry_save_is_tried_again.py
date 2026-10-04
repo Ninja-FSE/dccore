@@ -46,7 +46,7 @@ class _Quiet(DCCoreTestCase):
         self.addCleanup(runtime.known_bots.clear)
         runtime.known_bots_flushed_at = 0.0
         self.addCleanup(setattr, runtime, "known_bots_flushed_at", 0.0)
-        self.dir = tempfile.mkdtemp(prefix="dccore-registry-")
+        self.dir = self.make_temp_dir(prefix="dccore-registry-")
         self._real_file = db.KNOWN_BOTS_FILE
         db.KNOWN_BOTS_FILE = os.path.join(self.dir, "known_bots.json")
         self.addCleanup(setattr, db, "KNOWN_BOTS_FILE", self._real_file)

@@ -15,7 +15,6 @@ and Ctrl-C leaves cleanly with that instruction.
 """
 
 import os
-import socket
 import sys
 import threading
 import time
@@ -119,17 +118,38 @@ class TheSetupPageTellsYouHowElseToGoOn(DCCoreTestCase):
         self.assertIn("Stopped. Answer the questions here instead: python3 configure.py", said)
 
     def test_the_port_is_freed_after_ctrl_c(self):
-        port = free_port()
+        """The setup server's own listening socket is closed and its serving
+        thread has stopped. This used to bind the port number again, which
+        failed whenever another process on the machine took that port in
+        between - a parallel shard, or anything else on a CI runner - and
+        said nothing about whether the setup server had let it go."""
+        from unittest import mock
+        from werkzeug import serving
+
+        made = []
+
+        def recording_make_server(*args, **kwargs):
+            server = real_make_server(*args, **kwargs)
+            made.append(server)
+            return server
 
         def interrupted():
             raise KeyboardInterrupt
 
-        webserver.run_setup_until_configured(port=port, log=lambda *_: None, opener=lambda u: True,
-                                             wait=interrupted, token="tok")
-        listener = socket.socket()
-        self.addCleanup(listener.close)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("127.0.0.1", port))
+        real_make_server = serving.make_server
+        before = set(threading.enumerate())
+        with mock.patch.object(serving, "make_server", recording_make_server):
+            webserver.run_setup_until_configured(port=free_port(), log=lambda *_: None,
+                                                 opener=lambda u: True, wait=interrupted, token="tok")
+
+        self.assertEqual(len(made), 1, "the setup page was served by exactly one server")
+        self.assertEqual(made[0].socket.fileno(), -1, "the listening socket was left open")
+        serving_threads = [t for t in threading.enumerate()
+                           if t not in before and t.name == "dccore-setup"]
+        for thread in serving_threads:
+            thread.join(timeout=5)
+        self.assertFalse(any(t.is_alive() for t in serving_threads),
+                         "the setup server's thread was left serving")
 
 
 if __name__ == "__main__":

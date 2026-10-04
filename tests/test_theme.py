@@ -39,7 +39,7 @@ import list as list_mod  # noqa: E402
 import theme  # noqa: E402
 
 from tests._golden_palette import GOLDEN  # noqa: E402
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 # The three block codes as they have always been. Modules spell them as the
 # ESCAPE TEXT "\\x0304,05", not as the character it stands for, so a scan that
@@ -71,6 +71,12 @@ class ThemedPathCase(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
+        # send_debug() starts the process-wide debug drain on its first call,
+        # and these tests read the deque instead (see drive()). Marked as
+        # started, send_debug only appends. The drain used to be started for
+        # real here and to run for the rest of the process.
+        self.addCleanup(setattr, announce, "_debug_drain_started", announce._debug_drain_started)
+        announce._debug_drain_started = True
         self.tree = self.make_tree()
         # DEBUG_CHANNEL is named explicitly rather than inherited: these are
         # byte-identical golden fixtures, and send_debug's line embeds the
@@ -183,7 +189,7 @@ class TheLookDidNotChange(ThemedPathCase):
 
         readers = 0
         for name in ("announce.py", "list.py"):
-            tree = ast.parse(io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))),
+            tree = parse_source(io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))),
                                      encoding="utf-8").read())
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call)

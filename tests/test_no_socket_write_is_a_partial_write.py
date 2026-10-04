@@ -42,6 +42,7 @@ import io
 import os
 import sys
 import unittest
+from tests.support import parse_source  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -73,7 +74,7 @@ def send_calls():
     found = []
     for name in daemon_modules():
         with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename=name)
+            tree = parse_source(handle.read(), filename=name)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -89,7 +90,7 @@ def sendall_calls():
     total = 0
     for name in daemon_modules():
         with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename=name)
+            tree = parse_source(handle.read(), filename=name)
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                     and node.func.attr == "sendall":
@@ -163,7 +164,7 @@ class WhatGoesOnTheWire(unittest.TestCase):
 
         for name in daemon_modules():
             with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
-                tree = _ast.parse(handle.read(), filename=name)
+                tree = parse_source(handle.read(), filename=name)
             for node in _ast.walk(tree):
                 if not (isinstance(node, _ast.Call)
                         and isinstance(node.func, _ast.Attribute)
@@ -184,7 +185,7 @@ class WhatGoesOnTheWire(unittest.TestCase):
         holding the socket, so every site that encodes a str does it the way
         announce.py's drain always has."""
         with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read(), filename="dcc.py")
+            tree = parse_source(handle.read(), filename="dcc.py")
 
         encodes = 0
         for node in ast.walk(tree):

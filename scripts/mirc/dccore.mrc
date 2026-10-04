@@ -86,7 +86,7 @@
 
 alias dccore.ini { return $qt($+($scriptdir,dccore.ini)) }
 alias dccore.bot { return $hget(dccore,bot) }
-alias dccore.ver { return 1.11 }
+alias dccore.ver { return 1.12 }
 ;  The feed's protocol minor this script was written for. The bot says
 ;  its own in HELLO as major.minor; a different minor means a field was
 ;  inserted on one side and the lines would read wrong - see HELLO below.
@@ -633,6 +633,10 @@ alias dccore.structured {
   ; <phase> <folder_index> <folder_count> <files> <elapsed>: a list rebuild is
   ; running (#1024), however it was started; `end` when it stops. Kept in
   ; dccore.live and cleared by every STATUS, so a missed `end` lasts one burst.
+  ; The background audio reading (#1182) comes the same way, as phase
+  ; `reading <read> <to_read> <files_a_second> <elapsed>`, `finding` while a
+  ; reading started alone reads the list to find what to read, then
+  ; `rewriting` while it writes the lengths into the list - to 1.12 or later.
   if (%type == REBUILD) {
     if ($2 == end) { hdel dccore.live rebuild }
     else { hadd dccore.live rebuild $2- }
@@ -779,10 +783,14 @@ alias dccore.status {
 ; ---------------------------------------------------------------------
 
 ; What a rebuild has reached, for the title bar: "rebuilding folder 7/20" (or
-; the phase alone when it has no folders to count).
+; the phase alone when it has no folders to count). The background audio
+; reading (#1182): "audio info 3,200/12,000".
 alias dccore.rebuild.short {
   var %l = $dccore.st(rebuild)
   var %n = $gettok(%l,3,32)
+  if ($gettok(%l,1,32) == reading) { return audio info $dccore.num($gettok(%l,2,32)) $+ / $+ $dccore.num(%n) }
+  if ($gettok(%l,1,32) == rewriting) { return audio info: writing the list }
+  if ($gettok(%l,1,32) == finding) { return audio info: finding what to read }
   return rebuilding $iif(%n > 0,folder $gettok(%l,2,32) $+ / $+ %n,$gettok(%l,1,32))
 }
 
@@ -1041,9 +1049,20 @@ alias dccore.panel {
   ; Only drawn while one runs.
   if ($dccore.st(rebuild) != $null) {
     var %r = $dccore.st(rebuild)
-    aline -l %head $dccore.win Rebuilding $gettok(%r,1,32)
-    if ($gettok(%r,3,32) > 0) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp folder $gettok(%r,2,32) $+ / $+ $gettok(%r,3,32) $dccore.dot $dccore.num($gettok(%r,4,32)) files }
-    else { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,4,32)) files }
+    ; Audio info (#1182): the background reading after a rebuild, or on its
+    ; own from the Library menu - files read of files to read, and the rate.
+    if ($istok(reading rewriting finding,$gettok(%r,1,32),32)) {
+      aline -l %head $dccore.win Audio info
+      if ($gettok(%r,1,32) == rewriting) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp writing the list }
+      elseif ($gettok(%r,1,32) == finding) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp finding what to read }
+      elseif ($gettok(%r,4,32) > 0) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,2,32)) $+ / $+ $dccore.num($gettok(%r,3,32)) read $dccore.dot $dccore.num($gettok(%r,4,32)) $+ /s }
+      else { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,2,32)) $+ / $+ $dccore.num($gettok(%r,3,32)) read }
+    }
+    else {
+      aline -l %head $dccore.win Rebuilding $gettok(%r,1,32)
+      if ($gettok(%r,3,32) > 0) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp folder $gettok(%r,2,32) $+ / $+ $gettok(%r,3,32) $dccore.dot $dccore.num($gettok(%r,4,32)) files }
+      else { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,4,32)) files }
+    }
     if ($gettok(%r,5,32) > 0) { aline -l 14 $dccore.win $dccore.nbsp $+ $dccore.nbsp running $dccore.dur($gettok(%r,5,32)) }
     aline -l 14 $dccore.win $dccore.nbsp
   }
@@ -1343,6 +1362,7 @@ menu @DCCore {
   Library
   .Find duplicate filenames:dccore.send verify
   .Rebuild the list...:dccore.confirm update Rebuild the list? It walks the whole library and can take minutes.
+  .Read audio info:dccore.send audioinfo
   User control
   .Bans:dccore.send bans
   .Ban...:dccore.ask ban Ban pattern (for example *!*@host.example)

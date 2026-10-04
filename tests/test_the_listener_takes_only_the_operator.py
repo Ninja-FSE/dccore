@@ -34,6 +34,7 @@ import adminchat  # noqa: E402
 import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 
+from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
 
 LOOPBACK_LONG = struct.unpack("!I", socket.inet_aton("127.0.0.1"))[0]
@@ -55,7 +56,9 @@ class ARealListener(DCCoreTestCase):
         super().setUp()
         adminchat.reset_state_for_tests()
         self.addCleanup(adminchat.reset_state_for_tests)
-        self.set_config(DCC_PORT_START=55600, DCC_PORT_END=55620, NICKNAME="TestBot",
+        # A range of its own: a parallel run moves it into this shard's window (#1146).
+        port_start, port_end = dcc_ports(55600, 55620)
+        self.set_config(DCC_PORT_START=port_start, DCC_PORT_END=port_end, NICKNAME="TestBot",
                         MY_IP_OR_DOCK="127.0.0.1")
         self._real_ip = dcc.get_public_ip_long
         dcc.get_public_ip_long = lambda: LOOPBACK_LONG

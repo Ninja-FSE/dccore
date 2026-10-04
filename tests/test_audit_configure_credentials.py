@@ -42,7 +42,7 @@ if REPO_ROOT not in sys.path:
 import configure  # noqa: E402
 import settings_file  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 
 class WritingTheHashIsAtomic(DCCoreTestCase):
@@ -87,7 +87,7 @@ class WritingTheHashIsAtomic(DCCoreTestCase):
         configure.write_admin_config_password("NEW", path=self.path)
 
         with io.open(self.path, encoding="utf-8") as handle:
-            ast.parse(handle.read())
+            parse_source(handle.read())
 
     def test_the_new_hash_is_actually_written(self):
         """Control: atomicity is worthless if it writes nothing."""

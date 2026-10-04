@@ -76,7 +76,7 @@ class ALongFetchedNameCanStillBeDownloaded(DCCoreTestCase):
         self.fetched = os.path.join(self.make_tree().root, "fetched")
         os.makedirs(self.fetched, exist_ok=True)
         self.set_config(FETCHED_FILES_DIR=self.fetched)
-        config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash("pw")
+        self.set_config(ADMIN_PASSWORD_HASH=adminchat.make_password_hash("pw"))
         self.app = webserver.create_app()
         self.client = self.app.test_client()
         self.client.post("/login", data={"password": "pw"})

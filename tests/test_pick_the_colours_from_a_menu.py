@@ -149,7 +149,7 @@ class TheValueSurvivesTheRoundTrip(DCCoreTestCase):
     behaviour lost it."""
 
     def saved(self, posted):
-        directory = tempfile.mkdtemp()
+        directory = self.make_temp_dir()
         path = os.path.join(directory, "settings.conf")
         with io.open(path, "w", encoding="utf-8") as handle:
             handle.write("NICKNAME = SomeBot\n")
@@ -205,7 +205,7 @@ class AControlCharacterCannotHideBehindTheEscape(DCCoreTestCase):
     """
 
     def saved(self, name, posted):
-        directory = tempfile.mkdtemp()
+        directory = self.make_temp_dir()
         path = os.path.join(directory, "settings.conf")
         with io.open(path, "w", encoding="utf-8") as handle:
             handle.write("NICKNAME = SomeBot\n")

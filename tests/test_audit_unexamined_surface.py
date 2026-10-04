@@ -21,7 +21,7 @@ if REPO_ROOT not in sys.path:
 
 import on_connect  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, temp_dir  # noqa: E402
 
 
 class TheWindowsLauncherReportsTheCheckResult(unittest.TestCase):
@@ -69,9 +69,7 @@ class TheWindowsLauncherReportsTheCheckResult(unittest.TestCase):
         if os.name != "nt":
             self.skipTest("cmd.exe is a Windows shell")
 
-        import tempfile
-
-        workdir = tempfile.mkdtemp()
+        workdir = temp_dir(self)
         block = os.path.join(workdir, "block.bat")
         goto = os.path.join(workdir, "goto.bat")
         with io.open(block, "w", encoding="utf-8", newline="\r\n") as handle:

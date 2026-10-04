@@ -47,6 +47,7 @@ if REPO_ROOT not in sys.path:
 
 import adminchat
 import announce  # noqa: E402
+import commands  # noqa: E402
 import defaults as config  # noqa: E402
 import stats_mgr  # noqa: E402
 import webserver  # noqa: E402
@@ -75,6 +76,21 @@ class DashboardRouteCase(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
+        # A settings save answers and then runs a real !rehash on a thread of
+        # its own (webserver._save_settings_and_rehash). Nothing waited for
+        # it: it reloaded defaults while the NEXT test was logging in, put
+        # ADMIN_PASSWORD_HASH back to "" between that test's set_config() and
+        # its POST /login, and the login answered 401 - the CI flake "the
+        # fixture's own login failed". It also left SERVER at the form's
+        # example host for the rest of the process. No test here needs the
+        # rehash itself; test_webserver.py's settings tests stub it the same
+        # way, and test_rehash_end_to_end is where a real one is driven.
+        real_rehash = commands.handle_rehash_request
+        commands.handle_rehash_request = lambda *a, **kw: None
+        self.addCleanup(setattr, commands, "handle_rehash_request", real_rehash)
+        # And a save writes the settings it was given into the live config
+        # (MAX_DCC_SLOTS, SERVER, ...): put every one of them back.
+        self.keep_every_setting()
         self.tree = self.make_tree()
         os.makedirs(self.tree.lists, exist_ok=True)
         self.set_config(

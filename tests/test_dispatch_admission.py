@@ -359,13 +359,39 @@ class DispatchAdmissionTests(DCCoreTestCase):
         """
         self.in_channel("eve")  # dave is queued but no longer in the channel
         config.dcc_queue["dave"] = [queue_row(user="dave", filename="Ghost.flac")]
+        # Absent dave starts a freeze countdown thread. It used to sleep a
+        # fixed ten seconds per step, and settle() waited out its deadline
+        # twice: twenty seconds for this one test (#1148). Make it wake
+        # quickly, and thaw him below so it ends.
+        self.addCleanup(setattr, dcc, "FREEZE_POLL_SECONDS", dcc.FREEZE_POLL_SECONDS)
+        dcc.FREEZE_POLL_SECONDS = 0.01
 
         dcc.check_queue_and_send(self.sock, "carl")
-        self.settle()
 
         self.assertEqual(self.notices, [], "promoted a user who is not in any channel")
         self.assertEqual(config.active_transfers, [])
         self.assertNotIn("dave", config.user_processing_lock)
+        self.assertIn("dave", config.frozen_queues, "the absent user was not frozen")
+
+        # THAWED UNTIL NO COUNTDOWN IS LEFT, not once. Dave is still queued and
+        # still absent, so any queue sweep that runs meanwhile freezes him
+        # again and starts a new countdown - correctly. In the four-process run
+        # (#1146) a background thread another module left running did exactly
+        # that: two countdowns were alive after a single thaw, and the test
+        # failed on one CI job in nine while passing 40 times out of 40 alone.
+        deadline = time.time() + 10.0
+        while self._threads_started_here() and time.time() < deadline:
+            with dcc.queue_lock:
+                config.frozen_queues.pop("dave", None)
+            time.sleep(0.01)
+        self.settle()
+        self.assertEqual(self._threads_started_here(), [],
+                         "the freeze countdown did not end once dave was thawed")
+        self.assertIn("dave", config.dcc_queue, "the thawed queue must be kept")
+        # Asked again once every thread has finished: a promotion from a
+        # background thread would only show up after the settle.
+        self.assertEqual(self.notices, [], "promoted a user who is not in any channel")
+        self.assertEqual(config.active_transfers, [])
 
     # -- SECTION A: next file for the user who just finished ----------------
 

@@ -113,7 +113,10 @@ class TheGroups(unittest.TestCase):
         self.assertEqual(names(self.groups["User control"]), ["Bans", "Ban...", "Unban...", "Clear a queue..."])
 
     def test_library_is_only_about_the_library(self):
-        self.assertEqual(names(self.groups["Library"]), ["Find duplicate filenames", "Rebuild the list..."])
+        # Read audio info (#1182): the background reading of the list's
+        # audio lengths, on its own - about the library too.
+        self.assertEqual(names(self.groups["Library"]),
+                         ["Find duplicate filenames", "Rebuild the list...", "Read audio info"])
 
     def test_control_ends_with_reload_and_then_stop_behind_a_separator(self):
         items = self.groups["Control"]

@@ -34,7 +34,7 @@ if REPO_ROOT not in sys.path:
 import defaults as config  # noqa: E402
 import settings_file  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 
 class Coercion(unittest.TestCase):
@@ -427,7 +427,7 @@ class TheSampleStaysInStepWithConfig(unittest.TestCase):
         # put in a file.
         import ast
         with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
         missing = []
         # Both node types: an annotated setting (`MAX_DCC_SLOTS: int = 3`) is
         # an ast.AnnAssign, not an ast.Assign, and matching only the latter
@@ -478,7 +478,7 @@ class BothAssignmentFormsAreSeen(unittest.TestCase):
         generator = self._generator()
         for source in ("MAX_DCC_SLOTS = 3", "MAX_DCC_SLOTS: int = 3"):
             with self.subTest(source=source):
-                targets, value = generator.assignment_parts(ast.parse(source).body[0])
+                targets, value = generator.assignment_parts(parse_source(source).body[0])
                 self.assertEqual([t.id for t in targets], ["MAX_DCC_SLOTS"])
                 self.assertEqual(ast.literal_eval(value), 3)
 
@@ -514,7 +514,7 @@ class AHashInsideAValueIsNotAComment(unittest.TestCase):
         sys.path.insert(0, scripts)
         self.addCleanup(lambda: scripts in sys.path and sys.path.remove(scripts))
         import gen_settings_sample
-        return gen_settings_sample._doc_lines([source], ast.parse(source).body[0])
+        return gen_settings_sample._doc_lines([source], parse_source(source).body[0])
 
     def test_a_hash_in_the_value_produces_no_comment(self):
         self.assertEqual(self._doc_lines('CHANNEL = "#dccore-test,#dccore-test2"'), [])
@@ -562,7 +562,7 @@ class ConfigDeclaresEachSettingsType(unittest.TestCase):
         run first.
         """
         with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
 
         annotated = {node.target.id for node in tree.body
                      if isinstance(node, ast.AnnAssign)

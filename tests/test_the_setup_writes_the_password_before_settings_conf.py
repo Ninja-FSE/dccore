@@ -47,6 +47,7 @@ class TheBrowserSetup(DCCoreTestCase):
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
         self.settings = os.path.join(self.tmp, "settings.conf")
         self.admin = os.path.join(self.tmp, "admin_config.py")
+        self.keep_every_setting()   # apply_setup() changes SERVER and the rest too (#1146)
         self.set_config(NICKNAME=config.SHIPPED_DEFAULTS["NICKNAME"],
                         CHANNEL=config.SHIPPED_DEFAULTS["CHANNEL"],
                         ADMIN_NICK=config.SHIPPED_DEFAULTS["ADMIN_NICK"],

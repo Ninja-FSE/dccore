@@ -563,6 +563,10 @@ class OverARealChat(unittest.TestCase):
     def setUp(self):
         adminchat.reset_state_for_tests()
         self.addCleanup(adminchat.reset_state_for_tests)
+        # Put back when the test ends: a plain TestCase, so nothing else
+        # does, and every later test ran with this console password.
+        for name in ("ADMIN_HOSTMASKS", "ADMIN_PASSWORD_HASH", "NICKNAME"):
+            self.addCleanup(setattr, config, name, getattr(config, name))
         config.ADMIN_HOSTMASKS = ["*!*@SysOp.users.undernet.org"]
         config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash(PASSWORD, iterations=1000)
         config.NICKNAME = "MusicBot"

@@ -40,7 +40,7 @@ if REPO_ROOT not in sys.path:
 import defaults as config  # noqa: E402
 import runtime  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source  # noqa: E402
 
 CONTAINERS = [name for name, value in vars(runtime).items()
               if isinstance(value, (dict, list)) and not name.startswith("_")]
@@ -242,7 +242,7 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
             path = (next((p for p in (os.path.join(REPO_ROOT, "src", filename), os.path.join(REPO_ROOT, "conf", filename), os.path.join(REPO_ROOT, filename)) if os.path.exists(p)), os.path.join(REPO_ROOT, filename)))
             with io.open(path, encoding="utf-8") as handle:
                 source = handle.read()
-            tree = ast.parse(source)
+            tree = parse_source(source)
             config_aliases = self._config_aliases(tree)
             for node in ast.walk(tree):
                 targets = []
@@ -308,7 +308,7 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
                    "RAR_EXTENSIONS"}
 
         with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
-            tree = ast.parse(handle.read())
+            tree = parse_source(handle.read())
 
         offenders = []
         for node in tree.body:

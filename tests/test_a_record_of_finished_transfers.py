@@ -30,6 +30,7 @@ import defaults as config  # noqa: E402
 import runtime  # noqa: E402
 import transfer_log  # noqa: E402
 
+from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase, silence_debug  # noqa: E402
 from tests.test_a_failing_bot_is_paused import TcpLike  # noqa: E402
 from tests.test_dcc_resume_end_to_end import RecordingIrcSocket, loopback_is_usable  # noqa: E402
@@ -312,11 +313,27 @@ class ForgettingReallyRemoves(Case):
     VICTIM = b"secretvictim"
 
     def fill_many(self, victims=30, others=600):
-        """Enough rows for the table and its indexes to be several pages deep (#1082)."""
-        for n in range(others):
-            self.sent(f"Some Album/Track {n}.flac", nick=f"nick{n % 40}")
-            if n % (others // victims) == 0:
-                self.sent(f"Private/Secret {n}.flac", nick="SecretVictim")
+        """Enough rows for the table and its indexes to be several pages deep (#1082).
+
+        The rows are built by record_sent() itself, but written in ONE
+        transaction on one connection (#1148). Writing them one record_sent()
+        at a time reopened the file, re-ran its pragmas and schema and
+        checkpointed the log on every close: 18 ms a row, about 11 seconds a
+        test. These tests check what forgetting leaves in the file, not the
+        writer, which the tests above cover row by row.
+        """
+        rows = []
+        with mock.patch.object(transfer_log, "_record", rows.append):
+            for n in range(others):
+                self.sent(f"Some Album/Track {n}.flac", nick=f"nick{n % 40}")
+                if n % (others // victims) == 0:
+                    self.sent(f"Private/Secret {n}.flac", nick="SecretVictim")
+        conn = transfer_log._open(config.TRANSFER_LOG_FILE, transfer_log.WRITE_TIMEOUT)
+        try:
+            with conn:
+                conn.executemany(transfer_log._INSERT, rows)
+        finally:
+            conn.close()
 
     def test_a_forgotten_nick_is_gone_from_a_record_that_is_many_pages_deep(self):
         self.fill_many()
@@ -706,10 +723,12 @@ class ASendIsRecorded(DCCoreTestCase):
         self.served = os.path.join(self.tmp, "Some_Song.mp3")
         with io.open(self.served, "wb") as handle:
             handle.write(CONTENT)
+        # A range of its own: a parallel run moves it into this shard's window (#1146).
+        port_start, port_end = dcc_ports(51320, 51330)
         self.set_config(
             active_transfers=[{"user": USER, "file": "Some_Song.mp3", "bytes_sent": 0,
                                "next_file_obj": "Some_Song.mp3"}],
-            MAX_DCC_SLOTS=3, MY_IP_OR_DOCK="8.8.8.8", DCC_PORT_START=51320, DCC_PORT_END=51330,
+            MAX_DCC_SLOTS=3, MY_IP_OR_DOCK="8.8.8.8", DCC_PORT_START=port_start, DCC_PORT_END=port_end,
             FILE_DIRECTORY=self.tmp)
         runtime.dcc_send_offers.clear()
         self.addCleanup(runtime.dcc_send_offers.clear)

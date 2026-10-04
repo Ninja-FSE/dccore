@@ -294,6 +294,9 @@ class TheRoutesAreRegisteredAndGuarded(unittest.TestCase):
         import adminchat
         import defaults as config
 
+        # Put back when the test ends: left set, every later test in the
+        # process ran with a dashboard password configured.
+        self.addCleanup(setattr, config, "ADMIN_PASSWORD_HASH", config.ADMIN_PASSWORD_HASH)
         config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash("pw")
         app = webserver.create_app()
         anon = app.test_client()

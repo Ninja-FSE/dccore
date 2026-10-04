@@ -33,6 +33,7 @@ import defaults as config  # noqa: E402
 import platform_compat  # noqa: E402
 
 from tests import test_startup as boot  # noqa: E402
+from tests.support import temp_dir  # noqa: E402
 
 
 HOLD = (
@@ -46,7 +47,7 @@ HOLD = (
 class TheLock(unittest.TestCase):
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="dccore-lock-")
+        self.dir = temp_dir(self, prefix="dccore-lock-")
         self.path = os.path.join(self.dir, "dccore.lock")
         self.addCleanup(platform_compat.release_instance_lock)
 

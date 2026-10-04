@@ -176,7 +176,7 @@ class ItIsOffUntilAskedFor(DCCoreTestCase):
         import adminchat
         import defaults as config
 
-        config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash("pw")
+        self.set_config(ADMIN_PASSWORD_HASH=adminchat.make_password_hash("pw"))
         self.set_config(WEBUI_FOLDER_BROWSER_ENABLED=False)
         app = webserver.create_app()
         client = app.test_client()
@@ -193,7 +193,7 @@ class ItIsOffUntilAskedFor(DCCoreTestCase):
         import adminchat
         import defaults as config
 
-        config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash("pw")
+        self.set_config(ADMIN_PASSWORD_HASH=adminchat.make_password_hash("pw"))
         self.set_config(WEBUI_FOLDER_BROWSER_ENABLED=True)
         app = webserver.create_app()
         client = app.test_client()
@@ -211,7 +211,7 @@ class ItIsOffUntilAskedFor(DCCoreTestCase):
         import adminchat
         import defaults as config
 
-        config.ADMIN_PASSWORD_HASH = adminchat.make_password_hash("pw")
+        self.set_config(ADMIN_PASSWORD_HASH=adminchat.make_password_hash("pw"))
         self.set_config(WEBUI_FOLDER_BROWSER_ENABLED=True)
         app = webserver.create_app()
 

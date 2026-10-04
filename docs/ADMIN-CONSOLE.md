@@ -208,7 +208,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.14.0 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.15.0 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -245,6 +245,7 @@ prefix.
 | `clearqueue <nick>` | force-clear another user's queue |
 | `rehash` | reload modules in place |
 | `update` | rebuild the MasterList |
+| `audioinfo` | read the length and quality of the audio files the list has none for yet, and write them in - no new scan; "nothing new to read" when there is nothing, refused while a rebuild or another reading runs (a rebuild reads by itself once it has published). Only with `LIST_SHOW_AUDIO_INFO` on (#1182) |
 | `lists` | the bots' lists we hold, whether each has changed since we took our copy, how big and how old |
 | `fetch [<bot>]` | ask every held bot whose list has changed (up to 10 at a time, skipping offline ones), or one bot whatever its freshness |
 | `downloads on [<rows>]` / `downloads off` | the mIRC Downloads window opened (with how many finished and failed rows it wants, 1-15) or closed; the bot sends its `DLBEGIN` snapshots only in between (#1022) |
@@ -269,7 +270,16 @@ a `LISTFETCH` line when one is asked for automatically, arrives, or cannot be us
 `rehash` and `update` run in the background — `update` walks the whole library
 and can take minutes — so the console stays usable while they work. Their
 progress arrives in the session as it happens, because an authenticated console
-receives the daemon's runtime log alongside the debug channel.
+receives the daemon's runtime log alongside the debug channel. With
+`LIST_SHOW_AUDIO_INFO` on, `update` reports done as soon as the list is
+published; the audio files it has no length for yet are then read in the
+background (`Audio info: reading 12,000 files in the background`), and its end
+arrives the same way (`Audio info: done: 11,980 read, 20 unreadable, list
+updated`). How far it has got is in the @DCCore panel (dccore.mrc 1.12 and
+later), on the dashboard and in the bot's own window, not in the session:
+`audioinfo` asked while a reading runs says it. `audioinfo` runs that reading
+on its own, and answers with what happened - started, already reading, refused
+while a rebuild runs, or off.
 
 ### Your nick does not matter here
 
@@ -526,7 +536,7 @@ have been replaced with spaces.
 | `DCCORE SLOT <nick> <sent> <total> <bps>` | one per active transfer: bytes so far, size, speed from its own clock | the name |
 | `DCCORE FETCHING <bot> <received> <total> <bps> <name>` | one per file the bot is receiving from another bot right now (#1019), in the status burst after the QUEUE lines - the panel's Downloading section. Sent only to a script that said it is 1.8 or later in `HELLO` | the name (a list shows as "<bot>'s file list") |
 | `DCCORE DLBEGIN` / `DCCORE DLROW <id> <kind> <state> <bot> <received> <total> <bps> <when> <note> <name>` / `DCCORE DLEND <waiting_total> <complete_total> <failed_total>` | the Downloads window's snapshot (#1022): one `DLROW` per download - `kind` is `d` (coming in), `w` (waiting), `c` (finished) or `f` (failed, a rejected list included), at most 15 of each of the last two, `note` one token (why it waits, or how it ended), `when` the epoch a finished one ended. Whole or not sent; every 3 seconds at most and only when it changed, only after `downloads on`. Sent only to a script that said 1.10 or later in `HELLO` | the Downloads window |
-| `DCCORE REBUILD <phase> <folder_index> <folder_count> <files> <elapsed>` | a master-list rebuild is running, however it was started (#1024): in the status burst and every 5 seconds between; `DCCORE REBUILD end` once when it stops. The phase is `starting`, `scanning`, `audio`, `writing` or `publishing`. Sent only to a script that said it is 1.9 or later in `HELLO` | the phase |
+| `DCCORE REBUILD <phase> <folder_index> <folder_count> <files> <elapsed>` | a master-list rebuild is running, however it was started (#1024): in the status burst and every 5 seconds between; `DCCORE REBUILD end` once when it stops. The phase is `starting`, `scanning`, `writing`, `packing` or `publishing`. Sent only to a script that said it is 1.9 or later in `HELLO`. The background audio reading (#1182), once the rebuild has published or when `audioinfo` started it alone, comes the same way to a script of 1.12 or later: `DCCORE REBUILD reading <read> <to_read> <files_a_second> <elapsed>`, `finding 0 0 0 <elapsed>` while a reading started alone reads the list to find what to read, then `rewriting 0 0 0 <elapsed>` while it writes the lengths into the list | the phase |
 | `DCCORE QUEUE <pos> <nick> <files> <frozen_secs_left>` | one per queued user, the first 20 in the order they are served: position, files waiting, seconds until a frozen queue is dropped (0 = not frozen) | |
 | `DCCORE TOKEN <name>` | the reply to `pair` | the token, shown once |
 | `DCCORE PING` | stands in for a status burst the bot could not compute in time; a client treats it as any other line and shows nothing | |
@@ -687,7 +697,7 @@ Chat request** to auto-accept so it never asks again.
 | the side panel | **Sending n/m**: each running transfer with its size, percentage and speed; **Queue n**: who is waiting, in order, with `frozen m:ss` on a queue that is counting down; **Today**: files and bytes sent, the speed record; and what this window has seen since it opened |
 | the title bar | `MusicBot on Undernet · slots 2/3 · queue 14 · today 38 files / 12.4GB · 1.5MB/s`, updated with every status burst |
 | the editbox | anything you type is a console command - `status`, `queue helen`, `clearqueue ivan`, `ban *!*@bad.host` - and the reply comes back as `[CONSOLE]` lines, or into a second `@DCCore-console` window if you prefer |
-| right-click | the common commands, **Script Settings** and **Console command** on top, then the groups **Info**, **Lists**, **Library**, **User control**, **Control** (update check, console feed, reload, **Stop the bot**), **Connection** and **Window** (DCCore Chat, Downloads window, panel, font); on a panel line, that user's queue or clearing it; in any channel's nick list, **DCCore → Queue of / Clear the queue of** that nick |
+| right-click | the common commands, **Script Settings** and **Console command** on top, then the groups **Info**, **Lists**, **Library** (duplicate filenames, rebuild the list, **Read audio info**), **User control**, **Control** (update check, console feed, reload, **Stop the bot**), **Connection** and **Window** (DCCore Chat, Downloads window, panel, font); on a panel line, that user's queue or clearing it; in any channel's nick list, **DCCore → Queue of / Clear the queue of** that nick |
 | the window's button | on the switchbar or treebar, like any channel's: the **message** colour when there is new activity - a request, a queue position, a send, a search - and the **highlight** colour (the one mIRC uses when somebody says your nick) on a failed transfer or dropped lines, so a failure stands out. The `[STATUS]` line, joins, parts and bans do not light it, as they would not in a channel. mIRC 7 or later |
 | a beep | on a failed transfer, if you leave that on |
 

@@ -34,6 +34,7 @@ if REPO_ROOT not in sys.path:
 import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 
+from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
 
 
@@ -52,11 +53,13 @@ class AListenerThatCannotBeSetUp(DCCoreTestCase):
         # version of this fixture used TEST-NET-3 and never reached listen()
         # at all, so all four tests failed for a reason unrelated to the one
         # they exist to check.
+        # A range of its own: a parallel run moves it into this shard's window (#1146).
+        port_start, port_end = dcc_ports(51000, 51010)
         self.set_config(active_transfers=[{"user": "alice", "file": "track.flac",
                                            "bytes_sent": 0,
                                            "next_file_obj": "track.flac"}],
                         MAX_DCC_SLOTS=3, MY_IP_OR_DOCK="8.8.8.8",
-                        DCC_PORT_START=51000, DCC_PORT_END=51010)
+                        DCC_PORT_START=port_start, DCC_PORT_END=port_end)
 
     def break_listen(self):
         """Make listen() raise the way an out-of-descriptors host does."""
