@@ -2587,6 +2587,48 @@ def build_purge_offline_fetched_lists_result():
                  "skipped_in_flight": skipped_in_flight}
 
 
+def build_purge_all_fetched_lists_result():
+    """POST /api/filelists/purge-all payload: forget EVERY held list, online
+    or not - purge-offline above only ever touches the offline ones (#1260).
+
+    For an operator upgrading from before #1232/#1240: a bot's list held
+    from back then never had a real `preferred_channel` of its own, so the
+    first ordinary re-fetch after upgrading resolves one from a weaker
+    fallback (dcc_fetch._resolve_fetch_channel()'s advert-channel or
+    first-configured-channel steps) - and for a peer that advertises the
+    same list identically in several channels, whichever one that fallback
+    happens to land on gets stamped and reused from then on. Found live: a
+    folder request (and its retry) both went out in a channel the peer
+    bot served nothing in, with no answer, because this had landed wrong
+    once. Clearing every held list lets each one rebuild from scratch, with
+    a channel resolved the same way a BRAND NEW bot's first fetch already
+    is - correctly, by construction, since there is no stale stamp left to
+    prefer over it.
+
+    A bot with any request still outstanding is skipped, same safety
+    purge-offline already applies and for the same reason - forgetting its
+    list while an answer for it is in flight is unsafe regardless of
+    whether this is clearing one bot or every bot.
+    """
+    import dcc_fetch
+    import list_fetch
+
+    store = dict(getattr(config, "fetched_bot_lists", {}) or {})
+
+    purged = []
+    skipped_in_flight = []
+    for key, entry in store.items():
+        bot = entry.get("bot", key) if isinstance(entry, dict) else key
+        if dcc_fetch.has_any_outstanding_request(bot):
+            skipped_in_flight.append(bot)
+            continue
+        if list_fetch.forget_bot(bot):
+            purged.append(bot)
+
+    return 200, {"purged": purged, "count": len(purged),
+                 "skipped_in_flight": skipped_in_flight}
+
+
 # JavaScript's Number.MAX_SAFE_INTEGER. Past this a JSON number no longer
 # survives the trip into the page unchanged.
 _MAX_SAFE_JS_INT = 2 ** 53 - 1
@@ -5680,6 +5722,17 @@ if HAVE_FLASK:
             # asks "clear whatever is offline right now" rather than naming a
             # specific bot, so there is no resource URL for DELETE to name.
             status, result = build_purge_offline_fetched_lists_result()
+            return jsonify(result), status
+
+        @app.route("/api/filelists/purge-all", methods=["POST"])
+        def api_filelists_purge_all():
+            # Same shape as purge-offline right above, deliberately a
+            # separate route rather than a flag on it (#1260): one clears
+            # what is already gone, the other clears everything regardless
+            # of whether it answers right now - different enough blast
+            # radius that a typo flipping one into the other should not be
+            # possible.
+            status, result = build_purge_all_fetched_lists_result()
             return jsonify(result), status
 
         @app.route("/api/filelists/search")

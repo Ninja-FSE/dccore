@@ -208,7 +208,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.16.0 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.16.1 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -256,6 +256,7 @@ prefix.
 | `audioinfo` | read the length and quality of the audio files the list has none for yet, and write them in - no new scan; "nothing new to read" when there is nothing, refused while a rebuild or another reading runs (a rebuild reads by itself once it has published). Only with `LIST_SHOW_AUDIO_INFO` on (#1182) |
 | `lists` | the bots' lists we hold, whether each has changed since we took our copy, how big and how old |
 | `fetch [<bot>]` | ask every held bot whose list has changed (up to 10 at a time, skipping offline ones), or one bot whatever its freshness |
+| `purgealllists confirm` | forget EVERY held bot list, online or not - each rebuilds on its own (a changed advert, or a fresh fetch) with its channel resolved clean. Recommended once after upgrading from before v1.16, since an older list's channel can be stuck wrong (#1260) |
 | `downloads on [<rows>]` / `downloads off` | the mIRC Downloads window opened (with how many finished and failed rows it wants, 1-15) or closed; the bot sends its `DLBEGIN` snapshots only in between (#1022) |
 | `dlcancel <id> [<id> ...]` / `dlcancel all` | let downloads go that have not started (waiting, asked, queued there); never a transfer under way or a finished one. Each id is judged on its own; `all` is every request that has not started (#1217) |
 | `dlqueue` | every request that has not started, for the mIRC Download queues window (`DQBEGIN` snapshot), or as text with the ids for a console that cannot draw it (#1217) |

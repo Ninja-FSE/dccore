@@ -443,6 +443,8 @@ Nothing breaks if you skip this — every setting has a working default and the 
 
 That diff only catches settings that are new. **`PAUSE_ON_UPDATE` is not new in v1.13.1, but its meaning changed**: it now pauses searching and sharing only for the few seconds a rebuilt list is being swapped in, not for the whole rebuild. If you were relying on the old whole-rebuild pause, turn on the new `PAUSE_FOR_WHOLE_UPDATE` setting to keep it.
 
+**Coming from before v1.16:** a peer's list held from back then never tracked which channel it came from, which can send a cross-bot request to the wrong channel after upgrading - run `purgealllists confirm` (console) or "Purge every held list" (List Browser) once; every list rebuilds on its own with its channel resolved fresh.
+
 **5. Read the changelog.** [UPDATES.md](UPDATES.md) says what changed and, where it matters, what you have to do about it.
 
 **6. Verify before going live.**

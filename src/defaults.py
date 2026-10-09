@@ -22,7 +22,7 @@ import runtime
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
-SCRIPT_VERSION: str = "DCCore v1.16.0"
+SCRIPT_VERSION: str = "DCCore v1.16.1"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
