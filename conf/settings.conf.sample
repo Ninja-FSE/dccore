@@ -212,7 +212,8 @@
 #RAR_ENABLED = true
 
 # Where the rar program is on this machine. Leave empty and the bot finds it
-# by itself (on the PATH, or in WinRAR's folder on Windows).
+# by itself (on the PATH, or in WinRAR's folder on Windows). It also opens a
+# list another bot sends as .rar; without it such a list is refused.
 #
 # None = look for rar/rar.exe on PATH (and WinRAR's install dir)
 #RAR_BINARY = 
@@ -603,10 +604,10 @@
 # already run.
 #DOWNLOAD_COUNTS_FILE = ./data/download_counts.json
 
-# Where a record of every finished transfer is kept: what it was, its size,
-# its speed, how long it waited in the queue, and the nick it went to or came
-# from (no host, no channel). Shown on the Stats page, where a nick can be
-# forgotten. Empty turns it off.
+# Where a record of every transfer that ends - completed, failed or cancelled
+# - is kept: what it was, its size, its speed, how long it waited in the
+# queue, and the nick it went to or came from (no host, no channel). Shown on
+# the Stats page, where a nick can be forgotten. Empty turns it off.
 #
 # A row is about 120 bytes, so it is never rotated or trimmed.
 #TRANSFER_LOG_FILE = ./data/transfers.db
@@ -767,7 +768,7 @@
 
 # Post a line in the channel each time a file has been sent. Everything else
 # about a transfer is private to the person who asked; this is the only public
-# part.
+# part. A file asked for by private message is never announced.
 #
 # Announce a finished transfer in the channel it was requested from.
 # 
@@ -807,11 +808,33 @@
 # Most files across every queue combined
 #MAX_GLOBAL_QUEUE = 1000
 
+# Answer @find and @locator searches. Off, they are ignored without a reply
+# and the channel advert says Search: OFF. Requests for files and lists are
+# still answered.
+#
+# Answer @find and @locator; off ignores them and the advert says Search: OFF
+#SEARCH_ENABLED = true
+
 # How many matching files are sent back to somebody who searches with @find.
 # Each result is one line to that person.
 #
 # Maximum result lines sent in reply to an @find
 #MAX_SEARCH_RESULTS = 5
+
+# In the reply to an @find, name each result's folder on a line of its own
+# above its files, e.g. From: D:\MEDIA\Rock\Some Band\1999 - Some Album. One
+# extra line per folder, not per file; the result lines stay exactly as they
+# are. Off by default: every line is paced, so it slows the reply.
+#
+# Name each @find result's folder on a From: line above its files
+#SEARCH_SHOW_FOLDER = false
+
+# The longest folder a From: line shows, in characters, so the line does not
+# wrap. A longer one is cut from the left and starts with ..., keeping its
+# end, where the album name is. At least 10.
+#
+# Longest folder a From: line shows; longer ones are cut from the left
+#SEARCH_FOLDER_MAX_CHARS = 80
 
 # How many seconds the bot waits between the lines it sends to the server.
 # Protects you from being disconnected for flooding. 5 is safe on Undernet;
@@ -1241,6 +1264,37 @@
 # speed is not skipped. 0 turns it off.
 #AUTO_GRAB_MIN_SPEED_KB = 0
 
+# Watch bots you already hold a list from for a second, genuinely different
+# list bound to another of your channels, and fetch and hold that one too -
+# never instead of the first. Only acts once the difference has held steady
+# for the time below.
+#
+# Automatically discover and hold a bot's OTHER channel-bound lists (#1240):
+# a bot we already hold a list from, bound to a different list in a second of
+# our channels (DCCore's own multi-list-per-channel feature, which another
+# DCCore-family bot can equally run), has that second list fetched and held
+# alongside the first - not instead of it - with no manual step. OFF by
+# default, for the same reason as AUTO_REFETCH_LISTS/AUTO_GRAB_LISTS: a real
+# measurement (one operator's channels, ~8.5 hours, 49 advertising bots, 38
+# sharing more than one channel) found only 1 with a genuinely different list
+# per channel - everyone else just shares several channels with one list - so
+# this spends a little background watching for a case that is rare, and only
+# ever fetches on a confirmed, stable difference (MULTI_CHANNEL_LIST_STABLE_
+# SECONDS below), never a single advert.
+#AUTO_DISCOVER_CHANNEL_LISTS = false
+
+# How long, in seconds, a bot's channels must show a stable, differing file
+# count or list date before the setting above acts on it. A bot mid-scan in
+# one channel when its advert goes out should not be mistaken for a second
+# list.
+#
+# How long a bot's channels must show a stable, differing file count/date
+# before AUTO_DISCOVER_CHANNEL_LISTS acts on it, in seconds. A bot mid-scan
+# in one channel when its advert goes out must not be mistaken for a second
+# list - this is the bar that advert has to clear instead: the SAME
+# difference, held the whole time, not one lucky (or unlucky) pair of lines.
+#MULTI_CHANNEL_LIST_STABLE_SECONDS = 3600
+
 # When you rehash (reload settings), how many seconds the bot waits for
 # running transfers to finish first before reloading anyway. 0 reloads
 # straight away.
@@ -1367,6 +1421,23 @@
 #
 # Seconds a request queued at another bot waits for the file (12 h); 0 = no limit
 #FETCH_QUEUED_TIMEOUT = 43200
+
+# How many of your requests to one bot may fail in a row - no answer, a
+# connection that could not be made, a download that broke off - before that
+# bot is paused for a while. A bot saying it does not have the file, or you
+# cancelling, does not count; a finished download starts the count again. 0
+# never pauses.
+#
+# A bot that keeps failing is paused for a while (#1210).
+# Failed requests in a row that pause a bot; 0 = never
+#FETCH_BOT_MAX_FAILS = 3
+
+# How many minutes such a bot stays paused. Its requests wait, and go out by
+# themselves when the time is up - also after a restart. The Downloads page
+# shows until when, with a Resume now button. 0 turns the pause off.
+#
+# Minutes such a pause lasts; 0 = no pause
+#FETCH_BOT_COOLDOWN_MINUTES = 15
 
 # When you request a whole folder (.rar) from another bot, how many seconds to
 # wait for its offer. Much longer than for a single file, because the other

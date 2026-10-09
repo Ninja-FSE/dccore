@@ -20,7 +20,8 @@ or None for anything else, which changes nothing.
 THE PHRASES are the ones Autoget 7.40 (eMpTy, 2005) - the download manager
 that went with OmeNServE - recognised from the servers of its day, read out of
 its script: OmeNServE 1.31 to 2.x, SDFind, SpR Jukebox (English and French)
-and BWI; plus DCCore's own wording (announce.py). Each is a sequence of words
+and BWI; plus DCCore's own wording (announce.py), and mxrarserver 2.x's,
+read out of its script (#1209). Each is a sequence of words
 that must appear IN ORDER, anything between - the way mIRC's wildcard events
 matched them - after colour and formatting codes are removed. Order is
 checked, not just presence, so a line that merely contains the same words
@@ -159,6 +160,27 @@ _RULES = [
     ("queued", "You are in que now with in rank.", r"rank\.?\s*#?\s*(\d+)|with\s+#?\s*(\d+)\s+in\s+rank"),
     ("queued", "Tu es Maintenant dans liste d'attente comme \u00e9tant num\u00e9ro",
      "num\u00e9ro" r"\s*#?\s*(\d+)"),
+
+    # --- mxrarserver 2.x (#1209), read out of its script --------------------
+    # Last, so a line any rule above already knew keeps its meaning.
+    # "Request accepted: <name> | Queue position: P | Allowed requests: q of
+    # max", and for a list "List Request Accepted: Files, Queue Position: N"
+    # or "Complete list request accepted: Files + Folders, Queue Position N".
+    ("duplicate", "Request denied, you already have in the position:",
+     r"position\s*:?\s*#?\s*(\d+)"),
+    ("queued", "Request accepted: Queue position", r"queue\s+position\s*:?\s*#?\s*(\d+)"),
+    ("busy", "You reached of allowed requests", None),
+    ("refused", "File not found. Check the requested filename", None),
+    ("refused", "Folder not found in the list assigned to this channel", None),
+    # Packed and about to be sent: the request stands, so it keeps waiting -
+    # and stops counting down the "no answer" clock, which it has had.
+    ("queued", "Compression completed:", None),
+    ("refused", "Compression failed", None),
+    ("refused", "Compression timeout exceeded", None),
+    ("refused", "Manual cancellation: Folder compression was cancelled", None),
+    # "Files list build in progress ... temporarily disabled", the same for
+    # Folders, and "Public list build in progress: Masterlist 42%": not now.
+    ("busy", "list build in progress", None),
 ]
 
 _COMPILED = [(outcome, _words(words), re.compile(pos, re.IGNORECASE) if pos else None)

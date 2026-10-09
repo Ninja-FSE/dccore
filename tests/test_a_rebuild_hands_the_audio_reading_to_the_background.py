@@ -592,8 +592,12 @@ class TheMircScript(unittest.TestCase):
         self.assertIn("\n  .Read audio info:dccore.send audioinfo", library)
 
     def test_the_version_is_a_new_feature(self):
+        # At least the version the bot gates on, as the other features'
+        # tests have it: 1.13 moved on for the windows opened at start (#1201).
         match = re.search(r"alias dccore\.ver \{ return ([0-9.]+) \}", self.text)
-        self.assertEqual(match.group(1), adminchat.AUDIO_SCRIPT_VERSION)
+        self.assertGreaterEqual(tuple(int(p) for p in match.group(1).split(".")),
+                                tuple(int(p) for p in adminchat.AUDIO_SCRIPT_VERSION.split(".")))
+        self.assertTrue(adminchat.script_draws_audio(match.group(1)))
 
     def test_the_panel_draws_the_reading(self):
         panel = self.text[self.text.index("alias dccore.panel {"):]

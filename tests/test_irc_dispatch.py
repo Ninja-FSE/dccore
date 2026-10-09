@@ -123,6 +123,8 @@ def _evaluate(source, msg, target_chan=None):
         # the real function rather than a copy of its logic is what stops the
         # two drifting apart.
         "is_list_request": irc.is_list_request,
+        # The file-request test (#1242), shared with the Messages page.
+        "names_a_file_request": irc.names_a_file_request,
         "config": config,
         "target_chan": target_chan if target_chan is not None else config.NICKNAME,
     }

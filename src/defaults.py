@@ -22,7 +22,7 @@ import runtime
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
-SCRIPT_VERSION: str = "DCCore v1.15.0"
+SCRIPT_VERSION: str = "DCCore v1.16.0"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
@@ -548,7 +548,10 @@ ANNOUNCE_INTERVAL: int = 300     # Time between each channel advert, in seconds
 MAX_DCC_SLOTS: int      = 3      # Maximum simultaneous live downloads
 MAX_USER_QUEUE: int     = 100    # Most files a single user may queue
 MAX_GLOBAL_QUEUE: int   = 1000   # Most files across every queue combined
+SEARCH_ENABLED: bool = True  # Answer @find and @locator; off ignores them and the advert says Search: OFF
 MAX_SEARCH_RESULTS: int = 5      # Maximum result lines sent in reply to an @find
+SEARCH_SHOW_FOLDER: bool = False  # Name each @find result's folder on a From: line above its files
+SEARCH_FOLDER_MAX_CHARS: int = 80  # Longest folder a From: line shows; longer ones are cut from the left
 MSG_DELAY: float        = 5.0    # Delay in seconds for the ordinary message queue
 DEBUG_MSG_DELAY: float  = 0.0    # Wait between debug-channel lines; the larger of this and MSG_DELAY is used, so it can only slow the debug channel down (0 = the same as MSG_DELAY)
 
@@ -826,6 +829,25 @@ AUTO_GRAB_MIN_FILES: int = 0
 # Skip bots advertising a speed below this, in KB/s. A bot that advertises no
 # speed is not skipped. 0 turns it off.
 AUTO_GRAB_MIN_SPEED_KB: int = 0
+# Automatically discover and hold a bot's OTHER channel-bound lists (#1240):
+# a bot we already hold a list from, bound to a different list in a second of
+# our channels (DCCore's own multi-list-per-channel feature, which another
+# DCCore-family bot can equally run), has that second list fetched and held
+# alongside the first - not instead of it - with no manual step. OFF by
+# default, for the same reason as AUTO_REFETCH_LISTS/AUTO_GRAB_LISTS: a real
+# measurement (one operator's channels, ~8.5 hours, 49 advertising bots, 38
+# sharing more than one channel) found only 1 with a genuinely different list
+# per channel - everyone else just shares several channels with one list - so
+# this spends a little background watching for a case that is rare, and only
+# ever fetches on a confirmed, stable difference (MULTI_CHANNEL_LIST_STABLE_
+# SECONDS below), never a single advert.
+AUTO_DISCOVER_CHANNEL_LISTS: bool = False
+# How long a bot's channels must show a stable, differing file count/date
+# before AUTO_DISCOVER_CHANNEL_LISTS acts on it, in seconds. A bot mid-scan
+# in one channel when its advert goes out must not be mistaken for a second
+# list - this is the bar that advert has to clear instead: the SAME
+# difference, held the whole time, not one lucky (or unlucky) pair of lines.
+MULTI_CHANNEL_LIST_STABLE_SECONDS: int = 3600
 # How long a rehash waits for transfers in flight to finish before reloading
 # anyway, in seconds (#310). A transfer can sit idle for as long as the far
 # end keeps its socket open, so this cannot be unbounded: a bot that cannot
@@ -895,6 +917,9 @@ FETCH_OFFER_TIMEOUT: int    = 60       # Seconds an "offered" row waits for a DC
 # AutoGet's "active" mode did it. 0 = no limit.
 FETCH_MAX_PER_BOT: int = 3  # Files asked of one bot at once; the next goes when one finishes
 FETCH_QUEUED_TIMEOUT: int = 43200  # Seconds a request queued at another bot waits for the file (12 h); 0 = no limit
+# A bot that keeps failing is paused for a while (#1210).
+FETCH_BOT_MAX_FAILS: int = 3  # Failed requests in a row that pause a bot; 0 = never
+FETCH_BOT_COOLDOWN_MINUTES: int = 15  # Minutes such a pause lasts; 0 = no pause
 
 # A "folder" request_type row (dcc_fetch.py) asks another bot to pack a whole
 # folder/album as .rar via its own "!rar" convention and shares the same

@@ -562,6 +562,54 @@ def long_path(path):
     return "\\\\?\\" + absolute
 
 
+# ---------------------------------------------------------------------
+# Names Windows will not create
+# ---------------------------------------------------------------------
+# Device names. Windows refuses them as a file or folder name with ANY
+# extension ("CON.txt", "aux.rar"), in any case. The superscript digits are
+# reserved too (COM1 .. COM3 in the Microsoft list).
+_WINDOWS_RESERVED = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"{device}{digit}" for device in ("COM", "LPT") for digit in "123456789\u00b9\u00b2\u00b3"])
+
+
+def is_windows_reserved(name):
+    """Is `name` one Windows refuses to create - a device name, with any extension?
+
+    Judged on what comes before the FIRST dot, with trailing spaces there
+    ignored, because that is how Windows reads it: "NUL", "nul.txt" and
+    "NUL .tar.gz" are all the device. "CONCERT" and "Console" are not.
+    """
+    base = str(name or "").split(".", 1)[0].rstrip(" ")
+    return base.upper() in _WINDOWS_RESERVED
+
+
+def windows_safe_name(name, trim_end=True):
+    """`name` made into one Windows can create, the same on every platform.
+
+    A reserved name gets an underscore after its base, before any extension:
+    "CON" -> "CON_", "aux.txt" -> "aux_.txt". Ordinary names are returned
+    exactly as they came.
+
+    With `trim_end`, trailing dots and spaces go too - Windows drops them
+    silently, so a folder called "Live." would be created as "Live" and then
+    not be found under the name it was asked for. Pass trim_end=False when a
+    suffix is about to be added after the name, which makes the end of it
+    harmless ("Live." + ".rar").
+
+    Applied on Linux too, deliberately: a list directory, an archive or a
+    fetched file written here is often copied to a Windows machine, and a name
+    that only works on one platform is a surprise on the other.
+    """
+    text = str(name or "")
+    if trim_end:
+        text = text.rstrip(" .")
+    if is_windows_reserved(text):
+        base, dot, rest = text.partition(".")
+        text = base.rstrip(" ") + "_" + dot + rest
+    return text
+
+
 def describe():
     """One line for the startup log, so the platform in use is never a guess."""
     rar = rar_command(getattr(sys.modules.get("defaults"), "RAR_BINARY", None))

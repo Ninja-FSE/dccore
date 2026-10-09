@@ -14,6 +14,12 @@ through it, and a PM `!list` request takes the same path.
 
 The direct path now resolves the announce channel the way the queued paths
 do: the request's channel if it is one, the configured default otherwise.
+
+#1242 changed both halves of that for a private request. Its channel is the
+one the requester shares with the bot, not the first configured one they may
+never have been in; and its "Sent:" line goes to no channel at all - the
+operator's decision on #1242 - so the line the old third test checked at the
+wire is now checked not to be sent.
 """
 
 import os
@@ -40,13 +46,15 @@ class ADirectSendForAPrivateRequest(feed.ServesARealRequest):
         self.assertEqual(len(sends), 1, InlineThread.dispatched)
         return sends[0][4]      # (irc_sock, user, path, file_name, channel, next_file)
 
-    def test_announces_in_the_configured_channel_not_to_the_bot(self):
+    def test_names_the_channel_the_requester_shares_not_the_bot(self):
         self.request("Song.flac", channel=BOT)      # the wire target of a PM is our nick
 
         self.assertEqual(self.kinds()[-2:], ["REQUEST", "SENDING"])
         channel = self.started_send_channel()
         self.assertTrue(dcc.is_channel_name(channel), "start_dcc_send was handed %r" % channel)
-        self.assertEqual(channel, dcc.default_announce_channel())
+        # dave is in OTHER only; the default is the first configured channel.
+        self.assertEqual(channel, feed.OTHER)
+        self.assertNotEqual(channel, dcc.default_announce_channel())
         self.assertEqual(self.last("SENDING")["channel"], channel)
 
     def test_a_channel_request_still_announces_where_it_was_asked(self):
@@ -56,21 +64,21 @@ class ADirectSendForAPrivateRequest(feed.ServesARealRequest):
         self.assertEqual(self.started_send_channel(), feed.OTHER)
         self.assertEqual(self.last("SENDING")["channel"], feed.OTHER)
 
-    def test_the_sent_line_would_reach_the_channel(self):
-        """The line send_transfer_complete() builds from what this path
-        hands on, checked at the wire."""
+    def test_the_sent_line_reaches_no_channel(self):
+        """What send_transfer_complete() is handed for this path's row,
+        checked at the wire: nothing goes out, to a channel or to us."""
         import announce
         self.set_config(ANNOUNCE_TRANSFERS=True)
         self.request("Song.flac", channel=BOT)
-        channel = self.started_send_channel()
+        sends = [args for name, args in InlineThread.dispatched if name == "start_dcc_send"]
+        channel, row = sends[0][4], sends[0][5]
         self.oserve.queued.clear()
 
-        announce.send_transfer_complete(channel, "dave", "Song.flac", 4096, 0.0, 1000, duration=1.0)
+        announce.send_transfer_complete(channel, "dave", "Song.flac", 4096, 0.0, 1000, duration=1.0,
+                                        private=dcc.is_private_row(row))
 
-        lines = [m for u, m, *_ in self.oserve.queued if u == "channel_announce"]
-        self.assertTrue(lines, self.oserve.queued)
-        self.assertTrue(lines[0].startswith("PRIVMSG %s :" % channel), lines[0])
-        self.assertFalse(lines[0].startswith("PRIVMSG %s :" % BOT))
+        self.assertEqual([m for u, m, *_ in self.oserve.queued if u == "channel_announce"], [])
+        self.assertEqual(self.last("SENT")["channel"], feed.OTHER)
 
 
 for _name in [n for n in dir(feed.ServesARealRequest) if n.startswith("test")]:

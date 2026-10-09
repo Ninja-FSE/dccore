@@ -101,13 +101,13 @@ class TheHandlerTouchesNothing(PathSecurityBase):
     def test_a_unc_file_request_is_refused_without_a_file_system_call(self):
         seen = self.request(UNC)
         self.assertEqual(seen, [])
-        self.assertIn(("error", (mock.ANY, "invalid_path")), self.notices)
+        self.assertIn(("error", (mock.ANY, "invalid_path", mock.ANY)), self.notices)
         self.assertEqual(config_queue(), {})
 
     def test_the_forward_slash_form_is_refused_too(self):
         seen = self.request("//evil.example/share/a.mp3")
         self.assertEqual(seen, [])
-        self.assertIn(("error", (mock.ANY, "invalid_path")), self.notices)
+        self.assertIn(("error", (mock.ANY, "invalid_path", mock.ANY)), self.notices)
 
     def test_a_unc_pack_request_is_refused_without_a_file_system_call(self):
         seen = self.request("!rar \\\\evil.example\\share\\Album")
@@ -126,7 +126,7 @@ class TheHandlerTouchesNothing(PathSecurityBase):
 
     def test_an_ordinary_missing_file_is_still_reported_as_missing(self):
         self.request("No Such Song.flac")
-        self.assertIn(("error", (mock.ANY, "file_not_found")), self.notices)
+        self.assertIn(("error", (mock.ANY, "file_not_found", mock.ANY)), self.notices)
 
 
 def config_queue():

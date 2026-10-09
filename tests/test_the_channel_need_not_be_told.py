@@ -125,7 +125,7 @@ class TheChannelNoticeCanBeTurnedOff(DCCoreTestCase):
         body = source.split("def send_transfer_complete(", 1)[1] \
                      .split("\ndef ", 1)[0]
 
-        gated = body.split('if getattr(config, "ANNOUNCE_TRANSFERS", True):', 1)[1]
+        gated = body.split('if getattr(config, "ANNOUNCE_TRANSFERS", True) and _channel_may_be_told(channel, user):', 1)[1]
         self.assertIn('oserve.queue_message("channel_announce", msg)',
                       gated.split("\n    else:", 1)[0])
         # feed_event("SENT", ...) since #550 - it sends the debug line and

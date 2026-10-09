@@ -788,10 +788,47 @@ def _record_tops(since):
     return out[0], out[1]
 
 
+def _record_outcomes(since):
+    """How the period's transfers ended (#1203), as the Stats page's outcomes
+    table shows them: sent files, albums and lists, and everything received.
+
+    `failed` includes the albums whose folder could not be packed, which
+    `pack_failed` also gives on its own. The success rate is completed out of
+    completed and failed: a cancelled transfer was stopped by the operator,
+    the user or the bot, not lost by the network, and counting it would
+    blame the network for it. Rounded down, so 100% means nothing failed.
+    "since" is set when the counting starts later than the period does,
+    because failures were not written before then."""
+    import transfer_log
+    found = transfer_log.outcomes(since)
+    lines = []
+    for direction, kind in ((transfer_log.SENT, transfer_log.KIND_FILE),
+                            (transfer_log.SENT, transfer_log.KIND_ALBUM),
+                            (transfer_log.SENT, transfer_log.KIND_LIST),
+                            (transfer_log.RECEIVED, None)):
+        counts = {}
+        for (row_direction, row_kind), by_status in found["rows"].items():
+            if row_direction == direction and (kind is None or row_kind == kind):
+                for status, count in by_status.items():
+                    counts[status] = counts.get(status, 0) + count
+        completed = counts.get(transfer_log.STATUS_COMPLETED, 0)
+        pack_failed = counts.get(transfer_log.STATUS_PACK_FAILED, 0)
+        failed = counts.get(transfer_log.STATUS_FAILED, 0) + pack_failed
+        cancelled = counts.get(transfer_log.STATUS_CANCELLED, 0)
+        decided = completed + failed
+        rate = (completed * 100) // decided if decided else None
+        lines.append({"direction": direction, "kind": kind or "all",
+                      "attempts": completed + failed + cancelled, "completed": completed,
+                      "failed": failed, "pack_failed": pack_failed, "cancelled": cancelled,
+                      "success_rate": rate, "success_text": f"{rate}%" if rate is not None else ""})
+    return {"since": found["since"], "rows": lines}
+
+
 def build_record_payload(period="all"):
     """GET /api/stats/record?period=: the record's figures for a period - the
-    totals, the most-sent files and the nicks sent to and received from most.
-    Every figure comes raw and as the page shows it, as in build_stats_payload."""
+    totals, the most-sent files, the nicks sent to and received from most, and
+    how the transfers ended (#1203). Every figure comes raw and as the page
+    shows it, as in build_stats_payload."""
     import stats_mgr
     import transfer_log
     since, error = _record_since(period)
@@ -824,6 +861,7 @@ def build_record_payload(period="all"):
         "albums_enabled": bool(getattr(config, "RAR_ENABLED", True)),
         "top_sent": _nick_rows(transfer_log.top_nicks(transfer_log.SENT, 10, since)),
         "top_received": _nick_rows(transfer_log.top_nicks(transfer_log.RECEIVED, 10, since)),
+        "outcomes": _record_outcomes(since),
         # Said on the page: all time holds figures from before the record began -
         # the bot's own totals, a nick's, or both (#1102 review: a per-nick import
         # alone left the note hidden while the tables counted it).
@@ -964,6 +1002,14 @@ def build_stats_payload(parts=None):
     except Exception:
         uptime = 0
 
+    # When the first busy slot is likely to free up (#1207), from the same
+    # copy of active_transfers the Sending card counts, so the two cannot
+    # disagree about whether a slot is free. "now", whole minutes, or None.
+    try:
+        next_slot = stats_mgr.next_slot_estimate(transfers=active)
+    except Exception:
+        next_slot = None
+
     # The 7-column row: total files, total bytes, yesterday's pair, today's
     # pair, and the date the day last rolled over. Read through
     # load_advanced_stats_rolled(), which rolls a COPY, so a bot that has sent
@@ -1024,6 +1070,8 @@ def build_stats_payload(parts=None):
             "record_text": stats_mgr.format_speed(record),
             "sending": len(active),
             "slots": int(getattr(config, "MAX_DCC_SLOTS", 0) or 0),
+            "next_slot": next_slot,
+            "next_slot_text": stats_mgr.format_next_slot(next_slot),
             "queued_files": sum(len(entries) for entries in queue.values()),
             "queued_users": len(queue),
             "uptime_seconds": uptime,
@@ -1039,6 +1087,13 @@ def build_stats_payload(parts=None):
     return payload
 
 
+def _security_seconds_left(user_key):
+    """How long a timed ignore or ban on this nick has to run, 0 for none -
+    what turns a Queue row's Ignore button into "Ignored ... Lift" (#1206)."""
+    import security
+    return security.ban_seconds_left(user_key)
+
+
 def build_queue_payload(user=None):
     """The Queue view's data.
 
@@ -1049,14 +1104,18 @@ def build_queue_payload(user=None):
     that one user instead - what a click-through or `?user=<nick>` on
     /api/queue returns.
 
-    "preview"/"count"/"files" describe the QUEUE only - what is waiting
-    behind whatever is currently sending, if anything, never included in it.
-    dcc.py never puts the in-flight file into config.dcc_queue; it lives in
-    config.active_transfers instead, which is why a sending user's progress
-    needs its own fields rather than being folded into the queue ones -
+    "preview"/"count"/"files" describe the QUEUE: config.dcc_queue's rows.
+    A send that found a free slot at once never has a row; a queued file
+    keeps its row while it is sent, until the send settles it (#1245). The
+    progress lives in config.active_transfers either way, which is why a
+    sending user's progress needs its own fields rather than being folded
+    into the queue ones -
     an operator asked to see the whole queue, not just its head, and a
     progress bar for the transfer actually running, not for whatever is
     queued behind it.
+
+    "file_ids" is dcc.queue_row_id() of each of "files", in step: what a move
+    or a removal sends back to name the file it means (#1245).
 
     No lock is taken, matching adminchat.py's _cmd_queue/_cmd_status idiom: a
     shallow dict()/list() copy of the live containers, read without a lock,
@@ -1071,6 +1130,16 @@ def build_queue_payload(user=None):
     active_by_user = {}
     for tx in active:
         active_by_user.setdefault(str(tx.get("user", "")).lower(), tx)
+
+    # The user a folder is being packed for (#1202): without it their row read
+    # "queued" for as long as rar ran. The folder's name, never its path.
+    import dcc
+    pack = None
+    try:
+        pack = dcc.pack_status()
+    except Exception as err:
+        print(f"[WEBSERVER] The running pack could not be read for the queue: {err}")
+    packing_user = str(pack["user"]).lower() if pack else ""
 
     def _progress_fields(user_key):
         # None, not 0, when there is nothing sending or the size is not
@@ -1090,6 +1159,8 @@ def build_queue_payload(user=None):
         entries = queue.get(user_key, [])
         if user_key in sending_users:
             status = "sending"
+        elif user_key == packing_user:
+            status = "packing"
         elif user_key in frozen:
             status = "frozen"
         elif entries:
@@ -1098,8 +1169,13 @@ def build_queue_payload(user=None):
             status = "empty"
         files = [e.get("file", "?") if isinstance(e, dict) else str(e) for e in entries]
         current_file, bytes_sent, size = _progress_fields(user_key)
-        return {"user": user_key, "status": status, "count": len(entries), "files": files,
-                "current_file": current_file, "bytes_sent": bytes_sent, "size": size}
+        result = {"user": user_key, "status": status, "count": len(entries), "files": files,
+                  "file_ids": [dcc.queue_row_id(e) for e in entries],
+                  "current_file": current_file, "bytes_sent": bytes_sent, "size": size,
+                  "ignored_seconds": _security_seconds_left(user_key)}
+        if status == "packing":
+            result["pack"] = _pack_fields(pack)
+        return result
 
     # #220: a user sent with a free slot and nothing already queued never
     # enters dcc_queue at all - dcc.py's admission check appends straight to
@@ -1110,7 +1186,18 @@ def build_queue_payload(user=None):
     # single-user branch above already got this right by checking
     # sending_users regardless of whether entries exist; this does the same.
     rows = []
-    for user_key in dict.fromkeys(list(queue.keys()) + list(sending_users)):
+    # In the order the dispatcher gives out free slots (#1206): the page shows
+    # who is next, and Move up/down on a row changes that. The dispatcher's
+    # own key (#1245): ranked by the wait alone, a waiting list was shown
+    # last while it went first, and the arrows moved against a line the
+    # page did not show.
+    try:
+        waiting_order = dcc.slot_order(queue, dcc.a_list_may_go_first(active))
+        waiting_order += [key for key in queue if not queue[key]]
+    except Exception as err:
+        print(f"[WEBSERVER] The queue's order could not be read: {err}")
+        waiting_order = list(queue.keys())
+    for user_key in dict.fromkeys(waiting_order + list(sending_users) + ([packing_user] if packing_user else [])):
         # sending_users comes from active_transfers, whose rows are built by
         # dcc.py rather than keyed by it - an entry missing its "user" field
         # contributes "" to that set and used to reach the page as a blank row
@@ -1120,7 +1207,12 @@ def build_queue_payload(user=None):
         if not user_key:
             continue
         entries = queue.get(user_key, [])
-        status = "sending" if user_key in sending_users else ("frozen" if user_key in frozen else "queued")
+        if user_key in sending_users:
+            status = "sending"
+        elif user_key == packing_user:
+            status = "packing"
+        else:
+            status = "frozen" if user_key in frozen else "queued"
         files = [e.get("file", "?") if isinstance(e, dict) else str(e) for e in entries]
         first = entries[0] if entries else None
         if first is not None:
@@ -1130,10 +1222,130 @@ def build_queue_payload(user=None):
         else:
             preview = ""
         current_file, bytes_sent, size = _progress_fields(user_key)
-        rows.append({"user": user_key, "preview": preview, "count": len(entries), "status": status,
-                     "files": files, "current_file": current_file,
-                     "bytes_sent": bytes_sent, "size": size})
+        row = {"user": user_key, "preview": preview, "count": len(entries), "status": status,
+               "files": files, "file_ids": [dcc.queue_row_id(e) for e in entries],
+               "current_file": current_file,
+               "bytes_sent": bytes_sent, "size": size,
+               "ignored_seconds": _security_seconds_left(user_key)}
+        if status == "packing":
+            row["pack"] = _pack_fields(pack)
+        rows.append(row)
     return rows
+
+
+def _pack_fields(pack):
+    """The running pack as the Queue page draws it: the folder as the list
+    shows it, how long, and the archive so far against the folder's size."""
+    import announce
+    return {"name": pack["name"], "elapsed": pack["elapsed"],
+            "done": pack["done"], "total": pack["total"],
+            "done_text": announce.format_size_human(pack["done"]),
+            "total_text": announce.format_size_human(pack["total"]) if pack["total"] else "",
+            "cancelling": bool(pack.get("cancelled"))}
+
+
+def build_pack_cancel_result():
+    """POST /api/queue/pack/cancel (#1202): stop the folder pack that is
+    running. 200 with who and what it was; 404 when nothing is packing."""
+    import dcc
+    cancelled = dcc.cancel_pack()
+    if cancelled is None:
+        return 404, {"error": "Nothing is being packed."}
+    return 200, {"cancelled": {"user": cancelled["user"], "name": cancelled["name"]}}
+
+
+def build_ignore_result(body):
+    """POST /api/ignore (#1206): ignore a nick for some minutes. 200 with
+    how long, 400 with the reason when security.ignore_user() refuses."""
+    import security
+    nick = str(body.get("nick") or "").strip()
+    ok, message = security.ignore_user(nick, body.get("minutes"))
+    if not ok:
+        return 400, {"error": message}
+    return 200, {"user": nick.lower(), "message": message,
+                 "seconds_left": security.ban_seconds_left(nick)}
+
+
+def build_unignore_result(body):
+    """POST /api/unignore (#1206): end a timed ignore or ban now. 404 when
+    the nick has none."""
+    import security
+    nick = str(body.get("nick") or "").strip()
+    ok, message = security.lift_ban(nick)
+    if not ok:
+        return 404, {"error": message}
+    return 200, {"user": nick.lower(), "message": message}
+
+
+def _queue_nick(body):
+    return str(body.get("nick") or "").strip()
+
+
+def build_queue_move_user_result(body):
+    """POST /api/queue/move-user (#1206): one place up or down the line for a
+    free slot. 200 with the new place, 400 with the reason."""
+    import commands
+    nick = _queue_nick(body)
+    ok, message = commands.move_waiting_user(nick, body.get("direction"))
+    if not ok:
+        return 400, {"error": message}
+    return 200, {"user": nick.lower(), "message": message}
+
+
+def _queue_row_id(body):
+    """The `id` of the file a move or a removal means - one of the queue
+    payload's "file_ids" - or None when it is missing. Required: without it
+    nothing says the file is still the one the page showed (#1245).
+    """
+    row_id = str(body.get("id") or "").strip()
+    return row_id or None
+
+
+def build_queue_move_file_result(body):
+    """POST /api/queue/move-file (#1206): one place up or down inside the
+    nick's own queue. `position` is 1-based and `id` the file the page saw
+    there, so a queue that moved meanwhile is refused, not misread."""
+    import commands
+    nick = _queue_nick(body)
+    row_id = _queue_row_id(body)
+    if row_id is None:
+        return 400, {"error": "Which file? The page sent no id - reload it."}
+    ok, message = commands.move_queued_file(nick, body.get("position"), body.get("direction"), row_id)
+    if not ok:
+        return 400, {"error": message}
+    return 200, {"user": nick.lower(), "message": message}
+
+
+def build_queue_remove_file_result(body):
+    """POST /api/queue/remove-file (#1206): the one file out of the queue, with
+    the same notice to the nick as their own `@<bot>-remove <file>`. `id`
+    names the file, as for a move."""
+    import commands
+    nick = _queue_nick(body)
+    row_id = _queue_row_id(body)
+    if row_id is None:
+        return 400, {"error": "Which file? The page sent no id - reload it."}
+    ok, message = commands.remove_queued_file(nick, body.get("position"), row_id)
+    if not ok:
+        return 400, {"error": message}
+    return 200, {"user": nick.lower(), "message": message}
+
+
+def build_queue_clear_result(body):
+    """POST /api/queue/clear (#1206): everything queued for the nick, as the
+    console's `clearqueue` does. 404 when nothing was queued."""
+    import commands
+    nick = _queue_nick(body)
+    if not nick or any(ch.isspace() for ch in nick):
+        return 400, {"error": "Give the nick."}
+    key = nick.lower()
+    import dcc
+    with dcc.queue_lock:
+        count = len(getattr(config, "dcc_queue", {}).get(key) or [])
+    if not count:
+        return 404, {"error": f"{nick} has nothing queued."}
+    commands.handle_admin_clear_queue("dashboard", "", f"!clearqueue {nick}", authorised=True)
+    return 200, {"user": key, "removed": count, "message": f"Cleared {count} file(s) for {nick}."}
 
 
 def split_list_search_words(query):
@@ -1340,9 +1552,39 @@ def bot_not_here_error(bot):
             f"their name says which.")
 
 
-def build_list_fetch_enqueue_result(bot_raw):
+def build_list_fetch_enqueue_result(bot_raw, channel_raw=None, secondary_raw=False):
     """POST /api/filelists/fetch's pure logic: validate the bot nick and
     enqueue a request_type="list" row.
+
+    `channel_raw` (#1240) asks for this bot's list from a SPECIFIC one of our
+    channels rather than letting the dispatcher pick one. INTERNAL ONLY: the
+    HTTP route below never reads a "channel" field from its body, and no
+    console command accepts one either - an operator cannot ask for one by
+    hand (that capability existed briefly in #1239's draft and was reverted;
+    see its PR thread for the real-world data loss that caused it, now fixed
+    at the storage layer instead - see list_fetch._install_secondary_channel_
+    lists()).
+
+    When not given and this is not a secondary fetch (see `secondary_raw`
+    below), it defaults to held_list_channel(bot) - the channel this bot's
+    list is already known to answer in, if any (#1240 review). Left to the
+    dispatcher's own fallback (the bot's last advert channel, which may be
+    ANY channel we share with it) an ordinary refresh could re-ask in a
+    different shared channel than the one its list actually came from,
+    which - before this - created a second, duplicate marker for content
+    already held under the first: confirmed on review, real data from
+    #1239's own measurement (38 of 49 bots share more than one channel with
+    us).
+
+    `secondary_raw` is explicit (#1240 review), and True only for the one
+    caller that ran the discovery confidence gate: list_grab.
+    secondary_channel_tick(), once list_grab._secondary_channel_candidates()
+    has already decided a genuinely different, STABLE list is worth asking
+    for. Carried all the way to list_fetch.process_fetched_list_zip() so the
+    completion handler knows which kind of fetch this was without having to
+    guess from `channel_raw` after the fact - guessing is what let a bot
+    held from before #1232 (no channel on record at all) look "secondary" on
+    EVERY ordinary refresh forever, a real incident caught on review.
 
     Deliberately reuses dcc_fetch.enqueue_fetch() (extended with a
     request_type parameter) rather than build_fetch_enqueue_result() above:
@@ -1383,6 +1625,15 @@ def build_list_fetch_enqueue_result(bot_raw):
     if not bot:
         return 400, {"error": "'bot' is required."}
 
+    channel_raw = str(channel_raw or "")
+    channel_err = reject_if_unsafe_for_irc_line(channel_raw, "channel") if channel_raw.strip() else None
+    if channel_err:
+        return 400, {"error": channel_err}
+    channel = channel_raw.strip() or None
+    secondary = bool(secondary_raw)
+    if channel is None and not secondary:
+        channel = held_list_channel(bot)
+
     absent = bot_not_here_error(bot)
     if absent:
         return 409, {"error": absent}
@@ -1390,7 +1641,8 @@ def build_list_fetch_enqueue_result(bot_raw):
     if dcc_fetch.has_outstanding_bot_alone_request(bot):
         return 409, {"error": BOT_ALONE_FETCH_CONFLICT_ERROR}
 
-    request_id = dcc_fetch.enqueue_fetch(bot, "", request_type="list")
+    request_id = dcc_fetch.enqueue_fetch(bot, "", request_type="list", channel=channel,
+                                         secondary_channel=secondary)
     if request_id is None:
         # Defense in depth: enqueue_fetch() enforces this same invariant
         # itself (see its docstring), so this should be unreachable given
@@ -1400,7 +1652,7 @@ def build_list_fetch_enqueue_result(bot_raw):
     return 200, {"created": [request_id]}
 
 
-def build_folder_rar_fetch_enqueue_result(bot_raw, folder_raw):
+def build_folder_rar_fetch_enqueue_result(bot_raw, folder_raw, marker_raw=None, channel_raw=None):
     """POST /api/filelists/fetch-folder-rar's pure logic: validate the bot
     nick and folder path, then enqueue a request_type="folder" row asking
     that bot to pack the whole folder/album as a .rar via its own "!rar"
@@ -1445,14 +1697,136 @@ def build_folder_rar_fetch_enqueue_result(bot_raw, folder_raw):
     if absent:
         return 409, {"error": absent}
 
-    if dcc_fetch.has_outstanding_bot_alone_request(bot):
-        return 409, {"error": BOT_ALONE_FETCH_CONFLICT_ERROR}
+    return _enqueue_folder_request(dcc_fetch, bot, folder,
+                                   raw={"marker": marker_raw, "channel": channel_raw})
 
-    request_id = dcc_fetch.enqueue_fetch(bot, f"!rar {folder}", request_type="folder")
+
+def build_folder_rar_batch_enqueue_result(payload):
+    """POST /api/filelists/fetch-folder-rar with a LIST of {"bot","folder"}
+    objects (#1233): what Download selected sends for the ticked rows of a RAR
+    list. Every folder is queued, in the order given, and the dispatcher sends
+    them one at a time per bot. Returns (status, {"created": [ids], "errors":
+    [...]}); a body that created nothing carries the first error's status."""
+    if not isinstance(payload, list) or not payload:
+        return 400, {"error": 'Expected a non-empty list of {"bot": .., "folder": ..} objects.'}
+    if len(payload) > FETCH_ENQUEUE_MAX_ITEMS:
+        return 413, {"error": f"At most {FETCH_ENQUEUE_MAX_ITEMS} items per "
+                              f"request; this one had {len(payload)}."}
+    created = []
+    errors = []
+    first_status = 400
+    for raw in payload:
+        if not isinstance(raw, dict):
+            errors.append({"error": "Each item must be an object with bot/folder.", "item": raw})
+            continue
+        status, result = build_folder_rar_fetch_enqueue_result(
+            raw.get("bot", ""), raw.get("folder", ""), raw.get("marker", ""), raw.get("channel", ""))
+        if status == 200:
+            created.extend(result.get("created", []))
+        else:
+            if not errors:
+                first_status = status
+            errors.append({"error": result.get("error", ""), "item": raw})
+    if not created and errors:
+        return first_status, {"error": errors[0]["error"], "created": [], "errors": errors}
+    return 200, {"created": created, "errors": errors}
+
+
+# An mxrarserver pack row that could not be told apart from a request already
+# waiting on that bot (#1209) - see dcc_fetch._pack_request_conflicts_locked().
+PACK_FETCH_CONFLICT_ERROR = (
+    "A list request, or a folder that would arrive under the same name, is "
+    "already in progress for this bot - wait for it to finish before asking "
+    "for this one."
+)
+
+
+def _preferred_fetch_channel(raw, bot, marker_field="marker"):
+    """The channel a file/folder enqueue item should prefer (#1240): an
+    explicit "channel" on the item itself wins first - a Downloads-page
+    retry already knows exactly which channel its row went out in before
+    and must keep asking there, not fall back to a marker lookup it has no
+    marker for - then the item's own marker (held_list_channel()), then
+    nothing, same fallback chain dcc_fetch._resolve_fetch_channel() applies
+    from there regardless. A non-string or unsafe "channel" is ignored
+    rather than rejecting the whole item over it - this is only ever a
+    preference, never a requirement, so a bad value just loses the
+    preference instead of losing the request too.
+    """
+    channel = raw.get("channel") if isinstance(raw, dict) else None
+    if isinstance(channel, str) and channel.strip() and not reject_if_unsafe_for_irc_line(channel, "channel"):
+        return channel.strip()
+    return held_list_channel(bot, marker=(raw or {}).get(marker_field) if isinstance(raw, dict) else None)
+
+
+def held_list_channel(bot, marker=None):
+    """The channel the list we already hold for `bot` was fetched in, or None
+    (#1232) - read by its nick alone so most callers (a re-fetch, a request
+    with no marker of its own) need no extra field to carry.
+
+    `marker` (#1240), when given, asks the narrower question: not "the bot's
+    primary channel" but "the channel THIS marker's own list came from" -
+    fetched_bot_lists[bot]["lists"][marker]["channel"], checked FIRST. A
+    secondary channel's own marker has a different channel than the bot's
+    primary one by construction (that is what makes it secondary - see
+    list_fetch._install_secondary_channel_lists()), so a request for a file or
+    folder on a secondary marker's list that fell back to the primary's
+    channel would go out in the wrong place - found live: a file ticked on a
+    bot's "-VIDEO" marker's list went to the bot's ordinary channel, where
+    the file both was never advertised. Falls back to the bot's own
+    "channel" (today's rule) when no marker is given, the marker is "" (the
+    primary itself), or that marker is not actually held.
+
+    None for a bot with no held list, or a marker whose own channel could
+    not be resolved when it was fetched either - dcc_fetch._resolve_fetch_
+    channel()'s own fallback chain applies from there, same as always.
+    """
+    store = getattr(config, "fetched_bot_lists", None) or {}
+    entry = store.get(str(bot).strip().lower())
+    if not isinstance(entry, dict):
+        return None
+    marker = str(marker or "").strip()
+    if marker:
+        info = (entry.get("lists") or {}).get(marker)
+        if isinstance(info, dict) and info.get("channel"):
+            return info["channel"]
+    return entry.get("channel")
+
+
+def _enqueue_folder_request(dcc_fetch, bot, folder, trigger=None, raw=None):
+    """Enqueue one folder request: (http_status, payload_dict).
+
+    TWO SHAPES (#1209). A "!rar" folder - DCCore's and its relatives' - is
+    asked for as "!<bot> !rar <folder>" and admitted on the bot alone, so
+    only one may be outstanding per bot. An mxrarserver pack row is asked for
+    exactly as its list wrote it, "!<trigger> <path>.rar", with no "!rar",
+    and its RAR is admitted by the name it will arrive under, so several may
+    wait together as long as those names cannot clash.
+
+    `raw` (#1240) is the original item dict, read by _preferred_fetch_
+    channel() for an explicit "channel" (a Downloads-page retry, which
+    already knows exactly which channel this row went out in before) or a
+    "marker" (a List Browser request, which knows which of the bot's lists
+    the row came from but not its channel directly) - either way, never
+    both at once in practice, and neither is required.
+    """
+    import list as list_mod
+
+    if list_mod.pack_path_of(folder):
+        if dcc_fetch.pack_request_conflicts(bot, folder):
+            return 409, {"error": PACK_FETCH_CONFLICT_ERROR}
+        request, conflict = folder, PACK_FETCH_CONFLICT_ERROR
+    else:
+        if dcc_fetch.has_outstanding_non_folder_request(bot):
+            return 409, {"error": BOT_ALONE_FETCH_CONFLICT_ERROR}
+        request, conflict = f"!rar {folder}", BOT_ALONE_FETCH_CONFLICT_ERROR
+
+    request_id = dcc_fetch.enqueue_fetch(bot, request, request_type="folder", trigger=trigger,
+                                         channel=_preferred_fetch_channel(raw or {}, bot))
     if request_id is None:
         # Defense in depth - see build_list_fetch_enqueue_result()'s
         # identical comment above.
-        return 409, {"error": BOT_ALONE_FETCH_CONFLICT_ERROR}
+        return 409, {"error": conflict}
     return 200, {"created": [request_id]}
 
 
@@ -2529,6 +2903,7 @@ def build_fetch_enqueue_result(payload):
     if unavailable:
         return 503, {"error": unavailable}
     import dcc_fetch
+    import list as list_mod
 
     items = [payload] if isinstance(payload, dict) else payload
     if not isinstance(items, list) or not items:
@@ -2568,6 +2943,18 @@ def build_fetch_enqueue_result(payload):
         if not bot or not filename:
             errors.append({"error": "Both 'bot' and 'filename' are required.", "item": raw})
             continue
+        # A TRIGGER IS NOT A NICK (#1209). A line pasted out of an
+        # mxrarserver list begins "!<trigger>", a word its operator chose, so
+        # the "bot" the paste box split off may be that word and not anybody
+        # in the channel. When it is not a bot we know and exactly one known
+        # bot answers to it, the request is that bot's - matched by its nick
+        # as every request is - and still addressed to the trigger it was
+        # written with.
+        trigger = None
+        if not dcc_fetch.bot_is_known(bot):
+            owner = dcc_fetch.bot_for_trigger(bot)
+            if owner:
+                bot, trigger = owner, bot
         # PER ITEM, not per request: a bulk paste is routinely several bots at
         # once, and one of them having signed off is no reason to refuse the
         # rest. It joins `errors`, which this route already reports beside
@@ -2579,7 +2966,25 @@ def build_fetch_enqueue_result(payload):
         if absent and not dcc_fetch.bot_is_known(bot):
             errors.append({"error": absent, "item": raw})
             continue
-        request_id = dcc_fetch.enqueue_fetch(bot, filename)
+        # AN MXRARSERVER FOLDER ROW (#1209), ticked in the List Browser or
+        # pasted: "<path>.rar" is a folder for that bot to pack, and the RAR
+        # comes back under another name, so as a file request it could never
+        # be admitted. It goes the folder route instead.
+        if list_mod.pack_path_of(filename):
+            folder_status, result = _enqueue_folder_request(
+                dcc_fetch, bot, filename, trigger, raw=raw)
+            if folder_status == 200:
+                created.extend(result["created"])
+            else:
+                errors.append({"error": result["error"], "item": raw})
+            continue
+        if dcc_fetch.request_already_waiting(bot, filename):
+            errors.append({"error": f"Already requested from {bot} and not finished - "
+                                    "it is not asked for twice.",
+                           "item": raw})
+            continue
+        request_id = dcc_fetch.enqueue_fetch(bot, filename, trigger=trigger,
+                                            channel=_preferred_fetch_channel(raw, bot))
         if request_id is None:
             # Only reachable via the queue cap: enqueue_fetch()'s other refusal
             # is for "list"/"folder" rows and this route only creates "file"
@@ -2728,7 +3133,7 @@ def build_fetch_delete_result(request_id, only_states=None):
 
     removed_at_bot = False
     if at_the_bot and not never_sent:
-        removed_at_bot = dcc_fetch.drop_our_request_at(bot, asked_for)
+        removed_at_bot = dcc_fetch.drop_our_request_at(bot, asked_for, channel=row.get("channel"))
 
     if stored_filename:
         directory = os.path.abspath(getattr(config, "FETCHED_FILES_DIR", "./data/fetched"))
@@ -2753,6 +3158,114 @@ def build_fetch_delete_result(request_id, only_states=None):
     if at_the_bot:
         result["removed_at_bot"] = removed_at_bot
     return 200, result
+
+
+def build_fetch_delete_many_result(request_ids, only_states=None):
+    """Delete several rows in ONE pass (#1246 review), for `dlcancel all` /
+    `dlcancel <id> <id> ...` - dccore.mrc's own "Remove all" calls this
+    through the same console command.
+
+    Before this, each id went through build_fetch_delete_result() on its
+    own: a separate acquire-and-release of the fetch lock, a separate
+    another_row_wants_locked() SCAN of the whole queue, and a separate
+    persist_fetch_history() REWRITE OF THE WHOLE HISTORY FILE - all of it
+    repeated once per id. Measured: 500 pending + 500 finished took 6.0s;
+    2000 pending took 39.8s, the console taking no other command meanwhile
+    (dict mutation and the history write both run under a lock a console
+    command is also subject to). The same pattern build_fetch_clear_result()
+    already uses for the Downloads page's Clear buttons, generalised to an
+    explicit id list instead of a state-selected one: one hold of the lock
+    for the whole batch, one scan for "is anything else still waiting on
+    this exact file" per row but all under that SAME hold rather than a
+    fresh acquire each time, and one persist at the very end.
+
+    Deletes a file from disk for a row that has one (same reasoning as
+    build_fetch_delete_result() - unreachable for the current caller's
+    "pending"/"offered"/"queued" states, since none of them has received a
+    byte yet, but kept here so this function's own contract does not
+    silently depend on which states a caller happens to pass today).
+
+    Returns (http_status, {"cancelled": [ids], "refused": [{"id":, "error":}]})
+    - always 200: a per-id refusal (already in flight, gone, or wrong
+    state) is reported per id, not failed as a whole request, the same as
+    build_fetch_clear_result()'s own "nothing to clear is not an error".
+    """
+    import dcc
+    import dcc_fetch
+
+    cancelled = []
+    refused = []
+    still_held = []
+    removed_files = []
+    with dcc_fetch._fetch_lock():
+        queue = dcc_fetch._ensure_fetch_queue()
+        for request_id in dict.fromkeys(request_ids):
+            row = queue.get(request_id)
+            if row is None:
+                refused.append({"id": request_id, "error": "Unknown fetch request."})
+                continue
+            if only_states is not None and row.get("state") not in only_states:
+                refused.append({"id": request_id, "error": "That download is no longer waiting."})
+                continue
+            if row.get("state") not in ("complete", "failed", "pending", "queued", "offered"):
+                refused.append({"id": request_id, "error": "A fetch already in progress cannot be deleted."})
+                continue
+            stored_filename = row.get("stored_filename")
+            at_the_bot = ((row.get("state") in ("offered", "queued")
+                          or (row.get("state") == "failed" and row.get("reason") == "no response"))
+                         and row.get("request_type", "file") == "file")
+            bot = row.get("bot")
+            asked_for = row.get("requested_filename") or row.get("filename")
+            channel = row.get("channel")
+            del queue[request_id]
+            never_sent = dcc_fetch.take_back_unsent_request(row)
+            if at_the_bot and not never_sent:
+                still_held.append((bot, asked_for, channel))
+            if stored_filename:
+                removed_files.append(stored_filename)
+            cancelled.append(request_id)
+        # Never for a file a newer row (one of THIS batch's own survivors,
+        # or one outside it) still waits on there (#1083) - checked once
+        # the whole batch has already been popped, under the SAME lock
+        # hold, not a fresh another_row_wants_locked() scan per id.
+        still_held = [(bot, asked_for, channel) for bot, asked_for, channel in still_held
+                     if not dcc_fetch.another_row_wants_locked(queue, bot, asked_for)]
+        # Two of THIS batch's own rows can both be "at_the_bot" for the same
+        # bot and file (the exact #1083 shape, both sides now gone): the
+        # check above lets both through since neither sees the other in the
+        # queue by the time it runs. One "@bot-remove" clears our entry
+        # there regardless of how many local rows pointed at it, so only
+        # the first is kept.
+        seen = set()
+        deduped = []
+        for bot, asked_for, channel in still_held:
+            key = (bot, asked_for)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((bot, asked_for, channel))
+        still_held = deduped
+
+    directory = os.path.abspath(getattr(config, "FETCHED_FILES_DIR", "./data/fetched"))
+    for stored_filename in removed_files:
+        target = os.path.join(directory, stored_filename)
+        if not dcc.is_safe_path(directory, target):
+            print(f"[WEBUI] Refused to delete {stored_filename!r}: outside FETCHED_FILES_DIR.")
+            continue
+        try:
+            os.remove(platform_compat.long_path(target))
+        except FileNotFoundError:
+            pass
+        except OSError as remove_err:
+            print(f"[WEBUI] Could not delete fetched file {stored_filename!r}: {remove_err}")
+
+    for bot, asked_for, channel in still_held:
+        dcc_fetch.drop_our_request_at(bot, asked_for, channel=channel)
+
+    if cancelled:
+        dcc_fetch.persist_fetch_history()
+
+    return 200, {"cancelled": cancelled, "refused": refused}
 
 
 # Which finished rows POST /api/fetch/clear may forget, by what the operator asked for.
@@ -2797,13 +3310,13 @@ def build_fetch_clear_result(payload):
             never_sent = dcc_fetch.take_back_unsent_request(row)
             if (row.get("state") == "failed" and row.get("reason") == "no response"
                     and row.get("request_type", "file") == "file" and not never_sent):
-                still_held.append((row.get("bot"), row.get("requested_filename") or row.get("filename")))
+                still_held.append((row.get("bot"), row.get("requested_filename") or row.get("filename"), row.get("channel")))
         # Never for a file a newer row still waits on there (#1083): the
         # remove would take that request's place too.
-        still_held = [(bot, asked_for) for bot, asked_for in still_held
+        still_held = [(bot, asked_for, channel) for bot, asked_for, channel in still_held
                       if not dcc_fetch.another_row_wants_locked(queue, bot, asked_for)]
-    for bot, asked_for in still_held:
-        dcc_fetch.drop_our_request_at(bot, asked_for)
+    for bot, asked_for, channel in still_held:
+        dcc_fetch.drop_our_request_at(bot, asked_for, channel=channel)
     if doomed:
         dcc_fetch.persist_fetch_history()
     return 200, {"cleared": len(doomed)}
@@ -3106,7 +3619,8 @@ SETTINGS_CATEGORIES = (
                                                 "ADMIN_NICK", "CHANNEL", "DEBUG_CHANNEL",
                                                 "CHECK_FOR_UPDATES"]),
     ("sharing",       "Sharing & queue",       ["MAX_DCC_SLOTS", "MAX_USER_QUEUE",
-                                                "MAX_GLOBAL_QUEUE", "MAX_SEARCH_RESULTS",
+                                                "MAX_GLOBAL_QUEUE", "SEARCH_ENABLED", "MAX_SEARCH_RESULTS",
+                                                "SEARCH_SHOW_FOLDER", "SEARCH_FOLDER_MAX_CHARS",
                                                 "PAUSE_ON_UPDATE", "PAUSE_FOR_WHOLE_UPDATE",
                                                 "REHASH_TRANSFER_WAIT"]),
     # The transfer-tuning pair, together. Anyone reaching for one wants the
@@ -3135,7 +3649,9 @@ SETTINGS_CATEGORIES = (
     # #926: fetching lists nobody asked for is its own decision, with its
     # own rules - not four more lines at the end of "Fetching from bots".
     ("list-grab",     "Grabbing lists",        ["AUTO_GRAB_LISTS", "AUTO_GRAB_EVERY_MINUTES",
-                                                "AUTO_GRAB_MIN_FILES", "AUTO_GRAB_MIN_SPEED_KB"]),
+                                                "AUTO_GRAB_MIN_FILES", "AUTO_GRAB_MIN_SPEED_KB",
+                                                "AUTO_DISCOVER_CHANNEL_LISTS",
+                                                "MULTI_CHANNEL_LIST_STABLE_SECONDS"]),
     ("fetching",      "Fetching from bots",    ["MAX_FETCH_SLOTS", "AUTO_REFETCH_LISTS",
                                                 "AUTO_REFETCH_INTERVAL_HOURS",
                                                 "AUTO_REFETCH_MAX_PER_RUN",
@@ -3151,7 +3667,10 @@ SETTINGS_CATEGORIES = (
                                                 "FETCH_HISTORY_DAYS",
                                                 "FETCH_HISTORY_MAX_ROWS"]),
     # #926: how the fetch queue paces itself with another bot.
-    ("fetch-queue",   "Fetch queue",           ["FETCH_MAX_PER_BOT", "FETCH_QUEUED_TIMEOUT"]),
+    # #1210: a bot that keeps failing is paused for a while.
+    ("fetch-queue",   "Fetch queue",           ["FETCH_MAX_PER_BOT", "FETCH_QUEUED_TIMEOUT",
+                                                "FETCH_BOT_MAX_FAILS",
+                                                "FETCH_BOT_COOLDOWN_MINUTES"]),
     ("advertising",   "Advertising & search",  ["ANNOUNCE_INTERVAL", "ANNOUNCE_TRANSFERS",
                                                 "BROADCAST_SEARCH_CHANNEL",
                                                 "BROADCAST_SEARCH_COOLDOWN", "CTCP_VERSION_REPLY",
@@ -3225,7 +3744,10 @@ SETTINGS_LABELS = {
     "MAX_DCC_SLOTS": "Max simultaneous sends",
     "MAX_USER_QUEUE": "Max queue per user",
     "MAX_GLOBAL_QUEUE": "Max global queue",
+    "SEARCH_ENABLED": "Answer @find searches",
     "MAX_SEARCH_RESULTS": "Max search results",
+    "SEARCH_SHOW_FOLDER": "Name the folder in search replies",
+    "SEARCH_FOLDER_MAX_CHARS": "Longest folder shown (characters)",
     "MSG_DELAY": "Message delay (seconds)",
     "DEBUG_MSG_DELAY": "Debug message delay (seconds)",
     "DCC_PORT_START": "DCC port range start",
@@ -3243,6 +3765,8 @@ SETTINGS_LABELS = {
     "AUTO_GRAB_EVERY_MINUTES": "Minutes between automatic grabs",
     "AUTO_GRAB_MIN_FILES": "Skip bots with fewer files than",
     "AUTO_GRAB_MIN_SPEED_KB": "Skip bots slower than (KB/s)",
+    "AUTO_DISCOVER_CHANNEL_LISTS": "Discover a bot's other channel-bound lists",
+    "MULTI_CHANNEL_LIST_STABLE_SECONDS": "Hold stable this long first (seconds)",
     "AUTO_REFETCH_INTERVAL_HOURS": "Least time between re-fetches of one bot (hours)",
     "AUTO_REFETCH_MAX_PER_RUN": "Most lists to re-fetch in one sweep",
     "FETCH_TRANSFER_TIMEOUT": "Fetch transfer timeout (seconds)",
@@ -3251,6 +3775,8 @@ SETTINGS_LABELS = {
     # anybody made us.
     "FETCH_QUEUED_TIMEOUT": "Wait for a queued request (s)",
     "FETCH_MAX_PER_BOT": "Files asked of one bot at once",
+    "FETCH_BOT_MAX_FAILS": "Failed requests in a row that pause a bot",
+    "FETCH_BOT_COOLDOWN_MINUTES": "Minutes a failing bot stays paused",
     "FETCH_OFFER_TIMEOUT": "Wait for a reply to a fetch request (seconds)",
     "FETCH_FOLDER_OFFER_TIMEOUT": "Wait for a reply to a folder (.rar) request (seconds)",
     "FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED":
@@ -3575,6 +4101,15 @@ def theme_preview_overrides(payload):
             value = body.get(key)
             wanted[key] = (settings_file.coerce(key, value, "", str)
                            if isinstance(value, str) else "")
+    # SEARCH_ENABLED (#1249 review): announce.search_state() already reads
+    # the unsaved value first - `(settings or {}).get("SEARCH_ENABLED", ...)`
+    # - but nothing ever put it in `settings`, since this whitelist stopped
+    # at THEME and CUSTOM_THEME_*. The advert sample's "Search: ON/OFF"
+    # followed the SAVED setting regardless of what the operator had just
+    # toggled on the page, same as every other preview bug this function
+    # exists to prevent.
+    if "SEARCH_ENABLED" in body:
+        wanted["SEARCH_ENABLED"] = bool(body.get("SEARCH_ENABLED"))
     return wanted
 
 
@@ -4051,6 +4586,7 @@ def build_lists_payload():
             "name": entry.name,
             "primary": entry.primary,
             "channels": list(entry.channels),
+            "modes": dict(getattr(entry, "modes", None) or {}),
             "folders": [{"name": f.name, "path": f.path} for f in entry.folders],
         })
     return {
@@ -4103,6 +4639,12 @@ def apply_list_changes(payload):
             raw_channels = []
         if not isinstance(raw_channels, list):
             return 400, {"error": f"{name or 'A list'}: 'channels' must be a list."}
+        raw_modes = row.get("modes")
+        if raw_modes is None:
+            raw_modes = {}
+        if not isinstance(raw_modes, dict):
+            return 400, {"error": f"{name or 'A list'}: 'modes' must be an object "
+                                  f"of channel -> mode."}
         raw_folders = row.get("folders")
         if raw_folders is None:
             raw_folders = []
@@ -4129,7 +4671,10 @@ def apply_list_changes(payload):
         entries.append(library.ServedList(
             name, bool(row.get("primary")),
             [str(c).strip() for c in raw_channels if str(c).strip()],
-            folders))
+            folders,
+            {str(c).strip().lower(): str(m or "").strip().lower()
+             for c, m in raw_modes.items()
+             if str(m or "").strip().lower() not in (library.NORMAL, "")}))
 
     if not entries:
         import os as os_mod
@@ -4707,6 +5252,7 @@ class _WebConsoleSession:
     # prose - it used to be missing, so `pair` wrote the new token to disk and
     # then raised before showing it.
     structured = False
+    draws_dlqueue = False
     client = "web"
 
     def __init__(self, nick):
@@ -4870,6 +5416,41 @@ if HAVE_FLASK:
         @app.route("/api/queue")
         def api_queue():
             return jsonify(build_queue_payload(user=request.args.get("user")))
+
+        @app.route("/api/queue/pack/cancel", methods=["POST"])
+        def api_queue_pack_cancel():
+            status, result = build_pack_cancel_result()
+            return jsonify(result), status
+
+        @app.route("/api/queue/move-user", methods=["POST"])
+        def api_queue_move_user():
+            status, result = build_queue_move_user_result(json_object(request.get_json(silent=True)))
+            return jsonify(result), status
+
+        @app.route("/api/queue/move-file", methods=["POST"])
+        def api_queue_move_file():
+            status, result = build_queue_move_file_result(json_object(request.get_json(silent=True)))
+            return jsonify(result), status
+
+        @app.route("/api/queue/remove-file", methods=["POST"])
+        def api_queue_remove_file():
+            status, result = build_queue_remove_file_result(json_object(request.get_json(silent=True)))
+            return jsonify(result), status
+
+        @app.route("/api/queue/clear", methods=["POST"])
+        def api_queue_clear():
+            status, result = build_queue_clear_result(json_object(request.get_json(silent=True)))
+            return jsonify(result), status
+
+        @app.route("/api/ignore", methods=["POST"])
+        def api_ignore():
+            status, result = build_ignore_result(json_object(request.get_json(silent=True)))
+            return jsonify(result), status
+
+        @app.route("/api/unignore", methods=["POST"])
+        def api_unignore():
+            status, result = build_unignore_result(json_object(request.get_json(silent=True)))
+            return jsonify(result), status
 
         @app.route("/api/stats/import/variables")
         def api_stats_import_variables():
@@ -5050,9 +5631,13 @@ if HAVE_FLASK:
 
         @app.route("/api/filelists/fetch-folder-rar", methods=["POST"])
         def api_filelists_fetch_folder_rar():
-            body = json_object(request.get_json(silent=True))
+            payload = request.get_json(silent=True)
+            if isinstance(payload, list):
+                status, result = build_folder_rar_batch_enqueue_result(payload)
+                return jsonify(result), status
+            body = json_object(payload)
             status, result = build_folder_rar_fetch_enqueue_result(
-                body.get("bot", ""), body.get("folder", ""))
+                body.get("bot", ""), body.get("folder", ""), body.get("marker", ""), body.get("channel", ""))
             return jsonify(result), status
 
         @app.route("/api/settings/theme-preview", methods=["POST"])

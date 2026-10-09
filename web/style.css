@@ -952,6 +952,7 @@ html, body {
 }
 
 .status-pill.status-sending { color: var(--status-sending); }
+.status-pill.status-packing { color: var(--status-sending); }
 .status-pill.status-frozen  { color: var(--status-frozen); }
 .status-pill.status-queued  { color: var(--status-queued); }
 .status-pill.status-empty   { color: var(--status-empty); }
@@ -1240,6 +1241,16 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 14px;
+}
+
+.served-list-channel-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.served-list-channel-mode {
+  font-size: 11.5px;
 }
 
 .served-list-channel {
@@ -1890,6 +1901,14 @@ mark.filter-hit {
   width: 140px;
 }
 
+.queue-pack-line {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .queue-files summary {
   cursor: pointer;
   list-style: none;
@@ -1983,6 +2002,15 @@ mark.filter-hit {
 
 .record-nick-table .col-num {
   width: 72px;
+}
+
+/* How transfers ended (#1203): five figures beside the kind. */
+.transfer-outcome-wrap {
+  margin-bottom: 6px;
+}
+
+.transfer-outcome-table .col-num {
+  width: 96px;
 }
 
 .record-nick,
@@ -2927,4 +2955,20 @@ mark.filter-hit {
 
 .data-table th[aria-sort="descending"] .sort-btn::after {
   content: " \25BC";
+}
+
+/* #1206: the operator's queue controls sit small beside what they act on. */
+.queue-file-controls {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.queue-actions {
+  white-space: nowrap;
+}
+
+.queue-actions .btn + .btn {
+  margin-left: 4px;
 }

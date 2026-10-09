@@ -11,8 +11,12 @@ and forget_all() remove it again and then rebuild the file (VACUUM), so a remove
 read back out of it afterwards. Deleting alone does not do that: once the record outgrows one page the
 nick is also in the index's interior pages and in the free space of pages an earlier write split.
 
-Only completed transfers are written, as with stats.txt. A write that fails is
-printed and dropped, and never reaches the transfer that called it.
+Every transfer that ends is written, with how it ended in `status` (#1203):
+completed, failed, cancelled, or pack_failed for a folder that could not be
+packed. Before #1203 only completed ones were, and a file from then reads
+every old row as completed. Every figure but the outcomes table counts the
+completed rows alone, as it always has. A write that fails is printed and
+dropped, and never reaches the transfer that called it.
 
 A write happens on the transfer thread before its slot is released, so it waits
 at most WRITE_TIMEOUT seconds for a busy file. A read takes no lock of its own
@@ -39,6 +43,16 @@ KIND_FILE = "file"
 KIND_ALBUM = "album"
 KIND_LIST = "list"
 
+# How a transfer ended (#1203). A transfer the bot itself called off - the
+# operator cancelling a pack, a restart, a list rebuilt under a send - is
+# CANCELLED and not FAILED, so the success rate does not blame the network
+# for the operator's own actions. So is one the user stopped.
+STATUS_COMPLETED = "completed"
+STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
+STATUS_PACK_FAILED = "pack_failed"
+STATUSES = (STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_PACK_FAILED)
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS transfers (
     id         INTEGER PRIMARY KEY,
@@ -52,7 +66,8 @@ CREATE TABLE IF NOT EXISTS transfers (
     bytes      INTEGER NOT NULL,
     seconds    REAL,
     speed      INTEGER,
-    waited     REAL
+    waited     REAL,
+    status     TEXT    NOT NULL DEFAULT 'completed'
 );
 CREATE INDEX IF NOT EXISTS transfers_by_direction_and_time ON transfers (direction, ended_at);
 CREATE INDEX IF NOT EXISTS transfers_by_item ON transfers (direction, kind, item_key);
@@ -67,7 +82,35 @@ CREATE TABLE IF NOT EXISTS imported (
     imported_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS imported_by_nick ON imported (nick, direction);
+CREATE TABLE IF NOT EXISTS outcomes_began (
+    at  INTEGER NOT NULL
+);
 """
+
+# THE STATUS COLUMN (#1203) came after the file did. A file written before it
+# is given the column on its first open, and every row already in it reads as
+# completed - which it was, since nothing else was written then. The moment
+# that happens, or the moment a new file is made, goes in `outcomes_began`:
+# before it a failure left no row, so a success rate over a period reaching
+# back past it would count the old completed rows against no failures at all.
+def _migrate(conn):
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(transfers)")}
+    if "status" not in columns:
+        try:
+            conn.execute("ALTER TABLE transfers ADD COLUMN status TEXT NOT NULL DEFAULT 'completed'")
+        except sqlite3.OperationalError as err:
+            # Another connection opening the same old file added it first.
+            if "duplicate column" not in str(err).lower():
+                raise
+    # Looked at first, so an open of a stamped file - every open but the
+    # first - writes nothing and a read never takes the write lock. The
+    # insert is one statement, so two connections opening a new file at once
+    # cannot both stamp it.
+    if conn.execute("SELECT 1 FROM outcomes_began LIMIT 1").fetchone() is None:
+        with conn:
+            conn.execute("INSERT INTO outcomes_began (at) SELECT ? WHERE NOT EXISTS"
+                         " (SELECT 1 FROM outcomes_began)", (int(time.time()),))
+
 
 # IMPORTED FIGURES (#1062, #1064). Totals from before this record began -
 # KeepTrack's, so far - cannot be rows of `transfers`: they have no time, no
@@ -99,6 +142,7 @@ def _open(path, timeout):
         # block each other. The mode is stored in the file.
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
+        _migrate(conn)
     except Exception:
         conn.close()
         raise
@@ -154,19 +198,44 @@ def _start_afresh(path, err):
 
 _INSERT = ("INSERT INTO transfers (direction, nick, kind, ended_at, item_key, name,"
            " size, bytes, seconds, speed, waited) VALUES (?,?,?,?,?,?,?,?,?,?,?)")
+# The same with the status last (#1203). Without it a row is completed, the
+# column's default, as every row was before.
+_INSERT_WITH_STATUS = ("INSERT INTO transfers (direction, nick, kind, ended_at, item_key, name,"
+                       " size, bytes, seconds, speed, waited, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+
+
+# How far before outcomes_began a row may be timed and still be one whose time
+# was taken just before the open that wrote the stamp (#1203).
+_STAMP_RACE_SECONDS = 2
 
 
 def _record(row):
+    """Write one row: the columns in _INSERT's order, and a status after them
+    for a transfer that did not complete."""
     path = _path()
     if not path:
         return False
+    insert = _INSERT_WITH_STATUS if len(row) == 12 else _INSERT
     try:
         with runtime.transfer_log_lock:
             conn = _connect(path, WRITE_TIMEOUT, repair=True)
             try:
+                # NOT BEFORE THE RECORD OF OUTCOMES BEGAN (#1203). The row's
+                # time was taken by the caller, before this open - and the
+                # first open of an older file is what stamps outcomes_began,
+                # with its own, later clock. Across a second boundary the
+                # first failure written after an upgrade fell before the stamp
+                # and out of every success rate (seen on Windows CI, where
+                # that first open is slow). Only such a row - timed a moment
+                # before this very open - is lifted to the stamp, by a second
+                # or two at most; a row that really is older (an import, a
+                # test's backdated row) keeps its time.
+                began = conn.execute("SELECT MIN(at) FROM outcomes_began").fetchone()[0]
+                if began is not None and began - _STAMP_RACE_SECONDS <= row[3] < began:
+                    row = row[:3] + (int(began),) + row[4:]
                 try:
                     with conn:
-                        conn.execute(_INSERT, row)
+                        conn.execute(insert, row)
                 except sqlite3.DatabaseError as err:
                     # Opening reads only the header and the schema, so a file
                     # damaged further in opens fine and fails here, on every
@@ -178,7 +247,7 @@ def _record(row):
                     _start_afresh(path, err)
                     conn = _open(path, WRITE_TIMEOUT)
                     with conn:
-                        conn.execute(_INSERT, row)
+                        conn.execute(insert, row)
             finally:
                 conn.close()
         return True
@@ -232,6 +301,23 @@ def record_received(kind, size, nick=None):
                     _whole(size), None, None, None))
 
 
+def record_unfinished(direction, status, kind, size, reached, nick=None, item_key=None, name=None):
+    """One transfer that ended without completing (#1203): how it ended, how
+    big it was and how many bytes reached the other side before it did.
+
+    As with a completed row, a list keeps no name and a received transfer
+    keeps none either. There is no speed and no wait: neither means anything
+    for a transfer that did not finish. Returns False, writing nothing, for a
+    status that is not one of the three an unfinished transfer can have.
+    """
+    if direction not in (SENT, RECEIVED) or status not in (STATUS_FAILED, STATUS_CANCELLED, STATUS_PACK_FAILED):
+        return False
+    if kind == KIND_LIST or direction == RECEIVED:
+        item_key = name = None
+    return _record((direction, _nick(nick), kind, int(time.time()), item_key, name, _whole(size),
+                    _whole(reached), None, None, None, status))
+
+
 def _query(sql, args=()):
     path = _path()
     if not path or not os.path.exists(path):
@@ -262,7 +348,7 @@ def top_files(limit=10, since=None, kind=None):
     """
     rows = _query(
         "SELECT MAX(name), COUNT(*) AS n FROM transfers"
-        " WHERE direction = ? AND kind != ? AND (? IS NULL OR kind = ?)"
+        " WHERE status = 'completed' AND direction = ? AND kind != ? AND (? IS NULL OR kind = ?)"
         " AND item_key IS NOT NULL AND ended_at >= ?"
         " GROUP BY item_key ORDER BY n DESC, MAX(name) LIMIT ?",
         (SENT, KIND_LIST, kind, kind, since or 0, max(0, int(limit))))
@@ -281,18 +367,18 @@ def summary(since=None):
     since = since or 0
     sent = _one(3,
         "SELECT SUM(kind != ?), SUM(kind = ?), SUM(CASE WHEN kind != ? THEN bytes ELSE 0 END)"
-        " FROM transfers WHERE direction = ? AND ended_at >= ?",
+        " FROM transfers WHERE status = 'completed' AND direction = ? AND ended_at >= ?",
         (KIND_LIST, KIND_LIST, KIND_LIST, SENT, since))
     speed = _one(3,
         "SELECT MAX(speed), SUM(bytes), SUM(seconds) FROM transfers"
-        " WHERE direction = ? AND speed IS NOT NULL AND ended_at >= ?",
+        " WHERE status = 'completed' AND direction = ? AND speed IS NOT NULL AND ended_at >= ?",
         (SENT, since))
     waited = _one(1,
-        "SELECT AVG(waited) FROM transfers WHERE direction = ? AND waited IS NOT NULL"
+        "SELECT AVG(waited) FROM transfers WHERE status = 'completed' AND direction = ? AND waited IS NOT NULL"
         " AND ended_at >= ?", (SENT, since))
     received = _one(2,
         "SELECT SUM(kind != ?), SUM(CASE WHEN kind != ? THEN size ELSE 0 END)"
-        " FROM transfers WHERE direction = ? AND ended_at >= ?",
+        " FROM transfers WHERE status = 'completed' AND direction = ? AND ended_at >= ?",
         (KIND_LIST, KIND_LIST, RECEIVED, since))
     seconds = speed[2] or 0
     # All time includes the imported totals (#1062); a period does not.
@@ -307,6 +393,34 @@ def summary(since=None):
         "files_received": int(received[0] or 0) + before[RECEIVED][0],
         "bytes_received": int(received[1] or 0) + before[RECEIVED][1],
     }
+
+
+def outcomes_began():
+    """When failed and cancelled transfers began to be written (#1203), as a
+    Unix time, or None when there is no record yet."""
+    row = _one(1, "SELECT MIN(at) FROM outcomes_began")
+    return int(row[0]) if row[0] is not None else None
+
+
+def outcomes(since=None):
+    """How the transfers of a period ended (#1203), counted per direction and kind.
+
+    Returns {"since": the time counted from, "rows": {(direction, kind):
+    {status: count}}}. Only rows from outcomes_began() on are counted, however
+    far back `since` asks for: before it a failure was never written, and the
+    completed rows of that time would make every rate look better than it was.
+    "since" is that later time when it is the one used, so the page can say so.
+    """
+    began = outcomes_began()
+    if began is None:
+        return {"since": None, "rows": {}}
+    start = max(int(since or 0), began)
+    rows = {}
+    for direction, kind, status, count in _query(
+            "SELECT direction, kind, status, COUNT(*) FROM transfers WHERE ended_at >= ?"
+            " GROUP BY direction, kind, status", (start,)):
+        rows.setdefault((direction, kind), {})[status] = int(count or 0)
+    return {"since": start if start > int(since or 0) else None, "rows": rows}
 
 
 def _imported_totals():
@@ -373,7 +487,7 @@ def top_nicks(direction=SENT, limit=10, since=None):
     rows = _query(
         "SELECT nick, SUM(files), SUM(bytes) FROM ("
         " SELECT nick, (kind != ?) AS files, CASE WHEN kind != ? THEN bytes ELSE 0 END AS bytes"
-        " FROM transfers WHERE direction = ? AND nick IS NOT NULL AND ended_at >= ?"
+        " FROM transfers WHERE status = 'completed' AND direction = ? AND nick IS NOT NULL AND ended_at >= ?"
         " UNION ALL"
         " SELECT nick, files, bytes FROM imported WHERE direction = ? AND nick IS NOT NULL AND ? = 0"
         ") GROUP BY nick HAVING SUM(files) > 0 ORDER BY 2 DESC, 3 DESC, nick LIMIT ?",
@@ -390,11 +504,11 @@ def nick_summary(nick, since=None):
         return figures
     sent = _one(3,
         "SELECT SUM(kind != ?), SUM(kind = ?), SUM(CASE WHEN kind != ? THEN bytes ELSE 0 END)"
-        " FROM transfers WHERE direction = ? AND nick = ? AND ended_at >= ?",
+        " FROM transfers WHERE status = 'completed' AND direction = ? AND nick = ? AND ended_at >= ?",
         (KIND_LIST, KIND_LIST, KIND_LIST, SENT, nick, since))
     received = _one(2,
         "SELECT SUM(kind != ?), SUM(CASE WHEN kind != ? THEN size ELSE 0 END)"
-        " FROM transfers WHERE direction = ? AND nick = ? AND ended_at >= ?",
+        " FROM transfers WHERE status = 'completed' AND direction = ? AND nick = ? AND ended_at >= ?",
         (KIND_LIST, KIND_LIST, RECEIVED, nick, since))
     figures.update(files_sent=int(sent[0] or 0), lists_sent=int(sent[1] or 0), bytes_sent=int(sent[2] or 0),
                    files_received=int(received[0] or 0), bytes_received=int(received[1] or 0))
@@ -416,8 +530,10 @@ def has_imported():
     return bool(_query("SELECT 1 FROM imported LIMIT 1"))
 
 
+# The status last (#1203): a script that reads the columns by position
+# before it still finds every one where it was.
 EXPORT_COLUMNS = ("ended_at", "direction", "nick", "kind", "name", "size", "bytes",
-                  "seconds", "speed", "waited")
+                  "seconds", "speed", "waited", "status")
 EXPORT_CHUNK = 1000
 
 
@@ -551,7 +667,8 @@ def _empty_the_wal(conn, path):
 
 
 def forget_nick(nick):
-    """Take one nick out of the record. The rows go; the figures that do not name a nick go with them."""
+    """Take one nick out of the record. The rows go - failed and cancelled ones
+    as well as completed (#1203); the figures that do not name a nick go with them."""
     nick = _nick(nick)
     if nick is None:
         return 0

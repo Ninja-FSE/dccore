@@ -99,8 +99,10 @@ class TheQueueItselfIsBounded(DCCoreTestCase):
         self.addCleanup(setattr, dcc_fetch, "MAX_UNRESOLVED_FETCHES", self.real_cap)
 
     def test_repeated_requests_cannot_walk_past_the_queue_cap(self):
-        for _ in range(4):
-            webserver.build_fetch_enqueue_result(items(2))
+        # Different files each round: the same file twice is one request (#1218).
+        for round_ in range(4):
+            webserver.build_fetch_enqueue_result(
+                [{"bot": "goodbot", "filename": f"Round{round_}-{n}.flac"} for n in range(2)])
 
         self.assertEqual(dcc_fetch.count_unresolved_fetches(), 5)
 

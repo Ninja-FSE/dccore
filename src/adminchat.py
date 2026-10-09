@@ -558,10 +558,33 @@ def script_draws_fetching(version):
     return theirs is not None and theirs >= ours
 
 
+# The first script that draws the pack that is running (#1202). An older one
+# would print a PACKING line as text every status burst.
+PACKING_SCRIPT_VERSION = "1.14"
+
+
+def script_draws_packing(version):
+    ours = _version_tuple(PACKING_SCRIPT_VERSION)
+    theirs = _version_tuple(version)
+    return theirs is not None and theirs >= ours
+
+
+# The first script with the Download queues window (#1217). An older one has no
+# handler for the DQROW lines, so it is sent the list as plain text instead.
+DLQUEUE_SCRIPT_VERSION = "1.15"
+
+
+def script_draws_dlqueue(version):
+    ours = _version_tuple(DLQUEUE_SCRIPT_VERSION)
+    theirs = _version_tuple(version)
+    return theirs is not None and theirs >= ours
+
+
 # The first script that draws a list rebuild's progress (#1024). An older one
 # would print a REBUILD line as text.
 REBUILD_SCRIPT_VERSION = "1.9"
 REBUILD_INTERVAL = 5.0        # seconds between REBUILD lines while one runs, between bursts
+PACKING_INTERVAL = 3.0        # seconds between PACKING lines while a pack runs, between bursts
 
 
 def script_draws_rebuild(version):
@@ -658,8 +681,11 @@ DOWNLOAD_WAITING_NOTES = {
     "just-back": "{bot} is back - asking shortly",
     "retry": "busy - asking again later",
     "their-turn": "waiting - {bot} has enough of ours",
+    "one-at-a-time": "waiting - {bot} is sending another folder or list first",
     "slots": "waiting for a free slot",
     "paused": "paused - resume it on the dashboard",
+    # A bot that kept failing (#1210), paused until a time it ends by itself.
+    "cooldown": "paused until {until} after {failures} failures",
     "disk-full": "waiting for disk space",
     "joining": "waiting to join the channels",
 }
@@ -699,7 +725,89 @@ def _download_waiting_note(row):
     if state == "offered":
         return "asked - no answer yet"
     template = DOWNLOAD_WAITING_NOTES.get(row.get("waiting"))
-    return template.format(bot=row.get("bot") or "the bot") if template else "asking shortly"
+    if not template:
+        return "asking shortly"
+    until = row.get("cooldown_until")
+    clock = (time.strftime("%H:%M", time.localtime(until))
+             if isinstance(until, (int, float)) and not isinstance(until, bool) else "?")
+    return template.format(bot=row.get("bot") or "the bot", until=clock,
+                           failures=row.get("cooldown_failures") or "?")
+
+
+def _fetch_rows_snapshot():
+    """[(id, row copy)] of the fetch queue, or None when the lock is not free
+    in time. The caller is the session writer, which is also the link's
+    heartbeat, so the lock is tried for a moment and not waited for."""
+    try:
+        import dcc_fetch
+        queue = dcc_fetch._ensure_fetch_queue()
+        lock = dcc_fetch._fetch_lock()
+        if not lock.acquire(timeout=DOWNLOADS_LOCK_WAIT):
+            return None
+        try:
+            return [(rid, dict(row)) for rid, row in queue.items()]
+        finally:
+            lock.release()
+    except Exception as err:
+        print(f"[ADMINCHAT] Downloads unavailable for the window: {err}")
+        return None
+
+
+def _by_bot(items):
+    """One bot's rows together, bots in the order each first appears, so a
+    window can head each group with the bot's nick."""
+    groups = {}
+    for item in items:
+        groups.setdefault(item[1].get("bot") or "?", []).append(item)
+    return [item for group in groups.values() for item in group]
+
+
+# What a request is, for the Download queues window: a file, a folder (!rar) or a list.
+_DLQUEUE_KINDS = {"file": "f", "folder": "r", "list": "l"}
+_DLQUEUE_STATES = ("pending", "offered", "queued")
+
+
+def dlqueue_requests():
+    """[(id, row)] of every request that has not started, oldest first within
+    each bot, or None when the fetch queue could not be read in time. These are
+    the ones that can be let go: nothing is coming in for them yet."""
+    rows = _fetch_rows_snapshot()
+    if rows is None:
+        return None
+    waiting = [item for item in rows if item[1].get("state") in _DLQUEUE_STATES]
+    waiting.sort(key=lambda item: item[1].get("requested_at", 0))
+    return _by_bot(waiting)
+
+
+def dlqueue_lines(requests):
+    """The Download queues window's snapshot (#1217):
+
+        DCCORE DQBEGIN
+        DCCORE DQROW <id> <kind> <state> <bot> <note> <name>
+        DCCORE DQEND <count>
+
+    kind is f (file), r (folder, asked as !rar) or l (a bot's list); <note> is
+    one token, why the request waits. Whole or not sent: the window redraws at DQEND.
+
+    Capped at DOWNLOADS_WAITING_MAX rows (#1246 review), the same bound the
+    Downloads window's own DLBEGIN/DLROW/DLEND snapshot already applies to
+    its "waiting" rows - this had none at all. The session's own outgoing
+    buffer holds only so many lines (500) and drops the OLDEST once full -
+    with 600 pending, that dropped DQBEGIN itself, so the old dq.* rows a
+    client keeps across snapshots were never told to clear, and the window
+    showed a mix of stale and fresh rows with a count that matched neither.
+    DQEND still reports the REAL total, so a client that draws a count
+    (`dqn` in dccore.mrc) shows the true number even though only the first
+    DOWNLOADS_WAITING_MAX were actually drawn - the same split DLEND's own
+    waiting count already makes.
+    """
+    lines = ["DCCORE DQBEGIN"]
+    for rid, row in requests[:DOWNLOADS_WAITING_MAX]:
+        lines.append(f"DCCORE DQROW {rid} {_DLQUEUE_KINDS.get(row.get('request_type', 'file'), 'f')} "
+                     f"{row.get('state')} {_clean(row.get('bot'), token=True)} "
+                     f"{_clean(_download_waiting_note(row), token=True)} {_clean(_download_name(row))}")
+    lines.append(f"DCCORE DQEND {len(requests)}")
+    return lines
 
 
 def downloads_lines(finished_rows=DOWNLOADS_FINISHED_DEFAULT, now=None):
@@ -721,18 +829,8 @@ def downloads_lines(finished_rows=DOWNLOADS_FINISHED_DEFAULT, now=None):
     """
     import time as _time
     now = _time.time() if now is None else now
-    try:
-        import dcc_fetch
-        queue = dcc_fetch._ensure_fetch_queue()
-        lock = dcc_fetch._fetch_lock()
-        if not lock.acquire(timeout=DOWNLOADS_LOCK_WAIT):
-            return None
-        try:
-            rows = [(rid, dict(row)) for rid, row in queue.items()]
-        finally:
-            lock.release()
-    except Exception as err:
-        print(f"[ADMINCHAT] Downloads unavailable for the window: {err}")
+    rows = _fetch_rows_snapshot()
+    if rows is None:
         return None
 
     coming, waiting, finished = [], [], []
@@ -754,13 +852,7 @@ def downloads_lines(finished_rows=DOWNLOADS_FINISHED_DEFAULT, now=None):
     done = sorted((i for i in finished if not failed_row(i[1])), key=by_ended, reverse=True)
     failed = sorted((i for i in finished if failed_row(i[1])), key=by_ended, reverse=True)
 
-    def by_bot(items):
-        """One bot's rows together, bots in the order each first appears, so the
-        window can head each group with the bot's nick."""
-        groups = {}
-        for item in items:
-            groups.setdefault(item[1].get("bot") or "?", []).append(item)
-        return [item for group in groups.values() for item in group]
+    by_bot = _by_bot
 
     def line(rid, kind, state, row, bps=0, when=0, note="-"):
         return (f"DCCORE DLROW {rid} {kind} {state} {_clean(row.get('bot'), token=True)} "
@@ -815,7 +907,24 @@ def fetching_lines(now=None):
     return lines
 
 
-def status_lines(now=None, fetching=False, rebuild=False, reading=False):
+def packing_lines(now=None):
+    """`DCCORE PACKING <nick> <done> <total> <elapsed> <folder>` while a folder
+    pack runs (#1202): who it is for, the archive's size so far, the folder's
+    size (0 until measured), seconds, and the folder as the list shows it -
+    the last field, so it may hold spaces. Nothing when none runs."""
+    try:
+        import dcc
+        pack = dcc.pack_status(now)
+    except Exception as err:
+        print(f"[ADMINCHAT] The running pack is unavailable for the status burst: {err}")
+        return []
+    if pack is None:
+        return []
+    return [f"DCCORE PACKING {_clean(pack['user'], token=True)} {_num(pack['done'])} "
+            f"{_num(pack['total'])} {_num(pack['elapsed'])} {_clean(pack['name'])}"]
+
+
+def status_lines(now=None, fetching=False, rebuild=False, reading=False, packing=False):
     """The STATUS burst (#550, step 3): what the client's title bar and side
     panel are drawn from, read from what the daemon already holds.
 
@@ -868,15 +977,16 @@ def status_lines(now=None, fetching=False, rebuild=False, reading=False):
              f"{sum(len(rows) for rows in queue.values())} {len(queue)} "
              f"{sent_today} {bytes_today} {bps_now} {record} "
              f"{started} {failed} {searches}"]
+    # Imported here, not at module scope: webserver.py imports this module,
+    # and tests/test_import_graph.py pins that importing webserver pulls in
+    # none of the daemon - stats_mgr included.
+    import stats_mgr as _speeds
     for tx in transfers:
         sent = int(tx.get("bytes_sent") or 0)
-        started = float(tx.get("started_at") or 0)
-        # The speed is what THIS connection has moved, not what the receiver
-        # holds: a resumed send starts with bytes_sent already at the resume
-        # point, and dividing all of it by the seconds since it restarted
-        # showed 108 MB/s for a link doing 6 (#746).
-        moved = max(0, sent - int(tx.get("resume_offset") or 0))
-        bps = int(moved / (now - started)) if started and now > started + 0.5 else 0
+        # What THIS connection has moved per second (#746), through the one
+        # function the next-slot estimate reads too (#1207), so the console
+        # and the estimate cannot disagree about how fast a send is going.
+        bps = _speeds.send_speed(tx, now)
         lines.append(f"DCCORE SLOT {_clean(tx.get('user'), token=True)} {sent} "
                      f"{_num(tx.get('size'))} {bps} {_clean(tx.get('file'))}")
     # In the queue's own order, which is the order dcc.check_queue_and_send()
@@ -893,6 +1003,8 @@ def status_lines(now=None, fetching=False, rebuild=False, reading=False):
         lines.extend(fetching_lines(now))
     if rebuild:
         lines.extend(rebuild_lines(now, reading=reading))
+    if packing:
+        lines.extend(packing_lines(now))
     return lines
 
 
@@ -945,9 +1057,13 @@ class Session:
         self.draws_fetching = False   # the script said it can draw FETCHING lines (#1019)
         self.draws_rebuild = False    # ... and REBUILD lines (#1024)
         self.draws_audio = False      # ... and the background audio reading in them (#1182)
+        self.draws_packing = False    # ... and the pack that is running (#1202)
         self._rebuild_sent_at = 0.0
         self._rebuild_shown = False   # a REBUILD line is on the script's panel
+        self._packing_sent_at = 0.0
+        self._packing_shown = False   # a PACKING line is on the script's panel
         self.draws_downloads = False  # ... and the Downloads window's rows (#1022)
+        self.draws_dlqueue = False    # ... and the Download queues window's rows (#1217)
         self.reads_peers = False      # ... and PEERS and CONSOLEFEED lines (#1045)
         self.downloads_finished = 0   # > 0 while that window is open: how many finished rows it wants
         self._downloads_sent_at = 0.0
@@ -1029,7 +1145,8 @@ class Session:
                 try:
                     lines.extend(status_lines(fetching=self.draws_fetching,
                                               rebuild=self.draws_rebuild,
-                                              reading=self.draws_audio))
+                                              reading=self.draws_audio,
+                                              packing=self.draws_packing))
                 except Exception as err:
                     print(f"[ADMINCHAT] Status burst failed: {err}")
 
@@ -1045,6 +1162,8 @@ class Session:
             self.send(line)
         self._rebuild_shown = any(line.startswith("DCCORE REBUILD ") for line in job[1])
         self._rebuild_sent_at = time.time()
+        self._packing_shown = any(line.startswith("DCCORE PACKING ") for line in job[1])
+        self._packing_sent_at = time.time()
 
     def send_rebuild_progress(self):
         """A REBUILD line between bursts while a rebuild runs, and one
@@ -1062,6 +1181,24 @@ class Session:
         self._rebuild_sent_at = now
         self._rebuild_shown = bool(lines)
         self.send(lines[0] if lines else "DCCORE REBUILD end")
+
+    def send_packing_progress(self):
+        """A PACKING line between bursts while a folder pack runs, and one
+        `DCCORE PACKING end` when it stops (#1202) - the same shape as
+        send_rebuild_progress, so the panel's bar moves with the archive and
+        clears the moment the pack is over. Reads the running job only; no
+        lock, so it is safe on the writer thread."""
+        if not (self.draws_packing and self.structured and self.authenticated):
+            return
+        now = time.time()
+        if now - self._packing_sent_at < PACKING_INTERVAL:
+            return
+        lines = packing_lines(now)
+        if not lines and not self._packing_shown:
+            return
+        self._packing_sent_at = now
+        self._packing_shown = bool(lines)
+        self.send(lines[0] if lines else "DCCORE PACKING end")
 
     def request_downloads(self):
         """The Downloads window's next snapshot goes on the writer's next pass,
@@ -1134,6 +1271,7 @@ class Session:
                     self.send_status()
                     continue
                 self.send_rebuild_progress()
+                self.send_packing_progress()
                 self.send_downloads()
                 self._wake.wait(0.5)
                 self._wake.clear()
@@ -1454,9 +1592,9 @@ def _cmd_queue(session, args):
             return
         session.send(f"{target}: {len(rows)} file(s)"
                      f"{' (FROZEN)' if target in frozen else ''}")
-        for row in rows:
+        for place, row in enumerate(rows, start=1):
             name = row.get("file", "?") if isinstance(row, dict) else str(row)
-            session.send(f"  {name}")
+            session.send(f"  {place}. {name}")
         return
 
     if not queue:
@@ -1464,10 +1602,42 @@ def _cmd_queue(session, args):
         return
     total = sum(len(rows) for rows in queue.values())
     session.send(f"{total} file(s) queued for {len(queue)} user(s), in serving order:")
-    # The dispatcher's order, not alphabetical: the same walk dcc.py makes (#612).
-    for user_key in queue:
+    # The dispatcher's order, not alphabetical: the same walk dcc.py makes (#612),
+    # longest-waiting first - what queuemove changes (#1206).
+    import commands
+    for user_key in commands.queue_order():
         session.send(f"  {user_key:<20} {len(queue[user_key]):>4} file(s)"
                      f"{'  FROZEN' if user_key in frozen else ''}")
+
+
+def _pack_progress_text(pack):
+    from announce import format_size_human
+    sizes = format_size_human(pack["done"])
+    if pack["total"]:
+        sizes += " of " + format_size_human(pack["total"])
+    return f"{pack['name']} for {pack['user']}: {sizes} so far, {format_uptime(pack['elapsed'])}"
+
+
+def _cmd_packing(session, args):
+    """The folder pack that is running, if one is (#1202)."""
+    import dcc
+    pack = dcc.pack_status()
+    if pack is None:
+        session.send("Nothing is being packed.")
+        return
+    session.send("Packing " + _pack_progress_text(pack)
+                 + (" - being cancelled" if pack.get("cancelled") else ""))
+
+
+def _cmd_packcancel(session, args):
+    """Stop the folder pack that is running (#1202)."""
+    import dcc
+    cancelled = dcc.cancel_pack()
+    if cancelled is None:
+        session.send("Nothing is being packed.")
+        return
+    session.send(f"Cancelling the pack of {cancelled['name']} for {cancelled['user']}. "
+                 "They are told it was cancelled, and the next request starts.")
 
 
 def _cmd_status(session, args):
@@ -1557,6 +1727,50 @@ def _cmd_unban(session, args):
         session.nick, CONSOLE_SOURCE, f"!unban {pattern}", authorised=True))
 
 
+def _cmd_queuemove(session, args):
+    import commands
+    parts = args.split()
+    if len(parts) == 2:
+        ok, message = commands.move_waiting_user(parts[0], parts[1])
+    elif len(parts) == 3:
+        ok, message = commands.move_queued_file(parts[0], parts[1], parts[2])
+    else:
+        session.send("Usage: queuemove <nick> up|down   (a nick's place in line)")
+        session.send("       queuemove <nick> <number> up|down   (a file in its queue; numbers come from `queue <nick>`)")
+        return
+    session.send(message)
+
+
+def _cmd_queueremove(session, args):
+    import commands
+    parts = args.split()
+    if len(parts) != 2:
+        session.send("Usage: queueremove <nick> <number>   (numbers come from `queue <nick>`)")
+        return
+    ok, message = commands.remove_queued_file(parts[0], parts[1])
+    session.send(message)
+
+
+def _cmd_ignore(session, args):
+    import security
+    parts = args.split()
+    if len(parts) != 2:
+        session.send("Usage: ignore <nick> <minutes>   e.g. ignore someone 30")
+        return
+    ok, message = security.ignore_user(parts[0], parts[1])
+    session.send(message)
+
+
+def _cmd_unignore(session, args):
+    import security
+    nick = args.strip()
+    if not nick or " " in nick:
+        session.send("Usage: unignore <nick>")
+        return
+    ok, message = security.lift_ban(nick)
+    session.send(message)
+
+
 def _cmd_bans(session, args):
     import db
     patterns = db.load_hard_bans()
@@ -1570,8 +1784,10 @@ def _cmd_bans(session, args):
             session.send(f"  {pattern}")
     if timed:
         session.send(f"Timed ({len(timed)}):")
+        import security
         for user_key in sorted(timed):
-            session.send(f"  {user_key}")
+            left = security.ban_seconds_left(user_key)
+            session.send(f"  {user_key}  ({security.format_ban_duration(left)} left)")
 
 
 def _cmd_clearqueue(session, args):
@@ -1583,6 +1799,31 @@ def _cmd_clearqueue(session, args):
     session.send(f"Clearing the queue for {target} ...")
     _run_detached(session, "clearqueue", lambda: commands.handle_admin_clear_queue(
         session.nick, CONSOLE_SOURCE, f"!clearqueue {target}", authorised=True))
+
+
+def _cmd_clearandignore(session, args):
+    """`clearandignore <nick> <minutes>`: ignore first (so its pending
+    replies are dropped too), THEN clear - and only if the ignore actually
+    took (#1247). dccore.mrc's own "Clear the queue of ... and ignore
+    for..." menu used to send `ignore` and `clearqueue` as two separate,
+    unconditional commands - a nick the ignore refused (the bot's own nick,
+    or one outside the nick pattern, see security.ignore_user()) still had
+    its queue cleared regardless, as if the ignore had worked.
+    """
+    import security
+    parts = args.split()
+    if len(parts) != 2:
+        session.send("Usage: clearandignore <nick> <minutes>   e.g. clearandignore someone 30")
+        return
+    nick, minutes = parts
+    ok, message = security.ignore_user(nick, minutes)
+    session.send(message)
+    if not ok:
+        return
+    import commands
+    session.send(f"Clearing the queue for {nick} ...")
+    _run_detached(session, "clearqueue", lambda: commands.handle_admin_clear_queue(
+        session.nick, CONSOLE_SOURCE, f"!clearqueue {nick}", authorised=True))
 
 
 def _cmd_rehash(session, args):
@@ -1768,19 +2009,96 @@ def _download_row(session, args, usage):
 
 def _cmd_dlcancel(session, args):
     """`dlcancel <id>`: let a request go that has not started - what the
-    dashboard's Cancel does. A transfer under way cannot be stopped (#1022)."""
+    dashboard's Cancel does. A transfer under way cannot be stopped (#1022).
+    Several ids, or `all`, let a number of them go in one go (#1217): each is
+    judged on its own, so one that has started since is left running."""
+    words = args.split()
+    if len(words) > 1 or (words and words[0].lower() == "all"):
+        _cancel_many(session, words)
+        return
     found = _download_row(session, args, "dlcancel <id>")
     if found is None:
         return
     import webserver
     request_id, row = found
     status, result = webserver.build_fetch_delete_result(
-        request_id, only_states=("pending", "offered", "queued"))
+        request_id, only_states=_DLQUEUE_STATES)
     if status == 200:
         session.send(f"Cancelled {_download_name(row)} from {row.get('bot')}.")
         _refresh_downloads(session)
     else:
         session.send(result.get("error", "Could not cancel that download."))
+
+
+def _cancel_many(session, words):
+    if words[0].lower() == "all":
+        if len(words) > 1:
+            # #1246 review: "dlcancel all <extra words>" silently ignored
+            # the extra words - most likely a typo for a real id ("dlcancel
+            # all abc123" meaning two separate ids, not "all" at all), which
+            # this used to answer by cancelling EVERYTHING instead of saying
+            # why that could not be right.
+            session.send("Usage: dlcancel <id> [<id> ...] | dlcancel all (not both)")
+            return
+        waiting = dlqueue_requests()
+        if waiting is None:
+            session.send("The download queue could not be read - try again.")
+            return
+        ids = [rid for rid, _ in waiting]
+    else:
+        ids = [word.lower() for word in words]
+        if not all(_REQUEST_ID.fullmatch(rid) for rid in ids):
+            session.send("Usage: dlcancel <id> [<id> ...] | dlcancel all")
+            return
+    if not ids:
+        session.send("Nothing to cancel.")
+        return
+    # Run detached and in ONE batched pass, not one build_fetch_delete_
+    # result() call per id (#1246 review): that repeated a full history-
+    # file rewrite and a whole-queue scan per id - measured at 6.0s for
+    # 500 pending + 500 finished and 39.8s for 2000 pending, the console
+    # taking no other command meanwhile, since the dict mutation and the
+    # history write both run under a lock a console command is also
+    # subject to. See webserver.build_fetch_delete_many_result()'s own
+    # docstring for the batching itself.
+    session.send(f"Cancelling {len(ids)} request(s) ...")
+
+    def run():
+        import webserver
+        _status, result = webserver.build_fetch_delete_many_result(ids, only_states=_DLQUEUE_STATES)
+        cancelled = len(result.get("cancelled") or [])
+        started = len(result.get("refused") or [])
+        note = f" {started} had started or were gone already and were left." if started else ""
+        session.send(f"Cancelled {cancelled} request(s).{note}")
+        _refresh_downloads(session)
+
+    _run_detached(session, "dlcancel", run)
+
+
+def _cmd_dlqueue(session, args):
+    """`dlqueue`: every request that has not started, to the Download queues
+    window as DQROW lines, or as text to a client that cannot draw them (#1217)."""
+    requests = dlqueue_requests()
+    if requests is None:
+        session.send("The download queue could not be read - try again.")
+        return
+    if session.structured and session.draws_dlqueue:
+        for text in dlqueue_lines(requests):
+            session.send(text)
+        return
+    if not requests:
+        session.send("No request is waiting.")
+        return
+    session.send(f"{len(requests)} request(s) waiting, remove one with dlcancel <id>:")
+    # Capped the same way dlqueue_lines() now is (#1246 review): sending one
+    # line per row with no cap could push this header line itself out of
+    # the session's own 500-line outgoing buffer on a big enough queue,
+    # exactly the symptom reported for the structured path.
+    shown = requests[:DOWNLOADS_WAITING_MAX]
+    for rid, row in shown:
+        session.send(f"  {rid}  {row.get('bot')}: {_download_name(row)}  ({_download_waiting_note(row)})")
+    if len(requests) > len(shown):
+        session.send(f"  ... and {len(requests) - len(shown)} more.")
 
 
 def _cmd_dlagain(session, args):
@@ -1803,15 +2121,22 @@ def _cmd_dlagain(session, args):
         # By the folder route (#1040): asked as a file, "!rar <folder>" was a
         # file row matched by name, and the pack the other bot sent back was
         # refused as unsolicited.
+        #
+        # row.get("channel") (#1240 review): the channel THIS row actually
+        # went out in last time, carried straight through - same live bug as
+        # the dashboard's own retry button, just on the path dccore.mrc's
+        # `dlagain` takes instead.
         import dcc_fetch
         import webserver
-        status, result = webserver.build_folder_rar_fetch_enqueue_result(bot, dcc_fetch.folder_asked_for(row))
+        status, result = webserver.build_folder_rar_fetch_enqueue_result(
+            bot, dcc_fetch.folder_asked_for(row), None, row.get("channel"))
         session.send(f"Asked {bot} for {_download_name(row)} again." if status == 200
                      else (result.get("error") or "Refused."))
     else:
         import webserver
         wanted = row.get("requested_filename") or row.get("filename") or ""
-        status, result = webserver.build_fetch_enqueue_result([{"bot": bot, "filename": wanted}])
+        status, result = webserver.build_fetch_enqueue_result(
+            [{"bot": bot, "filename": wanted, "channel": row.get("channel")}])
         if status == 200:
             session.send(f"Asked {bot} for {_download_name(row)} again.")
         else:
@@ -1901,7 +2226,9 @@ def _cmd_hello(session, args):
     session.draws_fetching = script_draws_fetching(version)
     session.draws_rebuild = script_draws_rebuild(version)
     session.draws_audio = script_draws_audio(version)
+    session.draws_packing = script_draws_packing(version)
     session.draws_downloads = script_draws_downloads(version)
+    session.draws_dlqueue = script_draws_dlqueue(version)
     session.reads_peers = script_reads_peers(version)
     session.send(hello_line())
     if script_is_too_old(version):
@@ -2067,6 +2394,8 @@ COMMANDS = {
     "status":     (_cmd_status,     "everything at a glance",            "status"),
     "queue":      (_cmd_queue,      "queued files, all or one user",     "queue [nick]"),
     "slots":      (_cmd_slots,      "what is sending right now",         "slots"),
+    "packing":    (_cmd_packing,    "the folder pack that is running",   "packing"),
+    "packcancel": (_cmd_packcancel, "stop the folder pack that is running", "packcancel"),
     "bans":       (_cmd_bans,       "permanent and timed bans",          "bans"),
     "uptime":     (_cmd_uptime,     "how long the daemon has run",       "uptime"),
     "version":    (_cmd_version,    "build and platform",                "version"),
@@ -2074,6 +2403,11 @@ COMMANDS = {
     "checkupdates": (_cmd_checkupdates, "turn the daily update check on/off, or report it", "checkupdates [on|off]"),
     "consolefeed": (_cmd_consolefeed, "turn the console/dccore.mrc feed on/off, or report it", "consolefeed [on|off]"),
     "ban":        (_cmd_ban,        "add a permanent wildcard ban",      "ban <pattern>"),
+    "queuemove":  (_cmd_queuemove,  "move a nick, or one of its files, up or down the queue", "queuemove <nick> [number] up|down"),
+    "queueremove": (_cmd_queueremove, "remove one queued file (the nick is told)", "queueremove <nick> <number>"),
+    "ignore":     (_cmd_ignore,     "ignore a nick for some minutes (drops its requests)", "ignore <nick> <minutes>"),
+    "clearandignore": (_cmd_clearandignore, "ignore a nick, then clear its queue - only if the ignore took", "clearandignore <nick> <minutes>"),
+    "unignore":   (_cmd_unignore,   "end a timed ignore or ban now",     "unignore <nick>"),
     "unban":      (_cmd_unban,      "remove a permanent wildcard ban",   "unban <pattern>"),
     "clearqueue": (_cmd_clearqueue, "force-clear another user's queue",  "clearqueue <nick>"),
     "rehash":     (_cmd_rehash,     "reload modules in place",           "rehash"),
@@ -2083,7 +2417,8 @@ COMMANDS = {
     "lists":      (_cmd_lists,      "held bot lists, and which have changed", "lists"),
     "fetch":      (_cmd_fetch,      "ask the bots whose lists changed",  "fetch [bot]"),
     "downloads":  (_cmd_downloads,  "the Downloads window opening or closing", "downloads on [rows]|off"),
-    "dlcancel":   (_cmd_dlcancel,   "cancel a download that has not started", "dlcancel <id>"),
+    "dlcancel":   (_cmd_dlcancel,   "cancel downloads that have not started", "dlcancel <id>... | all"),
+    "dlqueue":    (_cmd_dlqueue,    "requests waiting to start, with their ids", "dlqueue"),
     "dlagain":    (_cmd_dlagain,    "ask again for a download that failed", "dlagain <id>"),
     "dlclear":    (_cmd_dlclear,    "forget the finished downloads",     "dlclear"),
     "chat":       (_cmd_chat,       "public operator chat in a channel", "chat [#chan|*|nick text]"),

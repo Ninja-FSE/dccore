@@ -91,7 +91,9 @@ def old_find_matching_entries(search_words, limit, list_path):
                     continue
             if not line_strip.startswith("!"):
                 continue
-            line_lower = line_strip.lower()
+            # The words are matched against the filename alone (#1199), cut
+            # out the plain way: the spec the fast cut is held to.
+            line_lower = list_mod.strip_info_suffix(line_strip.partition(" ")[2])[0].lower()
             if plain_words and not all(word in line_lower for word in plain_words):
                 continue
             if phrase_patterns and not all(pattern.search(line_lower) for pattern in phrase_patterns):

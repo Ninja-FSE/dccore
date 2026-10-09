@@ -325,7 +325,7 @@ class TheWindowsCommands(DCCoreTestCase):
         webserver.build_fetch_enqueue_result = lambda items: (asked.append(items) or (200, {}))
         self.addCleanup(setattr, webserver, "build_fetch_enqueue_result", real)
         adminchat._cmd_dlagain(self.session, "aaaaaaaaaaaa")
-        self.assertEqual(asked, [[{"bot": "SomeBot", "filename": "a.flac"}]])
+        self.assertEqual(asked, [[{"bot": "SomeBot", "filename": "a.flac", "channel": None}]])
         self.assertIn("aaaaaaaaaaaa", config.fetch_queue, "the old row stays as the record")
 
     def test_again_asks_a_failed_list_through_the_list_route(self):

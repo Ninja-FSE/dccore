@@ -60,6 +60,10 @@ since we cannot know what the target bot will name the resulting .rar), a
 longer FETCH_FOLDER_OFFER_TIMEOUT (packing a whole album takes real time on
 the other end), and a larger MAX_FETCH_FOLDER_FILE_SIZE cap (a packed
 archive is bigger than any single file).
+
+An mxrarserver folder row (#1209) is a "folder" row too, asked for as its
+list wrote it - "!<trigger> <path>.rar", no "!rar" - and admitted by the name
+the RAR will arrive under rather than on the bot alone (pack_offer_names()).
 """
 
 import ipaddress
@@ -175,7 +179,75 @@ def _ensure_fetch_queue():
     return config.fetch_queue
 
 
-def new_fetch_row(bot, filename, now=None, request_type="file"):
+def _sendable_trigger(text):
+    """`text` if it may address a request line, else None. irc.py owns the
+    rule; asked lazily, since irc imports half the daemon."""
+    import irc
+    text = str(text or "").strip()
+    return text if text and irc.is_sendable_trigger(text) else None
+
+
+def request_trigger(bot, row=None):
+    """The word a request to `bot` is addressed to: "@<it>" for its list,
+    "!<it> <file>" for a file (#1209).
+
+    The nick, for nearly every bot - its trigger IS its nick. mxrarserver lets
+    the operator choose any word, and a request addressed to the nick goes
+    unanswered. Where we have it, in order:
+
+      * the row's own: the "!<trigger>" a pasted line was written with;
+      * the bot's advert (irc._parse_mx_advert() keeps it in known_bots);
+      * the bot's list we hold - the "!<trigger>" its rows begin with, kept
+        by list_fetch for an mxrarserver list, which is how a bot in
+        "request only" mode, which never advertises, is still addressed.
+
+    Who a reply or an offer is FROM is still the nick: only what we send is
+    addressed this way. A trigger that could not be sent safely is skipped.
+    """
+    key = str(bot or "").strip().lower()
+    candidates = [(row or {}).get("trigger")]
+    known = (getattr(runtime, "known_bots", None) or {}).get(key)
+    if isinstance(known, dict):
+        candidates.append(known.get("trigger"))
+    held = (getattr(config, "fetched_bot_lists", None) or {}).get(key)
+    if isinstance(held, dict):
+        candidates.append(held.get("trigger"))
+    for candidate in candidates:
+        trigger = _sendable_trigger(candidate)
+        if trigger:
+            return trigger
+    return str(bot or "").strip()
+
+
+def bot_for_trigger(word):
+    """The nick of the bot whose trigger is `word`, or None (#1209).
+
+    A line pasted out of an mxrarserver list starts "!<trigger>", and the
+    trigger need not be the nick. Answered from the same two places
+    request_trigger() reads - the bot's advert and its list we hold - and
+    only when exactly one bot answers to it: two bots with one trigger is a
+    question this cannot settle.
+    """
+    wanted = str(word or "").strip().lower()
+    if not wanted:
+        return None
+    found = set()
+    nicks = {}
+    for key, entry in list((getattr(runtime, "known_bots", None) or {}).items()):
+        if isinstance(entry, dict) and str(entry.get("trigger") or "").strip().lower() == wanted:
+            found.add(key)
+            nicks.setdefault(key, entry.get("nick") or key)
+    for key, entry in list((getattr(config, "fetched_bot_lists", None) or {}).items()):
+        if isinstance(entry, dict) and str(entry.get("trigger") or "").strip().lower() == wanted:
+            found.add(key)
+            nicks.setdefault(key, entry.get("bot") or key)
+    if len(found) != 1:
+        return None
+    return str(nicks[found.pop()]).strip() or None
+
+
+def new_fetch_row(bot, filename, now=None, request_type="file", channel=None,
+                  secondary_channel=False):
     """Build a fresh `pending` row in the shape every reader of
     config.fetch_queue expects. Does not insert it - callers decide the key.
 
@@ -197,6 +269,45 @@ def new_fetch_row(bot, filename, now=None, request_type="file"):
     text (e.g. "!rar Artist/Album") since _claim_matching_offer_locked() will
     later overwrite row["filename"] with whatever name the responding bot
     actually sends, exactly as it already does for "list" rows.
+
+    `channel` (#1232) is the channel the CALLER prefers this request go out
+    in - a List Browser or Search request for a bot we already hold a list
+    from carries that list's own remembered channel; most callers pass
+    nothing, which is None and means "no preference, use today's rule".
+
+    Stored on TWO fields (review of #1239), not one: "preferred_channel" is
+    this value, untouched for the row's whole life, and "channel" starts the
+    same but is OVERWRITTEN by check_fetch_queue()'s dispatcher with whatever
+    channel it actually resolved and sent to - the same field a completed
+    list fetch is tagged with, and the one a cancel's "-remove" is sent to,
+    both of which need to know where the request REALLY went, not what was
+    asked for. Before this split, the two meanings shared one field: a bot
+    briefly out of its preferred channel at dispatch time got the FALLBACK
+    channel written into "channel", and a later retry of that same row (busy,
+    not yet sent) read that fallback back as its new "preference" - quietly
+    losing the original choice for good, even once the bot returned. Reading
+    "preferred_channel" instead for every dispatch means the original choice
+    never decays, no matter how many times resolving it falls back meanwhile.
+
+    `secondary_channel` (#1240 review) is True only for a "list" row built by
+    list_grab.secondary_channel_tick() once its own confidence gate has
+    confirmed a genuinely different, stable list in another of our channels.
+    Every other caller leaves it False - an ORDINARY list fetch (a manual
+    one, AUTO_REFETCH_LISTS, a Downloads-page retry) is always a primary
+    refresh, whatever channel it happens to be resolved to. Carried on the
+    row, untouched by dispatch (unlike "channel"/"preferred_channel" above),
+    so list_fetch.py's completion handler still knows which kind of fetch
+    this was once the file has arrived - see process_fetched_list_zip()'s
+    own "secondary" parameter.
+
+    This replaces guessing "secondary" from a channel mismatch after the
+    fact (list_fetch._is_secondary_channel_fetch(), removed): a bot held
+    from before #1232 has no "channel" on record at all, so EVERY ordinary
+    refresh of it looked like a mismatch and was never again treated as the
+    primary - the bot's channel was never backfilled, the content never
+    replaced, confirmed as a real incident on the live bot. Only the one
+    caller that actually ran the discovery confidence gate may say "this is
+    secondary"; nothing else gets to infer it.
     """
     now = time.time() if now is None else now
 
@@ -238,7 +349,67 @@ def new_fetch_row(bot, filename, now=None, request_type="file"):
         "total_size": None,
         "reason": "",
         "stored_filename": None,
+        "channel": _clean_channel(channel),
+        "preferred_channel": _clean_channel(channel),
+        "secondary_channel": bool(secondary_channel),
     }
+
+
+def _clean_channel(channel):
+    """A channel name stripped down to "" is still a channel nobody typed -
+    treat it the same as never having given one (#1232)."""
+    text = str(channel or "").strip()
+    return text or None
+
+
+def bot_in_our_channel(bot, channel):
+    """True if `bot` is on OUR live member list for `channel` right now - the
+    same membership config.channel_users already tracks for
+    dcc.channel_containing_user(), just asked about one channel instead of
+    searched across all of them (#1232)."""
+    wanted = str(bot).strip().lower()
+    with runtime.channel_users_lock():
+        users = (getattr(config, "channel_users", {}) or {}).get(str(channel).strip().lower())
+        return bool(users) and wanted in {str(u).lower() for u in users}
+
+
+def _resolve_fetch_channel(bot, preferred):
+    """Which of our channels a request for `bot` goes out in (#1232).
+
+    1. `preferred` (the row's own "preferred_channel" - a list/file/folder
+       request for a bot we already hold a list from carries that list's own
+       channel, see webserver.held_list_channel()) - but only if it is still
+       one we are configured for AND `bot` is still there; a channel we
+       left, or one the bot has since left, would send the request where
+       nobody capable of answering it can see. There is no way for an
+       operator to give one by hand (tried during review and reverted - see
+       "Remove the explicit fetch <bot> <channel> capability").
+    2. The channel `bot` last advertised in (runtime.known_bots), again only
+       if `bot` is still there - the strongest sign of where it actually
+       answers requests, for a row with no remembered channel of its own.
+    3. dcc.channel_containing_user(bot): the first of our channels, in
+       configured order, that `bot` is in right now - today's rule, kept as
+       the last resort so a bot we know nothing else about is still asked.
+
+    None if `bot` is in none of our channels - the caller's own fixed
+    fallback (BROADCAST_SEARCH_CHANNEL or the first configured channel)
+    applies from there, exactly as before this existed.
+    """
+    import irc
+    configured = {chan.lower(): chan for chan in irc.configured_channels()}
+
+    def _usable(raw):
+        chan = configured.get(str(raw or "").strip().lower())
+        return chan if chan and bot_in_our_channel(bot, chan) else None
+
+    chosen = _usable(preferred)
+    if chosen:
+        return chosen
+    advert_channel = (runtime.known_bots.get(str(bot).strip().lower()) or {}).get("channel")
+    chosen = _usable(advert_channel)
+    if chosen:
+        return chosen
+    return dcc.channel_containing_user(bot)
 
 
 _UNRESOLVED_FETCH_STATES = ("pending", "offered", "queued", "listening", "receiving")
@@ -291,6 +462,24 @@ CONNECT_FAILURES_TO_PAUSE = 3
 _paused = {}               # bot (lowercased) -> {"nick", "reason", "since", "by"}
 _connect_failures = {}     # bot (lowercased) -> consecutive active-connect failures
 
+# A BOT THAT KEEPS FAILING COOLS DOWN (#1210). Every request of ours to it got
+# its own asks and timeouts, but nothing noticed that this bot had failed
+# several in a row, so each new request waited out the same silence and the
+# channel saw the same requests again. FETCH_BOT_MAX_FAILS failed requests in a
+# row pause it for FETCH_BOT_COOLDOWN_MINUTES, through the same _paused entry a
+# pause by hand uses - so its requests wait, "pending", exactly as they do then
+# - with two more fields: "until", the time the pause ends, and "failures".
+# The end is a stored time, not a timer: it is saved with the other pauses,
+# survives a restart, and is checked whenever the dispatcher looks
+# (expire_cooldowns()). What counts as a failure is what says the bot did not
+# deliver: no answer, an offer we could not connect to, a transfer that broke
+# off. A refusal with a reason, a "busy", an operator's cancel and anything
+# that is our side's doing (no free port, a full disk, an oversized offer we
+# turned down) do not count. A finished transfer resets the count. Keyed by
+# the nick, lowercased, as the known-bot registry is: it does not treat a
+# "Bot^" or "Bot_" away-nick as the same bot, so neither does this.
+_fetch_failures = {}       # bot (lowercased) -> consecutive failed requests of ours
+
 # A FULL DISK (#926 item 4). No new fetch starts while FETCHED_FILES_DIR has
 # less than this free; a transfer that runs out of space mid-way goes back to
 # pending rather than failing, and everything resumes by itself once space is
@@ -330,9 +519,12 @@ def _save_paused_bots():
         print(f"[FETCH] Could not save the paused bots: {err}")
 
 
-def paused_bots():
-    """{bot (lowercased): {"nick", "reason", "since", "by"}}, a copy."""
-    return {key: dict(value) for key, value in _paused.items()}
+def paused_bots(now=None):
+    """{bot (lowercased): {"nick", "reason", "since", "by"}}, a copy. A
+    cooldown (#1210) also carries "until" and "failures"; one whose time has
+    come is over, and is not in it."""
+    expire_cooldowns(now)
+    return {key: dict(value) for key, value in list(_paused.items())}
 
 
 def pause_bot(bot, reason, by="operator"):
@@ -341,6 +533,7 @@ def pause_bot(bot, reason, by="operator"):
         return False
     _paused[nick.lower()] = {"nick": nick, "reason": str(reason), "since": time.time(), "by": by}
     _connect_failures.pop(nick.lower(), None)
+    _fetch_failures.pop(nick.lower(), None)
     _save_paused_bots()
     print(f"[FETCH] Paused fetching from {nick}: {reason}")
     return True
@@ -354,6 +547,96 @@ def resume_bot(bot):
     _save_paused_bots()
     print(f"[FETCH] Resumed fetching from {bot}.")
     return True
+
+
+def _cooldown_until(entry):
+    """When a cooldown pause ends (#1210), or None for a pause that waits for
+    the operator - by hand, or after failed connections."""
+    until = entry.get("until") if isinstance(entry, dict) else None
+    return float(until) if isinstance(until, (int, float)) and not isinstance(until, bool) else None
+
+
+def _pause_kind(key):
+    """Why a bot's requests wait, as row["waiting"] says it: "cooldown" for a
+    pause that ends by itself (#1210), "paused" for one the operator ends,
+    "" when it is not paused."""
+    entry = _paused.get(key)
+    if entry is None:
+        return ""
+    return "cooldown" if _cooldown_until(entry) is not None else "paused"
+
+
+def expire_cooldowns(now=None):
+    """End every cooldown whose stored time has come (#1210), and say so.
+    Lazy on purpose: there is no timer to lose in a restart, and the
+    dispatcher asks on every tick, so the bot's waiting requests go out, in
+    their order, on the first tick after the time. Returns the bots let go."""
+    now = time.time() if now is None else now
+    over = [key for key, entry in list(_paused.items())
+            if _cooldown_until(entry) is not None and _cooldown_until(entry) <= now]
+    ended = []
+    for key in over:
+        entry = _paused.pop(key, None)
+        if entry is not None:
+            ended.append(entry.get("nick") or key)
+    if ended:
+        _save_paused_bots()
+        for nick in ended:
+            print(f"[FETCH] The pause for {nick} is over; its requests go out again.")
+    return ended
+
+
+def _fetch_cooldown_settings():
+    """(FETCH_BOT_MAX_FAILS, FETCH_BOT_COOLDOWN_MINUTES), either 0 when the
+    setting cannot be read: off, rather than a pause nobody asked for."""
+    try:
+        max_fails = int(getattr(config, "FETCH_BOT_MAX_FAILS", 3) or 0)
+    except (TypeError, ValueError):
+        max_fails = 0
+    try:
+        minutes = float(getattr(config, "FETCH_BOT_COOLDOWN_MINUTES", 15) or 0)
+    except (TypeError, ValueError):
+        minutes = 0
+    return max_fails, minutes
+
+
+def _note_fetch_failure(bot, now=None):
+    """One more request of ours to this bot failed (#1210); the
+    FETCH_BOT_MAX_FAILS-th in a row pauses it for FETCH_BOT_COOLDOWN_MINUTES
+    and says so where the operator looks. A bot already paused is left as it
+    is: a request still out when the pause began does not lengthen it, and
+    the count starts again when it ends. Returns whether it paused the bot."""
+    nick = str(bot or "").strip()
+    key = nick.lower()
+    if not key or key in _paused:
+        return False
+    max_fails, minutes = _fetch_cooldown_settings()
+    if max_fails <= 0 or minutes <= 0:
+        return False
+    count = _fetch_failures.get(key, 0) + 1
+    if count < max_fails:
+        _fetch_failures[key] = count
+        return False
+    _fetch_failures.pop(key, None)
+    now = time.time() if now is None else now
+    until = now + minutes * 60
+    _paused[key] = {"nick": nick, "reason": f"{count} requests in a row failed",
+                    "since": now, "by": "cooldown", "until": until, "failures": count}
+    _save_paused_bots()
+    clock = time.strftime("%H:%M", time.localtime(until))
+    print(f"[FETCH] Paused fetching from {nick} until {clock}: {count} requests in a row failed.")
+    try:
+        import announce
+        announce.send_debug(f"Fetching from {nick} is paused until {clock}: {count} requests in a "
+                            f"row failed. Its requests wait and go out then; Resume now on the "
+                            f"Downloads page asks sooner.", category="INFO")
+    except Exception:
+        pass
+    return True
+
+
+def _note_fetch_success(bot):
+    _fetch_failures.pop(str(bot or "").strip().lower(), None)
 
 
 def _note_connect_failure(bot):
@@ -527,6 +810,56 @@ def _has_outstanding_bot_alone_request_locked(queue, bot):
     )
 
 
+def _has_outstanding_non_folder_request_locked(queue, bot):
+    """True if `queue` has an unresolved row for `bot` that a "!rar" folder
+    cannot queue beside: a "list", or an mxrarserver pack row. Those two are
+    not sent one at a time with the folders, so the offer they bring could be
+    taken for a folder's. Other "!rar" folders do not count (#1233)."""
+    wanted_bot = str(bot).strip().lower()
+    return any(
+        row.get("state") in _UNRESOLVED_FETCH_STATES
+        and str(row.get("bot", "")).strip().lower() == wanted_bot
+        and row.get("request_type") in ("list", "folder")
+        and not (row.get("request_type") == "folder" and _is_bot_alone_row(row))
+        for row in queue.values()
+    )
+
+
+def has_outstanding_non_folder_request(bot):
+    """True if a list or an mxrarserver pack request for `bot` is still on its
+    way: the only things a "!rar" folder cannot be queued beside (#1233)."""
+    queue = _ensure_fetch_queue()
+    with _fetch_lock():
+        return _has_outstanding_non_folder_request_locked(queue, bot)
+
+
+def _is_bot_alone_row(row):
+    """True for a row whose offer is admitted on the bot alone: a "list", or a
+    "!rar" folder. An mxrarserver pack row is admitted by the name it arrives
+    under, so it is not one (#1209)."""
+    kind = row.get("request_type")
+    if kind == "list":
+        return True
+    if kind != "folder":
+        return False
+    import list as list_mod
+    return not list_mod.pack_path_of(str(row.get("requested_filename") or row.get("filename") or ""))
+
+
+def _find_unresolved_folder_request_locked(queue, bot, request):
+    """The id of an unresolved "!rar" folder row for this bot asking for this
+    same folder, or None (#1233). Needs the fetch lock."""
+    wanted_bot = str(bot).strip().lower()
+    wanted = str(request).strip().lower()
+    for rid, row in queue.items():
+        if (row.get("state") in _UNRESOLVED_FETCH_STATES
+                and row.get("request_type") == "folder"
+                and str(row.get("bot", "")).strip().lower() == wanted_bot
+                and str(row.get("requested_filename") or "").strip().lower() == wanted):
+            return rid
+    return None
+
+
 def has_outstanding_bot_alone_request(bot):
     """True if a "list" or "folder" fetch is already outstanding for `bot`
     (any state other than "complete"/"failed").
@@ -577,18 +910,52 @@ def has_any_outstanding_request(bot):
         )
 
 
-def enqueue_fetch(bot, filename, request_type="file"):
+def _find_unresolved_file_request_locked(queue, bot, filename):
+    """The id of a "file" row for this bot and file that is still on its way
+    (any unresolved state), or None. The name is compared the way an offer is
+    matched: case, space/underscore and a copied ::INFO:: size do not tell two
+    requests apart (#1218). Needs the fetch lock."""
+    import list as list_mod
+
+    wanted_bot = str(bot).strip().lower()
+    wanted_name = _normalize_filename_for_match(list_mod.strip_info_suffix(str(filename).strip())[0])
+    for rid, row in queue.items():
+        if (row.get("state") in _UNRESOLVED_FETCH_STATES
+                and row.get("request_type", "file") == "file"
+                and str(row.get("bot", "")).strip().lower() == wanted_bot
+                and _match_name(row) == wanted_name):
+            return rid
+    return None
+
+
+def request_already_waiting(bot, filename):
+    """True when this file is already asked for from this bot and has not
+    ended: what the dashboard says instead of making a second row (#1218)."""
+    queue = _ensure_fetch_queue()
+    with _fetch_lock():
+        return _find_unresolved_file_request_locked(queue, bot, filename) is not None
+
+
+def enqueue_fetch(bot, filename, request_type="file", trigger=None, channel=None,
+                  secondary_channel=False):
     """Append one `pending` row to config.fetch_queue and return its id, or
     None if the request was refused (see below) - callers must check for
     None, they can no longer assume this always succeeds.
+
+    A "file" request for a bot and file that is already on its way (any state
+    short of complete or failed) returns THAT row's id and adds nothing, so
+    the bot is asked once however many times it is requested (#1218).
 
     Does NOT dispatch anything - check_fetch_queue() (the background
     dispatcher) is what promotes pending rows, so this is safe to call from
     a Flask request thread without blocking on IRC pacing.
 
-    A "list" or "folder" request_type is refused (returns None, no row is
-    created) if a "list" or "folder" row is already outstanding for the
-    same bot - see has_outstanding_bot_alone_request()'s docstring for why.
+    A "list" request_type is refused (returns None, no row is created) if a
+    "list" or "folder" row is already outstanding for the same bot - see
+    has_outstanding_bot_alone_request()'s docstring for why. A "folder" is
+    refused only while a "list" is outstanding; several folders may wait, and
+    the dispatcher sends them one at a time (#1233). Asking for a folder that
+    is already on its way returns THAT row's id.
     This check is enforced HERE, not only in webserver.py's two callers, so
     the invariant holds no matter what calls this function in the future
     (defense in depth, the same reasoning this feature's CTCP-safety check
@@ -606,13 +973,44 @@ def enqueue_fetch(bot, filename, request_type="file"):
     defense-in-depth reason as the check above, and additionally because it is
     the only place it CAN be exact: the count and the insert have to happen
     under one hold of the lock or two callers race.
+
+    `trigger` is the word the request is to be addressed to when it is not
+    the nick (#1209) - see request_trigger(). Kept on the row only when it is
+    given and sendable, so every other row keeps its shape.
+
+    `channel` (#1232) is a preferred channel for this request - see
+    new_fetch_row()'s docstring. Optional; most callers pass nothing.
+
+    `secondary_channel` (#1240 review) - see new_fetch_row()'s docstring.
+    Only list_grab.secondary_channel_tick() passes True.
     """
     queue = _ensure_fetch_queue()
+    trigger = _sendable_trigger(trigger) if trigger else None
     normalized_type = request_type if request_type in ("file", "list", "folder") else "file"
     request_id = uuid.uuid4().hex[:12]
+    pack = normalized_type == "folder" and bool(list_mod.pack_path_of(filename))
     with _fetch_lock():
-        if normalized_type in ("list", "folder") and _has_outstanding_bot_alone_request_locked(queue, bot):
+        # An mxrarserver pack row is admitted by name (#1209), so it only
+        # conflicts with what could take its RAR - see
+        # _pack_request_conflicts_locked(). Everything else as before.
+        if pack:
+            if _pack_request_conflicts_locked(queue, bot, filename):
+                return None
+        elif normalized_type == "list" and _has_outstanding_bot_alone_request_locked(queue, bot):
             return None
+        elif normalized_type == "folder":
+            # Folders queue behind each other (#1233): the dispatcher sends
+            # one per bot at a time, so they never wait for an offer together.
+            # A list or a pack row cannot share the bot with them.
+            if _has_outstanding_non_folder_request_locked(queue, bot):
+                return None
+            existing = _find_unresolved_folder_request_locked(queue, bot, filename)
+            if existing is not None:
+                return existing
+        if normalized_type == "file":
+            existing = _find_unresolved_file_request_locked(queue, bot, filename)
+            if existing is not None:
+                return existing
         # Checked under the same lock that does the insert, so the count cannot
         # go stale between deciding there is room and taking it - two request
         # threads enqueueing at once cannot both read 999 and both create.
@@ -620,7 +1018,10 @@ def enqueue_fetch(bot, filename, request_type="file"):
             return None
         while request_id in queue:  # practically never, but be certain
             request_id = uuid.uuid4().hex[:12]
-        queue[request_id] = new_fetch_row(bot, filename, request_type=request_type)
+        queue[request_id] = new_fetch_row(bot, filename, request_type=request_type, channel=channel,
+                                          secondary_channel=secondary_channel)
+        if trigger:
+            queue[request_id]["trigger"] = trigger
     return request_id
 
 
@@ -850,7 +1251,15 @@ def persist_fetch_history():
 # -> announce.send_dcc_error(user, "rar_disabled"): "Error: Folder packing
 # (!rar) is disabled on this bot.") and the OmenServe-family wording
 # ("Rar Server is currently disabled.") - both contain "rar" and "disabled".
+#
+# AS WORDS, not as substrings (#1209). "temporarily disabled" contains both
+# "rar" and "disabled", so mxrarserver's "Files list build in progress ...
+# temporarily disabled" - and any bot that says something is temporarily
+# disabled - failed every folder request waiting on that bot. "(!rar)" and
+# "Rar Server" still hold the word.
 _RAR_REFUSAL_MARKERS = ("disabled", "rar")
+_RAR_REFUSAL_WORD_RES = tuple(re.compile(r"\b" + re.escape(marker) + r"\b")
+                              for marker in _RAR_REFUSAL_MARKERS)
 
 
 def handle_refusal_notice(bot, notice_text):
@@ -871,10 +1280,11 @@ def handle_refusal_notice(bot, notice_text):
     is not this wording and is left to its own timeout), and the notice
     text must contain every marker in _RAR_REFUSAL_MARKERS - a false match
     here would fail a row a moment before its real DCC SEND arrived, with
-    no way back for that request.
+    no way back for that request. Each marker must be a whole word (#1209):
+    "temporarily" is not "rar".
     """
     text_lower = str(notice_text).lower()
-    if not all(marker in text_lower for marker in _RAR_REFUSAL_MARKERS):
+    if not all(word.search(text_lower) for word in _RAR_REFUSAL_WORD_RES):
         return False
     wanted_bot = str(bot).strip().lower()
     queue = _ensure_fetch_queue()
@@ -1127,13 +1537,20 @@ def check_fetch_queue():
     # Measured only while a row waits for room of its own (#964).
     free = _free_bytes() if held_for_space else None
     readiness = _bot_readiness(waiting_bots, now)
+    # A cooldown whose time has come ends here (#1210), before the pauses are
+    # read, so the bot's requests go out on this very tick.
+    expire_cooldowns(now)
     for bot in waiting_bots:
-        if bot in _paused:
-            readiness[bot] = "paused"
+        kind = _pause_kind(bot)
+        if kind:
+            readiness[bot] = kind
     disk_low = bool(waiting_bots) and _disk_is_low()
 
     to_dispatch = []
     to_take_back = []
+    # Bots one of whose requests failed on this tick (#1210), noted once the
+    # lock is let go: a pause writes a file and tells the console.
+    failed_bots = []
     with _fetch_lock():
         # Expire offers nobody ever answered. A row stuck in "offered" forever
         # would otherwise hold a slot open permanently and starve every other
@@ -1163,8 +1580,9 @@ def check_fetch_queue():
                                    reason=f"no response - asking again (attempt {row['silent_asks']} of {OFFER_ASKS})")
                     else:
                         _mark_failed_locked(row, "no response")
+                        failed_bots.append(row.get("bot"))
                         if row.get("request_type", "file") == "file":
-                            to_take_back.append((row.get("bot"), row.get("requested_filename") or row.get("filename")))
+                            to_take_back.append((row.get("bot"), row.get("requested_filename") or row.get("filename"), row.get("channel")))
 
         # Independent safety net for "listening" rows (passive DCC SEND).
         # _serve_passive_offer() already bounds its own accept() with
@@ -1187,6 +1605,7 @@ def check_fetch_queue():
                         _mark_failed_locked(
                             row, f"still queued at {row.get('bot')} after "
                                  f"{int(queued_timeout // 3600)} h - nothing arrived")
+                        failed_bots.append(row.get("bot"))
 
         listen_timeout = PASSIVE_LISTEN_TIMEOUT * 3
         for row in queue.values():
@@ -1225,6 +1644,9 @@ def check_fetch_queue():
                 load[key] = load.get(key, 0) + 1
         promoted = 0
         room = _room_left_locked(queue, free)
+        alone_busy = {str(row.get("bot", "")).strip().lower()
+                      for row in queue.values()
+                      if row.get("state") in _BOT_LOAD_STATES and _is_bot_alone_row(row)}
         for rid in pending_ids:
             row = queue[rid]
             key = str(row.get("bot", "")).strip().lower()
@@ -1236,7 +1658,16 @@ def check_fetch_queue():
             # looked at properly on the next tick, a couple of seconds away.
             if key not in readiness:
                 continue
-            why = readiness[key] or ("paused" if key in _paused else "")
+            why = readiness[key] or _pause_kind(key)
+            if why == "cooldown":
+                # What the Downloads page and the console say (#1210):
+                # "paused until 14:32 after 3 failures".
+                entry = _paused.get(key) or {}
+                row["cooldown_until"] = _cooldown_until(entry)
+                row["cooldown_failures"] = entry.get("failures")
+            else:
+                row.pop("cooldown_until", None)
+                row.pop("cooldown_failures", None)
             if not why and disk_low:
                 why = "disk-full"
             # A file already known not to fit waits until it does (#964),
@@ -1248,6 +1679,11 @@ def check_fetch_queue():
                 why = "retry"
             if not why and max_per_bot > 0 and load.get(key, 0) >= max_per_bot:
                 why = "their-turn"
+            # A list or folder is matched to its offer by the bot alone, so a
+            # second one asked of the same bot would be indistinguishable from
+            # the first (#1233). It goes out when the first has ended.
+            if not why and key in alone_busy and _is_bot_alone_row(row):
+                why = "one-at-a-time"
             if not why and promoted >= free_slots:
                 why = "slots"
             if why:
@@ -1262,11 +1698,16 @@ def check_fetch_queue():
             row["state"] = "offered"
             row["offered_at"] = now
             load[key] = load.get(key, 0) + 1
+            if _is_bot_alone_row(row):
+                alone_busy.add(key)
             promoted += 1
-            to_dispatch.append((rid, row["bot"], row["filename"], row.get("request_type", "file")))
+            to_dispatch.append((rid, row["bot"], row["filename"], row.get("request_type", "file"),
+                                row.get("trigger"), row.get("preferred_channel")))
 
-    for bot, filename in to_take_back:
-        drop_our_request_at(bot, filename)
+    for bot, filename, channel in to_take_back:
+        drop_our_request_at(bot, filename, channel=channel)
+    for bot in failed_bots:
+        _note_fetch_failure(bot, now)
 
     if not to_dispatch:
         return
@@ -1283,13 +1724,16 @@ def check_fetch_queue():
     # batch.
     default_channel = (getattr(config, "BROADCAST_SEARCH_CHANNEL", None)
                        or str(getattr(config, "CHANNEL", "")).split(",")[0].strip())
-    for rid, bot, filename, request_type in to_dispatch:
-        # The bot's own channel wins when we can find one - a stale fallback
-        # is exactly the bug above. Only a bot that left between enqueue and
-        # this dispatch tick (bot_not_here_error() already refused any that
-        # were never seen at all) falls through to the fixed default, which
-        # is no worse than what every request did before this fix.
-        channel = dcc.channel_containing_user(bot) or default_channel
+    for rid, bot, filename, request_type, row_trigger, preferred_channel in to_dispatch:
+        # Addressed to the bot's trigger where it has one (#1209); the
+        # channel, the log and every match on what comes back stay the nick.
+        trigger = request_trigger(bot, {"trigger": row_trigger})
+        # The row's own remembered/preferred channel wins first, then the
+        # bot's advert channel, then the first channel we share with it -
+        # _resolve_fetch_channel()'s own docstring has the full order (#1232).
+        # Only a bot in none of our channels at all falls through to the
+        # fixed default, no worse than what every request did before #1232.
+        channel = _resolve_fetch_channel(bot, preferred_channel) or default_channel
         # Defense-in-depth only, expected to be unreachable: `bot` (and, for
         # a "file" row, `filename`) already passed
         # webserver.reject_if_unsafe_for_irc_line() - which now delegates to
@@ -1304,7 +1748,7 @@ def check_fetch_queue():
         # message at all if either value is still unsafe for some future
         # reason, mirroring _serve_passive_offer()'s identical re-check
         # right before IT builds its own outbound CTCP line.
-        if contains_unsafe_ctcp_bytes(bot) or (
+        if contains_unsafe_ctcp_bytes(bot) or contains_unsafe_ctcp_bytes(trigger) or (
                 request_type != "list" and contains_unsafe_ctcp_bytes(filename)):
             _mark_failed_locked(queue[rid], "unsafe characters in bot/filename this late")
             print(f"[FETCH] Refusing to dispatch request {rid} "
@@ -1320,13 +1764,15 @@ def check_fetch_queue():
             # the same way: a DCC SEND of their own list zip, filename
             # unknown to us ahead of time (see _claim_matching_offer_locked()
             # for how admission control handles that).
-            message = f"PRIVMSG {channel} :@{bot}\r\n"
+            message = f"PRIVMSG {channel} :@{trigger}\r\n"
             log_desc = f"{bot}'s file list"
         elif request_type == "folder":
             # filename is already the literal string "!rar <folder path>" at
             # this point (see webserver.build_folder_rar_fetch_enqueue_result()),
             # so it falls into the same wire line the plain "file" branch below
-            # builds - only the log line differs, purely cosmetic.
+            # builds - only the log line differs, purely cosmetic. An
+            # mxrarserver pack row (#1209) holds its row's "<path>.rar"
+            # instead, with no "!rar", and goes out as that bot wrote it.
             #
             # webserver.reject_if_unsafe_for_irc_line() already caps filename's
             # length at enqueue time (IRC_LINE_FIELD_MAX_LEN); fit_irc_line()
@@ -1334,11 +1780,11 @@ def check_fetch_queue():
             # posture as the contains_unsafe_ctcp_bytes() re-check just above
             # (#162 finding #13).
             import announce
-            message = announce.fit_irc_line(lambda v: f"PRIVMSG {channel} :!{bot} {v}\r\n", filename)
+            message = announce.fit_irc_line(lambda v: f"PRIVMSG {channel} :!{trigger} {v}\r\n", filename)
             log_desc = f"{filename!r} (folder pack) from {bot}"
         else:
             import announce
-            message = announce.fit_irc_line(lambda v: f"PRIVMSG {channel} :!{bot} {v}\r\n", filename)
+            message = announce.fit_irc_line(lambda v: f"PRIVMSG {channel} :!{trigger} {v}\r\n", filename)
             log_desc = f"{filename!r} from {bot}"
         if oserve and hasattr(oserve, "queue_message"):
             # A request still waiting to go out is replaced, never added to
@@ -1357,6 +1803,11 @@ def check_fetch_queue():
                     continue
                 _take_back_unsent_line(message)
                 row["request_line"] = message
+                # Remembered on the row so a retry of THIS request keeps
+                # asking in the same channel rather than drifting tick to
+                # tick, and so the list it brings back can remember where it
+                # came from (#1232).
+                row["channel"] = channel
                 # Its own lane, sent ahead of everything: in the ordinary one a
                 # request waited among every other user's replies, in the express
                 # one behind the advert, and either way for minutes.
@@ -1414,7 +1865,7 @@ def requests_not_sent(lines):
     return back
 
 
-def drop_our_request_at(bot, filename):
+def drop_our_request_at(bot, filename, channel=None):
     """Ask `bot` to take `filename` out of our queue there: `@<bot>-remove
     <file>` in the channel, the per-file form of the command DCCore answers
     (commands.handle_queue_remove_file). Without it, cancelling on the
@@ -1422,7 +1873,13 @@ def drop_our_request_at(bot, filename):
     sent it later, refused as unsolicited. Only a bot known to be DCCore is
     told: another server may match its trigger as `@<bot>-remove*`, where the
     per-file form is the bare one and clears everything we have queued there.
-    Returns whether it was sent."""
+    Returns whether it was sent.
+
+    `channel` (#1232) is normally the removed row's own `channel` field - the
+    same one the request itself went out in, so the "-remove" reaches the
+    same place the bot is expecting to hear from us. Resolved the same way a
+    fresh request would be if it is absent, stale, or the bot has since left
+    it."""
     import announce
     import dcc
     import serverschat
@@ -1438,7 +1895,7 @@ def drop_our_request_at(bot, filename):
         return False
     default_channel = (getattr(config, "BROADCAST_SEARCH_CHANNEL", None)
                        or str(getattr(config, "CHANNEL", "")).split(",")[0].strip())
-    channel = dcc.channel_containing_user(bot) or default_channel
+    channel = _resolve_fetch_channel(bot, channel) or default_channel
     if not channel:
         return False
     oserve.queue_message(bot, announce.fit_irc_line(
@@ -1767,6 +2224,97 @@ def _normalize_filename_for_match(name):
     return re.sub(r'[\s_]+', ' ', str(name).strip()).strip().lower()
 
 
+# WHAT MXRARSERVER CALLS THE RAR IT PACKS (#1209), from its mx.rar.make.name:
+# the folder's last component - or "<parent> - <last>" when the last one says
+# nothing on its own: CD1, Disc 2, Vol III, Side A, Part 2, Covers, Scans...
+# These are its own patterns, tried against the whole component.
+_GENERIC_PACK_LEAF_RE = re.compile(
+    r"(?:cd|disc|disk|disco|dvd|lp|singles|cover|covers|scan|scans|artwork)"
+    r"|(?:cd|disc|disk|disco|part|parte|vol|volume|volumen|dvd|lp)\s*0*\d+"
+    r"|(?:cd|disc|disk|disco|part|parte|vol|volume|volumen|dvd|lp)\s*(?:i|ii|iii|iv|v|vi|vii|viii|ix|x)"
+    r"|(?:side|lado)\s*[ab]"
+    r"|(?:a|b)\s*(?:side|lado)"
+    r"|(?:pt|chapter|capitulo|session)\s*(?:0*\d+|i|ii|iii|iv|v|vi|vii|viii|ix|x)",
+    re.IGNORECASE)
+# The characters it replaces with "_" in that name.
+_PACK_NAME_UNSAFE_RE = re.compile(r'[\\/:*?<>|]')
+# mxrarserver's own lists arrive as "<name>-Files(<x>)-MX.rar" and the like.
+_MX_LIST_ARCHIVE_RE = re.compile(r"-MX\.rar$", re.IGNORECASE)
+
+
+def _pack_key(name):
+    """A name as pack names are compared: whitespace and underscores gone,
+    case folded. mxrarserver strips the spaces from the name it sends, and a
+    DCC client may turn any that are left into underscores."""
+    return re.sub(r"[\s_]+", "", str(name or "")).lower()
+
+
+def pack_offer_names(path):
+    """The names an mxrarserver bot may give the RAR it packs for `path`, a
+    pack row's "<folder>.rar" (#1209), as _pack_key()s.
+
+    Its "smart" name - "<parent> - <last>" for a generic last component - and
+    the plain last component, which is what it sends with smart naming off.
+    """
+    text = str(path or "").strip()
+    if text.lower().endswith(".rar"):
+        text = text[:-4]
+    parts = [part.strip() for part in re.split(r"[\\/]", text) if part.strip()]
+    if not parts:
+        return set()
+    last = parts[-1]
+    names = {last}
+    if len(parts) > 1 and _GENERIC_PACK_LEAF_RE.fullmatch(last):
+        names.add(f"{parts[-2]} - {last}")
+    return {_pack_key(_PACK_NAME_UNSAFE_RE.sub("_", name) + ".rar") for name in names}
+
+
+def _is_pack_row(row):
+    """Whether this is a request for an mxrarserver folder row (#1209): a
+    "folder" row whose request is the row's own "<path>.rar"."""
+    return (row.get("request_type") == "folder"
+            and bool(list_mod.pack_path_of(row.get("requested_filename") or "")))
+
+
+def _could_be_a_pack(filename):
+    """Whether an offer could be the RAR a pack row asked for, judged by its
+    name alone: a .rar, and not one of mxrarserver's own list archives."""
+    name = str(filename or "").strip()
+    return name.lower().endswith(".rar") and not _MX_LIST_ARCHIVE_RE.search(name)
+
+
+def _pack_request_conflicts_locked(queue, bot, path):
+    """True if a pack row for `path` cannot be told apart, when its RAR
+    arrives, from a request already outstanding for `bot`. Caller holds
+    _fetch_lock().
+
+    A list or "!rar" request is admitted on the bot alone, so either one
+    outstanding takes any offer and leaves no room for a pack beside it. Two
+    pack rows are told apart by the names their RARs will arrive under, so
+    they may wait together - unless those names could be the same: "Artist
+    A\\Album" and "Artist B\\Album" are both sent as "Album.rar".
+    """
+    wanted_bot = str(bot).strip().lower()
+    names = pack_offer_names(path)
+    for row in queue.values():
+        if (row.get("state") not in _UNRESOLVED_FETCH_STATES
+                or str(row.get("bot", "")).strip().lower() != wanted_bot):
+            continue
+        kind = row.get("request_type")
+        if kind == "list" or (kind == "folder" and not _is_pack_row(row)):
+            return True
+        if _is_pack_row(row) and pack_offer_names(row.get("requested_filename")) & names:
+            return True
+    return False
+
+
+def pack_request_conflicts(bot, path):
+    """_pack_request_conflicts_locked() for a caller without the lock -
+    webserver, to answer 409 before it tries to enqueue."""
+    with _fetch_lock():
+        return _pack_request_conflicts_locked(_ensure_fetch_queue(), bot, path)
+
+
 def _claim_matching_offer_locked(queue, from_nick, filename):
     """Find and claim (mark 'receiving') the 'offered' row this CTCP answers.
 
@@ -1844,6 +2392,26 @@ def _claim_matching_offer_locked(queue, from_nick, filename):
             row["state"] = "receiving"
             return rid, row
 
+    # A PENDING FILE ROW (#1244 review), checked before the bot-alone "list"/
+    # "folder" matches below ever get a chance at this offer. A "file" row
+    # goes back to "pending" - no longer awaiting an offer at all - when it
+    # is asked again after silence, held for a busy-bot retry, or kept
+    # waiting for disk space; none of that makes the bot's eventual answer
+    # any less this row's own. Without this check, an offer that happens to
+    # arrive while this same bot also has a "folder" row genuinely offered
+    # was claimed by that folder row instead - bot-alone is the ONLY test a
+    # plain folder match makes, so it cannot tell this exact-name answer
+    # apart from its own - and the file row was left starved, still pending,
+    # its real answer already spent on someone else's request.
+    for rid, row in queue.items():
+        if (row.get("state") == "pending"
+                and row.get("request_type", "file") == "file"
+                and row.get("offered_at") is not None  # was actually asked before, not merely queued
+                and str(row.get("bot", "")).strip().lower() == wanted_bot
+                and _normalize_filename_for_match(row.get("filename", "")) == wanted_name):
+            row["state"] = "receiving"
+            return rid, row
+
     list_candidates = [
         (rid, row) for rid, row in queue.items()
         if row.get("state") in _AWAITING_OFFER_STATES
@@ -1865,6 +2433,50 @@ def _claim_matching_offer_locked(queue, from_nick, filename):
         and row.get("request_type") == "folder"
         and str(row.get("bot", "")).strip().lower() == wanted_bot
     ]
+    # A LATE FOLDER ANSWER (#1244 review), the same allowance a late file or
+    # list already gets above - but folders need it far more often. #1234's
+    # one-at-a-time dispatch promotes a bot's NEXT folder the moment one
+    # times out, so by the time a slow bot's archive for the FIRST one
+    # finally arrives, that row has already failed ("no response") and the
+    # bot-alone match below would otherwise hand the archive to the row that
+    # replaced it instead - confirmed live: a 100-folder batch with one slow
+    # bot shifted every label after it by one, and the true last archive was
+    # lost outright. Included in the SAME pool the live candidates below are
+    # drawn from, not matched first or separately: a named pack match still
+    # finds a late pack row by its predicted name exactly as it would a live
+    # one, and the final oldest-wins tie-break among plain rows naturally
+    # prefers a late (failed, so necessarily asked for earlier) row over a
+    # live one that only started because the late row's timeout promoted it.
+    folder_candidates += [
+        (rid, row) for rid, row in queue.items()
+        if row.get("state") == "failed" and row.get("reason") == "no response"
+        and row.get("request_type") == "folder"
+        and row.get("offered_at") is not None
+        and 0 <= now - row["offered_at"] <= _LATE_OFFER_GRACE
+        and str(row.get("bot", "")).strip().lower() == wanted_bot
+    ]
+    # AN MXRARSERVER PACK ROW (#1209) is told apart by name. Its request is
+    # the row's own "<path>.rar" and the RAR comes back under a name that
+    # can be worked out from that path (pack_offer_names()), so several may
+    # wait on one bot together - enqueue_fetch() refuses one whose name
+    # could clash. The one that names this offer takes it. Failing that, a
+    # "!rar" row takes it on the bot alone, as it always has; and failing
+    # that, a lone pack row takes a RAR it did not predict, since a bot can
+    # name its packs its own way - but not one of mxrarserver's own list
+    # archives, which is a list arriving late, not a pack.
+    packs = [pair for pair in folder_candidates if _is_pack_row(pair[1])]
+    plain = [pair for pair in folder_candidates if not _is_pack_row(pair[1])]
+    offered = _pack_key(filename)
+    named = [pair for pair in packs
+             if offered in pack_offer_names(pair[1].get("requested_filename"))]
+    if named:
+        folder_candidates = named
+    elif plain:
+        folder_candidates = plain
+    elif len(packs) == 1 and _could_be_a_pack(filename):
+        folder_candidates = packs
+    else:
+        folder_candidates = []
     if folder_candidates:
         rid, row = min(folder_candidates, key=lambda pair: pair[1].get("requested_at", 0))
         # Same reasoning as the "list" branch above: the row was created with
@@ -1874,6 +2486,32 @@ def _claim_matching_offer_locked(queue, from_nick, filename):
         # packed .rar - that is only known now. row["requested_filename"] was
         # set once at creation (new_fetch_row()) and is left untouched here,
         # so the original request text survives even after this overwrite.
+        row.pop("reason", None)  # cleared whether or not this was the late branch above
+        row["filename"] = filename
+        row["state"] = "receiving"
+        return rid, row
+
+    # A LATE LIST (#1209), the same allowance a late file gets above. A list
+    # request gives up after FETCH_OFFER_TIMEOUT - a minute - and a bot that
+    # builds its list on request (mxrarserver packs it into a RAR first, and
+    # says "The list will be prepared and sent automatically") or one with a
+    # queue sends it later than that: it was refused as unsolicited. A list
+    # row has no name to match, so the bot alone decides, as it does for a
+    # list still waiting - and only after every row still waiting has had
+    # its chance at this offer, so a late list never takes what answers a
+    # request that has not given up. The newest such row takes it: it is the
+    # request this list most likely answers.
+    late_lists = [
+        (rid, row) for rid, row in queue.items()
+        if row.get("state") == "failed" and row.get("reason") == "no response"
+        and row.get("request_type") == "list"
+        and row.get("offered_at") is not None
+        and 0 <= now - row["offered_at"] <= _LATE_OFFER_GRACE
+        and str(row.get("bot", "")).strip().lower() == wanted_bot
+    ]
+    if late_lists:
+        rid, row = max(late_lists, key=lambda pair: pair[1].get("requested_at", 0))
+        row.pop("reason", None)
         row["filename"] = filename
         row["state"] = "receiving"
         return rid, row
@@ -1900,7 +2538,7 @@ def _sanitize_offer_filename(raw_name):
     name = name.strip().strip('.').strip()
     if not name:
         name = "fetched_file"
-    return name
+    return platform_compat.windows_safe_name(name)
 
 
 # One path COMPONENT, in bytes. NTFS allows 255 characters per name and ext4
@@ -2177,11 +2815,34 @@ def handle_incoming_offer(irc_sock, from_nick, ctcp_payload):
             row["state"] = "listening"
             row["listening_since"] = time.time()
 
-    if is_passive:
-        _serve_passive_offer(irc_sock, from_nick, row, offer, dest_dir, stored_name)
-        return
+    try:
+        if is_passive:
+            _serve_passive_offer(irc_sock, from_nick, row, offer, dest_dir, stored_name)
+        else:
+            _run_transfer(row, offer, dest_dir, stored_name)
+    finally:
+        _record_a_failed_fetch(row)
 
-    _run_transfer(row, offer, dest_dir, stored_name)
+
+def _record_a_failed_fetch(row):
+    """A download that was offered, admitted and then failed, in the transfer
+    record (#1203), as a completed one is: the bot it came from, its kind, its
+    size and what had arrived, never its name.
+
+    Only from here: an offer refused before anything was opened (too big, an
+    unsafe name) never became a transfer, and one put back to wait for disk
+    space has not ended. Never raises."""
+    try:
+        if row.get("state") != "failed":
+            return False
+        return transfer_log.record_unfinished(
+            transfer_log.RECEIVED, transfer_log.STATUS_FAILED,
+            {"list": transfer_log.KIND_LIST, "folder": transfer_log.KIND_ALBUM}.get(
+                row.get("request_type"), transfer_log.KIND_FILE),
+            row.get("total_size") or 0, row.get("bytes_received") or 0, nick=row.get("bot"))
+    except Exception as record_err:
+        print(f"[TRANSFER-LOG ERROR] Could not record the failed download: {record_err}")
+        return False
 
 
 def _open_fetch_listener():
@@ -2437,7 +3098,9 @@ def _handle_completed_list_fetch(row, zip_path):
     """
     try:
         import list_fetch
-        ok, reason = list_fetch.process_fetched_list_zip(row.get("bot", ""), zip_path)
+        ok, reason = list_fetch.process_fetched_list_zip(row.get("bot", ""), zip_path,
+                                                          channel=row.get("channel"),
+                                                          secondary=bool(row.get("secondary_channel")))
         if not ok:
             row["list_processing_error"] = reason or "no recognizable list file found in the zip"
             print(f"[FETCH] {row.get('bot')}'s fetched list zip was received "
@@ -2486,6 +3149,10 @@ def _offer_timeout_for(row, offer_timeout, folder_timeout, unadvertised_timeout)
     """
     if row.get("request_type") != "folder":
         return offer_timeout
+    # An mxrarserver pack row (#1209) came out of that bot's own list of the
+    # folders it packs: the strongest sign there is, carried by the request.
+    if _is_pack_row(row):
+        return folder_timeout
     try:
         import list_fetch
         if list_fetch.bot_publishes_a_rar_list(row.get("bot", "")):
@@ -2566,6 +3233,10 @@ def _run_transfer(row, offer, dest_dir, stored_name, sock=None):
             # not reach them. A passive offer that nobody connects back to is
             # about our side, not theirs.
             _note_connect_failure(row.get("bot"))
+            # And one failed request (#1210). After the line above, so three
+            # failed connections still pause the bot until it is resumed, as
+            # #926 decided; a cooldown never shortens that.
+            _note_fetch_failure(row.get("bot"))
             try:
                 sock.close()
             except Exception:
@@ -2655,6 +3326,7 @@ def _run_transfer(row, offer, dest_dir, stored_name, sock=None):
         row["state"] = "complete"
         row["bytes_received"] = bytes_received
         _note_connect_success(row.get("bot"))
+        _note_fetch_success(row.get("bot"))
         transfer_log.record_received(
             {"list": transfer_log.KIND_LIST, "folder": transfer_log.KIND_ALBUM}.get(
                 row.get("request_type"), transfer_log.KIND_FILE),
@@ -2700,6 +3372,9 @@ def _run_transfer(row, offer, dest_dir, stored_name, sock=None):
     else:
         _mark_failed_locked(row, failure_reason)
         print(f"[FETCH] Failed ({failure_reason}): {stored_name}.")
+        # The transfer broke off: a failed request (#1210). A full disk,
+        # above, is ours and is asked again, so it does not count.
+        _note_fetch_failure(row.get("bot"))
     try:
         if os.path.exists(platform_compat.long_path(dest_path)):
             # Unwrapped, exists() answers False for a >260 path and the

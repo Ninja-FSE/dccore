@@ -72,7 +72,12 @@ class TheWindowMenu(unittest.TestCase):
     def test_every_console_command_that_is_not_plumbing_has_an_entry(self):
         # dlcancel and dlagain act on one row's id: they live in the
         # Downloads window's own right-click menu (see test_dccore_downloads_window).
-        plumbing = {"hello", "help", "quit", "pair", "unpair", "dlcancel", "dlagain"}
+        # dlqueue feeds the Download queues window, whose menu item is
+        # dccore.queues. clearandignore (#1247) is never clicked directly -
+        # the menu's own "Clear the queue of ... and ignore for..." items
+        # reach it through the dccore.clearignore alias instead, the same
+        # way "Clear and ignore..." always had to ask for the minutes first.
+        plumbing = {"hello", "help", "quit", "pair", "unpair", "dlcancel", "dlagain", "dlqueue", "clearandignore"}
         for command in adminchat.COMMANDS:
             if command in plumbing:
                 continue
@@ -155,6 +160,9 @@ class TheOtherMenus(unittest.TestCase):
         for entry in (".Show the lists:dccore lists", ".Fetch the changed lists:dccore fetch", ".Command list:dccore"):
             self.assertIn(entry, menu)
         self.assertIn(".Open the window:dccore window", menu)
+
+    def test_the_status_and_channel_menu_opens_the_download_queues_too(self):
+        self.assertIn(".Download queues...:dccore.queues", block("menu status,channel {"))
 
     def test_the_nicklist_menu_is_unchanged(self):
         menu = block("menu nicklist {")

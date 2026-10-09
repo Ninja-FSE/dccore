@@ -29,6 +29,7 @@ import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 
 from tests import test_path_security as security  # noqa: E402
+from tests import support  # noqa: E402
 from tests.support import temp_dir  # noqa: E402
 
 
@@ -63,7 +64,7 @@ class AFailedRarRun(security.PoisonedQueueRowTests):
                 stdout = ""
                 stderr = "rar: out of disk"
             return Failed()
-        dcc.subprocess.run = run
+        support.fake_rar_runs(self, dcc.subprocess, run)
 
     def pack(self):
         out = io.StringIO()

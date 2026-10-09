@@ -519,6 +519,12 @@ def startup(setup_page=None):
         list_grab.ensure_worker()
     except Exception as grab_err:
         print(f"[LIST-GRAB] Could not start automatic list grabbing: {grab_err}")
+    # Automatic discovery of a bot's other channel-bound lists (#1240).
+    try:
+        import list_grab as _list_grab_secondary
+        _list_grab_secondary.ensure_secondary_channel_worker()
+    except Exception as secondary_err:
+        print(f"[LIST-GRAB] Could not start automatic channel-list discovery: {secondary_err}")
 
     # The list rebuild schedule (#776): started the same way, also re-armed by
     # every rehash, so setting it on the dashboard needs no restart.
@@ -633,6 +639,14 @@ def _shut_down():
         try:
             import commands as _commands_stop
             _commands_stop.stop_audio_reading(wait=10.0)
+        except Exception:
+            pass
+        # Every send and the pack still running end with the bot (#1203):
+        # each goes into the transfer record as cancelled, last, so one
+        # that finished while the steps above ran is recorded as it ended.
+        try:
+            import dcc as _dcc_stop
+            _dcc_stop.record_transfers_cut_off()
         except Exception:
             pass
     except KeyboardInterrupt:

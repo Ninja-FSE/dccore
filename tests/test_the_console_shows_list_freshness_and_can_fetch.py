@@ -248,27 +248,30 @@ class TheEvents(DCCoreTestCase):
     def test_an_arrived_list_says_how_many_files(self):
         config.fetched_bot_lists["alpha"] = {"bot": "Alpha", "entry_count": 64136}
         self.addCleanup(config.fetched_bot_lists.pop, "alpha", None)
-        with mock.patch.object(list_fetch, "_process_fetched_list_zip_unlocked", lambda bot, path: (True, "")):
+        with mock.patch.object(list_fetch, "_process_fetched_list_zip_unlocked",
+                               lambda bot, path, channel=None, secondary=False: (True, "")):
             self.assertEqual(list_fetch.process_fetched_list_zip("Alpha", "x.zip"), (True, ""))
         self.assertEqual(self.events[0][2], {"bot": "Alpha", "action": "arrived"})
         self.assertIn("64,136 files", self.events[0][1])
 
     def test_an_unusable_list_says_why(self):
         with mock.patch.object(list_fetch, "_process_fetched_list_zip_unlocked",
-                               lambda bot, path: (False, "not a plausible list")):
+                               lambda bot, path, channel=None, secondary=False: (False, "not a plausible list")):
             self.assertEqual(list_fetch.process_fetched_list_zip("Alpha", "x.zip"), (False, "not a plausible list"))
         self.assertEqual(self.events[0][2], {"bot": "Alpha", "action": "unusable"})
         self.assertIn("not a plausible list", self.events[0][1])
 
     def test_the_return_value_is_untouched(self):
-        with mock.patch.object(list_fetch, "_process_fetched_list_zip_unlocked", lambda bot, path: (False, "r")):
+        with mock.patch.object(list_fetch, "_process_fetched_list_zip_unlocked",
+                               lambda bot, path, channel=None, secondary=False: (False, "r")):
             self.assertEqual(list_fetch.process_fetched_list_zip("A", "z"), (False, "r"))
 
     def test_a_console_that_raises_does_not_fail_the_fetch(self):
         announce.feed_event = mock.Mock(side_effect=RuntimeError("no console"))
         with mock.patch("builtins.print"):
             list_fetch._tell_the_console("Alpha", "auto", "t")
-        with mock.patch.object(list_fetch, "_process_fetched_list_zip_unlocked", lambda bot, path: (True, "")), \
+        with mock.patch.object(list_fetch, "_process_fetched_list_zip_unlocked",
+                               lambda bot, path, channel=None, secondary=False: (True, "")), \
                 mock.patch("builtins.print"):
             self.assertEqual(list_fetch.process_fetched_list_zip("Alpha", "x.zip"), (True, ""))
 
