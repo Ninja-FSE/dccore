@@ -208,7 +208,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.15.0 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.16.0 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -228,8 +228,10 @@ prefix.
 | Command | Effect |
 |---|---|
 | `status` | everything at a glance — slots, queue, bans, list, uptime |
-| `queue [nick]` | queued files, all users (in the order they are served) or one |
+| `queue [nick]` | queued files, all users (in the order they are served) or one nick's files, numbered |
 | `slots` | what is sending right now, and how far along |
+| `packing` | the folder pack that is running: for whom, which folder (its name, never its path), how long, and the archive's size so far against the folder's (#1202) |
+| `packcancel` | stop the folder pack that is running: `rar` is terminated, the partial archive is deleted, the user is told it was cancelled (no failure is counted against the request), and the next waiting pack starts. "Nothing is being packed." when none runs (#1202) |
 | `bans` | permanent and timed bans |
 | `uptime` | how long the daemon has been running |
 | `version` | build and platform |
@@ -242,6 +244,12 @@ prefix.
 |---|---|
 | `ban <pattern>` | add a permanent wildcard ban |
 | `unban <pattern>` | remove one |
+| `queuemove <nick> up\|down` | move a nick one place up or down the line for a free slot (#1206); `queue` lists the nicks in that order. Only the two nicks swap places; nobody else's moves. A nick with a list waiting is served first, so nobody is moved past it - that is refused, with the place the nick keeps. The order is kept in memory only: a restart puts it back to first-come |
+| `queuemove <nick> <number> up\|down` | move one of a nick's queued files up or down in its own queue — the one at the top is sent first. A file being sent or packed stays put and nothing is moved past it. The number is the one `queue <nick>` shows |
+| `queueremove <nick> <number>` | take one file out of a nick's queue, as if they had typed `@<bot>-remove <file>`: same notice to them, `clearqueue` removes the lot. A file being sent is not removed, nor a folder being packed (`packcancel` stops that) |
+| `ignore <nick> <minutes>` | drop one nick's requests for a while, 1 to 10080 minutes (#1206). It is a timed ban: kept across a restart, ends by itself, listed by `bans` with the time left. Its queued files stay; `clearqueue` removes them |
+| `clearandignore <nick> <minutes>` | `ignore`, then `clearqueue` the same nick - but only if the ignore actually took (the bot's own nick, and a nick outside the pattern `ignore` accepts, are refused and the queue is left alone). dccore.mrc's "Clear the queue of ... and ignore for..." sends this one command instead of the two separately (#1247) |
+| `unignore <nick>` | end a timed ignore - or a flood ban - now |
 | `clearqueue <nick>` | force-clear another user's queue |
 | `rehash` | reload modules in place |
 | `update` | rebuild the MasterList |
@@ -249,7 +257,8 @@ prefix.
 | `lists` | the bots' lists we hold, whether each has changed since we took our copy, how big and how old |
 | `fetch [<bot>]` | ask every held bot whose list has changed (up to 10 at a time, skipping offline ones), or one bot whatever its freshness |
 | `downloads on [<rows>]` / `downloads off` | the mIRC Downloads window opened (with how many finished and failed rows it wants, 1-15) or closed; the bot sends its `DLBEGIN` snapshots only in between (#1022) |
-| `dlcancel <id>` | let a download go that has not started (waiting, asked, queued there); never a transfer under way or a finished one |
+| `dlcancel <id> [<id> ...]` / `dlcancel all` | let downloads go that have not started (waiting, asked, queued there); never a transfer under way or a finished one. Each id is judged on its own; `all` is every request that has not started (#1217) |
+| `dlqueue` | every request that has not started, for the mIRC Download queues window (`DQBEGIN` snapshot), or as text with the ids for a console that cannot draw it (#1217) |
 | `dlagain <id>` | ask again for a download or list that failed; the old row stays |
 | `dlclear` | forget every finished download (the files stay on disk) |
 | `chat [#channel\|* <text>]` | say something in DCCore Chat, as the bot, in one channel or (`*`) the fewest that reach the other DCCore bots - **public**, see below; alone, the channels it can chat in |
@@ -447,7 +456,8 @@ unread count on the tab. **Mark all read** clears it.
 What is recorded, and nothing else:
 
 - **private** messages only - a channel line is one you can already see;
-- that are **not** a recognised command;
+- that are **not** a recognised command - a file asked for privately
+  (`!<nick> <file>`) is a request and is answered, so it is never one of them;
 - that are **not** a CTCP (a DCC offer or a VERSION reply is a client talking
   to a client, not a person);
 - from somebody who is **not banned** - a ban silences them here too.
@@ -536,6 +546,8 @@ have been replaced with spaces.
 | `DCCORE SLOT <nick> <sent> <total> <bps>` | one per active transfer: bytes so far, size, speed from its own clock | the name |
 | `DCCORE FETCHING <bot> <received> <total> <bps> <name>` | one per file the bot is receiving from another bot right now (#1019), in the status burst after the QUEUE lines - the panel's Downloading section. Sent only to a script that said it is 1.8 or later in `HELLO` | the name (a list shows as "<bot>'s file list") |
 | `DCCORE DLBEGIN` / `DCCORE DLROW <id> <kind> <state> <bot> <received> <total> <bps> <when> <note> <name>` / `DCCORE DLEND <waiting_total> <complete_total> <failed_total>` | the Downloads window's snapshot (#1022): one `DLROW` per download - `kind` is `d` (coming in), `w` (waiting), `c` (finished) or `f` (failed, a rejected list included), at most 15 of each of the last two, `note` one token (why it waits, or how it ended), `when` the epoch a finished one ended. Whole or not sent; every 3 seconds at most and only when it changed, only after `downloads on`. Sent only to a script that said 1.10 or later in `HELLO` | the Downloads window |
+| `DCCORE DQBEGIN` / `DCCORE DQROW <id> <kind> <state> <bot> <note> <name>` / `DCCORE DQEND <count>` | the Download queues window's snapshot (#1217), sent when `dlqueue` is asked: one `DQROW` per request that has not started - `kind` is `f` (file), `r` (a `!rar` folder) or `l` (a list), `state` is `pending`, `offered` or `queued`, `note` one token (why it waits), the name last and may hold spaces. Whole or not sent. Only to a script that said 1.15 or later in `HELLO` | the Download queues window |
+| `DCCORE PACKING <nick> <done> <total> <elapsed> <folder>` | a folder is being packed into an archive (#1202): in the status burst and every 3 seconds between; `DCCORE PACKING end` once when it stops. `done` is the archive's size so far in bytes, `total` the folder's (0 until measured; rar compresses, so the two are a guide), the folder's name is last and may hold spaces. Sent only to a script that said it is 1.14 or later in `HELLO` | the user |
 | `DCCORE REBUILD <phase> <folder_index> <folder_count> <files> <elapsed>` | a master-list rebuild is running, however it was started (#1024): in the status burst and every 5 seconds between; `DCCORE REBUILD end` once when it stops. The phase is `starting`, `scanning`, `writing`, `packing` or `publishing`. Sent only to a script that said it is 1.9 or later in `HELLO`. The background audio reading (#1182), once the rebuild has published or when `audioinfo` started it alone, comes the same way to a script of 1.12 or later: `DCCORE REBUILD reading <read> <to_read> <files_a_second> <elapsed>`, `finding 0 0 0 <elapsed>` while a reading started alone reads the list to find what to read, then `rewriting 0 0 0 <elapsed>` while it writes the lengths into the list | the phase |
 | `DCCORE QUEUE <pos> <nick> <files> <frozen_secs_left>` | one per queued user, the first 20 in the order they are served: position, files waiting, seconds until a frozen queue is dropped (0 = not frozen) | |
 | `DCCORE TOKEN <name>` | the reply to `pair` | the token, shown once |
@@ -550,10 +562,10 @@ fields inserted into old ones, so they do not move the minor. An older script
 shows them as they come, as it does any type it does not know.
 
 `<channel>` is always exactly one token, straight after the nick: the channel
-the request or search was made in, or `-` when there is none (a request by
-private message, a resume, or a transfer that no longer knows where it was
-asked for) - so a client can count on the position of everything after it and
-print nothing for `-`.
+the request or search was made in - for a request by private message, the
+channel its sender shares with the bot - or `-` when there is none (a resume,
+or a transfer that no longer knows where it was asked for), so a client can
+count on the position of everything after it and print nothing for `-`.
 
 Whatever you did not tick in **Settings → Console feed** is not sent in either
 mode. A session that never says `hello` is the console described above,
@@ -581,7 +593,9 @@ lines, and a burst on top of a backlog would only push more of them off the
 500-line outbox, so the writer drains what is queued before the timer speaks.
 `bps_now` is the daemon's own live speed; a `SLOT` line's `bps` is that
 transfer's bytes over its own elapsed time, and reads `0` for the first half
-second. Today's figures are the rolled ones, the same the advert shows.
+second. It is the speed the next-slot estimate reads too (the one `-que`,
+`-stats` and Live Transfers show), so the two cannot disagree. Today's
+figures are the rolled ones, the same the advert shows.
 
 ### Pairing: a credential that is not the password
 
@@ -697,7 +711,7 @@ Chat request** to auto-accept so it never asks again.
 | the side panel | **Sending n/m**: each running transfer with its size, percentage and speed; **Queue n**: who is waiting, in order, with `frozen m:ss` on a queue that is counting down; **Today**: files and bytes sent, the speed record; and what this window has seen since it opened |
 | the title bar | `MusicBot on Undernet · slots 2/3 · queue 14 · today 38 files / 12.4GB · 1.5MB/s`, updated with every status burst |
 | the editbox | anything you type is a console command - `status`, `queue helen`, `clearqueue ivan`, `ban *!*@bad.host` - and the reply comes back as `[CONSOLE]` lines, or into a second `@DCCore-console` window if you prefer |
-| right-click | the common commands, **Script Settings** and **Console command** on top, then the groups **Info**, **Lists**, **Library** (duplicate filenames, rebuild the list, **Read audio info**), **User control**, **Control** (update check, console feed, reload, **Stop the bot**), **Connection** and **Window** (DCCore Chat, Downloads window, panel, font); on a panel line, that user's queue or clearing it; in any channel's nick list, **DCCore → Queue of / Clear the queue of** that nick |
+| right-click | **Cancel the running pack** at the very top while one runs, the common commands, **Script Settings** and **Console command** on top, then the groups **Info** (with **Download queues...**), **Lists**, **Library** (duplicate filenames, rebuild the list, **Read audio info**), **User control**, **Control** (update check, console feed, reload, **Stop the bot**), **Connection** and **Window** (DCCore Chat, Downloads window, panel, font); on a panel line, that user's queue, clearing it, ignoring them for a while, clearing and ignoring, or moving them earlier or later in line; in any channel's nick list, **DCCore → Queue of / Clear the queue of / Ignore for... / Clear the queue of and ignore for... / Stop ignoring** that nick |
 | the window's button | on the switchbar or treebar, like any channel's: the **message** colour when there is new activity - a request, a queue position, a send, a search - and the **highlight** colour (the one mIRC uses when somebody says your nick) on a failed transfer or dropped lines, so a failure stands out. The `[STATUS]` line, joins, parts and bans do not light it, as they would not in a channel. mIRC 7 or later |
 | a beep | on a failed transfer, if you leave that on |
 
@@ -710,6 +724,17 @@ minutes. An offer the bot never answers - mIRC's own `Waiting for
 acknowledgement...` never gives up - is closed after 75 seconds and
 retried the same way. Closing the window closes the chat and stops the
 retries; `/dccore connect` starts them again.
+
+When mIRC starts, `@DCCore` opens by itself, minimised, with its button at
+the end of the switchbar (dccore.mrc 1.13 or later). Until the console
+connects, its title and first line say what it is waiting for: mIRC not
+connected to the bot's network yet, the bot not answering yet, the console
+not open (you closed the window last time, so it waits for
+`/dccore connect`), or no bot paired yet, with the command to pair one.
+Opening it does not dial the bot: the usual reconnect when mIRC connects to
+the bot's network fills it in. Closing the window does not stop it opening next time; the setting under
+**Open when mIRC starts** in the options does. DCCore Chat and the Downloads
+window can open the same way; both are off by default.
 
 ### Options
 
@@ -729,6 +754,8 @@ retries; `/dccore connect` starts them again.
   beside itself (`dccore-bg-<n>.bmp`) and tiles it behind the text;
 - the bot's nick, whether the script reconnects by itself, the pairing
   state with **Pair again...** and **Forget token**.
+- **Open when mIRC starts (minimised)**: `@DCCore` (on by default),
+  `@DCCore-Chat` and `@DCCore-Downloads` (both off by default).
 
 These are the script's own filters, kept by mIRC in `dccore.ini`. The
 bot's **Settings → Console feed** tickboxes remain the ceiling on what is
@@ -742,7 +769,7 @@ sent at all: what is off there never reaches the script.
 /dccore disconnect           close the chat and stop reconnecting
 /dccore unpair               forget the token here and revoke it on the bot
 /dccore trust                accept the bot's current host as the one to send the token to
-/dccore options              what to show, colours, panel, title bar, beep
+/dccore options              what to show, colours, panel, title bar, beep, windows at start
 /dccore window               open or focus @DCCore
 /dccore chat [text]          open DCCore Chat, or say something in it (public)
 /dccore downloads            open @DCCore-Downloads: what the bot is fetching from other bots (needs 1.10)

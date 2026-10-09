@@ -2069,6 +2069,128 @@ class FolderRarRequestTypeTests(DCCoreTestCase):
         self.assertEqual(row["requested_filename"], "!rar Artist/Album")
 
 
+class ALateFolderAnswerClaimsTheRightRow(DCCoreTestCase):
+    """#1244 review: #1234's one-at-a-time dispatch promotes a bot's NEXT
+    folder row the moment one times out ("no response"). A slow bot's
+    archive for the FIRST (now-failed) row arriving late used to be claimed
+    by the row that replaced it instead, since the live bot-alone match
+    (_claim_matching_offer_locked()'s "folder" branch) never looked at
+    failed rows at all - confirmed live, in a long batch, as every label
+    after the slow one shifting by one and the true last archive being lost
+    outright. A late folder answer is now matched the same way a late file
+    or list answer already was, and the existing oldest-wins tie-break
+    naturally prefers it over the row promoted after it (the failed row, by
+    definition, was asked for first)."""
+
+    def test_a_late_answer_goes_to_the_row_that_actually_timed_out(self):
+        older_rid = insert_row_bypassing_enqueue_guard("goodbot", "!rar Older/Album", request_type="folder")
+        config.fetch_queue[older_rid].update(
+            state="failed", reason="no response", offered_at=time.time(), requested_at=1.0)
+
+        newer_rid = insert_row_bypassing_enqueue_guard("goodbot", "!rar Newer/Album", request_type="folder")
+        config.fetch_queue[newer_rid].update(state="offered", offered_at=time.time(), requested_at=2.0)
+
+        claimed_id, row = dcc_fetch._claim_matching_offer_locked(
+            config.fetch_queue, "goodbot", "WhateverName.rar")
+
+        self.assertEqual(claimed_id, older_rid)
+        self.assertEqual(row["state"], "receiving")
+        self.assertEqual(config.fetch_queue[newer_rid]["state"], "offered", "untouched")
+
+    def test_the_stale_failure_reason_is_cleared_once_reclaimed(self):
+        rid = insert_row_bypassing_enqueue_guard("goodbot", "!rar Older/Album", request_type="folder")
+        config.fetch_queue[rid].update(
+            state="failed", reason="no response", offered_at=time.time())
+
+        _claimed_id, row = dcc_fetch._claim_matching_offer_locked(
+            config.fetch_queue, "goodbot", "WhateverName.rar")
+
+        self.assertNotIn("reason", row)
+
+    def test_outside_the_grace_window_a_late_folder_is_not_considered(self):
+        """Control: the allowance has a bound, same as the file/list ones."""
+        rid = insert_row_bypassing_enqueue_guard("goodbot", "!rar Older/Album", request_type="folder")
+        config.fetch_queue[rid].update(
+            state="failed", reason="no response",
+            offered_at=time.time() - dcc_fetch._LATE_OFFER_GRACE - 1)
+
+        claimed_id, _row = dcc_fetch._claim_matching_offer_locked(
+            config.fetch_queue, "goodbot", "WhateverName.rar")
+
+        self.assertIsNone(claimed_id)
+
+    def test_a_late_named_pack_rows_own_name_still_finds_it(self):
+        """The pack branch has the same bug independently of the plain one:
+        folder_candidates used to exclude a failed row from the name search
+        too, so even a reliably-predictable pack name could not rescue it."""
+        rid = insert_row_bypassing_enqueue_guard("goodbot", "E:\\Music\\Artist\\Some Album.rar",
+                                                 request_type="folder")
+        config.fetch_queue[rid].update(
+            state="failed", reason="no response", offered_at=time.time())
+        live_rid = insert_row_bypassing_enqueue_guard("goodbot", "E:\\Music\\Artist\\Other Album.rar",
+                                                       request_type="folder")
+        config.fetch_queue[live_rid].update(state="offered", offered_at=time.time())
+
+        claimed_id, row = dcc_fetch._claim_matching_offer_locked(
+            config.fetch_queue, "goodbot", "Some_Album.rar")
+
+        self.assertEqual(claimed_id, rid)
+        self.assertEqual(row["filename"], "Some_Album.rar")
+        self.assertEqual(config.fetch_queue[live_rid]["state"], "offered")
+
+
+class APendingFileRowIsMatchedBeforeABotAloneFolderClaim(DCCoreTestCase):
+    """#1244 review: a "file" row goes back to "pending" - no longer
+    awaiting an offer at all - when it is asked again after silence, held
+    for a busy-bot retry, or kept waiting for disk space. None of that makes
+    the bot's eventual answer any less this row's own, but a "folder" row's
+    bot-alone match (the ONLY test it makes) could not tell this exact-name
+    answer apart from its own, and claimed it instead - confirmed live,
+    much more likely since #1234 made an offered folder row for the same
+    bot the ordinary case rather than a rare one."""
+
+    def test_a_pending_file_row_that_was_offered_before_wins_over_a_live_folder(self):
+        file_rid = dcc_fetch.enqueue_fetch("goodbot", "Song.flac", request_type="file")
+        config.fetch_queue[file_rid].update(state="pending", offered_at=time.time() - 5)
+        folder_rid = dcc_fetch.enqueue_fetch("goodbot", "!rar Artist/Album", request_type="folder")
+        config.fetch_queue[folder_rid].update(state="offered", offered_at=time.time())
+
+        claimed_id, row = dcc_fetch._claim_matching_offer_locked(
+            config.fetch_queue, "goodbot", "Song.flac")
+
+        self.assertEqual(claimed_id, file_rid)
+        self.assertEqual(row["state"], "receiving")
+        self.assertEqual(config.fetch_queue[folder_rid]["state"], "offered", "untouched")
+
+    def test_a_pending_file_row_never_actually_offered_is_not_matched_by_name_alone(self):
+        """A row still waiting its very first turn (offered_at is still None
+        - MAX_FETCH_SLOTS or FETCH_MAX_PER_BOT held it back, say) was never
+        asked for at all, so an offer matching its name by coincidence is
+        not its answer - it falls through to the folder's own bot-alone
+        match instead, exactly as before this fix."""
+        file_rid = dcc_fetch.enqueue_fetch("goodbot", "Song.flac", request_type="file")
+        self.assertIsNone(config.fetch_queue[file_rid]["offered_at"])
+        folder_rid = dcc_fetch.enqueue_fetch("goodbot", "!rar Artist/Album", request_type="folder")
+        config.fetch_queue[folder_rid].update(state="offered", offered_at=time.time())
+
+        claimed_id, _row = dcc_fetch._claim_matching_offer_locked(
+            config.fetch_queue, "goodbot", "Song.flac")
+
+        self.assertEqual(claimed_id, folder_rid)
+        self.assertEqual(config.fetch_queue[file_rid]["state"], "pending", "untouched")
+
+    def test_a_pending_file_row_with_a_different_name_does_not_block_the_folder_claim(self):
+        file_rid = dcc_fetch.enqueue_fetch("goodbot", "Other.flac", request_type="file")
+        config.fetch_queue[file_rid].update(state="pending", offered_at=time.time() - 5)
+        folder_rid = dcc_fetch.enqueue_fetch("goodbot", "!rar Artist/Album", request_type="folder")
+        config.fetch_queue[folder_rid].update(state="offered", offered_at=time.time())
+
+        claimed_id, _row = dcc_fetch._claim_matching_offer_locked(
+            config.fetch_queue, "goodbot", "Artist_Album.rar")
+
+        self.assertEqual(claimed_id, folder_rid)
+
+
 class EnqueueTimeBotAloneCollisionTests(DCCoreTestCase):
     """"list" and "folder" rows both use bot-alone admission control (see
     _claim_matching_offer_locked()'s docstring) - neither convention's

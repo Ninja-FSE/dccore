@@ -238,9 +238,11 @@ class ChildrenGetNoWindowOfTheirOwn(unittest.TestCase):
 
     def test_every_console_child_the_daemon_starts_asks_for_it(self):
         sites = {
-            "src/dcc.py": "process = subprocess.run(cmd, capture_output=True,",
+            "src/dcc.py": "process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,",
             "src/commands.py": "process = subprocess.Popen(argv, stdout=subprocess.PIPE,",
             "update_list.py": "result = subprocess.run(cmd, capture_output=True, text=True,",
+            # A RAR list another bot sent is opened with rar (#1200).
+            "src/list_fetch.py": "self.process = subprocess.Popen(_rar_argv(rar_bin, args),",
         }
         for path, call in sites.items():
             with self.subTest(path=path):
@@ -263,7 +265,8 @@ class ChildrenGetNoWindowOfTheirOwn(unittest.TestCase):
                         and isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess"
                         and node.func.attr in ("run", "Popen", "call", "check_call", "check_output")):
                     found.append(path)
-        self.assertEqual(sorted(found), ["src/commands.py", "src/dcc.py", "update_list.py"])
+        self.assertEqual(sorted(found), ["src/commands.py", "src/dcc.py",
+                                         "src/list_fetch.py", "update_list.py"])
 
 if __name__ == "__main__":
     unittest.main()

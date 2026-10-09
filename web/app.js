@@ -219,6 +219,7 @@
     stSpeed:               document.getElementById("st-speed"),
     stRecord:              document.getElementById("st-record"),
     stSending:             document.getElementById("st-sending"),
+    stNextSlot:            document.getElementById("st-next-slot"),
     stQueued:              document.getElementById("st-queued"),
     stQueuedLabel:         document.getElementById("st-queued-label"),
     stUptime:              document.getElementById("st-uptime"),
@@ -255,6 +256,8 @@
     recordNickShow:        document.getElementById("record-nick-show"),
     recordNickResult:      document.getElementById("record-nick-result"),
     recordExport:          document.getElementById("record-export"),
+    transferOutcomeRows:   document.getElementById("transfer-outcome-rows"),
+    transferOutcomeNote:   document.getElementById("transfer-outcome-note"),
     recordForgetAll:       document.getElementById("record-forget-all"),
     importApply:           document.getElementById("import-apply"),
     importCancel:          document.getElementById("import-cancel"),
@@ -806,9 +809,23 @@
   var DOWNLOAD_WAITING_LABELS = {
     offline: "download.waiting.offline", "just-back": "download.waiting.justBack",
     retry: "download.waiting.retry", "their-turn": "download.waiting.theirTurn",
+    "one-at-a-time": "download.waiting.oneAtATime",
     slots: "download.waiting.slots", paused: "download.waiting.paused",
+    cooldown: "download.waiting.fetchCooldown",
     "disk-full": "download.waiting.diskFull", joining: "download.waiting.joining"
   };
+
+  // #1210: "Paused until 14:32 after 3 failures" - a bot that kept failing,
+  // paused until a time, told apart from one paused by hand. The time is the
+  // viewer's own clock; the row carries when, in epoch seconds.
+  function fetchCooldownLabel(row) {
+    var until = new Date(Number(row.cooldown_until) * 1000);
+    var clock = isNaN(until.getTime()) ? "?" :
+      ("0" + until.getHours()).slice(-2) + ":" + ("0" + until.getMinutes()).slice(-2);
+    return t("download.waiting.fetchCooldown")
+      .replace("{time}", clock)
+      .replace("{failures}", String(row.cooldown_failures || "?"));
+  }
 
   // Nothing has been downloaded for it yet: waiting here, or waiting in the
   // other bot's queue (#977). A queued row was given the "Delete this
@@ -868,14 +885,19 @@
       // refused as unsolicited.
       var folder = String(row.requested_filename || "").replace(/^!rar\s+/i, "");
       if (!folder) { button.disabled = false; return; }
-      again = postJson("/api/filelists/fetch-folder-rar", { bot: row.bot, folder: folder });
+      // row.channel (#1240): the channel THIS row actually went out in last
+      // time, carried straight through rather than re-resolved - a retry of
+      // a secondary marker's folder must keep asking in that same channel,
+      // not fall back to the bot's primary one for lack of a marker here.
+      again = postJson("/api/filelists/fetch-folder-rar",
+                       { bot: row.bot, folder: folder, channel: row.channel });
     } else {
       // requested_filename, not filename: for a folder row the second is the
       // name the OTHER bot eventually advertised, and for a failed one it may
       // never have been set at all. The first is what we asked for.
       var wanted = row.requested_filename || row.filename;
       if (!wanted) { button.disabled = false; return; }
-      again = postJson("/api/fetch/enqueue", [{ bot: row.bot, filename: wanted }]);
+      again = postJson("/api/fetch/enqueue", [{ bot: row.bot, filename: wanted, channel: row.channel }]);
     }
 
     again.then(function (res) {
@@ -1151,6 +1173,7 @@
       // back, it has enough of ours, it was busy, or every slot is taken.
       if (state === "pending" && DOWNLOAD_WAITING_LABELS[row.waiting]) {
         label = t(DOWNLOAD_WAITING_LABELS[row.waiting]).replace("{bot}", row.bot || "");
+        if (row.waiting === "cooldown") { label = fetchCooldownLabel(row); }
       }
       var progress = row.total_size
         ? Math.round(100 * (row.bytes_received || 0) / row.total_size) + "%"
@@ -1206,6 +1229,10 @@
         // #926: a paused bot's requests wait here; one click resumes it.
         action = "<button type=\"button\" class=\"btn btn-small fetch-resume-btn\" data-request-id=\"" +
           encodeURIComponent(row.id) + "\">" + t("download.resumeBot") + "</button> " + deleteBtn;
+      } else if (state === "pending" && row.waiting === "cooldown") {
+        // #1210: the same resume, sooner than the pause would end by itself.
+        action = "<button type=\"button\" class=\"btn btn-small fetch-resume-btn\" data-request-id=\"" +
+          encodeURIComponent(row.id) + "\">" + t("download.fetchCooldownResumeNow") + "</button> " + deleteBtn;
       } else if (state === "pending") {
         action = deleteBtn;
       } else if (state === "queued" || state === "offered") {
@@ -1283,6 +1310,7 @@
   // views{} above.
   var STATUS_LABELS = {
     sending: "queue.status.sending", frozen: "queue.status.frozen",
+    packing: "queue.status.packing",
     queued: "sidebar.queued", empty: "queue.status.empty"
   };
 
@@ -1296,7 +1324,7 @@
       })
       .catch(function (err) {
         markConnection(false);
-        el.queueBody.innerHTML = emptyRow(4, "Could not load the queue: " + err.message);
+        el.queueBody.innerHTML = emptyRow(5, "Could not load the queue: " + err.message);
       });
   }
 
@@ -1312,28 +1340,163 @@
       "<div class=\"progress-bar-fill\" style=\"width:" + pct + "%\"></div></div>";
   }
 
-  // What is WAITING - never includes whatever is currently sending, because
-  // dcc.py never puts the in-flight file into dcc_queue (see
-  // build_queue_payload()'s own docstring). A single queued file is shown
+  // The pack being built for this user (#1202): the folder as the list shows
+  // it, the archive's size so far against the folder's (rar compresses, so a
+  // guide, and held under 100% until rar says it is done), and the one button
+  // that stops that process. Nothing is drawn for the bar until the folder
+  // has been measured.
+  function queuePackPart(row) {
+    var pack = row.pack;
+    if (!pack) { return ""; }
+    var bar = "";
+    if (pack.total) {
+      var pct = Math.max(0, Math.min(99, Math.round(100 * (pack.done || 0) / pack.total)));
+      bar = "<div class=\"progress-bar queue-progress\">" +
+        "<div class=\"progress-bar-fill\" style=\"width:" + pct + "%\"></div></div>";
+    }
+    var sizes = pack.total ? (pack.done_text + " / " + pack.total_text) : pack.done_text;
+    var button = pack.cancelling
+      ? "<span class=\"col-dim\">" + escapeHtml(t("queue.cancelling")) + "</span>"
+      : "<button type=\"button\" class=\"btn btn-small btn-danger pack-cancel-btn\">" +
+        escapeHtml(t("common.cancel")) + "</button>";
+    return "<div class=\"queue-current\">" +
+      escapeHtml(t("queue.packingFolder").replace("{folder}", pack.name)) + "</div>" + bar +
+      "<div class=\"queue-pack-line\">" +
+      escapeHtml(t("queue.packingSoFar").replace("{sizes}", sizes).replace("{elapsed}", describeDuration(pack.elapsed))) +
+      " " + button + "</div>";
+  }
+
+  if (el.queueBody) {
+    el.queueBody.addEventListener("click", function (evt) {
+      var target = evt.target;
+      if (!target || !target.classList) { return; }
+      if (target.classList.contains("ignore-btn")) {
+        var nick = target.getAttribute("data-user");
+        var answer = window.prompt(t("queue.ignorePrompt").replace("{user}", nick), "30");
+        if (answer === null) { return; }
+        postJson("/api/ignore", { nick: nick, minutes: answer.trim() }).then(function (res) {
+          if (!res.ok) { window.alert(t("queue.ignoreFailed").replace("{error}", (res.data && res.data.error) || res.status)); }
+          loadQueue();
+        });
+        return;
+      }
+      if (target.classList.contains("qmove-user-btn")) {
+        queueControl("/api/queue/move-user", { nick: target.getAttribute("data-user"), direction: target.getAttribute("data-dir") });
+        return;
+      }
+      if (target.classList.contains("qmove-file-btn")) {
+        queueControl("/api/queue/move-file", {
+          nick: target.getAttribute("data-user"), position: target.getAttribute("data-pos"),
+          id: target.getAttribute("data-id"), direction: target.getAttribute("data-dir")
+        });
+        return;
+      }
+      if (target.classList.contains("qremove-btn")) {
+        queueControl("/api/queue/remove-file", {
+          nick: target.getAttribute("data-user"), position: target.getAttribute("data-pos"),
+          id: target.getAttribute("data-id")
+        });
+        return;
+      }
+      if (target.classList.contains("qclear-btn")) {
+        var who = target.getAttribute("data-user");
+        var total = target.getAttribute("data-count");
+        if (!window.confirm(t("queue.clearConfirm").replace("{user}", who).replace("{count}", total))) { return; }
+        queueControl("/api/queue/clear", { nick: who });
+        return;
+      }
+      if (target.classList.contains("lift-btn")) {
+        target.disabled = true;
+        postJson("/api/unignore", { nick: target.getAttribute("data-user") }).then(function () { loadQueue(); });
+        return;
+      }
+      if (!target.classList.contains("pack-cancel-btn")) { return; }
+      target.disabled = true;
+      postJson("/api/queue/pack/cancel", {}).then(function () { loadQueue(); });
+    });
+  }
+
+  // The operator's queue controls (#1206). Each posts one change and draws
+  // the queue again; a refusal (the file is being sent, the queue moved since
+  // the page was drawn) is said in words rather than ignored.
+  function queueControl(url, body) {
+    postJson(url, body).then(function (res) {
+      if (!res.ok) { window.alert(t("queue.controlFailed").replace("{error}", (res.data && res.data.error) || res.status)); }
+      loadQueue();
+    });
+  }
+
+  function queueButton(cls, label, attrs) {
+    return "<button type=\"button\" class=\"btn btn-small " + cls + "\" title=\"" + escapeHtml(label) +
+      "\" aria-label=\"" + escapeHtml(label) + "\" " + attrs + ">";
+  }
+
+  // The three buttons of one queued file: earlier, later, remove. Its place
+  // and its id go with the click, so a queue that moved since the page was
+  // drawn is refused instead of changing whatever slid into that place. The
+  // id, not the name (#1245): two albums can each hold an Intro.mp3.
+  function queueFileControls(row, index) {
+    var id = (row.file_ids || [])[index] || "";
+    var attrs = "data-user=\"" + escapeHtml(row.user) + "\" data-pos=\"" + (index + 1) + "\" data-id=\"" + escapeHtml(id) + "\"";
+    var up = index > 0 ? queueButton("qmove-file-btn", t("queue.fileEarlier"), attrs + " data-dir=\"up\"") + "\u25B2</button>" : "";
+    var down = index < row.files.length - 1 ? queueButton("qmove-file-btn", t("queue.fileLater"), attrs + " data-dir=\"down\"") + "\u25BC</button>" : "";
+    return " <span class=\"queue-file-controls\">" + up + down +
+      queueButton("qremove-btn btn-danger", t("queue.removeFile"), attrs) + "\u2715</button></span>";
+  }
+
+  // What is QUEUED. A queued file keeps its row while it is sent, so the one
+  // in flight can be in this list too; the server refuses to move it, move
+  // past it or remove it (#1245, see build_queue_payload()'s own
+  // docstring). A send that never queued is not. A single queued file is shown
   // plain, like before; more than one collapses behind a <details> so the
   // row does not grow without bound, but every one of them is there to open
   // - not just a preview of the first, which is all this used to show.
   function queueFileList(row) {
     var files = row.files || [];
     if (!files.length) { return ""; }
-    if (files.length === 1) { return escapeHtml(files[0]); }
-    return "<details class=\"queue-files\"><summary>" +
+    if (files.length === 1) { return escapeHtml(files[0]) + queueFileControls(row, 0); }
+    return "<details class=\"queue-files\" data-user=\"" + escapeHtml(row.user) + "\"><summary>" +
       escapeHtml(files[0]) + " <span class=\"col-dim\">(+" + (files.length - 1) + " more)</span></summary>" +
       "<ul class=\"queue-file-list\">" +
-      files.map(function (f) { return "<li>" + escapeHtml(f) + "</li>"; }).join("") +
+      files.map(function (f, i) { return "<li>" + escapeHtml(f) + queueFileControls(row, i) + "</li>"; }).join("") +
       "</ul></details>";
+  }
+
+  // Ignore (#1206): a nick's requests dropped for some minutes. A nick under
+  // one - or under a flood ban - reads how long is left, and Lift ends it.
+  function queueOrderPart(row) {
+    if (!(row.files || []).length) { return ""; }
+    var nick = escapeHtml(row.user);
+    var attrs = "data-user=\"" + nick + "\"";
+    return queueButton("qmove-user-btn", t("queue.earlier"), attrs + " data-dir=\"up\"") + "\u25B2</button>" +
+      queueButton("qmove-user-btn", t("queue.later"), attrs + " data-dir=\"down\"") + "\u25BC</button>" +
+      queueButton("qclear-btn btn-danger", t("queue.clear"), attrs + " data-count=\"" + row.files.length + "\"") +
+      escapeHtml(t("queue.clear")) + "</button> ";
+  }
+
+  function queueIgnorePart(row) {
+    var nick = escapeHtml(row.user);
+    if (row.ignored_seconds > 0) {
+      return "<span class=\"col-dim\">" +
+        escapeHtml(t("queue.ignoredLeft").replace("{left}", describeDuration(row.ignored_seconds))) + "</span> " +
+        "<button type=\"button\" class=\"btn btn-small lift-btn\" data-user=\"" + nick + "\">" +
+        escapeHtml(t("queue.lift")) + "</button>";
+    }
+    return "<button type=\"button\" class=\"btn btn-small btn-danger ignore-btn\" data-user=\"" + nick + "\">" +
+      escapeHtml(t("queue.ignore")) + "</button>";
   }
 
   function renderQueueTable(rows) {
     if (!rows.length) {
-      el.queueBody.innerHTML = emptyRow(4, t("queue.empty"));
+      el.queueBody.innerHTML = emptyRow(5, t("queue.empty"));
       return;
     }
+    // The queue is drawn again every few seconds; a nick's open list of files
+    // has to stay open through it, or it shuts under the operator's finger.
+    var opened = {};
+    Array.prototype.forEach.call(el.queueBody.querySelectorAll("details.queue-files[open]"), function (d) {
+      opened[d.getAttribute("data-user")] = true;
+    });
     el.queueBody.innerHTML = rows.map(function (row) {
       var status = row.status || "queued";
       var label = t(STATUS_LABELS[status] || status);
@@ -1344,6 +1507,7 @@
           t("queue.sendingFile").replace("{file}", escapeHtml(row.current_file)) +
           "</div>" + queueProgressBar(row);
       }
+      if (status === "packing") { sendingPart = queuePackPart(row); }
       // With nothing queued behind an in-flight send, "preview" already
       // equals current_file - showing it a second time would be a
       // duplicate, not new information.
@@ -1355,8 +1519,12 @@
         "<td class=\"col-dim col-mono\">" + sendingPart + queuedPart + "</td>" +
         "<td class=\"col-mono\">" + escapeHtml(row.count) + "</td>" +
         "<td><span class=\"status-pill status-" + escapeHtml(status) + "\">" + escapeHtml(label) + "</span></td>" +
+        "<td class=\"queue-actions\">" + queueOrderPart(row) + queueIgnorePart(row) + "</td>" +
         "</tr>";
     }).join("");
+    Array.prototype.forEach.call(el.queueBody.querySelectorAll("details.queue-files"), function (d) {
+      if (opened[d.getAttribute("data-user")]) { d.open = true; }
+    });
   }
 
   // WHAT THE OPERATOR MISSED. Two severities and no more: "warning" happened
@@ -2928,6 +3096,23 @@
           if (i >= boxes.length) { return; }
           boxes[i].dataset.bot = row.source;
           boxes[i].dataset.filename = row.title;
+          // WHICH OF THE BOT'S LISTS THIS ROW CAME FROM (#1240). row.source
+          // is the bare nick only - entries_to_filelist_rows() shares that
+          // shape with the operator's own list, which has no marker at all -
+          // so the marker has to come from here instead: group.bot for a
+          // cross-search row (each group is its own "nick/marker" source),
+          // state.filelistsSource for the single list currently open in the
+          // List Browser. Sent on every request so the server can answer
+          // from the CHANNEL THIS LIST CAME FROM rather than always the
+          // bot's primary one - a file from a secondary channel's list used
+          // to be asked for in the bot's main channel instead, found live.
+          boxes[i].dataset.marker = splitFetchedSource(group.bot || state.filelistsSource).list;
+          // A row of a RAR list asks for a folder (#1233): Download selected
+          // sends it the way "Get Folder as Rar" does, not as a file.
+          if (row.rar_folder) {
+            boxes[i].dataset.rarFolder = row.rar_folder;
+            boxes[i].dataset.folderBot = splitFetchedSource(group.bot || state.filelistsSource).nick;
+          }
           i += 1;
         });
       });
@@ -2955,8 +3140,11 @@
         // whichever list the sidebar has selected - not the one this folder
         // came from. Requesting the right folder from the wrong bot is a
         // request that cannot succeed.
-        button.dataset.bot = splitFetchedSource(
-          group.bot || state.filelistsSource).nick;
+        var source = splitFetchedSource(group.bot || state.filelistsSource);
+        button.dataset.bot = source.nick;
+        // WHICH OF THE BOT'S LISTS (#1240) - same reasoning as
+        // attachFilelistsCheckboxData()'s own comment above.
+        button.dataset.marker = source.list;
         // THE ROW'S OWN FOLDER, taken from the request line that put the
         // button there - not the folder HEADING the row happens to sit under.
         // A RAR list's rows are grouped under whatever heading that list
@@ -2973,7 +3161,8 @@
       var folder = button.dataset.folder;
       if (!bot || !folder) { return; }
       button.disabled = true;
-      postJson("/api/filelists/fetch-folder-rar", { bot: bot, folder: folder }).then(function (res) {
+      postJson("/api/filelists/fetch-folder-rar",
+              { bot: bot, folder: folder, marker: button.dataset.marker }).then(function (res) {
         if (!res.ok) {
           showFilelistsFetchStatus(res.data.error || ("HTTP " + res.status), true);
           button.disabled = false;
@@ -2996,17 +3185,48 @@
 
     el.filelistsDownloadSelectedBtn.addEventListener("click", function () {
       var checked = el.filelistsBody.querySelectorAll(".filelists-check:checked");
-      var items = Array.prototype.map.call(checked, function (box) {
-        return { bot: box.dataset.bot, filename: box.dataset.filename };
-      });
-      if (!items.length) { return; }
-      el.filelistsDownloadSelectedBtn.disabled = true;
-      postJson("/api/fetch/enqueue", items).then(function (res) {
-        if (!res.ok && !(res.data && res.data.created && res.data.created.length)) {
-          showFilelistsFetchStatus(t("download.couldNotQueue").replace("{error}",
-            (res.data.error || (res.data.errors && res.data.errors[0] && res.data.errors[0].error) || ("HTTP " + res.status))), true);
+      // A ticked row of a RAR list is a FOLDER to be packed, so it goes the way
+      // "Get Folder as Rar" does; the rest are files, one request each (#1233).
+      var items = [];
+      var folders = [];
+      Array.prototype.forEach.call(checked, function (box) {
+        if (box.dataset.rarFolder) {
+          folders.push({ bot: box.dataset.folderBot || box.dataset.bot, folder: box.dataset.rarFolder,
+                        marker: box.dataset.marker });
         } else {
-          showFilelistsFetchStatus(t("download.queuedForFetch").replace("{count}", res.data.created.length), false);
+          items.push({ bot: box.dataset.bot, filename: box.dataset.filename, marker: box.dataset.marker });
+        }
+      });
+      if (!items.length && !folders.length) { return; }
+      el.filelistsDownloadSelectedBtn.disabled = true;
+      var posts = [];
+      if (items.length) { posts.push(postJson("/api/fetch/enqueue", items)); }
+      if (folders.length) { posts.push(postJson("/api/filelists/fetch-folder-rar", folders)); }
+      Promise.all(posts).then(function (results) {
+        var queued = 0;
+        var failure = null;
+        results.forEach(function (res) {
+          var made = (res.data && res.data.created && res.data.created.length) || 0;
+          queued += made;
+          if (!made && !failure) {
+            failure = (res.data && (res.data.error ||
+              (res.data.errors && res.data.errors[0] && res.data.errors[0].error))) || ("HTTP " + res.status);
+          }
+        });
+        if (!queued) {
+          showFilelistsFetchStatus(t("download.couldNotQueue").replace("{error}", failure), true);
+        } else {
+          // A mixed files+folders tick (#1244 review): the files post and
+          // the folder post are two separate requests, and only the files
+          // one succeeding used to report total success - a folder post
+          // refused outright (409 for an outstanding list, 413 over 500
+          // rows, the bot absent) was silently dropped, every box unticked
+          // regardless, as if nothing had gone wrong.
+          var message = t("download.queuedForFetch").replace("{count}", queued);
+          if (failure) {
+            message += " " + t("download.partialFailure").replace("{error}", failure);
+          }
+          showFilelistsFetchStatus(message, Boolean(failure));
           Array.prototype.forEach.call(checked, function (box) { box.checked = false; });
           // Re-read the page so the rows just queued say so. The marks are
           // stamped server-side when a page is built, so without this they
@@ -4672,7 +4892,10 @@
     MAX_DCC_SLOTS: "settings.field.MAX_DCC_SLOTS",
     MAX_USER_QUEUE: "settings.field.MAX_USER_QUEUE",
     MAX_GLOBAL_QUEUE: "settings.field.MAX_GLOBAL_QUEUE",
+    SEARCH_ENABLED: "settings.field.SEARCH_ENABLED",
     MAX_SEARCH_RESULTS: "settings.field.MAX_SEARCH_RESULTS",
+    SEARCH_SHOW_FOLDER: "settings.field.SEARCH_SHOW_FOLDER",
+    SEARCH_FOLDER_MAX_CHARS: "settings.field.SEARCH_FOLDER_MAX_CHARS",
     MSG_DELAY: "settings.field.MSG_DELAY",
     DEBUG_MSG_DELAY: "settings.field.DEBUG_MSG_DELAY",
     DCC_PORT_START: "settings.field.DCC_PORT_START",
@@ -4692,10 +4915,14 @@
     AUTO_GRAB_EVERY_MINUTES: "settings.field.AUTO_GRAB_EVERY_MINUTES",
     AUTO_GRAB_MIN_FILES: "settings.field.AUTO_GRAB_MIN_FILES",
     AUTO_GRAB_MIN_SPEED_KB: "settings.field.AUTO_GRAB_MIN_SPEED_KB",
+    AUTO_DISCOVER_CHANNEL_LISTS: "settings.field.AUTO_DISCOVER_CHANNEL_LISTS",
+    MULTI_CHANNEL_LIST_STABLE_SECONDS: "settings.field.MULTI_CHANNEL_LIST_STABLE_SECONDS",
     FETCH_TRANSFER_TIMEOUT: "settings.field.FETCH_TRANSFER_TIMEOUT",
     FETCH_OFFER_TIMEOUT: "settings.field.FETCH_OFFER_TIMEOUT",
     FETCH_QUEUED_TIMEOUT: "settings.field.FETCH_QUEUED_TIMEOUT",
     FETCH_MAX_PER_BOT: "settings.field.FETCH_MAX_PER_BOT",
+    FETCH_BOT_MAX_FAILS: "settings.field.FETCH_BOT_MAX_FAILS",
+    FETCH_BOT_COOLDOWN_MINUTES: "settings.field.FETCH_BOT_COOLDOWN_MINUTES",
     FETCH_FOLDER_OFFER_TIMEOUT: "settings.field.FETCH_FOLDER_OFFER_TIMEOUT",
     FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED: "settings.field.FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED",
     MAX_FETCH_FOLDER_FILE_SIZE: "settings.field.MAX_FETCH_FOLDER_FILE_SIZE",
@@ -5294,11 +5521,41 @@
   // not encode a double quote, which is the same rule every other row in this
   // file follows.
   function channelBoxHtml(index, name, checked, unconfigured) {
-    return '<label class="served-list-channel' +
+    return '<div class="served-list-channel-item">' +
+      '<label class="served-list-channel' +
       (unconfigured ? " is-unconfigured" : "") + '">' +
       '<input type="checkbox" class="served-list-channel-box"' +
       ' data-list-index="' + index + '"' + (checked ? " checked" : "") + ">" +
-      "<span></span></label>";
+      "<span></span></label>" +
+      channelModeHtml(checked) +
+      "</div>";
+  }
+
+  // How the bot behaves in a channel it serves (#1204). The values are the
+  // ones library.MODES stores. Only meaningful while the channel is ticked,
+  // so it is disabled otherwise - an untick has to take the mode with it,
+  // because the server refuses a mode on a channel the list does not serve.
+  function channelModeHtml(enabled) {
+    return '<select class="served-list-channel-mode"' + (enabled ? "" : " disabled") +
+      ' title="' + t("settings.channelModeTitle") + '">' +
+      '<option value="normal">' + t("settings.channelModeNormal") + "</option>" +
+      '<option value="quiet">' + t("settings.channelModeQuiet") + "</option>" +
+      '<option value="request_only">' + t("settings.channelModeRequestOnly") + "</option>" +
+      "</select>";
+  }
+
+  // {channel: mode} for what is ticked and not Normal, read off the DOM for
+  // the same reason tickedChannels() is.
+  function channelModes(block) {
+    var out = {};
+    block.querySelectorAll(".served-list-channel-item").forEach(function (item) {
+      var box = item.querySelector(".served-list-channel-box");
+      var select = item.querySelector(".served-list-channel-mode");
+      if (box && select && box.checked && box.dataset.channel && select.value !== "normal") {
+        out[box.dataset.channel.toLowerCase()] = select.value;
+      }
+    });
+    return out;
   }
 
   // Values as PROPERTIES, never concatenated into value="…": escapeHtml() is
@@ -5358,8 +5615,17 @@
         if (name === undefined) { return; }
         box.dataset.channel = name;
         label.querySelector("span").textContent = name;
+        var modeSelect = label.parentNode.querySelector(".served-list-channel-mode");
+        if (modeSelect) {
+          modeSelect.value = ((entry.modes || {})[name.toLowerCase()]) || "normal";
+          modeSelect.addEventListener("change", function () {
+            draft[index].modes = channelModes(block);
+          });
+        }
         box.addEventListener("change", function () {
           draft[index].channels = tickedChannels(block);
+          if (modeSelect) { modeSelect.disabled = !box.checked; }
+          draft[index].modes = channelModes(block);
         });
       });
       primaryInput.addEventListener("change", function () {
@@ -5462,6 +5728,7 @@
               name: entry.name,
               primary: !!entry.primary,
               channels: (entry.channels || []).slice(),
+              modes: Object.assign({}, entry.modes || {}),
               folders: (entry.folders || []).map(function (f) {
                 return { name: f.name, path: f.path };
               })
@@ -5727,13 +5994,20 @@
     var wanted = {};
     (state.settingsCategories || []).forEach(function (category) {
       category.fields.forEach(function (field) {
-        if (field.name !== "THEME" && field.name.indexOf("CUSTOM_THEME_") !== 0) {
+        var isSearchEnabled = field.name === "SEARCH_ENABLED";
+        if (field.name !== "THEME" && field.name.indexOf("CUSTOM_THEME_") !== 0 && !isSearchEnabled) {
           return;
         }
-        wanted[field.name] = Object.prototype.hasOwnProperty.call(
-          state.settingsDirty, field.name)
+        var current = Object.prototype.hasOwnProperty.call(state.settingsDirty, field.name)
           ? state.settingsDirty[field.name]
-          : settingsValueToString(field.value);
+          : field.value;
+        // SEARCH_ENABLED (#1249 review): the advert sample's "Search: ON/OFF"
+        // followed the SAVED setting regardless of what the operator had
+        // just toggled, because the preview request never carried the
+        // unsaved value at all. Sent as a real boolean, not stringified
+        // like THEME/CUSTOM_THEME_* - those are genuinely text, this is not,
+        // and the server reads it as one.
+        wanted[field.name] = isSearchEnabled ? Boolean(current) : settingsValueToString(current);
       });
     });
 
@@ -6267,6 +6541,16 @@
     setStat(el.stFoot, data.version || "");
   }
 
+  // When the first busy slot is likely to free up (#1207): the next FREE
+  // slot, not anybody's turn. "now" and "not known yet" are words, so they
+  // are translated here; a time ("~4 min", "~2h 10m") is the server's own
+  // rendering, the one the -que and -stats notices print.
+  function nextSlotText(tr) {
+    if (tr.next_slot === "now") { return t("stats.nextSlotNow"); }
+    if (tr.next_slot === null || tr.next_slot === undefined) { return t("stats.nextSlotUnknown"); }
+    return tr.next_slot_text || t("stats.nextSlotUnknown");
+  }
+
   // The Live Transfers figures. Every one is rendered server-side by the same
   // helpers the channel advert and the admin console use, so the page cannot
   // disagree with the advert about how the same number reads.
@@ -6275,6 +6559,7 @@
     setStat(el.stSpeed, tr.speed_now_text || "0k/s");
     setStat(el.stRecord, tr.record_text || "0k/s");
     setStat(el.stSending, (tr.sending || 0) + " / " + (tr.slots || 0));
+    setStat(el.stNextSlot, nextSlotText(tr));
     setStat(el.stQueued, (tr.queued_files || 0).toLocaleString());
     setStat(el.stQueuedLabel,
             t("sidebar.queued") + (tr.queued_users
@@ -6410,6 +6695,40 @@
     });
   }
 
+  // How the period's transfers ended (#1203): a row per kind sent and one
+  // for everything received. Failed albums include those whose folder could
+  // not be packed, which the note under the table counts on their own.
+  function renderTransferOutcomes(outcomes, albumsEnabled) {
+    var labels = { file: "stats.outcome.files", album: "stats.outcome.albums",
+                   list: "stats.outcome.lists" };
+    var body = el.transferOutcomeRows;
+    body.textContent = "";
+    var packFailed = 0;
+    ((outcomes && outcomes.rows) || []).forEach(function (item) {
+      // No albums can be sent with packing off: their row only while the
+      // period still holds some from before.
+      if (item.kind === "album" && !albumsEnabled && !item.attempts) { return; }
+      packFailed += item.pack_failed || 0;
+      var row = document.createElement("tr");
+      recordCell(row, t(item.direction === "received" ? "stats.outcome.received" : labels[item.kind]), false);
+      [item.attempts, item.completed, item.failed, item.cancelled].forEach(function (count) {
+        recordCell(row, (count || 0).toLocaleString(), true);
+      });
+      recordCell(row, item.success_text || "—", true);
+      body.appendChild(row);
+    });
+    var notes = [];
+    if (packFailed) {
+      notes.push(fillIn(t("stats.outcome.packFailed"), { count: packFailed.toLocaleString() }));
+    }
+    if (outcomes && outcomes.since) {
+      notes.push(fillIn(t("stats.outcome.since"),
+                        { date: new Date(outcomes.since * 1000).toLocaleDateString() }));
+    }
+    el.transferOutcomeNote.textContent = notes.join(" ");
+    el.transferOutcomeNote.hidden = !notes.length;
+  }
+
   // False until the record has answered, and while it is off: then the
   // Most downloaded tables show /api/stats' all-time lists instead.
   function recordIsOn() {
@@ -6456,6 +6775,7 @@
       box.appendChild(label);
       el.recordCards.appendChild(box);
     });
+    renderTransferOutcomes(data.outcomes, data.albums_enabled);
     var nickColumns = [
       function (r) { return r.nick; },
       function (r) { return (r.files || 0).toLocaleString(); },

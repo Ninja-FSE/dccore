@@ -1,10 +1,29 @@
 # security.py - Flood protection and ban enforcement
+import re
 import threading
 import time
 import os
 import sys
 import defaults as config
 import db
+import runtime
+
+# config.banned_users is written from the Flask (dashboard) and console
+# threads (ignore_user(), lift_ban()) and iterated by the IRC read thread's
+# own flood sweep (_prune_flood_tracking()) - the only one of the three
+# flood-tracking structures that ANOTHER thread ever writes; the other two
+# are IRC-thread-only and need no lock. Before this, an ignore or lift
+# landing mid-sweep could raise "dictionary changed size during iteration",
+# which reaches the read loop's own outer exception handler and reconnects
+# the bot - confirmed on review, forced in a scratch test.
+#
+# Bound from runtime.py, not constructed here (#1248 review): a Lock()
+# built at this module's top level is rebound every time !rehash reloads
+# security.py, the same trap runtime.py's own module docstring already
+# warns about for every other lock it holds - a thread already inside
+# `with banned_users_lock:` would go on holding the OLD object while the
+# next caller acquired the fresh one rehash just created.
+banned_users_lock = runtime.banned_users_lock
 
 # Nicks we have already sent a debug notice about - one notice per nick.
 # send_debug sleeps 0.5s while holding a lock and is called from here by the IRC
@@ -471,6 +490,15 @@ def _prune_flood_tracking(now):
     dict while iterating it raises RuntimeError, and this runs on the IRC read
     thread, where that would take the connection down.
 
+    banned_users (#1248 review) needs more than that: unlike user_requests
+    and muted_until, which only the IRC thread ever writes, it is also
+    written from the Flask and console threads (ignore_user(), lift_ban()).
+    An ignore or lift landing between this function's own list-comprehension
+    read of the dict and its delete loop would still raise - materialising
+    the key list first only protects against THIS function's own deletes,
+    not another thread's concurrent write - so both the read and the deletes
+    run under banned_users_lock, the same lock those two functions take.
+
     Returns how many entries were dropped. The tests asserts on that number
     because a sweep that runs and removes nothing is indistinguishable from
     outside from one that never ran at all.
@@ -497,10 +525,12 @@ def _prune_flood_tracking(now):
     # that will not parse as a number is treated as 0.0 and swept, exactly as
     # that path would have deleted it. A row nothing can read is not a ban
     # anyone is serving.
-    expired_bans = [nick for nick, until in config.banned_users.items()
-                    if now >= _ban_expiry(until)]
+    with banned_users_lock:
+        expired_bans = [nick for nick, until in config.banned_users.items()
+                        if now >= _ban_expiry(until)]
+        for nick in expired_bans:
+            del config.banned_users[nick]
     for nick in expired_bans:
-        del config.banned_users[nick]
         # The "already told them" marker goes with the ban it belongs to.
         # _NotifiedNicks expires its own entries on a TTL, so this is tidiness
         # rather than a leak - but leaving it would let a returning nick be
@@ -550,6 +580,82 @@ def format_ban_duration(seconds):
         whole = int(hours)
         return f"{whole} hour" + ("" if whole == 1 else "s")
     return f"{hours:.1f} hours"
+
+
+# A TIMED IGNORE (#1206) is a timed ban the operator sets by hand: the same
+# entry in config.banned_users and the same bans.txt, so check_user_status()
+# already drops the nick's requests without a word, the sweep already expires
+# it, a restart already keeps it (the END time is what is stored), and `bans`
+# already lists it. Nothing new is stored and nothing new is checked.
+IGNORE_MAX_MINUTES = 7 * 24 * 60
+_IGNORE_NICK_RE = re.compile(r"^[A-Za-z\[\]\\`_^{|}][A-Za-z0-9\[\]\\`_^{|}-]{0,49}$")
+
+
+def ignore_user(nick, minutes):
+    """Ignore `nick` for `minutes`. Returns (ok, message).
+
+    Refused: a word that is not a nick (a wildcard is a permanent `ban`), the
+    bot's own nick, and a length outside 1..IGNORE_MAX_MINUTES. An ignore
+    already running is replaced, shorter or longer: the operator's latest
+    word is the one that counts. The nick's pending replies are dropped, as a
+    flood ban drops them; its queued files are left alone (Clear user does
+    that).
+    """
+    import time
+    import defaults as config
+    import db
+    import runtime
+
+    nick = str(nick or "").strip()
+    if not _IGNORE_NICK_RE.match(nick):
+        return False, f"'{nick}' is not a nick. For a pattern, use ban."
+    if nick.lower() == str(getattr(config, "NICKNAME", "") or "").strip().lower():
+        return False, "That is the bot's own nick."
+    try:
+        minutes = int(str(minutes).strip())
+    except (TypeError, ValueError):
+        return False, "The length is a whole number of minutes."
+    if minutes < 1 or minutes > IGNORE_MAX_MINUTES:
+        return False, f"The length is 1 to {IGNORE_MAX_MINUTES} minutes."
+
+    key = nick.lower()
+    with banned_users_lock:
+        config.banned_users[key] = time.time() + minutes * 60
+    _ban_notified.discard(key)
+    with runtime.send_queue_lock:
+        config.send_queue.pop(key, None)
+    db.save_bans_to_file()
+    return True, f"Ignoring {nick} for {format_ban_duration(minutes * 60)}."
+
+
+def lift_ban(nick):
+    """End a timed ban or ignore on `nick` now. Returns (ok, message)."""
+    import defaults as config
+    import db
+
+    key = str(nick or "").strip().lower()
+    # pop(), not a check-then-del (#1248 review): the two used to be separate
+    # statements, so the sweep thread could expire this exact nick in the gap
+    # between them, and the del below would raise KeyError - a 500 on the
+    # dashboard for an ignore that really had just ended on its own.
+    with banned_users_lock:
+        existed = config.banned_users.pop(key, None) is not None
+    if not existed:
+        return False, f"{str(nick or '').strip() or 'That nick'} is not ignored or banned for a time."
+    _ban_notified.discard(key)
+    db.save_bans_to_file()
+    return True, f"{key} is no longer ignored."
+
+
+def ban_seconds_left(nick):
+    """Seconds of a timed ban or ignore still to run on `nick`, or 0."""
+    import time
+    import defaults as config
+
+    until = config.banned_users.get(str(nick or "").strip().lower())
+    if until is None:
+        return 0
+    return max(0, int(_ban_expiry(until) - time.time()))
 
 
 def is_flooding(user):

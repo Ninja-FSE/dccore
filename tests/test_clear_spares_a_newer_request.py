@@ -60,13 +60,13 @@ class Clear(Case):
         self.old_silent()
         self.row("Song.flac", bot="OtherBot", state="queued")
         webserver.build_fetch_clear_result({"which": "failed"})
-        self.drop.assert_called_once_with("PeerBot", "Song.flac")
+        self.drop.assert_called_once_with("PeerBot", "Song.flac", channel=None)
 
     def test_a_finished_or_failed_twin_does_not_stop_it(self):
         self.old_silent()
         self.row("Song.flac", state="complete")
         webserver.build_fetch_clear_result({"which": "failed"})
-        self.drop.assert_called_once_with("PeerBot", "Song.flac")
+        self.drop.assert_called_once_with("PeerBot", "Song.flac", channel=None)
 
 
 class Delete(Case):
@@ -81,4 +81,4 @@ class Delete(Case):
     def test_alone_it_is_still_let_go(self):
         old = self.old_silent()
         webserver.build_fetch_delete_result(old)
-        self.drop.assert_called_once_with("PeerBot", "Song.flac")
+        self.drop.assert_called_once_with("PeerBot", "Song.flac", channel=None)

@@ -29,6 +29,7 @@ if REPO_ROOT not in sys.path:
 import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 
+from tests import support  # noqa: E402
 from tests import test_path_security as security  # noqa: E402
 
 
@@ -85,7 +86,7 @@ class TheWokenUsersClaimSurvives(security.PoisonedQueueRowTests):
             # the house fills while rar runs
             config.active_transfers.append({"user": "someoneelse", "file": "X.flac", "bytes_sent": 0})
             return Packed()
-        dcc.subprocess.run = rar_that_writes
+        support.fake_rar_runs(self, dcc.subprocess, rar_that_writes)
         real_sleep = dcc.time.sleep
         dcc.time.sleep = lambda *_a: None
         self.addCleanup(setattr, dcc.time, "sleep", real_sleep)

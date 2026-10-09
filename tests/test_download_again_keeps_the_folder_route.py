@@ -55,7 +55,8 @@ class DlagainInTheMircWindow(support.DCCoreTestCase):
             "failed", name="!rar Artist - Album", request_type="folder", reason="no response")
         asked, as_files = [], []
         real_folder, real_file = webserver.build_folder_rar_fetch_enqueue_result, webserver.build_fetch_enqueue_result
-        webserver.build_folder_rar_fetch_enqueue_result = lambda bot, folder: (asked.append((bot, folder)) or (200, {}))
+        webserver.build_folder_rar_fetch_enqueue_result = (
+            lambda bot, folder, marker=None, channel=None: (asked.append((bot, folder)) or (200, {})))
         webserver.build_fetch_enqueue_result = lambda items: (as_files.append(items) or (200, {}))
         self.addCleanup(setattr, webserver, "build_folder_rar_fetch_enqueue_result", real_folder)
         self.addCleanup(setattr, webserver, "build_fetch_enqueue_result", real_file)
@@ -115,10 +116,13 @@ class TheSourceSaysSo(unittest.TestCase):
     def test_both_send_a_folder_row_by_the_folder_route(self):
         with io.open(os.path.join(REPO_ROOT, "web", "app.js"), encoding="utf-8") as handle:
             js = handle.read()
-        self.assertIn('again = postJson("/api/filelists/fetch-folder-rar", { bot: row.bot, folder: folder });', js)
+        self.assertIn('again = postJson("/api/filelists/fetch-folder-rar",\n'
+                     '                       { bot: row.bot, folder: folder, channel: row.channel });', js)
         with io.open(os.path.join(REPO_ROOT, "src", "adminchat.py"), encoding="utf-8") as handle:
             py = handle.read()
-        self.assertIn("webserver.build_folder_rar_fetch_enqueue_result(bot, dcc_fetch.folder_asked_for(row))", py)
+        self.assertIn(
+            "webserver.build_folder_rar_fetch_enqueue_result(\n"
+            '            bot, dcc_fetch.folder_asked_for(row), None, row.get("channel"))', py)
 
 
 if __name__ == "__main__":

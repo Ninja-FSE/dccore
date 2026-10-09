@@ -354,12 +354,23 @@ class ANickIsNotAPlaceToAnnounce(DCCoreTestCase):
         super().setUp()
         self.set_config(CHANNEL="#one,#two", NICKNAME=BOT_NICK)
 
-    def test_the_bots_own_nick_falls_back_to_the_default_channel(self):
-        self.assertEqual(dcc.announce_channel_for({"channel": BOT_NICK}), "#one")
+    # Not the default channel any more (#1242): a row with a nick for its
+    # channel is a private request queued before #1242, and it takes the
+    # channel its requester shares with the bot - "" sharing none - never
+    # the first configured one, which they may never have been in.
+    def test_the_bots_own_nick_is_never_the_default_channel(self):
+        config.channel_users["#two"] = {"someuser"}
+        self.assertEqual(dcc.announce_channel_for({"channel": BOT_NICK, "user_raw": "SomeUser"}), "#two")
+        self.assertEqual(dcc.announce_channel_for({"channel": BOT_NICK, "user_raw": "nobody"}), "")
 
     def test_any_nick_does(self):
         """Not only ours: a row cannot legitimately name a nick at all."""
-        self.assertEqual(dcc.announce_channel_for({"channel": "somebodyelse"}), "#one")
+        self.assertEqual(dcc.announce_channel_for({"channel": "somebodyelse"}), "")
+
+    def test_a_row_with_no_channel_still_takes_the_default(self):
+        """Nothing says it was private: #530's fallback stands."""
+        self.assertEqual(dcc.announce_channel_for({}), "#one")
+        self.assertEqual(dcc.announce_channel_for({"channel": ""}), "#one")
 
     def test_a_channel_is_still_kept(self):
         for chan in ("#chosen", "&local", "+modeless", "!safe"):

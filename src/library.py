@@ -68,8 +68,22 @@ _DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 # only for the primary. Once a channel can be bound to a list, an unbound
 # channel gets nothing - that is #26's rule, not this stage's, and nothing
 # here enforces it yet.
+#
+# `modes` (#1204) is {channel: mode} for the channels that are NOT Normal;
+# a channel it does not name is Normal, so an old lists.json, and every
+# ServedList built without it, reads as Normal everywhere.
 ServedList = collections.namedtuple(
-    "ServedList", ("name", "primary", "channels", "folders"))
+    "ServedList", ("name", "primary", "channels", "folders", "modes"),
+    defaults=({},))
+
+# What a channel a list serves is allowed to hear from the bot (#1204).
+#   normal        - advert, answers, notices: how it always was.
+#   quiet         - no advert; still answers and still sends its notices.
+#   request_only  - no advert and no notices: it serves, silently.
+NORMAL = "normal"
+QUIET = "quiet"
+REQUEST_ONLY = "request_only"
+MODES = (NORMAL, QUIET, REQUEST_ONLY)
 
 # What a single-list install is called. It is an operator-facing name that no
 # user ever types - #26 is explicit that list names are never typed in a
@@ -85,6 +99,21 @@ def lists_file():
     location for the life of the process.
     """
     return getattr(config, "LISTS_FILE", os.path.join("data", "lists.json"))
+
+
+def _modes_from(raw, channels):
+    """{channel: mode} of the channels that are not Normal, from what was
+    stored. A mode this version does not know, or a channel the list does not
+    serve, is dropped: it reads as Normal, the way an old file does."""
+    if not isinstance(raw, dict):
+        return {}
+    kept = {}
+    for channel, mode in raw.items():
+        low = str(channel).strip().lower()
+        mode = str(mode or "").strip().lower()
+        if low in channels and mode in MODES and mode != NORMAL:
+            kept[low] = mode
+    return kept
 
 
 def load_lists(path=None):
@@ -128,7 +157,8 @@ def load_lists(path=None):
         channels = [str(c).strip().lower()
                     for c in (item.get("channels") or []) if str(c).strip()]
         entries.append(ServedList(name, bool(item.get("primary")),
-                                  channels, folders_in))
+                                  channels, folders_in,
+                                  _modes_from(item.get("modes"), channels)))
 
     if not entries:
         return None
@@ -273,6 +303,71 @@ def list_name_for_label(label, default_name):
             return default_name
     if len({path for _name, path in holders}) == 1:
         return holders[0][0]
+    return None
+
+
+def channel_mode(channel):
+    """How a channel a list serves is to be treated (#1204): NORMAL, QUIET or
+    REQUEST_ONLY. A channel nothing is bound to is NORMAL - there is no mode
+    to read, and the rule that such a channel gets nothing is list_for_request's."""
+    wanted = str(channel or "").strip().lower()
+    if not wanted:
+        return NORMAL
+    for entry in lists():
+        if wanted in entry.channels:
+            return (getattr(entry, "modes", None) or {}).get(wanted, NORMAL)
+    return NORMAL
+
+
+def mode_for_request(channel=None, user=None):
+    """The mode a request is answered under (#1204).
+
+    In a channel, that channel's. A private message has no channel, so it is
+    the mode of the first channel the user shares with the bot that is bound
+    to a list; with none, Normal. Looking at it from the bot's side: who is in
+    which channel is config.channel_users, in the order the bot joined them.
+    """
+    name = str(channel or "").strip()
+    if name.startswith(("#", "&")):
+        return channel_mode(name)
+    # shared_channel() answers with a list-bound channel whenever there is
+    # one, so this is the rule above: an unbound channel served by the
+    # catch-all primary has no mode of its own and reads as Normal.
+    shared = shared_channel(user)
+    return channel_mode(shared) if shared else NORMAL
+
+
+def shared_channel(user):
+    """The channel a private request from `user` belongs to (#1242), or None
+    when they are in none of the channels this bot serves.
+
+    The first list-bound channel of ours they are in - the channel
+    mode_for_request() reads a private message's mode from. With none bound,
+    the first configured channel of ours they are in that the catch-all
+    primary serves: one list and no bindings is every install that has not
+    split its library, and a private request there must not be refused for
+    want of a binding nobody needed. A channel the bot is in but does not
+    serve (the debug channel, or an unbound one once the primary names its
+    own) is not one: a request typed there would not be answered either.
+
+    Looking at it from the bot's side, like mode_for_request(): who is in
+    which channel is config.channel_users, in the order the bot joined them.
+    """
+    who = str(user or "").strip().lower()
+    if not who:
+        return None
+    import runtime
+    with runtime.channel_users_lock():
+        sharing = [chan for chan, members in (getattr(config, "channel_users", None) or {}).items()
+                   if any(str(member).lower().lstrip("@+%&~") == who for member in members)]
+    for chan in sharing:
+        if list_for_channel(chan) is not None:
+            return chan
+    configured = {part.strip().lower() for part in str(getattr(config, "CHANNEL", "") or "").split(",")
+                  if part.strip()}
+    for chan in sharing:
+        if str(chan).lower() in configured and list_for_request(chan) is not None:
+            return chan
     return None
 
 
@@ -537,6 +632,16 @@ def list_problems(entries):
                          f"cannot be blank.")
             continue
 
+        if platform_compat.is_windows_reserved(name):
+            # Refused, not renamed behind the operator's back: list_slug() keeps
+            # a list of this name loading, but a name the operator typed and
+            # sees every day should be one that works as typed on Windows too.
+            found.append(f"{name!r}: Windows will not create a folder with that "
+                         f"name - CON, PRN, AUX, NUL, COM1-9 and LPT1-9 are "
+                         f"reserved, with or without an extension. Pick "
+                         f"another name.")
+            continue
+
         key = name.lower()
         if key in seen_names:
             # Case-insensitively, because list_by_name() matches that way and
@@ -565,6 +670,14 @@ def list_problems(entries):
                 found.append(f"{channel} is bound to both {seen_channels[low]!r} "
                              f"and {name!r}. A channel can only serve one list.")
             seen_channels[low] = name
+
+        served = {str(c).strip().lower() for c in (getattr(entry, "channels", None) or [])}
+        for channel, mode in (getattr(entry, "modes", None) or {}).items():
+            if str(channel).strip().lower() not in served:
+                found.append(f"{name!r}: {channel!r} has a mode but the list does not serve it.")
+            elif str(mode or "").strip().lower() not in MODES:
+                found.append(f"{name!r}: {channel!r} has the mode {mode!r}; it is one of "
+                             f"{', '.join(MODES)}.")
 
         found.extend(f"{name!r}: {line}"
                      for line in problems(getattr(entry, "folders", None) or []))
@@ -601,7 +714,10 @@ def save_lists(entries, path=None):
             bool(getattr(entry, "primary", False)),
             [str(c).strip().lower() for c in (getattr(entry, "channels", None) or [])
              if str(c).strip()],
-            folders_in))
+            folders_in,
+            {str(c).strip().lower(): str(m or "").strip().lower()
+             for c, m in (getattr(entry, "modes", None) or {}).items()
+             if str(m or "").strip().lower() not in (NORMAL, "")}))
 
     found = list_problems(prepared)
     if found:
@@ -612,8 +728,9 @@ def save_lists(entries, path=None):
     os.makedirs(platform_compat.long_path(directory), exist_ok=True)
 
     payload = json.dumps(
-        [{"name": e.name, "primary": e.primary, "channels": list(e.channels),
-          "folders": [{"name": f.name, "path": f.path} for f in e.folders]}
+        [dict({"name": e.name, "primary": e.primary, "channels": list(e.channels),
+               "folders": [{"name": f.name, "path": f.path} for f in e.folders]},
+              **({"modes": dict(e.modes)} if e.modes else {}))
          for e in prepared],
         indent=2, ensure_ascii=False)
 

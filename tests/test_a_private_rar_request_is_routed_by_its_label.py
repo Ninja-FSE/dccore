@@ -68,11 +68,14 @@ class TwoListsOverTwoTrees(DCCoreTestCase):
                         TMP_ZIP_DIR=os.path.join(self.tree.root, "tmp"),
                         bot_joined_channel=True, MAX_DCC_SLOTS=3)
         os.makedirs(config.TMP_ZIP_DIR, exist_ok=True)
+        # In one of our channels: a private request from somebody in none is
+        # refused before any routing (#1242).
+        config.channel_users["#music"] = {USER}
         no_disk_writes(db)
         self.debug = silence_debug(announce)
         self.errors = []
         real_error = announce.send_dcc_error
-        announce.send_dcc_error = lambda user, kind: self.errors.append((user, kind))
+        announce.send_dcc_error = lambda user, kind, channel=None: self.errors.append((user, kind))
         self.addCleanup(setattr, announce, "send_dcc_error", real_error)
         InlineThread.dispatched = []
         self._real_thread = threading.Thread

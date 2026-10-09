@@ -63,6 +63,14 @@ def is_admin(user, host=None):
     return adminchat.is_admin_host(host)
 
 
+def _silent_in(user, target):
+    """True when this reply is not to be sent: the request came in a channel
+    that is Request only (#1204). The channel's own commands still run; only
+    the notice back to the user is dropped."""
+    import announce
+    return not announce.notices_allowed(user, target)
+
+
 def handle_help_request(s, user, target):
     """Answer "@<nick>-help" with how to actually use this bot.
 
@@ -86,7 +94,7 @@ def handle_help_request(s, user, target):
     would be handing out the same instruction the album list stopped shipping.
     """
     oserve = sys.modules.get('oserve')
-    if not oserve:
+    if not oserve or _silent_in(user, target):
         return
 
     import list as list_mod
@@ -110,19 +118,26 @@ def handle_help_request(s, user, target):
         f"What I have and what I have sent: {bold}{red}@{nick}-stats{reset}. "
         f"What people request most: {bold}{red}@{nick}-top{reset}.")
 
-    lines.append(
+    # Gated the same way RAR_ENABLED's own line above is (#1249 review):
+    # with SEARCH_ENABLED off, @find and @locator get no reply at all, so
+    # -help explaining them anyway just sent people to a dead end.
+    search_enabled = getattr(config, "SEARCH_ENABLED", True)
+    queue_line = (
         f"Your queue: {bold}{red}@{nick}-que{reset} to see it, "
         f"{bold}{red}@{nick}-remove{reset} to cancel it all, "
-        f"{bold}{red}@{nick}-remove <file>{reset} for just one. "
-        f"To search every bot at once, type: {bold}{red}@find <words>{reset}")
+        f"{bold}{red}@{nick}-remove <file>{reset} for just one.")
+    if search_enabled:
+        queue_line += f" To search every bot at once, type: {bold}{red}@find <words>{reset}"
+    lines.append(queue_line)
 
-    # #774: a band or title made of common words - "Metal Church" matched
-    # every file with both words anywhere. Said as this bot's own rule: the
-    # same @find reaches every bot, and one that does not know quotes simply
-    # answers nothing to a quoted term.
-    lines.append(
-        f"Words in quotes must appear together, in that order, in my list: "
-        f'{bold}{red}@find "metal church"{reset}')
+    if search_enabled:
+        # #774: a band or title made of common words - "Metal Church" matched
+        # every file with both words anywhere. Said as this bot's own rule: the
+        # same @find reaches every bot, and one that does not know quotes simply
+        # answers nothing to a quoted term.
+        lines.append(
+            f"Words in quotes must appear together, in that order, in my list: "
+            f'{bold}{red}@find "metal church"{reset}')
 
     for line in lines:
         # #426: NOT is_vip=True. The VIP lane is strict-priority with no
@@ -145,6 +160,8 @@ def handle_queue_check(s, user, target):
     handle_help_request()'s own comment for why a per-user reply does not
     belong in the lane channel adverts exist for.
     """
+    if _silent_in(user, target):
+        return
     user_key = user.lower()
     oserve = sys.modules.get('oserve')
     import list
@@ -177,11 +194,19 @@ def handle_queue_check(s, user, target):
     queued_count = dcc.get_total_queued_count()
     queue_str = f"{queued_count}/{config.MAX_QUEUE_LIMIT}" if hasattr(config, 'MAX_QUEUE_LIMIT') else f"{queued_count}"
 
+    # When the first busy slot is likely to free up (#1207) - the question a
+    # busy channel asks most. Worded as the next FREE SLOT on purpose: who
+    # gets that slot is the queue's business, not a promise to this user.
+    import stats_mgr
+    next_slot = stats_mgr.format_next_slot(stats_mgr.next_slot_estimate())
+    next_slot_str = f"Next free slot: {config.C_BOLD}{config.C_GREEN}{next_slot}{config.C_RESET}. "
+
     # 3. Pick the layout depending on whether the queue is empty
     if file_count > 0:
         # Layout when they do have files queued; only the number and trigger are bold
         msg = (
             f"NOTICE {user} :You have {config.C_BOLD}{config.C_RED}{file_count}{config.C_RESET} files in queue. "
+            f"{next_slot_str}"
             f"To remove your entire queue, type: {config.C_BOLD}{config.C_RED}@{config.NICKNAME}-remove{config.C_RESET} "
             f"or send CTCP: {config.C_BOLD}{config.C_GREEN}REMOVE{config.C_RESET}. "
             f"For just one file, add its name: {config.C_BOLD}{config.C_RED}@{config.NICKNAME}-remove <file>{config.C_RESET}\r\n"
@@ -194,6 +219,7 @@ def handle_queue_check(s, user, target):
             f"Download my list with {config.C_BOLD}{config.C_GREEN}@{config.NICKNAME}{config.C_RESET} "
             f"of {config.C_BOLD}{config.C_RED}{formatted_total_files}{config.C_RESET}. "
             f"Slots {config.C_BOLD}{config.C_GREEN}{slots_str}{config.C_RESET}. "
+            f"{next_slot_str}"
             f"Queue {config.C_BOLD}{config.C_GREEN}{queue_str}{config.C_RESET}. "
             f"List {config.C_BOLD}{config.C_RED}{list_date}{config.C_RESET}. "
             f"({config.SCRIPT_VERSION})\r\n"
@@ -213,18 +239,17 @@ def _same_file_name(a, b):
     return bool(norm(a)) and norm(a) == norm(b)
 
 
-def handle_queue_remove_file(s, user, target, filename):
-    """`@<nick>-remove <file>`: take that one file out of the user's queue and
-    leave the rest. Without a file, handle_queue_remove() clears the lot."""
-    user_key = user.lower()
-    oserve = sys.modules.get('oserve')
-    import dcc
-    import list as list_mod
+def _take_rows_out(user_key, choose):
+    """Take the rows `choose(rows)` names out of one nick's queue, under the
+    queue lock, and save. Returns (rows taken, temp archives removed with them).
 
-    wanted = list_mod.printable_text(str(filename)).strip()
-    shown = wanted[:120]
+    The one place a single queued file leaves a queue - for the user's own
+    `@<nick>-remove <file>` and for the operator's remove on the Queue page and
+    in the console - so the two cannot drift apart.
+    """
+    import dcc
+
     removed_archives = []
-    removed = 0
     with dcc.queue_lock:
         # dcc_queue alone holds rows. A frozen user's rows stay there too:
         # frozen_queues maps a nick to the time it froze (#1042), and walking it
@@ -233,8 +258,7 @@ def handle_queue_remove_file(s, user, target, filename):
         # disk still named.
         queues = getattr(config, 'dcc_queue', {})
         rows = queues.get(user_key) or []
-        gone = [r for r in rows if isinstance(r, dict)
-                and _same_file_name(r.get('file', ''), wanted)]
+        gone = choose(rows)
         if gone:
             removed_archives = dcc.discard_orphaned_temp_archives(user_key, rows=gone)
             queues[user_key] = [r for r in rows if not any(r is g for g in gone)]
@@ -242,14 +266,28 @@ def handle_queue_remove_file(s, user, target, filename):
                 del queues[user_key]
                 # Nothing left to keep frozen - as handle_queue_remove() does.
                 getattr(config, 'frozen_queues', {}).pop(user_key, None)
-            removed = len(gone)
             db.save_dcc_queue()
+    return gone, removed_archives
+
+
+def handle_queue_remove_file(s, user, target, filename):
+    """`@<nick>-remove <file>`: take that one file out of the user's queue and
+    leave the rest. Without a file, handle_queue_remove() clears the lot."""
+    user_key = user.lower()
+    oserve = sys.modules.get('oserve')
+    import list as list_mod
+
+    wanted = list_mod.printable_text(str(filename)).strip()
+    shown = wanted[:120]
+    gone, removed_archives = _take_rows_out(user_key, lambda rows: [
+        r for r in rows if isinstance(r, dict) and _same_file_name(r.get('file', ''), wanted)])
+    removed = len(gone)
 
     if removed:
         msg = f"NOTICE {user} :Removed \"{shown}\" from your queue. \r\n"
     else:
         msg = f"NOTICE {user} :\"{shown}\" is not in your queue. \r\n"
-    if oserve:
+    if oserve and not _silent_in(user, target):
         oserve.queue_message(user, msg)
     if removed_archives:
         print(f"[COMMANDS] Removed {len(removed_archives)} orphaned temp archive(s) with {user}'s file.")
@@ -280,7 +318,7 @@ def handle_queue_remove(s, user, target):
             del config.frozen_queues[user_key]
 
     msg = f"NOTICE {user} :Your queue has been completely removed. \r\n"
-    if oserve:
+    if oserve and not _silent_in(user, target):
         oserve.queue_message(user, msg)
     if removed_archives:
         print(f"[COMMANDS] Removed {len(removed_archives)} orphaned temp archive(s) with {user}'s queue.")
@@ -342,6 +380,189 @@ def handle_admin_clear_queue(user, target_chan, msg_text, authorised=False, user
             f"Clearqueue: {config.C_BOLD}{target_nick}{config.C_RESET} had no queue or frozen entry to remove.",
             category="INFO")
         print(f"[ADMIN CLEARQUEUE] {user} tried to clear {target_nick}, but no queue or frozen entry was found.")
+
+def _queue_order_held():
+    """queue_order() for a caller that already holds queue_lock (it is not reentrant).
+
+    Ranked with the dispatcher's own key, dcc.list_first_rank() (#1205): a nick
+    whose queue starts with a list that may go first is ahead, then the longest
+    wait. Sorting by the wait alone showed the line a slot is NOT given out in
+    whenever a list was waiting.
+    """
+    import dcc
+    return dcc.slot_order(config.dcc_queue, dcc.a_list_may_go_first())
+
+
+def queue_order():
+    """The nicks that have something queued, in the order the dispatcher gives
+    out free slots: a list that may go first (#1205), then longest-waiting
+    first (#1032), ties in arrival order.
+    """
+    import dcc
+    with dcc.queue_lock:
+        return _queue_order_held()
+
+
+def _untie_waits(stamp):
+    """Give the waiting nicks that share the wait `stamp` one each, in the
+    order they already stand. Caller holds queue_lock.
+
+    After a restart no nick has a stamp, and a swap of two equal ones changes
+    nothing. Only the tied nicks are touched, and they stay below the next
+    stamp up, so nobody else's place changes.
+    """
+    import dcc
+    tied = [key for key, rows in config.dcc_queue.items()
+            if rows and dcc.queue_waiting_since(key) == stamp]
+    above = [st for st in runtime.queue_waiting_since.values() if st > stamp]
+    step = min(1e-4, (min(above) - stamp) / (len(tied) + 1)) if above else 1e-4
+    for place, key in enumerate(tied):
+        runtime.queue_waiting_since[key] = stamp + place * step
+
+
+def move_waiting_user(nick, direction):
+    """Move a nick one place up or down the line for a free slot (#1206).
+    Returns (ok, message).
+
+    The line is queue_order(). A move swaps the wait stamps of the nick and
+    its neighbour there and touches no other nick's (#1245). It used to
+    re-stamp the whole line in that order, which gave a nick with a list at
+    its head the oldest stamp; go_to_the_back(keep_place=True) kept it once
+    the list had gone, and its files jumped everyone (#1032). A list going
+    first is not a wait, so no swap of waits moves a nick past one: that is
+    refused, and said. The reply is read from the line after the move.
+    """
+    import dcc
+    step = {"up": -1, "down": 1}.get(str(direction).strip().lower())
+    if step is None:
+        return False, "Say up or down."
+    key = str(nick).strip().lower()
+    with dcc.queue_lock:
+        order = _queue_order_held()
+        if key not in order:
+            return False, f"{nick} has nothing queued."
+        here = order.index(key)
+        there = here + step
+        if there < 0:
+            return False, f"{nick} is already first in line."
+        if there >= len(order):
+            return False, f"{nick} is already last in line."
+        other = order[there]
+        lists_first = dcc.a_list_may_go_first()
+        mine = dcc.list_first_rank(key, config.dcc_queue[key], lists_first)
+        theirs = dcc.list_first_rank(other, config.dcc_queue[other], lists_first)
+        if mine[0] != theirs[0]:
+            lister = key if mine[0] == 0 else other
+            return False, (f"{lister} has a list waiting, and a list goes ahead of every wait: "
+                           f"{nick} stays number {here + 1} of {len(order)} in line.")
+        if mine[1] == theirs[1]:
+            _untie_waits(mine[1])
+        stamps = runtime.queue_waiting_since
+        stamps[key], stamps[other] = dcc.queue_waiting_since(other), dcc.queue_waiting_since(key)
+        order = _queue_order_held()
+    return True, f"{nick} is now number {order.index(key) + 1} of {len(order)} in line."
+
+
+def _queued_row(user_key, position, row_id):
+    """The row at 1-based `position` in a nick's queue, or an error text. Caller holds queue_lock.
+
+    `row_id`, when given, has to be dcc.queue_row_id() of the file the caller
+    saw there: the queue moves under a page that was loaded a minute ago, and
+    "remove number 2" must never remove whatever has slid into place 2 since.
+    An id, not the name (#1245): two albums can each hold an Intro.mp3. The
+    console passes none - its numbers come from `queue <nick>` a moment before.
+    """
+    import dcc
+    rows = config.dcc_queue.get(user_key) or []
+    try:
+        index = int(position) - 1
+    except (TypeError, ValueError):
+        return None, "The position has to be a number."
+    if not 0 <= index < len(rows):
+        return None, f"{user_key} has no file number {position} queued."
+    row = rows[index]
+    if row_id is not None and dcc.queue_row_id(row) != str(row_id).strip():
+        return None, "The queue has changed - look again."
+    return (index, row), None
+
+
+def move_queued_file(nick, position, direction, row_id=None):
+    """Move the file at `position` one place up or down in a nick's own queue
+    (#1206). Returns (ok, message). The dispatcher sends a nick's queue from
+    the top, so this is what decides which file they get next.
+
+    A file that is being sent, or the folder being packed, stays where it is
+    and nothing is moved past it. Known by the row itself, not by its place
+    or its path (#1245): a list goes to the front while a folder packs, and a
+    queued send's claim holds no path.
+    """
+    import dcc
+    step = {"up": -1, "down": 1}.get(str(direction).strip().lower())
+    if step is None:
+        return False, "Say up or down."
+    key = str(nick).strip().lower()
+    with dcc.queue_lock:
+        found, error = _queued_row(key, position, row_id)
+        if error:
+            return False, error
+        index, row = found
+        rows = config.dcc_queue[key]
+        other = index + step
+        if other < 0:
+            return False, "That file is already first."
+        if other >= len(rows):
+            return False, "That file is already last."
+        busy = dcc.queued_row_in_flight(row)
+        if busy:
+            return False, ("That folder is being packed right now." if busy == "packing"
+                           else "That file is being sent right now.")
+        busy = dcc.queued_row_in_flight(rows[other])
+        if busy:
+            return False, (f"The file next to it is being {'packed' if busy == 'packing' else 'sent'} "
+                           f"right now, and nothing moves past it.")
+        rows[index], rows[other] = rows[other], rows[index]
+        db.save_dcc_queue()
+    return True, f"Moved to place {other + 1} of {len(rows)}."
+
+
+def remove_queued_file(nick, position, row_id=None):
+    """Take the file at `position` out of a nick's queue, as if they had typed
+    `@<bot>-remove <file>` themselves - same removal, same notice to them
+    (#1206). Returns (ok, message).
+
+    Not a file being sent or the folder being packed (#1245): the row went,
+    the nick was told so, and the file kept arriving. The pack has its own
+    cancel.
+    """
+    import list as list_mod
+    key = str(nick).strip().lower()
+    import dcc
+    with dcc.queue_lock:
+        found, error = _queued_row(key, position, row_id)
+        if error:
+            return False, error
+        row = found[1]
+        busy = dcc.queued_row_in_flight(row)
+        if busy == "packing":
+            return False, "That folder is being packed right now - cancel the pack to stop it."
+        if busy:
+            return False, "That file is being sent right now, so it cannot be removed."
+        shown = list_mod.printable_text(str(row.get('file', '?') if isinstance(row, dict) else row)).strip()[:120]
+        who = (row.get('user_raw') if isinstance(row, dict) else None) or nick
+    # Looked at again under the lock that takes it out: the slot may have
+    # gone to this very row in between.
+    gone, removed_archives = _take_rows_out(
+        key, lambda rows: [r for r in rows if r is row and not dcc.queued_row_in_flight(r)])
+    if not gone:
+        return False, "The queue has changed - look again."
+    oserve = sys.modules.get('oserve')
+    if oserve:
+        oserve.queue_message(who, f"NOTICE {who} :Removed \"{shown}\" from your queue. \r\n")
+    if removed_archives:
+        print(f"[COMMANDS] Removed {len(removed_archives)} orphaned temp archive(s) with {who}'s file.")
+    print(f"[COMMANDS] An operator removed {shown!r} from {who}'s queue.")
+    return True, f"Removed \"{shown}\" from {nick}'s queue."
+
 
 def diagnostics_are_for_the_admin(user, host=None):
     """Whether `user` may run the bot's diagnostics - !ping and !debugnames.
@@ -1396,6 +1617,14 @@ def _handle_rehash_request(user, target_chan, confirmed_debug_removal=False):
                 print("[REHASH] AUTO_GRAB_LISTS is on: automatic list grabbing has started.")
         except Exception as grab_err:
             print(f"[REHASH] Could not start automatic list grabbing: {grab_err}")
+        # Automatic discovery of a bot's other channel-bound lists (#1240).
+        try:
+            import list_grab as _list_grab_secondary
+            if _list_grab_secondary.ensure_secondary_channel_worker():
+                print("[REHASH] AUTO_DISCOVER_CHANNEL_LISTS is on: automatic "
+                      "channel-list discovery has started.")
+        except Exception as secondary_err:
+            print(f"[REHASH] Could not start automatic channel-list discovery: {secondary_err}")
 
         # The list rebuild schedule (#776), the same way and for the same
         # reason: a dashboard save that sets one lands here.
@@ -2830,7 +3059,7 @@ def _clamp_name(name, limit=None):
 def handle_stats_request(s, user, target):
     """Answer "@<nick>-stats" with what this bot has and what it has sent."""
     oserve = sys.modules.get('oserve')
-    if not oserve:
+    if not oserve or _silent_in(user, target):
         return
 
     import list as list_mod
@@ -2865,6 +3094,9 @@ def handle_stats_request(s, user, target):
     active = oserve.active_downloads if oserve else 0
     free_slots = max(0, config.MAX_DCC_SLOTS - active)
     queued = dcc.get_total_queued_count()
+    # Next to the free slots (#1207): when the first busy one is likely to
+    # free up. The next FREE SLOT, not the asker's turn.
+    next_slot = stats_mgr.format_next_slot(stats_mgr.next_slot_estimate())
 
     speed_now = stats_mgr.format_speed(stats_mgr.live_speed())
     record = stats_mgr.format_speed(db.get_speed_record())
@@ -2893,6 +3125,7 @@ def handle_stats_request(s, user, target):
         f"{figure(yesterday_files, red)} yesterday, {figure(today_files, red)} today.",
 
         f"Slots {figure(f'{free_slots}/{config.MAX_DCC_SLOTS}')} free, "
+        f"next free slot {figure(next_slot)}, "
         f"{figure(queued)} queued. Speed {figure(speed_now)}, "
         f"record {figure(record)}. Up {figure(_format_uptime(stats_mgr.get_uptime_seconds()))}.",
     ]
@@ -2921,7 +3154,7 @@ def _format_uptime(seconds):
 def handle_top_request(s, user, target):
     """Answer "@<nick>-top" with the most-requested files and albums."""
     oserve = sys.modules.get('oserve')
-    if not oserve:
+    if not oserve or _silent_in(user, target):
         return
 
     import announce

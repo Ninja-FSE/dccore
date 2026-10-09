@@ -34,6 +34,12 @@
 #     anything wildly beyond that shape outright, before either guard above
 #     even runs.
 #
+# Not every list is a zip. A RAR list is opened with the rar program under
+# these same guards (see "RAR lists (#1200)" below), a plain .txt list is
+# taken as it is once it looks like one (_accept_plain_text_list()), and
+# anything else - a 7z, binary data - is refused, and the list already held
+# for that bot stays as it was (_hold_existing_list()).
+#
 # Extraction lands in a per-bot subdirectory - <FETCHED_FILES_DIR>/lists/<bot
 # nick>/ - deliberately never alongside dcc_fetch.py's own raw fetched files:
 # those are "a file I fetched to listen to", this is "a list archive I
@@ -46,10 +52,12 @@
 # the same "::INFO::" tolerance this project already added for OTHER bots'
 # formatting variance (see strip_info_suffix()'s own docstring) applies here
 # automatically, for free.
+import hashlib
 import io
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import zipfile
@@ -120,6 +128,31 @@ _COPY_CHUNK = 65536
 # banner is capped at 8KB, so this is comfortable headroom over the point
 # the answer is knowable.
 _PLAUSIBLE_LIST_PREFIX = 64 * 1024
+
+# Control characters a text list never holds (#1200). Left out of the set:
+# tab, the line ends, vertical tab and form feed, DOS's end-of-file mark
+# (\x1a), and IRC's formatting codes (bold, colour, reset, monospace,
+# reverse, italic, strikethrough, underline), which a banner copied out of
+# an IRC client can carry. Random bytes are about 7% these; text is none.
+_BINARY_CONTROL_BYTES = bytes(
+    code for code in range(32)
+    if code not in b"\t\n\r\x0b\x0c\x1a\x02\x03\x0f\x11\x16\x1d\x1e\x1f")
+
+# What a list archive DCCore cannot use as plain text starts with. RAR is
+# "Rar!\x1a\x07" for both RAR4 (then \x00) and RAR5 (then \x01\x00); 7z is
+# its own six bytes.
+_RAR_SIGNATURE = b"Rar!\x1a\x07"
+_SEVEN_ZIP_SIGNATURE = b"7z\xbc\xaf\x27\x1c"
+
+# How long one rar child may run while a fetched RAR list is read: listing
+# it, or unpacking one member. A list of the biggest size allowed unpacks in
+# seconds; a rar that is still going after this is hung, and a hung child
+# here would hold the fetch lock that every other list fetch waits on.
+_RAR_LIST_TIMEOUT = 300
+
+# The longest line of rar's listing read in one go. RAR caps a name at 2048
+# bytes; a "line" longer than this is not a listing this code knows.
+_RAR_LISTING_LINE_LIMIT = 16384
 
 
 _FALLBACK_LOCK = threading.Lock()
@@ -198,7 +231,119 @@ def _sanitize_bot_dir_name(bot):
     name = name.replace('..', '')
     name = _BOT_DIR_CHARSET_RE.sub('_', name)
     name = name.strip().strip('.').strip()
-    return name or "unknown_bot"
+    # A Windows-reserved nick and one already spelled with windows_safe_
+    # name()'s own "_" suffix collide (#1249 review): "AUX" and "AUX_" both
+    # become "AUX_", one directory for two different bots' held lists.
+    # Lower-cased before hashing, since every caller lower-cases the result
+    # anyway (list_extract_dir() and friends) - two spellings of the same
+    # nick, "AUX" and "Aux", must still land on one directory, not two.
+    if platform_compat.is_windows_reserved(name):
+        digest = hashlib.sha1(name.strip().lower().encode("utf-8", "replace")).hexdigest()[:6]
+        name = f"{name}-{digest}"
+    return platform_compat.windows_safe_name(name) or "unknown_bot"
+
+
+def _current_channel_signature(bot, channel):
+    """A snapshot of what `channel` is advertising for `bot` RIGHT NOW
+    (#1240) - the same shape irc._record_channel_signature() stores,
+    {"files", "list_date", "last_seen", "since"} (whichever of the first two
+    are known). Stamped onto a marker as "advert_signature" when it is
+    fetched, so a later comparison (list_grab._secondary_channel_candidates())
+    can tell a channel's list has moved on since WITHOUT needing a second,
+    separate freshness mechanism - the same signature this already is.
+    """
+    channel = str(channel or "").strip().lower()
+    if not channel:
+        return {}
+    registry = (getattr(config, "known_bots", {}) or {}).get(str(bot).strip().lower())
+    channels = registry.get("channels") if isinstance(registry, dict) else None
+    signature = channels.get(channel) if isinstance(channels, dict) else None
+    return dict(signature) if isinstance(signature, dict) else {}
+
+
+def _channel_marker_name(channel):
+    """A channel turned into something usable as a list marker (#1240):
+    "#video" becomes "video". Never empty - list_marker()'s own rule
+    that an empty marker means "the main list" must never apply to a channel
+    name by accident, so a channel that somehow sanitises to nothing falls
+    back to a fixed word instead.
+    """
+    name = str(channel or "").strip().lstrip("#")
+    name = _BOT_DIR_CHARSET_RE.sub("_", name)
+    return name.strip("-_ .") or "channel"
+
+
+def _disambiguate_marker(candidate, channel, reserved_lower):
+    """`candidate`, unchanged unless it collides - compared case-
+    insensitively - with a marker name `reserved_lower` already lists
+    (#1240 review). The common case, no collision, returns it untouched.
+
+    Confirmed on review: "#RAR" sanitises to the exact name a filename-
+    derived "RAR" marker already uses (`kept_lists.update(fresh)` would
+    silently replace the primary's own RAR list); "#rar" and "#RAR" differ
+    only by case, which the dict tolerates as two distinct keys but
+    index_bot_list() folds to the same search-index entry regardless; "#a|b"
+    and "#a_b" both sanitise to "a_b" outright, a flat dict-key collision
+    that would let the second channel's fetch silently overwrite the
+    first's.
+
+    The suffix is a short hash of `channel` itself, not of `candidate` - two
+    different channels that collide on the same sanitised name need two
+    DIFFERENT suffixes to stop colliding with EACH OTHER, which hashing the
+    (identical, by definition of a collision) candidate string could never
+    produce - and the same channel must always land on the same
+    disambiguated name across repeated fetches, which a running counter
+    could not promise (its result would depend on fetch order).
+    """
+    if candidate.lower() not in reserved_lower:
+        return candidate
+    digest = hashlib.sha1(str(channel).strip().lower().encode("utf-8", "replace")).hexdigest()
+    return f"{candidate}-{digest[:6]}"
+
+
+def secondary_channel_extract_dir(bot, channel):
+    """Where a SECONDARY channel's fetch for `bot` extracts to (#1240): a
+    directory OUTSIDE the bot's own (list_extract_dir()), never a
+    subdirectory of it.
+
+    A real incident, confirmed on review: an earlier version of this put it
+    at <bot's own dir>/_channels/<chan> - inside the exact directory
+    _hold_existing_list()/_release_held_list() rename and rmtree whole on
+    every ordinary refresh of the PRIMARY channel. The marker and its index
+    rows survived (they live in config.fetched_bot_lists, untouched by an
+    ordinary refresh - see _install_fetched_list()), but the files a
+    secondary channel's fetch had just extracted did not: a ordinary refresh
+    of the primary deleted them outright, leaving a marker that pointed at
+    nothing. Sibling to list_extract_dir(bot), not nested in it, so nothing
+    that ever touches the primary's own directory can reach this one.
+    """
+    base = os.path.abspath(getattr(config, "FETCHED_FILES_DIR", "./data/fetched"))
+    channels_root = os.path.join(base, "lists", "_channels")
+    candidate = os.path.join(channels_root, _sanitize_bot_dir_name(bot).lower(),
+                             _channel_marker_name(channel).lower())
+    if not dcc.is_safe_path(channels_root, candidate):
+        candidate = os.path.join(channels_root, "unknown_bot", "channel")
+    return candidate
+
+
+def _extract_dir_for(bot, channel, secondary=False):
+    """Which directory THIS fetch extracts into - list_extract_dir(bot) for
+    an ordinary/primary fetch, secondary_channel_extract_dir() for a
+    CONFIRMED secondary one (#1240) so it can never collide with - or share
+    a directory tree that gets rmtree'd alongside - what the primary
+    channel's lists already point at.
+
+    `secondary` is explicit, passed down from whichever caller already knows
+    which kind of fetch this is (see new_fetch_row()'s docstring in
+    dcc_fetch.py) - never inferred here from `channel` alone. An earlier
+    version guessed "secondary" from a channel mismatch against whatever was
+    already on record; a bot held from before #1232 has no channel on
+    record at all, so every ordinary refresh of it looked like a mismatch
+    and was treated as secondary forever, a real incident on the live bot.
+    """
+    if secondary:
+        return secondary_channel_extract_dir(bot, channel)
+    return list_extract_dir(bot)
 
 
 def list_extract_dir(bot):
@@ -253,15 +398,36 @@ def _fetch_file_size_budget_name():
     return f"the list archive ceiling (MAX_LIST_TEXT_SIZE x {MAX_LISTS_PER_ARCHIVE})"
 
 
-def _validate_zip_members(infolist, extract_dir):
+def _member_parts(filename):
+    """The path components a list-archive member is written under.
+
+    The archive's own separators and "." dropped, and every component made
+    into a name Windows can create (platform_compat.windows_safe_name()). A
+    peer chooses these names, and on Windows os.path.abspath() turns a
+    component like "NUL" - or, before Windows 11, "COM1" or "con.txt" - into
+    the device itself ("\\\\.\\NUL"), which long_path() then makes a UNC
+    path: the write went to a device, and a serial port could hold the fetch
+    thread. "NUL" becomes "NUL_", as everywhere else a peer's name is used;
+    _pick_list_file() looks for the list by what is in the folder, not by the
+    member's name, so nothing is lost.
+    """
+    parts = [p for p in str(filename).replace("\\", "/").split("/")
+             if p not in ("", ".")]
+    return [platform_compat.windows_safe_name(p) or "_" for p in parts]
+
+
+def _validate_zip_members(infolist, extract_dir, kind="zip"):
     """Check EVERY member before anything is extracted. Returns a short
     rejection reason string, or None if the whole archive is clear to
     extract. Never partial: the caller only proceeds if this returns None.
+
+    `kind` names the archive in the reason. A RAR list (#1200) is held to
+    these same guards, through members shaped like ZipInfo - see _RarMember.
     """
     if not infolist:
-        return "zip archive is empty"
+        return f"{kind} archive is empty"
     if len(infolist) > MAX_LIST_ZIP_ENTRIES:
-        return (f"zip contains {len(infolist)} entries, more than the "
+        return (f"{kind} contains {len(infolist)} entries, more than the "
                 f"{MAX_LIST_ZIP_ENTRIES} a real master-list archive should "
                 f"ever need (zip-bomb-shaped guard)")
 
@@ -272,7 +438,7 @@ def _validate_zip_members(infolist, extract_dir):
             continue
         total_uncompressed += info.file_size
         if total_uncompressed > max_total:
-            return (f"zip's declared total uncompressed size exceeds "
+            return (f"{kind}'s declared total uncompressed size exceeds "
                      f"{_fetch_file_size_budget_name()} ({max_total} bytes) - "
                      f"refusing to extract (zip-bomb guard)")
 
@@ -282,15 +448,20 @@ def _validate_zip_members(infolist, extract_dir):
         # BEFORE the join below, rather than relying on is_safe_path() to
         # catch every possible form of it after the fact.
         if member_name.startswith('/') or (len(member_name) > 1 and member_name[1] == ':'):
-            return f"zip entry {info.filename!r} has an absolute path"
+            return f"{kind} entry {info.filename!r} has an absolute path"
 
         parts = [p for p in member_name.split('/') if p not in ('', '.')]
         if not parts:
             continue
 
+        # Both the name as sent and the name written (_member_parts()) must
+        # stay inside: the renaming trims dots, so only the first still
+        # shows a ".." for what it is.
         dest_path = os.path.join(extract_dir, *parts)
-        if not dcc.is_safe_path(extract_dir, dest_path):
-            return (f"zip entry {info.filename!r} would extract outside the "
+        written_path = os.path.join(extract_dir, *_member_parts(info.filename))
+        if not (dcc.is_safe_path(extract_dir, dest_path)
+                and dcc.is_safe_path(extract_dir, written_path)):
+            return (f"{kind} entry {info.filename!r} would extract outside the "
                      f"target directory (path traversal / zip-slip)")
 
         # A component made only of dots - "..", "...", "...." and so on.
@@ -317,7 +488,7 @@ def _validate_zip_members(infolist, extract_dir):
         # directory is called "....".
         for part in parts:
             if set(part) == {'.'}:
-                return (f"zip entry {info.filename!r} has a path component "
+                return (f"{kind} entry {info.filename!r} has a path component "
                          f"made only of dots ({part!r})")
 
     return None
@@ -385,6 +556,15 @@ _LIST_DATE_RE = re.compile(r"[\(\[\-_ ]?\d{4}[-_.]\d{2}[-_.]\d{2}[\)\]]?")
 # the list, not which list it is.
 _LIST_TRAILER_RE = re.compile(r"[-_ ]*(?:OS|OmenServe)\s*$", re.IGNORECASE)
 
+# mxrarserver's (#1209): "-Files(<x>)-MX", "-Folders(<x>)-MX". The "-MX" says
+# who built it and the parenthesis changes from one build to the next, so
+# both come off. A separator before "MX" is required: "TOPMX" keeps its MX.
+_MX_LIST_TRAILER_RE = re.compile(r"\s*(?:\([^)]*\))?\s*[-_ ]+MX\s*$", re.IGNORECASE)
+
+# An mxrarserver FOLDERS list: one row per folder it packs into a RAR on
+# request - its pack list, the counterpart of DCCore's "-RAR-" list.
+_MX_FOLDERS_LIST_RE = re.compile(r"-Folders\s*(?:\([^)]*\))?\s*-MX\.txt$", re.IGNORECASE)
+
 # How many lists to keep out of one archive. A peer's zip is untrusted, and
 # "keep exactly one" was what bounded this before - without a ceiling, an
 # archive of five hundred small .txt files becomes five hundred parses, five
@@ -429,6 +609,7 @@ def list_marker(file_name, shared_prefix=""):
         stem = stem[len(shared_prefix):]
     stem = _LIST_DATE_RE.sub("", stem)
     stem = _LIST_TRAILER_RE.sub("", stem)
+    stem = _MX_LIST_TRAILER_RE.sub("", stem)
     return stem.strip("-_ .")
 
 
@@ -568,8 +749,11 @@ def _pick_list_file(extract_dir):
     # what this function returns and to the size ceiling that guards it; it is
     # recorded in docs/FUTURE.md rather than smuggled in here.
     skip = ("-rar-", f"-{list_mod.VIDEO_LIST_MARKER.lower()}-")
+    # mxrarserver's Folders list is its pack list, as "-RAR-" is ours (#1209):
+    # in a "Complete" archive beside its Files list, Files is the main one.
     candidates = [p for p in txt_files
-                  if not any(m in os.path.basename(p).lower() for m in skip)]
+                  if not any(m in os.path.basename(p).lower() for m in skip)
+                  and not _MX_FOLDERS_LIST_RE.search(os.path.basename(p))]
     if not candidates:
         candidates = txt_files
 
@@ -604,6 +788,21 @@ def _pick_list_file(extract_dir):
     return candidates[0]
 
 
+def _looks_binary(head):
+    """True when `head` (raw bytes) cannot be the start of a text list.
+
+    One NUL settles it: no text list holds one, and every archive format
+    has them in its first few bytes. Failing that, control characters from
+    _BINARY_CONTROL_BYTES making up more than a 32nd of the head - random
+    data is about 7% of them, so a short binary with no NUL is still caught,
+    while a stray one in a real list is not enough to refuse it.
+    """
+    if b"\x00" in head:
+        return True
+    controls = len(head) - len(head.translate(None, _BINARY_CONTROL_BYTES))
+    return controls * 32 > len(head)
+
+
 def _accept_plain_text_list(source_path, extract_dir):
     """Take a list that arrived as plain text, returning (path, reason).
 
@@ -628,14 +827,35 @@ def _accept_plain_text_list(source_path, extract_dir):
     # 128MB and the answer is in the first few lines - after a header and a
     # banner, which is itself capped at 8KB.
     try:
-        with io.open(platform_compat.long_path(source_path), "r",
-                     encoding="utf-8", errors="replace") as handle:
+        with io.open(platform_compat.long_path(source_path), "rb") as handle:
             head = handle.read(_PLAUSIBLE_LIST_PREFIX)
     except OSError as err:
         shutil.rmtree(platform_compat.long_path(extract_dir), ignore_errors=True)
         return None, f"could not read the fetched list: {err}"
 
-    if not any(line.lstrip().startswith("!") for line in head.splitlines()):
+    # BINARY NEVER PASSES (#1200). The request-line test below was the only
+    # check, and it read the head with str.splitlines(), which also breaks on
+    # \x0b, \x0c, \x1c-\x1e and \x85: compressed data fell apart into
+    # thousands of short "lines", one of them started with "!", and 64KB of
+    # random bytes passed 50 times out of 50. A RAR or 7z list was installed
+    # as the bot's list - zero rows, reported as arrived - in place of the
+    # good one already held.
+    #
+    # Judged on the raw bytes, not on U+FFFD after decoding: a list written
+    # in a legacy 8-bit code page decodes to as many replacement characters
+    # as random bytes do (a Greek cp1253 list is about 45% of them, random
+    # data about 44%), so that ratio cannot tell the two apart. A NUL, or
+    # control characters no text list contains, can.
+    if _looks_binary(head):
+        shutil.rmtree(platform_compat.long_path(extract_dir), ignore_errors=True)
+        return None, ("the file is not a zip, a RAR archive or a text list - "
+                      "it holds binary data - so it is not a file list")
+
+    # Lines are split where the list parser splits them: text mode ends a
+    # line at "\n", "\r\n" or a lone "\r", and nowhere else.
+    text = head.decode("utf-8", "replace")
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if not any(line.lstrip().startswith("!") for line in lines):
         shutil.rmtree(platform_compat.long_path(extract_dir), ignore_errors=True)
         return None, ("the file is not a zip and holds no request lines, so it "
                       "is not a file list")
@@ -648,6 +868,322 @@ def _accept_plain_text_list(source_path, extract_dir):
         shutil.rmtree(platform_compat.long_path(extract_dir), ignore_errors=True)
         return None, f"could not read the fetched list: {err}"
     return destination, None
+
+
+# ==========================================================================
+# RAR lists (#1200).
+#
+# A peer running DCCore with LIST_FORMAT = "rar" sends its list as a RAR
+# archive, and before this the archive itself went down the plain-text route
+# and was installed as the list. Python cannot read RAR, so the configured
+# rar program does - the same one dcc.py packs albums with, found the same
+# way (platform_compat.rar_command()).
+#
+# The archive is held to the zip route's guards, in the same order: every
+# member is LISTED and checked before a single byte is unpacked - the entry
+# count, the declared sizes against the zip-bomb budget, absolute paths,
+# drive letters, traversal and all-dots components (_validate_zip_members()
+# itself), then the text ceiling on the list that is picked.
+#
+# rar never chooses where anything is written. Each .txt member is printed
+# to a pipe ("rar p") and copied by this code to a path built here from the
+# checked name, stopping the moment it passes the size the member declared.
+# So a link member, a lying size or a name rar would resolve differently
+# from this code can never put a byte anywhere but the extraction directory,
+# and never more of them than the listing allowed for.
+# ==========================================================================
+
+class _RarMember(object):
+    """One entry of a RAR listing, shaped like the ZipInfo that
+    _validate_zip_members() reads: filename, file_size and is_dir()."""
+
+    __slots__ = ("filename", "file_size", "_is_dir")
+
+    def __init__(self, filename, file_size, is_dir):
+        self.filename = filename
+        self.file_size = file_size
+        self._is_dir = is_dir
+
+    def is_dir(self):
+        return self._is_dir
+
+
+def _archive_signature(path):
+    """"rar" or "7z" when the file starts with that format's signature,
+    else None. Read from the content, never the offered name - the same
+    reason the zip check reads the archive's own end record."""
+    try:
+        with io.open(platform_compat.long_path(path), "rb") as handle:
+            start = handle.read(8)
+    except OSError:
+        return None
+    if start.startswith(_RAR_SIGNATURE):
+        return "rar"
+    if start.startswith(_SEVEN_ZIP_SIGNATURE):
+        return "7z"
+    return None
+
+
+def _rar_argv(rar_bin, args):
+    """The command line for one rar child. A seam of its own so the tests
+    can put a stand-in rar behind every real code path below on a machine
+    with no rar installed."""
+    return [rar_bin] + list(args)
+
+
+class _RarChild(object):
+    """One rar process, read through its stdout, and killed by its own
+    handle - never by name: the operator may be running rar themselves - if
+    it outlives _RAR_LIST_TIMEOUT.
+
+    The watchdog is a timer rather than a timeout on a wait, because the
+    reader blocks in read() on the pipe, and a hung rar never returns from
+    that. Killing it closes the pipe, which ends the read.
+    """
+
+    def __init__(self, rar_bin, args):
+        self.timed_out = False
+        # A list of arguments and never a shell, no stdin (a password prompt
+        # would otherwise wait for ever; -p- says the same to rar), and
+        # stderr discarded so a chatty rar cannot fill a pipe nobody reads.
+        self.process = subprocess.Popen(_rar_argv(rar_bin, args),
+                                        stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL,
+                                        **platform_compat.no_console_window())
+        self._watchdog = threading.Timer(_RAR_LIST_TIMEOUT, self._expire)
+        self._watchdog.daemon = True
+        self._watchdog.start()
+
+    def _expire(self):
+        self.timed_out = True
+        self._kill()
+
+    def _kill(self):
+        try:
+            self.process.kill()
+        except OSError:
+            pass
+
+    def finish(self, completed):
+        """Wait for the child and return its exit code. `completed` says the
+        caller read its output to the end; otherwise the caller stopped
+        early, and the child is killed rather than waited on."""
+        try:
+            if not completed:
+                self._kill()
+            try:
+                return self.process.wait(timeout=_RAR_LIST_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                self._kill()
+                return self.process.wait()
+        finally:
+            self._watchdog.cancel()
+            self.process.stdout.close()
+
+
+def _decode_rar_listing_line(raw):
+    """One line of rar's listing as text, or None if it cannot be read.
+
+    On Windows rar is asked for UTF-8 (-scfr) and anything else is refused.
+    Elsewhere it prints names in the locale's encoding, as the file system
+    hands them over, so they are decoded the way Python decodes file names -
+    and go back to rar unchanged when a member is asked for by name.
+    """
+    if platform_compat.IS_WINDOWS:
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    return os.fsdecode(raw)
+
+
+def _list_rar_members(rar_bin, archive):
+    """Every entry of `archive`, from rar's technical listing ("rar lt").
+    Returns (members, None), or (None, reason).
+
+    Read a line at a time, so an archive of a million tiny entries is
+    refused at entry MAX_LIST_ZIP_ENTRIES + 1 instead of being held whole in
+    memory first. -c- keeps the archive comment out of the listing: the
+    sender writes the comment, and it can hold lines shaped like entries.
+    """
+    unreadable = "rar's listing of the archive could not be read"
+    args = ["lt", "-p-", "-cfg-", "-c-"]
+    if platform_compat.IS_WINDOWS:
+        args.append("-scfr")
+    args += ["--", archive]
+    child = _RarChild(rar_bin, args)
+    entries = []
+    reason = None
+    completed = False
+    try:
+        while True:
+            raw = child.process.stdout.readline(_RAR_LISTING_LINE_LIMIT)
+            if not raw:
+                completed = True
+                break
+            if len(raw) >= _RAR_LISTING_LINE_LIMIT and not raw.endswith(b"\n"):
+                reason = unreadable + " (a line of it is too long)"
+                break
+            line = _decode_rar_listing_line(raw)
+            if line is None:
+                reason = unreadable + " (it is not UTF-8)"
+                break
+            line = line.rstrip("\r\n").lstrip(" ")
+            # "Name: <the name>" - the name exactly as rar printed it, spaces
+            # and all, because it is handed back to rar to ask for the member.
+            key, sep, value = line.partition(": ")
+            if key == "Name" and sep:
+                if len(entries) >= MAX_LIST_ZIP_ENTRIES:
+                    reason = (f"RAR contains more than {MAX_LIST_ZIP_ENTRIES} "
+                              f"entries, more than a real master-list archive "
+                              f"should ever need (zip-bomb-shaped guard)")
+                    break
+                entries.append({"Name": value})
+                continue
+            # Everything before the first entry is rar's banner and the
+            # archive's own details.
+            if not entries or not line:
+                continue
+            if not sep or key in entries[-1]:
+                reason = unreadable
+                break
+            entries[-1][key] = value
+    finally:
+        code = child.finish(completed=completed)
+
+    if child.timed_out:
+        return None, (f"rar took more than {_RAR_LIST_TIMEOUT} seconds to "
+                      f"list the archive")
+    if reason:
+        return None, reason
+    if code != 0:
+        return None, (f"rar could not read the archive (exit code {code}) - "
+                      f"it is damaged, encrypted, or not a whole RAR archive")
+
+    members = []
+    for entry in entries:
+        name = entry["Name"]
+        kind = entry.get("Type", "").strip()
+        if kind == "Directory":
+            members.append(_RarMember(name, 0, True))
+        elif kind == "File":
+            size = entry.get("Size", "").strip()
+            if not re.fullmatch(r"[0-9]+", size):
+                return None, unreadable
+            members.append(_RarMember(name, int(size), False))
+        else:
+            # A link, a hard link or a "file copy" points at something else,
+            # and a list archive has no reason to hold one.
+            return None, (f"RAR entry {name!r} is not a file or a folder "
+                          f"({kind or 'no type given'})")
+    return members, None
+
+
+def _validate_rar_names(members):
+    """The checks a RAR member's NAME needs beyond the zip route's, because
+    rar is asked for each member by that name and reads it as a pattern.
+    Returns a reason, or None.
+
+    "*" and "?" would match other members, a leading "@" or "-" reads as a
+    list file or a switch, and two names differing only in case are one
+    name to rar on Windows. Control characters cannot be told apart from the
+    listing's own line breaks. A real list archive has none of these.
+    """
+    seen = set()
+    for member in members:
+        name = member.filename
+        if (any(ch in name for ch in "*?") or name.startswith(("@", "-"))
+                or any(ord(ch) < 32 for ch in name)):
+            return (f"RAR entry {name!r} has a name rar would read as a "
+                    f"pattern or a switch")
+        folded = name.replace("\\", "/").rstrip("/").lower()
+        if folded in seen:
+            return f"RAR entry {name!r} appears in the archive twice"
+        seen.add(folded)
+    return None
+
+
+def _unpack_rar_member(rar_bin, archive, member, dest_path):
+    """Copy one member out of `archive` to `dest_path`, through a pipe.
+    Returns None, or the reason the whole archive is refused.
+
+    Never more than the size the listing declared for it: that is the
+    number _validate_zip_members() summed against the budget, so reading
+    past it is the zip bomb those guards exist for - stopped here on the
+    real bytes, without trusting rar to stop on its own.
+    """
+    os.makedirs(platform_compat.long_path(os.path.dirname(dest_path)),
+                exist_ok=True)
+    child = _RarChild(rar_bin, ["p", "-inul", "-p-", "-cfg-", "--",
+                                archive, member.filename])
+    written = 0
+    completed = False
+    try:
+        with open(platform_compat.long_path(dest_path), "wb") as dst:
+            while True:
+                chunk = child.process.stdout.read(_COPY_CHUNK)
+                if not chunk:
+                    completed = True
+                    break
+                written += len(chunk)
+                if written > member.file_size:
+                    break
+                dst.write(chunk)
+    finally:
+        code = child.finish(completed=completed)
+
+    if child.timed_out:
+        return (f"rar took more than {_RAR_LIST_TIMEOUT} seconds to unpack "
+                f"{member.filename!r}")
+    if written > member.file_size:
+        return (f"RAR entry {member.filename!r} unpacked past its declared "
+                f"size of {member.file_size} bytes (zip-bomb guard)")
+    if code != 0:
+        return (f"rar could not unpack {member.filename!r} (exit code {code})")
+    return None
+
+
+def _extract_rar_list(rar_path, extract_dir):
+    """The RAR counterpart of the zip branch of
+    _extract_and_locate_list_file(), with the same (list_path, reason)
+    contract and the same rule: refused means nothing of it is left on disk.
+    """
+    def refuse(reason):
+        shutil.rmtree(platform_compat.long_path(extract_dir), ignore_errors=True)
+        return None, reason
+
+    rar_bin = platform_compat.rar_command(getattr(config, "RAR_BINARY", None))
+    if not rar_bin:
+        return refuse("the list arrived as a RAR archive, and no rar program "
+                      "was found to open it - install rar, or set RAR_BINARY "
+                      "to where it is")
+    archive = os.path.abspath(rar_path)
+    try:
+        members, reason = _list_rar_members(rar_bin, archive)
+        if reason:
+            return refuse(reason)
+        reason = (_validate_zip_members(members, extract_dir, kind="RAR")
+                  or _validate_rar_names(members))
+        if reason:
+            return refuse(reason)
+        # Only the .txt members: they are all _pick_list_file() and
+        # pick_list_files() ever look at, so nothing else is worth a child.
+        for member in members:
+            if member.is_dir() or not member.filename.lower().endswith(".txt"):
+                continue
+            reason = _unpack_rar_member(rar_bin, archive, member,
+                                        os.path.join(extract_dir,
+                                                     *_member_parts(member.filename)))
+            if reason:
+                return refuse(reason)
+    except (OSError, ValueError, subprocess.SubprocessError) as err:
+        return refuse(f"extraction aborted: {err}")
+    except Exception as err:
+        # Same promise as the zip branch: never an exception loose in the
+        # fetch thread over bytes a peer chose.
+        return refuse(f"extraction aborted: {type(err).__name__}: {err}")
+    return _pick_list_file(extract_dir), None
 
 
 def _extract_and_locate_list_file(zip_path, extract_dir):
@@ -708,7 +1244,18 @@ def _extract_and_locate_list_file(zip_path, extract_dir):
     # the sending bot and a peer calling a zip "list.txt" must not skip the
     # archive guards. zipfile.is_zipfile() reads the file's own end-of-archive
     # record.
+    #
+    # A RAR list is not a zip either, and is opened with rar (#1200). A 7z is
+    # named in the refusal rather than called binary data, so the operator
+    # knows what the peer sent.
     if not zipfile.is_zipfile(platform_compat.long_path(zip_path)):
+        signature = _archive_signature(zip_path)
+        if signature == "rar":
+            return _extract_rar_list(zip_path, extract_dir)
+        if signature == "7z":
+            shutil.rmtree(platform_compat.long_path(extract_dir), ignore_errors=True)
+            return None, ("the list arrived as a 7z archive, which DCCore "
+                          "cannot open - it reads .txt, .zip and .rar lists")
         return _accept_plain_text_list(zip_path, extract_dir)
 
     try:
@@ -723,8 +1270,7 @@ def _extract_and_locate_list_file(zip_path, extract_dir):
             for info in infolist:
                 if info.is_dir():
                     continue
-                member_name = info.filename.replace('\\', '/')
-                parts = [p for p in member_name.split('/') if p not in ('', '.')]
+                parts = _member_parts(info.filename)
                 if not parts:
                     continue
                 dest_path = os.path.join(extract_dir, *parts)
@@ -1049,13 +1595,21 @@ def auto_refetch_worker(sleep=None):
 
 
 
-def process_fetched_list_zip(bot, zip_path):
+def process_fetched_list_zip(bot, zip_path, channel=None, secondary=False):
     """Entry point, called by dcc_fetch.py once a request_type="list" fetch
     reaches 'complete'. Safely extracts `zip_path`, locates the master-list
     .txt inside it, and stores a REFERENCE to it - not its parsed contents -
     in config.fetched_bot_lists keyed by lowercased bot nick, REPLACING any
     previous entry for the same bot, per the operator's explicit
     "switchable, not accumulating" requirement.
+
+    `secondary` (#1240 review) is explicit, carried on the fetch_queue row
+    from the moment it was enqueued (dcc_fetch.new_fetch_row()) all the way
+    to here - never re-derived from `channel` at this end. Only
+    list_grab.secondary_channel_tick() ever enqueues with it True; every
+    other caller (a manual fetch, AUTO_REFETCH_LISTS, a Downloads-page
+    retry) is always a primary refresh of this bot's own list, whatever
+    channel it actually went out in.
 
     Issue #76, option 2: earlier versions of this function parsed the whole
     extracted list here and stored the resulting row list permanently in
@@ -1102,14 +1656,16 @@ def process_fetched_list_zip(bot, zip_path):
     out an in-progress fetch, itself already a background step measured in
     seconds) is the same accepted tradeoff as above, extended to reads.
     """
+    extract_dir = _extract_dir_for(bot, channel, secondary=secondary)
     with _lock():
-        result = _process_fetched_list_zip_unlocked(bot, zip_path)
-        # The files under this bot's directory were rewritten or put back:
+        result = _process_fetched_list_zip_unlocked(bot, zip_path, channel=channel,
+                                                     secondary=secondary)
+        # The files under THIS fetch's directory were rewritten or put back:
         # its folder tables describe what was there (#1128). Under the lock,
         # so no page builds one from the files half way through. Keyed on
         # mtime and size as well, but a same-size rewrite inside one tick of
         # a coarse clock would keep both.
-        list_mod.forget_folder_tables(under=list_extract_dir(bot))
+        list_mod.forget_folder_tables(under=extract_dir)
     # Outside the lock: telling a console can take a moment and nothing
     # else should wait for it (#750).
     try:
@@ -1118,13 +1674,32 @@ def process_fetched_list_zip(bot, zip_path):
         succeeded, reason = bool(result), ""
     if succeeded:
         entry = (getattr(config, "fetched_bot_lists", {}) or {}).get(str(bot).strip().lower())
-        count = int((entry or {}).get("entry_count") or 0) if isinstance(entry, dict) else 0
+        # A secondary channel's own list, just merged in, reports ITS count -
+        # entry["entry_count"] is the PRIMARY channel's, untouched by this
+        # fetch, and would misreport what just actually arrived (#1240).
+        if secondary and isinstance(entry, dict):
+            # Not just kept_lists[_channel_marker_name(channel)]: a channel
+            # that sub-splits INSIDE its own archive (its own "-VIDEO-" file,
+            # say) does not keep that base name at all - the base marker's
+            # own file can even turn out empty and be dropped, as happened
+            # live (the console reported 0 files for a channel that had
+            # really just arrived with thousands, because the one marker it
+            # looked up by name was never stored). Sum every marker this
+            # fetch actually touched - the ones tagged with THIS channel -
+            # instead of assuming there is exactly one, named after it.
+            count = sum(int(info.get("entry_count") or 0)
+                       for info in (entry.get("lists") or {}).values()
+                       if isinstance(info, dict) and info.get("channel") == channel)
+        else:
+            count = int((entry or {}).get("entry_count") or 0) if isinstance(entry, dict) else 0
         _tell_the_console(bot, "arrived", f"{bot}'s list arrived: {count:,} files")
         # Automatic grabbing starts this bot over (#967). Never raises into
         # a list that has already been stored.
         try:
             import list_grab
             list_grab.note_list_arrived(bot)
+            if secondary:
+                list_grab.note_secondary_channel_list_arrived(bot, channel)
         except Exception as err:
             print(f"[LIST-FETCH] Could not reset {bot}'s automatic grab record: {err}")
     else:
@@ -1185,17 +1760,25 @@ def _release_held_list(held, extract_dir, succeeded):
               f"({err}); it is still on disk at {held!r}.")
 
 
-def _process_fetched_list_zip_unlocked(bot, zip_path):
+def _process_fetched_list_zip_unlocked(bot, zip_path, channel=None, secondary=False):
     """The body of process_fetched_list_zip. Caller must hold _lock().
 
     Wraps the real work so that a rejected re-fetch leaves the list we were
-    already serving exactly where it was - see _hold_existing_list().
+    already serving exactly where it was - see _hold_existing_list(). The
+    directory itself is _extract_dir_for(bot, channel, secondary) (#1240):
+    the bot's own for an ordinary or primary-channel fetch, a directory
+    outside it entirely for a confirmed secondary channel - see that
+    function's docstring. Holding/releasing THAT directory (never the
+    primary's) is what keeps a secondary channel's own re-fetch from ever
+    touching the primary's files, the same safety _hold_existing_list()
+    already gives the primary.
     """
-    extract_dir = list_extract_dir(bot)
+    extract_dir = _extract_dir_for(bot, channel, secondary=secondary)
     held = _hold_existing_list(extract_dir)
     succeeded = False
     try:
-        succeeded, reason = _install_fetched_list(bot, zip_path, extract_dir)
+        succeeded, reason = _install_fetched_list(bot, zip_path, extract_dir, channel=channel,
+                                                   secondary=secondary)
         return succeeded, reason
     finally:
         _release_held_list(held, extract_dir, succeeded)
@@ -1290,8 +1873,14 @@ def bot_publishes_a_rar_list(bot):
     entry = (getattr(config, "fetched_bot_lists", {}) or {}).get(key)
     held = entry.get("lists") if isinstance(entry, dict) else None
     if isinstance(held, dict):
-        for marker in held:
+        for marker, info in held.items():
             if str(marker).strip().lower() in _RAR_MARKERS:
+                return True
+            # mxrarserver's Folders list (#1209), by its file's name: as the
+            # only list in a Folders-only archive it is the main one and has
+            # no marker at all.
+            if (isinstance(info, dict)
+                    and _MX_FOLDERS_LIST_RE.search(str(info.get("file_name") or ""))):
                 return True
 
     advert = runtime.known_bots.get(key)
@@ -1299,6 +1888,41 @@ def bot_publishes_a_rar_list(bot):
         if advert.get("rar_folders") is not None or advert.get("rar_trigger"):
             return True
     return False
+
+
+# How far into a list to look for its first request line. mxrarserver's
+# banner is an operator-written header of a few dozen lines.
+_TRIGGER_SCAN_LINES = 2000
+
+
+def _first_request_token(path):
+    """The word after "!" on the first request line of the list at `path`, or
+    None. Reads no further than _TRIGGER_SCAN_LINES lines."""
+    try:
+        with open(platform_compat.long_path(path), "r", encoding="utf-8",
+                  errors="replace") as handle:
+            for number, line in enumerate(handle):
+                if number >= _TRIGGER_SCAN_LINES:
+                    return None
+                text = list_mod.strip_control_codes(line).strip()
+                if text.startswith("!") and len(text) > 1:
+                    return text[1:].split(None, 1)[0]
+    except OSError:
+        return None
+    return None
+
+
+def _mx_list_trigger(kept_lists):
+    """The trigger the rows of the first mxrarserver list among `kept_lists`
+    are addressed to, or None - see _install_fetched_list()."""
+    import dcc_fetch
+    for info in kept_lists.values():
+        if not list_mod.is_mxrarserver_list(info.get("file_name")):
+            continue
+        trigger = dcc_fetch._sendable_trigger(_first_request_token(info.get("list_path")))
+        if trigger:
+            return trigger
+    return None
 
 
 def index_key(bot, marker):
@@ -1319,8 +1943,115 @@ def split_index_key(key):
     return (nick, marker) if sep else (text, "")
 
 
-def _install_fetched_list(bot, zip_path, extract_dir):
-    """Extract, validate and publish one fetched list. (bool, reason)."""
+def _install_secondary_channel_lists(bot, channel, extract_dir, list_path):
+    """Merge a SECONDARY channel's archive into the bot's existing entry,
+    rather than replace it (#1240).
+
+    Called only when `secondary` is explicitly True - an entry
+    for this bot exists, and this fetch's channel differs from the one its
+    "" (main) marker came from. Every file this archive held - `list_path`,
+    whatever _pick_list_file() called "main" for lack of anything better to
+    call it, included - is stored as its OWN marker, named after `channel`
+    rather than "" or whatever filename convention it happened to match, so
+    it can never collide with or overwrite the primary channel's own markers.
+    A sub-split within THIS one archive (its own "-RAR-" file, say) keeps its
+    relative name, joined to the channel's: "video", "video-RAR".
+
+    Only this channel's own previously-held markers are ever replaced or
+    dropped by a fetch from it; every other marker in the entry - the primary
+    channel's "" and anything else, and any OTHER secondary channel's - is
+    left exactly as it was. (bool, reason), the same contract as
+    _install_fetched_list().
+
+    `channel_marker` is disambiguated against every OTHER marker already in
+    the entry, compared case-insensitively (#1240 review): "#RAR" sanitises
+    to the same name a filename-derived "RAR" marker already uses, "#rar"
+    and "#RAR" differ only by case - which index_bot_list() folds away in
+    the search index regardless of their (distinct) dict keys - and "#a|b"
+    and "#a_b" both sanitise to "a_b" outright. Left alone, any of these
+    would overwrite (in the dict, the index, or both) a marker that belongs
+    to someone else entirely. See _disambiguate_marker()'s own docstring for
+    why a hash of the CHANNEL, not of the name, is what breaks the tie.
+    """
+    store = _ensure_fetched_bot_lists()
+    key = str(bot).strip().lower()
+    previous = store.get(key) or {}
+    kept_lists = dict(previous.get("lists") or {})
+    if "" not in kept_lists and previous.get("list_path"):
+        # A bot held from before #1209's multi-list-per-archive feature has
+        # no "lists" dict at all - its one list lives directly in list_path/
+        # entry_count on the entry itself. Backfilled here as the "" marker
+        # so the loop just below (which only ever looks at kept_lists) still
+        # finds and preserves it, exactly as if it had always been stored
+        # this way - the alternative is losing it the moment this runs.
+        kept_lists[""] = {
+            "list_path": previous["list_path"],
+            "entry_count": previous.get("entry_count") or 0,
+            "file_name": os.path.basename(str(previous["list_path"])),
+            "channel": previous.get("channel"),
+        }
+    this_channels_markers = {marker for marker, info in kept_lists.items()
+                             if isinstance(info, dict) and info.get("channel") == channel}
+    reserved_lower = {str(marker).lower() for marker in kept_lists
+                      if marker not in this_channels_markers}
+    channel_marker = _disambiguate_marker(_channel_marker_name(channel), channel, reserved_lower)
+
+    signature = _current_channel_signature(bot, channel)
+    fresh = {}
+    for marker, path in pick_list_files(extract_dir, list_path):
+        effective = channel_marker if not marker else f"{channel_marker}-{marker}"
+        info = _measure_extra_list(bot, effective, path)
+        if info:
+            info["channel"] = channel
+            info["advert_signature"] = signature
+            fresh[effective] = info
+
+    if not fresh:
+        reason = f"no usable list in {channel}'s answer (empty, or could not be parsed)"
+        print(f"[LIST-FETCH] {bot}'s fetch from {channel}: {reason}")
+        return False, reason
+
+    # This channel's own markers from before are replaced wholesale by what
+    # it answered with just now - the same "switchable, not accumulating"
+    # rule _install_fetched_list() always applied to the whole bot, now
+    # scoped to just the one channel being re-fetched. A marker THIS channel
+    # held before but did not reproduce this time (a sub-list it stopped
+    # publishing) leaves the index, the same cleanup _install_fetched_list()
+    # already does for a whole-bot replace.
+    for marker in this_channels_markers - set(fresh):
+        list_index.drop_bot(index_key(bot, marker))
+    for marker in this_channels_markers:
+        kept_lists.pop(marker, None)
+    kept_lists.update(fresh)
+
+    entry = dict(previous)
+    entry["lists"] = kept_lists
+    store[key] = entry
+    db.save_fetched_bot_lists(dict(store))
+
+    detail = ", ".join(f"{marker}: {info['entry_count']}" for marker, info in fresh.items())
+    print(f"[LIST-FETCH] Stored {len(fresh)} list(s) from {bot}'s {channel} "
+          f"({detail}), alongside what was already held for this bot.")
+    return True, None
+
+
+def _install_fetched_list(bot, zip_path, extract_dir, channel=None, secondary=False):
+    """Extract, validate and publish one fetched list. (bool, reason).
+
+    `channel` (#1232) is the channel this particular fetch actually went out
+    in - dcc_fetch.py's dispatcher resolves and stamps it onto the row before
+    the request is even sent, so by the time a fetch completes it is the real
+    answer, not a guess. Stored on the entry so a later request for this bot
+    (a file, a folder, a re-fetch) can use the same channel instead of
+    dcc.channel_containing_user()'s plain "first channel we share" rule.
+
+    `secondary` (#1240 review) is explicit, carried straight through from
+    process_fetched_list_zip() - see its own docstring. Decides which of the
+    two branches below runs; never re-derived from `channel` here.
+    """
+    # Normalised once, used everywhere below it matters.
+    channel = (str(channel).strip() or None) if channel else None
+
     list_path, reason = _extract_and_locate_list_file(zip_path, extract_dir)
     if reason:
         print(f"[LIST-FETCH] Rejected list zip from {bot}: {reason}")
@@ -1349,6 +2080,22 @@ def _install_fetched_list(bot, zip_path, extract_dir):
         print(f"[LIST-FETCH] Rejected list zip from {bot}: {reason}")
         shutil.rmtree(platform_compat.long_path(extract_dir), ignore_errors=True)
         return False, reason
+
+    # A CONFIRMED SECONDARY CHANNEL (#1240) is never this bot's "main" list
+    # by construction, however _pick_list_file() above happened to label the
+    # one file it found - that label only ever meant "nothing else survived
+    # the -rar-/-video- exclusion", not "this is the bot's default list", and
+    # treating it as the real main would overwrite the PRIMARY channel's own
+    # main list both on disk (it does not - see _extract_dir_for() - but in
+    # config.fetched_bot_lists it still would) and in the search index (every
+    # row indexed under the bare bot key, below, IS that bot's main list as
+    # far as the cross-list filter is concerned). So this branches before any
+    # of that happens, and merges every file this archive held into the
+    # existing entry's "lists" dict instead, named after the channel rather
+    # than main/rar/video - see _install_secondary_channel_lists()'s own
+    # docstring for the rest.
+    if secondary:
+        return _install_secondary_channel_lists(bot, channel, extract_dir, list_path)
 
     # list.py opens this path directly and does not wrap it itself, so the
     # prefix goes on here - at the point of use, the same idiom dcc.py uses.
@@ -1398,19 +2145,44 @@ def _install_fetched_list(bot, zip_path, extract_dir):
     # oversized or unreadable costs that list alone. Reporting the whole fetch
     # as failed over it would throw away a list that is sitting there, correct.
     kept_lists = {"": {"list_path": list_path, "entry_count": entry_count,
-                       "file_name": os.path.basename(list_path)}}
+                       "file_name": os.path.basename(list_path), "channel": channel,
+                       "advert_signature": _current_channel_signature(bot, channel)}}
     for marker, path in pick_list_files(extract_dir, list_path):
         if not marker:
             continue
         info = _measure_extra_list(bot, marker, path)
         if info:
+            info["channel"] = channel
+            info["advert_signature"] = _current_channel_signature(bot, channel)
             kept_lists[marker] = info
 
     store = _ensure_fetched_bot_lists()
     previous = store.get(str(bot).strip().lower())
+    # A SECONDARY CHANNEL'S OWN MARKERS, if this bot has any, are not this
+    # fetch's to touch (#1240) - this whole function only ever regenerates
+    # the CHANNEL this fetch itself used (None here means "unspecified",
+    # which is still its own channel, distinct from a real one on record for
+    # some other marker). _install_secondary_channel_lists() is the only
+    # place a marker with a DIFFERENT channel is ever added or replaced; carry
+    # every one of those forward untouched; a name this fetch wants to use is
+    # never also a secondary-channel marker name (those are always prefixed
+    # by a channel, see _channel_marker_name()), so there is nothing to
+    # resolve a clash with.
+    if isinstance(previous, dict):
+        for marker, info in (previous.get("lists") or {}).items():
+            if (marker not in kept_lists and isinstance(info, dict)
+                    and info.get("channel")
+                    and str(info["channel"]).strip().lower() != str(channel or "").strip().lower()):
+                kept_lists[marker] = info
     store[str(bot).strip().lower()] = {
         "bot": str(bot).strip(),
         "fetched_at": time.time(),
+        # The channel THIS fetch actually went out in (#1232), or None for a
+        # fetch dispatched before this existed, or one whose channel could
+        # not be resolved at all. Read by webserver.py to steer a later file
+        # or folder request for this bot into the same channel its list
+        # answers in, without the operator having to say so again.
+        "channel": channel,
         # The plain, already-absolute path _pick_list_file() returned -
         # NOT long_path()-wrapped here. Every reader of this field (the parse
         # call just above, and get_fetched_bot_page() below) wraps it with
@@ -1454,6 +2226,15 @@ def _install_fetched_list(bot, zip_path, extract_dir):
         # freshness LED nothing stable to compare against.
         "lists": kept_lists,
     }
+    # WHAT ITS ROWS ARE ADDRESSED TO (#1209). An mxrarserver bot answers to a
+    # trigger of the operator's choosing, every row of its list begins
+    # "!<trigger>", and in "request only" mode that list is the only place it
+    # is ever said. Only for an mxrarserver list: any other bot's rows carry
+    # the nick the list was built under, which is stale once it changes
+    # nick, and requests to it keep going to the nick it has now.
+    trigger = _mx_list_trigger(kept_lists)
+    if trigger:
+        store[str(bot).strip().lower()]["trigger"] = trigger
 
     # Persisted immediately, not on a timer: unlike the bot registry (updated
     # on every advert, throttled for exactly that reason), a list fetch

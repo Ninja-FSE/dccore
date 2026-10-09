@@ -36,6 +36,10 @@ def list_slug(name):
     case and the readable one: "Films" is the "Films" directory. Two such
     names cannot collide, because they are equal.
 
+    A name Windows will not create ("NUL", "COM1", #1208) counts as one that
+    needed changing: it takes the digest too, so it is not made safe by a
+    suffix that another list's own name could already be using.
+
     Stable across restarts and across reordering the lists: it depends on that
     one name and nothing else. hashlib rather than hash(), which is randomised
     per process and would rename every directory on each start.
@@ -43,7 +47,7 @@ def list_slug(name):
     raw = str(name or "").strip()
     cleaned = "".join(ch if (ch.isalnum() or ch in "-_ ") else "_" for ch in raw)
     cleaned = cleaned.strip(" ")
-    if cleaned == raw and cleaned:
+    if cleaned == raw and cleaned and not platform_compat.is_windows_reserved(cleaned):
         return cleaned
     digest = hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()[:6]
     return f"{cleaned or 'list'}-{digest}"
@@ -732,18 +736,66 @@ def _matching_lines(search_words, list_path):
         return
 
     with open(current_list_path, "r", encoding="utf-8", errors="replace") as f:
-        yield from _scan_lines(f, plain_words, phrase_patterns)
+        yield from _scan_lines(f, plain_words, phrase_patterns,
+                               banner_first=is_mxrarserver_list(current_list_path))
 
 
-def _scan_lines(lines, plain_words, phrase_patterns, state="none", on_heading=None):
+# An mxrarserver list file (#1209): "<name>-MX.txt", "<name>-Files(<x>)-MX.txt",
+# "<name>-Folders(<x>)-MX.txt". Every one it writes ends in "-MX".
+_MXRARSERVER_LIST_RE = re.compile(r"-MX\.txt$", re.IGNORECASE)
+
+
+def is_mxrarserver_list(path):
+    """Whether the list at `path` is one mxrarserver wrote, by its name."""
+    return bool(_MXRARSERVER_LIST_RE.search(os.path.basename(str(path or ""))))
+
+
+def _searched_part(line_strip):
+    """The part of one "!" row a search word is matched against, lower-cased (#1199).
+
+    The filename: what is between "!<nick> " and the "::INFO::" marker (or
+    the end of the row). Matching the whole row made "info" and "nfo" find
+    every file, and the bot's own nick find the whole list, because every row
+    carries both - and it disagreed with the cross-list search index, which
+    holds only the filename. A size, a length or a bitrate in the tail is not
+    searched either, as in the index.
+
+    The marker is looked for with str.find first: this runs on every row of
+    every list a search reads (#1126).
+    """
+    lowered = line_strip.lower()
+    start = lowered.find(" ") + 1
+    if not start:
+        return ""
+    end = lowered.find("::info::", start)
+    if end >= 0:
+        return lowered[start:end]
+    if "--" in lowered:
+        return strip_info_suffix(lowered[start:])[0]
+    return lowered[start:]
+
+
+def _scan_lines(lines, plain_words, phrase_patterns, state="none", on_heading=None,
+                banner_first=False):
     """_matching_lines()'s parser, over any source of lines.
 
     The List Browser's folder table (#1128) reads the same lists in binary,
     to know where each folder is, and starts this part-way through a file -
     at a heading, in the "open" state - so there is one parser and not two
     that could drift. `on_heading` is called as each heading is taken.
+
+    `banner_first` (#1209) is for an mxrarserver list, whose rows have no
+    folder headings and which opens with its operator's banner: blocks of
+    text between "=" rules, which this parser takes for headings - the last
+    one, "> Overview" or the bot's name, then filed every row in the list.
+    In such a list nothing before the first row is a heading. Only when the
+    scan starts at the top of the file: one started at a heading (the folder
+    table's "open") is past that point already. Every other list is read
+    exactly as before - DCCore's own put a summary line under each heading,
+    which is why "text after a heading" cannot be the test.
     """
     current_folder = None
+    in_banner = banner_first and state == "none"
     # "none" -> saw the opening rule line, now expecting the folder line ("open")
     # -> saw the folder line, now expecting the closing rule line ("folder_seen")
     for line in lines:
@@ -797,8 +849,16 @@ def _scan_lines(lines, plain_words, phrase_patterns, state="none", on_heading=No
 
         if not line_strip.startswith("!"):
             continue
+        if in_banner:
+            # The first row: what was taken for a heading above it was the
+            # banner (#1209).
+            current_folder = None
+            in_banner = False
 
-        line_lower = line_strip.lower()
+        if not plain_words and not phrase_patterns:
+            yield line_strip, current_folder
+            continue
+        line_lower = _searched_part(line_strip)
         # Plain loops, not all() over a generator (#1126): the generator
         # was built afresh for every file line, and cost more than the
         # substring tests it ran. Same order, same early stop.
@@ -1099,6 +1159,30 @@ def rar_folder_of(title):
     return match.group(1).strip() if match else ""
 
 
+def pack_path_of(title, size=""):
+    """The folder an mxrarserver pack row asks for, or "" if the row is not
+    one (#1209).
+
+    mxrarserver's folder list has no "!rar": each row is "!<trigger>
+    <absolute Windows path>.rar" - "!Music E:\\Music\\Artist\\Album.rar" - and
+    asking for that line verbatim has the bot pack the folder and send it as
+    a RAR. Its own test for a folder request is the same: ends in ".rar" and
+    holds a path separator. A row with a size (an "::INFO::" or a "----"
+    suffix) is a file, which is how its file list writes every row, so that
+    is asked first and costs a row nothing else.
+
+    The path itself is the answer, unchanged: it is what goes back on the
+    wire, so it must survive exactly as the list wrote it.
+    """
+    if size:
+        return ""
+    text = str(title or "").strip()
+    if (not text or text.startswith("!") or "\\" not in text
+            or not text.lower().endswith(".rar")):
+        return ""
+    return text
+
+
 def entries_to_filelist_rows(entries, source):
     """Shape find_matching_entries() output into the File Lists view's row
     format: {"title", "size", "format", "source"}, deduping same
@@ -1260,8 +1344,15 @@ def _filelist_rows(entries, source):
             # Asked only of a title that starts with "!" (#1136): nothing
             # else can match rar_folder_of()'s anchored "^!rar", and running
             # the regex on every row of every list cost more than the answer.
+            #
+            # mxrarserver's folder rows (#1209) are the other shape of the
+            # same thing, "!<trigger> <path>.rar" with no "!rar", and are
+            # offered the same way: rar_folder is the path, which
+            # webserver.build_folder_rar_fetch_enqueue_result() recognises
+            # and sends back as the bot wrote it.
             "rar_folder": (rar_folder_of(filename)
-                           if filename.lstrip().startswith("!") else ""),
+                           if filename.lstrip().startswith("!")
+                           else pack_path_of(filename, size)),
             # What we have already asked this bot for: "requested",
             # "received", or "" for neither. Declared HERE, empty, rather
             # than added by whichever payload happens to know - both this
@@ -1632,7 +1723,7 @@ def _build_folder_table_within(paths, signature, budget):
             crc = 0
             for line_strip, folder in _scan_lines(
                     _binary_lines(handle, 0, None, at, raw), [], [],
-                    on_heading=on_heading):
+                    on_heading=on_heading, banner_first=is_mxrarserver_list(path)):
                 if run_folder is _NO_RUN or folder != run_folder:
                     if run_folder is not _NO_RUN:
                         table.seg_rows.append(position)
@@ -1775,7 +1866,8 @@ def _run_lines(table, run, handles):
     crc = 0
     lines = _binary_lines(handle, table.seg_start[run], table.seg_end[run], at, raw)
     for line_strip, folder in _scan_lines(
-            lines, [], [], state="open" if table.seg_open[run] else "none"):
+            lines, [], [], state="open" if table.seg_open[run] else "none",
+            banner_first=is_mxrarserver_list(table.signature[file_index][0])):
         crc = zlib.crc32(raw[0], crc)
         yield line_strip, folder
     if crc != table.seg_crc[run]:
@@ -1964,8 +2056,55 @@ def rebuild_pauses_requests():
     return update_list.read_phase() not in update_list.PHASES_BEFORE_THE_SWAP
 
 
+# The shortest SEARCH_FOLDER_MAX_CHARS honoured (#1228). The cut keeps
+# "..." and the end of the folder, so a cap of 3 or less would show nothing
+# of it, and 0 would slice nothing off at all (text[-0:] is the whole text).
+# Ten keeps at least the last seven characters - usually enough of an album
+# name to tell two apart.
+SEARCH_FOLDER_MIN_CHARS = 10
+
+
+def search_folder_text(folder, max_chars):
+    """The folder a search reply's From: line shows (#1228), or "" for none.
+
+    The list's own heading, as find_matching_entries() returns it - the
+    "D:\\MEDIA\\..." prefix included, never a path on the operator's disk -
+    without the trailing backslash every heading is written with, so the line
+    ends on the folder's own name. Past `max_chars` it is cut from the LEFT
+    and marked with "...": the end of a folder (the album) is what tells two
+    results apart, and the start is the prefix every heading shares.
+    """
+    text = str(folder or "").strip().rstrip("\\")
+    try:
+        limit = int(max_chars)
+    except (TypeError, ValueError):
+        limit = 80
+    limit = max(limit, SEARCH_FOLDER_MIN_CHARS)
+    if len(text) <= limit:
+        return text
+    return "..." + text[len(text) - (limit - 3):]
+
+
+def group_search_entries_by_folder(entries):
+    """The search results with each folder's files together, folders sorted (#1228).
+
+    A stable sort, so the files of one folder keep the list's own order.
+    Results with no folder (rows above the first heading) come FIRST: placed
+    after a From: line they would read as part of that folder.
+    """
+    def key(entry):
+        folder = entry.get("folder") or ""
+        return (bool(folder), folder.casefold(), folder)
+    return sorted(entries, key=key)
+
+
 def execute_search(irc_sock, user, search_term, channel):
     """Search the list file, sending the matching rows exactly as they are stored."""
+    # Off (#1237): no reply at all, the same silence as a channel that is not
+    # served. "is False" so only a real off turns searching off.
+    if getattr(config, 'SEARCH_ENABLED', True) is False:
+        print(f'[SEARCH] Ignored a search from {user} in {channel}: searching is off (SEARCH_ENABLED).')
+        return
     # update_inprogress, not search_inprogress (#214) - see dcc.py's own comment
     # on the same change. This branch is the REBUILD case and its message says
     # so; the branch below is the concurrent-search case and needs its own.
@@ -2050,6 +2189,13 @@ def execute_search(irc_sock, user, search_term, channel):
                 search_words, limit=max_results, name=wanted)
         else:
             found_entries, total_matches = [], 0
+        # SEARCH_SHOW_FOLDER (#1228): each folder's files together, so its
+        # From: line is sent once above them rather than once per result.
+        # Sorted AFTER the cap, so MAX_SEARCH_RESULTS still counts files and
+        # the same files are sent either way; off, nothing is reordered.
+        show_folder = getattr(config, 'SEARCH_SHOW_FOLDER', False) is True
+        if show_folder:
+            found_entries = group_search_entries_by_folder(found_entries)
         # The row is kept exactly as it is on disk - matches go to IRC raw.
         matches = [entry["line"] for entry in found_entries]
 
@@ -2070,8 +2216,32 @@ def execute_search(irc_sock, user, search_term, channel):
             oserve = sys.modules.get('oserve')
             if oserve:
                 BG_RED_BLOCK, BG_CYAN_BLOCK, BG_TEXT_BOX, R, B, V, A, X = theme.blocks()
-                
-                for match in matches:
+
+                # The From: line (#1228), framed like the header above it so it
+                # follows the theme. "From: " comes BEFORE the frame, not
+                # after it (#1249 review): CUSTOM_THEME_BORDER/SEPARATOR/
+                # TEXTBOX are free-text settings only the operator can set,
+                # and framing first meant a border set to e.g. "!othernick"
+                # put that text, unescaped, at the very start of the line -
+                # a real request to another bot, pasted into a channel.
+                # "From: " first means the line always starts with that
+                # literal text, under any theme or custom colour, matching
+                # the guarantee this feature's own changelog entry promised.
+                def _build_folder(shown_folder):
+                    return (f"PRIVMSG {user} :From: {BG_RED_BLOCK} {BG_CYAN_BLOCK} {BG_TEXT_BOX} "
+                            f"{V}{shown_folder} {BG_CYAN_BLOCK} {BG_RED_BLOCK} \r\n")
+
+                folder_cap = getattr(config, 'SEARCH_FOLDER_MAX_CHARS', 80)
+                previous_folder = None
+
+                for entry, match in zip(found_entries, matches):
+                    folder = entry.get("folder")
+                    if show_folder and folder and folder != previous_folder:
+                        previous_folder = folder
+                        shown_folder = search_folder_text(folder, folder_cap)
+                        if shown_folder:
+                            oserve.queue_message(user, announce.fit_irc_line(
+                                _build_folder, shown_folder))
                     # Through fit_irc_line, like the header of this very reply
                     # two lines above. These rows were the only user-visible
                     # lines in the module that skipped it, so a long filename
@@ -2124,6 +2294,12 @@ def send_file_list(irc_sock, user, channel):
     if wanted is None:
         print(f"[LIST] No list is bound to {channel!r}; ignoring the request "
               f"from {user}.")
+        return
+    # Asked for by private message from somebody in none of our channels
+    # (#1242): handle_download_request() below refuses it, so it is refused
+    # here, before "Preparing full list" promises a list that never comes.
+    if not dcc.is_channel_name(channel) and library.shared_channel(user) is None:
+        dcc.refuse_unshared_private_request(user, "the list")
         return
 
     current_zip_path = find_latest_list_file(wanted)

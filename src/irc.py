@@ -1620,6 +1620,14 @@ def parse_search_header(text):
 #   PackBot publishes both: 719,041 loose files AND 39,454 RAR folders. They are
 #   two different lists and are kept apart in the registry for that reason.
 #
+#   mxrarserver 2.x (#1209) - one sentence for both of its lists, with a
+#   trigger that is any word the operator chose:
+#     Type: @SomeTrigger to get list(s) of Files:(1,234) + Folders:(56) * Slots:
+#     3/5 * Queue: 0 * Sent: 99 (1.2 GB) * Speed: 120KB/s * Updated: 05/Oct/26 *
+#     [ mxrarserver v2.1.5 ]
+#   Either count may be missing (a bot serving only files or only folders),
+#   and the separator is whichever glyph the operator picked.
+#
 # WHAT THE SAMPLE SETTLES
 #
 #   * The LABELS are stable, the layout is not. Across the sample the field
@@ -1733,6 +1741,14 @@ _RAR_RE = re.compile(
 # a different field. Length capped because nothing legitimate is long and the
 # line budget is 512 bytes.
 _TRIGGER_RE = re.compile(r"^[^\s,\x00-\x1f]{1,64}$")
+
+
+def is_sendable_trigger(text):
+    """Whether `text` may be put in a request line as another bot's trigger.
+    The one test, for a trigger out of an advert, out of a fetched list's rows
+    or out of a pasted line alike (#1209). fullmatch(), because the "$" in
+    the pattern also matches before a final line ending."""
+    return isinstance(text, str) and bool(_TRIGGER_RE.fullmatch(text))
 
 # nick.lower() -> [first_seen, text_so_far] for an advert that may still be
 # continued on a following line. Module level rather than in runtime.py because
@@ -1872,9 +1888,87 @@ def _parse_rar_folder_advert(clean):
     return advert
 
 
+# mxrarserver 2.x (#1209). "list(s)" is the bot's own spelling and the one
+# thing in the sentence no other family writes, so it is what identifies it,
+# together with at least one of the two counts.
+_MX_RE = re.compile(r"Type:\s*@(\S+)\s+to\s+get\s+list\(s\)\s+of\b", re.IGNORECASE)
+_MX_FILES_RE = re.compile(r"\bFiles:\s*\(\s*([\d,]+)\s*\)", re.IGNORECASE)
+_MX_FOLDERS_RE = re.compile(r"\bFolders:\s*\(\s*([\d,]+)\s*\)", re.IGNORECASE)
+_MX_QUEUE_RE = re.compile(r"\bQueue:\s*([\d,]+)", re.IGNORECASE)
+_MX_UPDATED_RE = re.compile(r"\bUpdated:\s*(\d{1,2}/[A-Za-z]{3,9}/\d{2,4})", re.IGNORECASE)
+_MX_SOFTWARE_RE = re.compile(r"\[\s*(mx\.?rarserver\s+v?[^\s\]]+)\s*\]", re.IGNORECASE)
+# What strip_control_codes() leaves: reverse, italics, monospace and
+# strikethrough. A theme may wrap any part of the advert in them.
+_MX_FORMATTING_RE = re.compile(r"[\x11\x16\x1d\x1e]")
+
+
+def _parse_mx_advert(clean):
+    """mxrarserver 2.x (#1209): "Type: @<trigger> to get list(s) of
+    Files:(N) + Folders:(N) <sep> Slots: free/max <sep> Queue: q <sep> ...
+    Updated: dd/mmm/yy <sep> [ mxrarserver vX ]".
+
+    Its two lists are counted apart, and kept apart the way PackBot's two
+    adverts are: Files is its loose-file list, Folders the list of folders it
+    packs into a RAR on request - so the first goes to `files` and the second
+    to `rar_folders`. Only the types the operator serves are written, so
+    either may be missing; a line with neither is not this advert.
+
+    NO IDENTITY CLAIM, for the reason _parse_rar_folder_advert() gives: the
+    word after "@" is a TRIGGER, any word the operator chose, and has no
+    relationship to the sender's nick that is safe to assume. `nick` is None
+    and the sender stays the identity. The trigger is kept as `trigger`, which
+    is what requests to this bot are addressed to (dcc_fetch.request_trigger()),
+    and dropped - the bot still recorded - if it could not be sent safely.
+    """
+    clean = _MX_FORMATTING_RE.sub("", clean)
+    found = _MX_RE.search(clean)
+    if not found:
+        return None
+    tail = clean[found.end():]
+    files = _MX_FILES_RE.search(tail)
+    folders = _MX_FOLDERS_RE.search(tail)
+    if not files and not folders:
+        return None
+
+    advert = {"family": "mx", "nick": None}
+    if files:
+        advert["files"] = _as_int(files.group(1))
+    if folders:
+        advert["rar_folders"] = _as_int(folders.group(1))
+
+    trigger = found.group(1)
+    if is_sendable_trigger(trigger):
+        advert["trigger"] = trigger
+    else:
+        print(f"[ADVERT] Ignoring a trigger that cannot be sent safely: "
+              f"{trigger[:40]!r}")
+
+    # The live figures, each only when the bot said it. Slots are FREE/max,
+    # the same sense OmenServe's carry.
+    slots = _ADVERT_SLOTS_RE.search(tail)
+    if slots:
+        advert["slots_free"] = _as_int(slots.group(1))
+        advert["slots_total"] = _as_int(slots.group(2))
+    queued = _MX_QUEUE_RE.search(tail)
+    if queued:
+        advert["queued"] = _as_int(queued.group(1))
+    speed = _ADVERT_SPEED_RE.search(tail)
+    if speed:
+        advert["speed"] = re.sub(r"\s+", "", speed.group(1))
+    updated = _MX_UPDATED_RE.search(tail)
+    if updated:
+        advert["list_date"] = updated.group(1)
+    software = _MX_SOFTWARE_RE.search(tail)
+    if software:
+        advert["software"] = re.sub(r"\s+", " ", software.group(1))
+    return advert
+
+
 # Order matters only in that each wording is distinct enough not to overlap:
-# SPQR has no "Of:", the RAR advert has no colon after "Type" and no "For".
-_ADVERT_PARSERS = (_parse_omenserve_advert, _parse_spqr_advert, _parse_rar_folder_advert)
+# SPQR has no "Of:", the RAR advert has no colon after "Type" and no "For",
+# and mxrarserver's "to get list(s) of" is in none of the others.
+_ADVERT_PARSERS = (_parse_omenserve_advert, _parse_spqr_advert, _parse_rar_folder_advert,
+                   _parse_mx_advert)
 
 # What each family is entitled to write into a registry entry. A bot's RAR
 # advert must not overwrite the count of its loose-file list, and the other way
@@ -1887,6 +1981,9 @@ _ADVERT_FIELDS = {
                   "slots_free", "slots_total", "queued", "speed", "mode"),
     "spqr": ("files", "list_size", "slots_in_use", "slots_total", "queued"),
     "rar": ("rar_folders", "rar_size", "rar_trigger"),
+    # Both of its lists' counts, its trigger and its version (#1209).
+    "mx": ("files", "rar_folders", "list_date", "trigger", "software",
+           "slots_free", "slots_total", "queued", "speed"),
 }
 
 
@@ -1923,11 +2020,65 @@ def _record_bot(key, user, target, advert, now):
     for field in _ADVERT_FIELDS.get(advert.get("family"), ()):
         if field in advert:
             entry[field] = advert[field]
+    _record_channel_signature(entry, target, advert, now)
     runtime.known_bots[key] = entry
     expire = not 0 <= now - runtime.known_bots_pruned_at < KNOWN_BOTS_EXPIRY_INTERVAL_SECONDS
     if expire:
         runtime.known_bots_pruned_at = now
     _prune_known_bots(now, expire=expire)
+
+
+# The fields compared to tell one of a bot's channels' lists apart from
+# another's (#1240) - "files" is the one count every advert family that
+# publishes a real catalogue carries (_ADVERT_FIELDS above), so it is the one
+# signal comparable across OmenServe, SPQR and mxrarserver alike. list_date
+# is a second, independent signal for the same comparison, carried by fewer
+# families - kept beside "files" rather than instead of it, so two channels
+# that happen to share a file count (round numbers, or two empty lists) are
+# not mistaken for the same list, when it so happens one of them also gives
+# the date and can still be compared on that.
+_CHANNEL_SIGNATURE_FIELDS = ("files", "list_date")
+
+
+def _record_channel_signature(entry, channel, advert, now):
+    """Remember, per channel, what THIS channel's advert claimed (#1240) -
+    entry["channels"][<lowercased channel>] = {"files", "list_date",
+    "last_seen", "since"}. Additive only: nothing existing reads or writes
+    this, so a bot entry that predates it simply starts growing one from its
+    next advert, the same way a brand new field always has.
+
+    "since" is when the CURRENT files/list_date pair started holding - reset
+    to `now` only when either actually changes, left alone on every advert
+    that just repeats what was already on record. secondary_channel_lists.py
+    reads it to require a difference to have held for a while before acting
+    on it, rather than a single advert that might just be a bot mid-scan.
+    """
+    key = str(channel or "").strip().lower()
+    if not key:
+        return
+    if not isinstance(entry.get("channels"), dict):
+        # A malformed "channels" value (loaded from known_bots.json, where
+        # nothing enforces its shape) must not raise on every single advert
+        # from this bot forever after (#1240 review) - start fresh rather
+        # than trust whatever was there.
+        entry["channels"] = {}
+    channels = entry["channels"]
+    previous = channels.get(key) or {}
+    # Carried forward, not blanked, for a field this particular advert line
+    # did not repeat - the same "absent means did not say" rule
+    # _advert_snapshot() already follows, so one advert missing list_date
+    # right after another gave it does not read as the list having changed.
+    signature = {field: previous[field] for field in _CHANNEL_SIGNATURE_FIELDS
+                if field in previous}
+    signature.update({field: advert[field] for field in _CHANNEL_SIGNATURE_FIELDS
+                      if field in advert})
+    changed = any(previous.get(field) != signature.get(field)
+                  for field in _CHANNEL_SIGNATURE_FIELDS)
+    channels[key] = {
+        **signature,
+        "last_seen": now,
+        "since": now if changed or "since" not in previous else previous["since"],
+    }
 
 
 def never_breaks_the_read_loop(capture):
@@ -2006,10 +2157,11 @@ def _capture_channel_advert(user, target, msg, now=None):
     if advert:
         # Only when the advert claims a name. The OmenServe and SPQR wordings
         # put the bot's own nick in the text, so a mismatch there is somebody
-        # advertising as somebody else and is worth refusing. The RAR wording
-        # carries a TRIGGER, which is not a nick and is not required to
-        # resemble one - see _parse_rar_folder_advert(), which returns None
-        # here rather than a name it would have had to invent.
+        # advertising as somebody else and is worth refusing. The RAR and
+        # mxrarserver wordings carry a TRIGGER, which is not a nick and is
+        # not required to resemble one - see _parse_rar_folder_advert(),
+        # which returns None here rather than a name it would have had to
+        # invent.
         if advert.get("nick") and advert["nick"].lower() != key:
             print(f"[ADVERT] {user} advertised as {advert['nick']!r} - ignoring; "
                   f"the sender is the authority on who a bot is.")
@@ -2466,6 +2618,27 @@ def parse_advert_slots(text, known_files):
     return found
 
 
+def _slots_counts(entry):
+    """The counts a bot's SLOTS line may carry, in the order to try them.
+
+    Its advert's file count, for every family as before. mxrarserver (#1209)
+    writes <entries> for everything it serves, which is Files + Folders when
+    it serves both and Folders alone when it serves no files - so those are
+    tried too, and only for a bot whose advert said it runs mxrarserver: for
+    anyone else the one count it published is the only one to calibrate
+    against, and a second guess is a second chance to misread.
+    """
+    files = entry.get("files")
+    counts = [files]
+    if str(entry.get("software") or "").lower().startswith(("mxrarserver", "mx.rarserver")):
+        folders = entry.get("rar_folders")
+        if isinstance(folders, int) and not isinstance(folders, bool):
+            if isinstance(files, int) and not isinstance(files, bool):
+                counts.append(files + folders)
+            counts.append(folders)
+    return [count for count in counts if count]
+
+
 def _capture_advert_slots(user, target, msg, now):
     """Fold a bot's CTCP SLOTS line into the registry entry its advert built.
 
@@ -2477,7 +2650,11 @@ def _capture_advert_slots(user, target, msg, now):
     if not entry:
         return
 
-    extra = parse_advert_slots(msg, entry.get("files"))
+    extra = None
+    for count in _slots_counts(entry):
+        extra = parse_advert_slots(msg, count)
+        if extra is not None:
+            break
     if not extra:
         return
 
@@ -2589,6 +2766,21 @@ def get_bot_aliases():
         if low and low not in aliases:
             aliases.append(low)
     return aliases
+
+
+def names_a_file_request(msg_lower, bot_aliases=None):
+    """True if this message, lowercased, is a file request to this bot:
+    "!<nick> <file>" on any name get_bot_aliases() gives.
+
+    The test the dispatcher's own `is_file_request` makes - it calls this -
+    and the one the Messages page is kept clear of requests by (#1242): a
+    file asked for by private message is a request, not a message, and the
+    recorder in announce.py refuses it by this same test rather than a
+    second copy that could drift from what the dispatcher serves.
+    """
+    if bot_aliases is None:
+        bot_aliases = get_bot_aliases()
+    return any(msg_lower.startswith(f"!{alias} ") for alias in bot_aliases)
 
 
 def is_list_request(msg, msg_lower):
@@ -3955,7 +4147,7 @@ def irc_loop():
                         # -remove, list requests, the CTCPs - is metered
                         # exactly as before.
                         is_file_request = (
-                            any(msg_lower.startswith(f"!{alias} ") for alias in bot_aliases)
+                            names_a_file_request(msg_lower, bot_aliases)
                         )
                         if is_bot_command and not is_file_request and security.is_flooding(user):
                             continue

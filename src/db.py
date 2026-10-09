@@ -39,6 +39,9 @@ PRIVATE_MESSAGES_FILE = getattr(config, "PRIVATE_MESSAGES_FILE",
                                 os.path.join("data", "private_messages.json"))
 LIST_GRABS_FILE = getattr(config, "LIST_GRABS_FILE",
                           os.path.join("data", "list_grabs.json"))
+SECONDARY_CHANNEL_GRABS_FILE = getattr(
+    config, "SECONDARY_CHANNEL_GRABS_FILE",
+    os.path.join("data", "secondary_channel_grabs.json"))
 
 
 # The temp file's name, and how it is swapped in (#692, audit L28). One
@@ -1327,6 +1330,34 @@ def save_list_grabs(record):
         return True
     except Exception as err:
         print(f"[DB ERROR] Could not save {LIST_GRABS_FILE}: {err}")
+        return False
+
+
+def load_secondary_channel_grabs():
+    """Automatic secondary-channel discovery's per-(bot, channel) tries
+    record (#1240), or {} if there is none. An unreadable file costs the
+    tries count and nothing else - the same posture load_list_grabs() takes
+    for its own, identically-shaped file."""
+    if not os.path.exists(SECONDARY_CHANNEL_GRABS_FILE):
+        return {}
+    try:
+        with io.open(SECONDARY_CHANNEL_GRABS_FILE, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception as err:
+        print(f"[DB ERROR] Could not read {SECONDARY_CHANNEL_GRABS_FILE}: {err}")
+        return {}
+
+
+def save_secondary_channel_grabs(record):
+    """Write it, atomically. False when it did not land."""
+    try:
+        with _disk_lock:
+            _atomic_write(SECONDARY_CHANNEL_GRABS_FILE,
+                          json.dumps(record, indent=1, sort_keys=True))
+        return True
+    except Exception as err:
+        print(f"[DB ERROR] Could not save {SECONDARY_CHANNEL_GRABS_FILE}: {err}")
         return False
 
 

@@ -1,4 +1,5 @@
 # stats_mgr.py - Size formatting, transfer speed and uptime figures
+import math
 import time
 
 import defaults as config
@@ -252,6 +253,99 @@ def live_speed(now=None):
     runtime.live_speed_bps = value
     runtime.live_speed_sampled_at = now
     return value
+
+
+def send_speed(tx, now=None):
+    """Bytes per second ONE send has moved since its connection started.
+
+    The per-send figure the DCC console's SLOT line has always shown (#550),
+    moved here so the next-slot estimate (#1207) reads the same number rather
+    than a second idea of how fast a send is going. live_speed() above is not
+    that number: it is a sum over every send, and taking a sample consumes
+    its window.
+
+    What THIS connection has moved, not what the receiver holds: a resumed
+    send starts with bytes_sent already at the resume point, and dividing all
+    of it by the seconds since it restarted showed 108 MB/s for a link doing
+    6 (#746). Half a second of data is not a rate, so a send that has only
+    just started, or one start_dcc_send() has not stamped yet, reads 0.
+
+    A malformed row raises, as the console's own arithmetic always did: the
+    STATUS burst reports it as a failed burst (#681), and the estimate below
+    skips that row.
+    """
+    now = time.time() if now is None else now
+    sent = int(tx.get("bytes_sent") or 0)
+    started = float(tx.get("started_at") or 0)
+    moved = max(0, sent - int(tx.get("resume_offset") or 0))
+    return int(moved / (now - started)) if started and now > started + 0.5 else 0
+
+
+# What next_slot_estimate() answers when a slot is free already (#1207).
+NEXT_SLOT_NOW = "now"
+
+
+def next_slot_estimate(now=None, transfers=None, slots=None):
+    """When the first busy DCC slot is likely to free up (#1207).
+
+    NEXT_SLOT_NOW while a slot is free; otherwise whole minutes, rounded up,
+    until the send nearest its end finishes at its current speed: the minimum
+    over the active sends of (size - sent) / send_speed(). None when no send
+    has a usable speed or a known size yet - a guess from nothing would be a
+    promise the bot cannot keep.
+
+    It is the next FREE SLOT, not anybody's turn: who gets that slot is the
+    queue's business, and the user asking may have others ahead of them.
+
+    At least one minute while every slot is busy, even for a send a few
+    bytes from its end: "~0 min" would read as "now" for a slot that is not
+    free yet.
+    """
+    now = time.time() if now is None else now
+    if transfers is None:
+        transfers = list(getattr(config, "active_transfers", []) or [])
+    if slots is None:
+        slots = int(getattr(config, "MAX_DCC_SLOTS", 0) or 0)
+    if len(transfers) < slots:
+        return NEXT_SLOT_NOW
+    soonest = None
+    for tx in transfers:
+        if not isinstance(tx, dict):
+            continue
+        # A malformed row - a hand-edited or mis-typed one - tells nothing
+        # about when a slot frees, and must not take a -que reply down.
+        try:
+            speed = send_speed(tx, now)
+            size = int(tx.get("size") or 0)
+            left = max(0, size - int(tx.get("bytes_sent") or 0))
+        except (TypeError, ValueError):
+            continue
+        if speed <= 0 or size <= 0:
+            continue
+        seconds = left / speed
+        if soonest is None or seconds < soonest:
+            soonest = seconds
+    if soonest is None:
+        return None
+    return max(1, math.ceil(soonest / 60))
+
+
+def format_next_slot(estimate):
+    """next_slot_estimate()'s answer as the user notices print it (#1207):
+    "now", "~4 min", "~2h 10m", "~1d 3h", or "not known yet". The units
+    follow -stats' own uptime figure."""
+    if estimate == NEXT_SLOT_NOW:
+        return "now"
+    if estimate is None:
+        return "not known yet"
+    minutes = int(estimate)
+    if minutes < 60:
+        return f"~{minutes} min"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"~{hours}h {minutes}m"
+    days, hours = divmod(hours, 24)
+    return f"~{days}d {hours}h"
 
 
 def get_uptime_seconds():

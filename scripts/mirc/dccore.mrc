@@ -18,6 +18,10 @@
 ;    operators in the channels your bot is in, relayed by the bot - see
 ;    its section near the end of this file.
 ;
+;    When mIRC starts, @DCCore opens by itself, minimised, and says what it
+;    is waiting for until the console connects; Chat and Downloads can do
+;    the same - "Open when mIRC starts" in /dccore options (#1201).
+;
 ;  Install
 ;    Save this file anywhere (your mIRC folder is fine), then in mIRC:
 ;
@@ -86,7 +90,7 @@
 
 alias dccore.ini { return $qt($+($scriptdir,dccore.ini)) }
 alias dccore.bot { return $hget(dccore,bot) }
-alias dccore.ver { return 1.12 }
+alias dccore.ver { return 1.17.1 }
 ;  The feed's protocol minor this script was written for. The bot says
 ;  its own in HELLO as major.minor; a different minor means a field was
 ;  inserted on one side and the lines would read wrong - see HELLO below.
@@ -157,13 +161,35 @@ alias dccore.init {
   ; from other DCCore bots arrive at all, so there is little to filter
   dccore.default chat.all 1
   dccore.default chat.popup 1
+  ; Which windows open, minimised, when mIRC starts (#1201). @DCCore does by
+  ; default, so the bot's window is there before anything has connected;
+  ; Chat and Downloads only when asked for, as before.
+  dccore.default start.main 1
+  dccore.default start.chat 0
+  dccore.default start.downloads 0
 }
 alias dccore.default { if ($hget(dccore,$1) == $null) { hadd dccore $1 $2- } }
 alias dccore.save { hsave -o dccore $dccore.ini }
 alias dccore.set { hadd dccore $1 $2- | dccore.save }
 alias dccore.forget { hdel dccore $1 | dccore.save }
 
-on *:START: { dccore.init }
+on *:START: {
+  dccore.init
+  dccore.atstart
+}
+; The windows ticked under "Open when mIRC starts" (#1201): each minimised,
+; its button at the end of the switchbar, so they are there without taking
+; the focus. Only the windows: nothing here dials the bot or sets wantopen.
+; The usual auto-connect on CONNECT fills @DCCore, which is already open by
+; then. Until it does, @DCCore says in one line what it is waiting for.
+alias dccore.atstart {
+  if ($dccore.opt(start.main)) && (!$window($dccore.win)) {
+    dccore.window start
+    if ($dccore.st(state) == $null) { dccore.sys $dccore.waiting }
+  }
+  if ($dccore.opt(start.chat)) { dccore.chat.window start }
+  if ($dccore.opt(start.downloads)) { dccore.dl.window start }
+}
 on *:LOAD: {
   dccore.init
   echo 14 -a DCCore window script $dccore.ver loaded. Type /dccore pair <botnick> to connect for the first time, /dccore for help.
@@ -265,7 +291,7 @@ alias dccore {
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore disconnect $+ $str($dccore.nbsp,11) close the chat and stop reconnecting
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore unpair $+ $str($dccore.nbsp,15) forget the token here and revoke it on the bot
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore trust $+ $str($dccore.nbsp,16) accept the bot's current host as the one to send the token to
-  echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore options $+ $str($dccore.nbsp,14) what to show, colours, panel, title bar, beep
+  echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore options $+ $str($dccore.nbsp,14) what to show, colours, panel, title bar, beep, windows at start
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore window $+ $str($dccore.nbsp,15) open or focus @DCCore
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore downloads $+ $str($dccore.nbsp,10) open the downloads window: coming in, waiting, finished
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore weburl [addr] $+ $str($dccore.nbsp,7) where the bot's dashboard is, for the window's menu
@@ -389,6 +415,10 @@ on *:CONNECT: {
     hadd dccore.live tries 0
     .timerdccoreRetry 1 8 dccore.connect
   }
+  ; A @DCCore opened at start said "not connected to <network> yet" (#1201);
+  ; now it is, so the title says what it waits for next. Only the title:
+  ; the dial above is what fills the window.
+  if ($dccore.here) { dccore.title }
 }
 
 on *:CHATCLOSE: {
@@ -644,6 +674,17 @@ alias dccore.structured {
     dccore.panel.soon
     return
   }
+  ; <nick> <done> <total> <elapsed> <folder>: a folder pack is running (#1202);
+  ; `end` when it stops. <done> is the archive's size so far, <total> the
+  ; folder's (0 until measured), the folder last as it may hold spaces. Kept in
+  ; dccore.live and cleared by every STATUS, like REBUILD.
+  if (%type == PACKING) {
+    if ($2 == end) { hdel dccore.live packing }
+    else { hadd dccore.live packing $2- }
+    dccore.title
+    dccore.panel.soon
+    return
+  }
   ; The Downloads window's snapshot (#1022): DLBEGIN, one DLROW per download
   ; (<id> <kind> <state> <bot> <received> <total> <bps> <when> <note> <name>),
   ; DLEND <waiting_total> <complete_total> <failed_total>. Drawn at DLEND only, so a window
@@ -651,6 +692,9 @@ alias dccore.structured {
   if (%type == DLBEGIN) { hdel -w dccore.live dl.* | hadd dccore.live dln 1 | return }
   if (%type == DLROW) { hadd dccore.live dl. $+ $dccore.st(dln) $2- | hinc dccore.live dln | return }
   if (%type == DLEND) { hadd dccore.live dlwait $2 | hadd dccore.live dlfin $3 | hadd dccore.live dlfail $4 | hadd dccore.live dlend 1 | dccore.dl.draw | return }
+  if (%type == DQBEGIN) { hdel -w dccore.live dq.* | hdel dccore.live dqend | hadd dccore.live dqn 1 | return }
+  if (%type == DQROW) { hadd dccore.live dq. $+ $dccore.st(dqn) $2- | hinc dccore.live dqn | return }
+  if (%type == DQEND) { hadd dccore.live dqcount $2 | hadd dccore.live dqend 1 | dccore.dq.draw | return }
   if (%type == OUT) { dccore.out $2- | return }
   if (%type == LISTFETCH) {
     ; <bot> <auto|arrived|unusable> <text>: a held bot list asked for again,
@@ -764,6 +808,7 @@ alias dccore.status {
   hdel -w dccore.live queue.*
   hdel -w dccore.live fetch.*
   hdel dccore.live rebuild
+  hdel dccore.live packing
   hadd dccore.live nslots 1
   hadd dccore.live nfetch 1
   dccore.title
@@ -794,9 +839,15 @@ alias dccore.rebuild.short {
   return rebuilding $iif(%n > 0,folder $gettok(%l,2,32) $+ / $+ %n,$gettok(%l,1,32))
 }
 
+; $1 = start: opened when mIRC starts (#1201), so minimised (-n) with its
+; button at the end of the switchbar (-z), and otherwise the same window.
 alias dccore.window {
   if ($window($dccore.win)) { return }
-  if ($dccore.opt(panel)) { window -el30 $dccore.win }
+  if ($1 == start) {
+    if ($dccore.opt(panel)) { window -enzl30 $dccore.win }
+    else { window -enz $dccore.win }
+  }
+  elseif ($dccore.opt(panel)) { window -el30 $dccore.win }
   else { window -e $dccore.win }
   if ($dccore.opt(font)) { font $dccore.win $dccore.fontsize Lucida Console }
   dccore.background
@@ -974,10 +1025,27 @@ alias dccore.title {
   if (!$window($dccore.win)) { return }
   var %bot = $iif($dccore.bot,$dccore.bot,DCCore)
   var %net = $iif($network,$network,$server)
+  ; No dial yet this session: say what the window is waiting for (#1201)
+  if ($dccore.st(state) == $null) { titlebar $dccore.win %bot $dccore.dot $dccore.waiting | return }
   if ($dccore.st(state) != in) { titlebar $dccore.win %bot $dccore.dot $iif($dccore.st(state),$dccore.st(state),not connected) | return }
   if (!$dccore.opt(titlebar)) || ($dccore.st(mode) != structured) { titlebar $dccore.win %bot on %net | return }
   var %rb = $iif(($dccore.st(rebuild) != $null) && (!$dccore.opt(panel)),$dccore.dot $dccore.rebuild.short,)
-  titlebar $dccore.win %bot on %net %rb $dccore.dot slots $dccore.st(st.used) $+ / $+ $dccore.st(st.slots) $dccore.dot queue $dccore.st(st.qusers) $dccore.dot today $dccore.st(st.sent) files / $dccore.bytes($dccore.st(st.bytes)) $dccore.dot $dccore.speed($dccore.st(st.bps))
+  var %pk = $iif(($dccore.st(packing) != $null) && (!$dccore.opt(panel)),$dccore.dot packing $gettok($dccore.st(packing),5-,32))
+  titlebar $dccore.win %bot on %net %rb %pk $dccore.dot slots $dccore.st(st.used) $+ / $+ $dccore.st(st.slots) $dccore.dot queue $dccore.st(st.qusers) $dccore.dot today $dccore.st(st.sent) files / $dccore.bytes($dccore.st(st.bytes)) $dccore.dot $dccore.speed($dccore.st(st.bps))
+}
+
+; What @DCCore is waiting for before its first dial of the session (#1201):
+; a window opened at start would otherwise sit there saying only "not
+; connected". The bot's network, not the active one: $dccore.cid finds it,
+; and $scid(N).server is empty while that connection is not up.
+alias dccore.waiting {
+  if ($dccore.bot == $null) { return no bot paired yet: /dccore pair <botnick> }
+  var %cid = $dccore.cid
+  var %net = $iif($dccore.opt(net),$dccore.opt(net),IRC)
+  if (%cid == $null) { return Waiting for the bot: not connected to %net yet }
+  if ($scid(%cid).server == $null) { return Waiting for the bot: not connected to %net yet }
+  if ($dccore.opt(wantopen)) && ($dccore.opt(auto)) { return Waiting for the bot: it is not answering yet }
+  return Waiting for the bot: the console is not open - /dccore connect opens it
 }
 
 ; SLOT and QUEUE lines arrive one by one after STATUS with no end marker,
@@ -1066,6 +1134,17 @@ alias dccore.panel {
     if ($gettok(%r,5,32) > 0) { aline -l 14 $dccore.win $dccore.nbsp $+ $dccore.nbsp running $dccore.dur($gettok(%r,5,32)) }
     aline -l 14 $dccore.win $dccore.nbsp
   }
+  ; Packing (#1202): the folder being packed into an archive, for whom, and how
+  ; far the archive has got of the folder's size. Only drawn while one runs.
+  if ($dccore.st(packing) != $null) {
+    var %pk = $dccore.st(packing)
+    aline -l %head $dccore.win Packing
+    aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $gettok(%pk,5-,32)
+    if ($gettok(%pk,3,32) > 0) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp for $gettok(%pk,1,32) $dccore.dot $dccore.bytes($gettok(%pk,2,32)) of $dccore.bytes($gettok(%pk,3,32)) $dccore.dot $int($calc(100 * $gettok(%pk,2,32) / $gettok(%pk,3,32))) $+ $chr(37) }
+    else { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp for $gettok(%pk,1,32) $dccore.dot $dccore.bytes($gettok(%pk,2,32)) }
+    if ($gettok(%pk,4,32) > 0) { aline -l 14 $dccore.win $dccore.nbsp $+ $dccore.nbsp running $dccore.dur($gettok(%pk,4,32)) }
+    aline -l 14 $dccore.win $dccore.nbsp
+  }
   aline -l %head $dccore.win Queue $dccore.st(st.qusers) $iif($dccore.st(st.qfiles) > 0,( $+ $dccore.st(st.qfiles) files))
   var %i = 1
   while ($dccore.st(queue. $+ %i) != $null) {
@@ -1143,9 +1222,15 @@ alias dccore.dl.rows {
 alias dccore.dl.tell {
   if ($chat($dccore.bot)) && ($dccore.st(mode) == structured) { .msg $+(=,$dccore.bot) downloads on $dccore.dl.rows }
 }
+; $1 = start: opened when mIRC starts (#1201) - minimised, its button at the
+; end of the switchbar, and an open one is left where it is, not brought up.
 alias dccore.dl.window {
-  if ($window($dccore.dl.win)) { window -a $dccore.dl.win | return }
-  window -l64 $dccore.dl.win
+  if ($window($dccore.dl.win)) {
+    if ($1 != start) { window -a $dccore.dl.win }
+    return
+  }
+  if ($1 == start) { window -nzl64 $dccore.dl.win }
+  else { window -l64 $dccore.dl.win }
   if ($dccore.opt(font)) { font $dccore.dl.win $dccore.fontsize Lucida Console }
   titlebar $dccore.dl.win DCCore Downloads $dccore.dot what $iif($dccore.bot,$dccore.bot,the bot) is fetching from other bots
   echo 14 -i2 $dccore.dl.win Every request, queue place, transfer and result appears here as it happens; the list on the right is how things stand now.
@@ -1279,6 +1364,91 @@ menu @DCCore-Downloads {
 }
 
 ; ---------------------------------------------------------------------
+;  Download queues (#1217): the requests the bot has made that have not started
+; ---------------------------------------------------------------------
+;
+;  A dialog with every request still waiting - a file, a !rar folder or a
+;  bot's list - asked for, queued at the other bot or held back here. Select
+;  some and remove them, or remove all of them; a download that has started is
+;  never touched. The bot sends the rows when asked (`dlqueue`), and asked
+;  again after each removal. dqmap.<line> remembers which request a line is.
+
+alias dccore.queues {
+  if ($dccore.st(mode) != structured) { dccore.sys Download queues needs the structured link to the bot. | return }
+  if ($dialog(dccore.dq)) { dialog -v dccore.dq | dccore.dq.ask | return }
+  dialog -m dccore.dq dccore.dq
+}
+alias dccore.dq.ask {
+  hdel dccore.live dqend
+  dccore.dq.draw
+  if ($chat($dccore.bot)) { .msg $+(=,$dccore.bot) dlqueue }
+}
+alias dccore.dq.draw {
+  if (!$dialog(dccore.dq)) { return }
+  did -r dccore.dq 2
+  hdel -w dccore.live dqmap.*
+  if ($dccore.st(mode) != structured) { did -ra dccore.dq 1 (not connected to the bot) | return }
+  if (!$dccore.st(dqend)) { did -ra dccore.dq 1 (asking the bot...) | return }
+  var %n = $calc($dccore.st(dqn) - 1), %i = 1
+  while (%i <= %n) {
+    var %l = $dccore.st(dq. $+ %i)
+    ; <id> <kind> <state> <bot> <note> <name>
+    var %name = $gettok(%l,6-,32)
+    if ($gettok(%l,2,32) == r) { %name = [!rar] %name }
+    did -a dccore.dq 2 $gettok(%l,4,32) $dccore.dot %name $dccore.dot $replace($gettok(%l,5,32),_,$chr(32))
+    hadd dccore.live $+(dqmap.,$did(dccore.dq,2).lines) $gettok(%l,1,32)
+    inc %i
+  }
+  did -ra dccore.dq 1 $iif($dccore.st(dqcount) == 0,Nothing is waiting.,$dccore.st(dqcount) waiting - select the ones to remove (Ctrl or Shift for several))
+}
+; Up to 20 ids to a line, so a long selection stays inside one IRC line.
+; $chat() checked the same way dccore.dq.ask already does (#1246 review):
+; sending unconditionally meant a stale window open after a disconnect
+; queued a DCC CHAT message nobody would ever read it as.
+alias dccore.dq.cancel {
+  if (!$chat($dccore.bot)) { return }
+  var %ids = $1-, %batch = $null, %k = 0, %i = 1
+  while (%i <= $numtok(%ids,32)) {
+    %batch = %batch $gettok(%ids,%i,32)
+    inc %k
+    if (%k == 20) || (%i == $numtok(%ids,32)) { .msg $+(=,$dccore.bot) dlcancel %batch | %batch = $null | %k = 0 }
+    inc %i
+  }
+}
+alias dccore.dq.remove {
+  var %n = $did(dccore.dq,2,0).sel, %i = 1, %ids = $null
+  if (%n == 0) { did -ra dccore.dq 1 Select the requests to remove first. | return }
+  while (%i <= %n) {
+    var %id = $hget(dccore.live,$+(dqmap.,$did(dccore.dq,2,%i).sel))
+    if (%id != $null) { %ids = %ids %id }
+    inc %i
+  }
+  if (%ids == $null) { return }
+  dccore.dq.cancel %ids
+  dccore.dq.ask
+}
+
+dialog dccore.dq {
+  title "DCCore - Download queues"
+  size -1 -1 330 200
+  option dbu
+  text "", 1, 5 4 320 8
+  list 2, 5 14 320 160, extsel hsbar vsbar
+  button "Remove selected", 3, 5 181 62 12
+  button "Remove all...", 4, 70 181 52 12
+  button "Refresh", 5, 125 181 40 12
+  button "Close", 6, 285 181 40 12, cancel
+}
+on *:dialog:dccore.dq:init:0: { dccore.dq.ask }
+on *:dialog:dccore.dq:sclick:3: { dccore.dq.remove }
+on *:dialog:dccore.dq:sclick:4: {
+  if ($dccore.st(dqcount) == 0) || (!$dccore.st(dqend)) { return }
+  if (!$chat($dccore.bot)) { return }
+  if ($input(Remove all $dccore.st(dqcount) waiting requests? Downloads that have started are left alone.,yq,DCCore)) { .msg $+(=,$dccore.bot) dlcancel all | dccore.dq.ask }
+}
+on *:dialog:dccore.dq:sclick:5: { dccore.dq.ask }
+
+; ---------------------------------------------------------------------
 ;  What you type in the window goes to the bot
 ; ---------------------------------------------------------------------
 
@@ -1333,9 +1503,35 @@ alias dccore.askraw {
   var %v = $input(Console command (see help),eo,DCCore)
   if (%v != $null) { dccore.send %v }
 }
+; Cancel the running pack (#1202): top of the right-click menu while one runs; named, so the prompt can say whose.
+alias dccore.packcancel {
+  if ($dccore.st(packing) == $null) { return }
+  if ($input(Cancel the pack of $gettok($dccore.st(packing),5-,32) for $gettok($dccore.st(packing),1,32) $+ ? The partial archive is deleted and the user is told.,yq,DCCore)) { dccore.send packcancel }
+}
 ; Yes or no first, for the ones that change something or take a while.
 alias dccore.confirm {
   if ($input($2-,yq,DCCore)) { dccore.send $1 }
+}
+; Ignore a nick for some minutes (#1206). The bot drops its requests until the
+; time is up; Cancel or something that is not a whole number sends nothing.
+; No commas in the prompt text: they would end the $input argument.
+alias dccore.minutes {
+  var %v = $input(Ignore $1 for how many minutes? 1 to 10080. Its requests are dropped until then.,eo,DCCore,30)
+  if (%v isnum 1-10080) && (. !isin %v) { return %v }
+  if (%v != $null) { dccore.sys Ignore: %v is not a whole number of minutes from 1 to 10080. }
+}
+alias dccore.ignorefor {
+  var %m = $dccore.minutes($1)
+  if (%m) { dccore.send ignore $1 %m }
+}
+; Drop what it has queued and what it asks for next: ignore first, so its
+; pending replies go too, then clear - one console command, so the clear
+; only happens if the ignore actually took (#1247). Two separate sends
+; used to clear the queue unconditionally even when the bot refused the
+; ignore (its own nick, or a nick outside the pattern ignore accepts).
+alias dccore.clearignore {
+  var %m = $dccore.minutes($1)
+  if (%m) { dccore.send clearandignore $1 %m }
 }
 alias dccore.askfont {
   var %v = $input(Font size (6 or more),eo,DCCore)
@@ -1344,6 +1540,7 @@ alias dccore.askfont {
 
 ; Every /dccore command, and every console command worth a click, is here.
 menu @DCCore {
+  $iif($dccore.st(packing) != $null,Cancel the running pack...):dccore.packcancel
   Script Settings:dccore.options
   Console command:dccore.askraw
   -
@@ -1351,6 +1548,7 @@ menu @DCCore {
   .Status:dccore.send status
   .Slots:dccore.send slots
   .Queue:dccore.send queue
+  .Download queues...:dccore.queues
   .Uptime:dccore.send uptime
   .Version:dccore.send version
   .-
@@ -1368,6 +1566,10 @@ menu @DCCore {
   .Ban...:dccore.ask ban Ban pattern (for example *!*@host.example)
   .Unban...:dccore.ask unban Pattern to remove
   .Clear a queue...:dccore.ask clearqueue Clear the queue of which nick
+  .Ignore a nick...:dccore.ask ignore Which nick and for how many minutes - for example someone 30
+  .Stop ignoring a nick...:dccore.ask unignore Stop ignoring which nick
+  .Move in the queue...:dccore.ask queuemove Nick then up or down - or nick then file number then up or down
+  .Remove one queued file...:dccore.ask queueremove Nick then the file number from Queue of the nick
   Control
   .Check for a new version:dccore.send checkversion
   .Daily update check $iif($dccore.st(checkupdates) == on,off,on):dccore.send checkupdates $iif($dccore.st(checkupdates) == on,off,on)
@@ -1378,6 +1580,10 @@ menu @DCCore {
   -
   $iif($dccore.selq,Queue of $dccore.selq):dccore.send queue $dccore.selq
   $iif($dccore.selq,Clear the queue of $dccore.selq):dccore.send clearqueue $dccore.selq
+  $iif($dccore.selq,Ignore $dccore.selq for...):dccore.ignorefor $dccore.selq
+  $iif($dccore.selq,Clear the queue of $dccore.selq and ignore for...):dccore.clearignore $dccore.selq
+  $iif($dccore.selq,Move $dccore.selq earlier in line):dccore.send queuemove $dccore.selq up
+  $iif($dccore.selq,Move $dccore.selq later in line):dccore.send queuemove $dccore.selq down
   $iif($dccore.sels,Queue of $dccore.sels):dccore.send queue $dccore.sels
   -
   Connection
@@ -1400,6 +1606,9 @@ menu nicklist {
   DCCore
   .Queue of $1:dccore.send queue $1
   .Clear the queue of $1:dccore.send clearqueue $1
+  .Ignore $1 for...:dccore.ignorefor $1
+  .Clear the queue of $1 and ignore for...:dccore.clearignore $1
+  .Stop ignoring $1:dccore.send unignore $1
 }
 
 menu status,channel {
@@ -1407,6 +1616,7 @@ menu status,channel {
   .Open the window:dccore window
   .Open DCCore Chat:dccore chat
   .Open the Downloads window:dccore downloads
+  .Download queues...:dccore.queues
   .Show the lists:dccore lists
   .Fetch the changed lists:dccore fetch
   .Command list:dccore
@@ -1426,7 +1636,7 @@ alias dccore.options {
 
 dialog dccore.opt {
   title "DCCore window - options"
-  size -1 -1 322 288
+  size -1 -1 322 316
   option dbu
   box "Show in @DCCore", 100, 5 3 312 102
   check "Requests (who asked for what)", 101, 10 13 170 10
@@ -1475,10 +1685,14 @@ dialog dccore.opt {
   box "DCCore Chat (public)", 600, 5 235 312 36
   check "Listen on every channel the bot is in, not only the ticked ones", 601, 10 245 300 10
   check "Open the chat window when a line arrives", 602, 10 256 300 10
-  button "OK", 1, 232 274 40 12, ok default
-  button "Cancel", 2, 276 274 40 12, cancel
-  button "Pair again...", 501, 5 274 46 12
-  button "Forget token", 502, 54 274 46 12
+  box "Open when mIRC starts (minimised)", 700, 5 274 312 24
+  check "@DCCore", 701, 10 284 60 10
+  check "@DCCore-Chat", 702, 90 284 80 10
+  check "@DCCore-Downloads", 703, 192 284 110 10
+  button "OK", 1, 232 302 40 12, ok default
+  button "Cancel", 2, 276 302 40 12, cancel
+  button "Pair again...", 501, 5 302 46 12
+  button "Forget token", 502, 54 302 46 12
 }
 
 alias dccore.colours { return 00 white,01 black,02 navy,03 green,04 red,05 maroon,06 purple,07 orange,08 yellow,09 lime,10 teal,11 cyan,12 blue,13 pink,14 grey,15 silver }
@@ -1518,6 +1732,9 @@ on *:dialog:dccore.opt:init:0: {
   if ($dccore.st(checkupdates) == on) { did -c dccore.opt 406 }
   if ($dccore.opt(chat.all)) { did -c dccore.opt 601 }
   if ($dccore.opt(chat.popup)) { did -c dccore.opt 602 }
+  if ($dccore.opt(start.main)) { did -c dccore.opt 701 }
+  if ($dccore.opt(start.chat)) { did -c dccore.opt 702 }
+  if ($dccore.opt(start.downloads)) { did -c dccore.opt 703 }
 }
 ; "none" first, then the sixteen colours: the selected line is the colour + 2
 alias dccore.fillbg {
@@ -1557,6 +1774,9 @@ on *:dialog:dccore.opt:sclick:1: {
   hadd dccore auto $did(dccore.opt,404).state
   hadd dccore chat.all $did(dccore.opt,601).state
   hadd dccore chat.popup $did(dccore.opt,602).state
+  hadd dccore start.main $did(dccore.opt,701).state
+  hadd dccore start.chat $did(dccore.opt,702).state
+  hadd dccore start.downloads $did(dccore.opt,703).state
   if ($did(dccore.opt,402).text != $null) { hadd dccore bot $did(dccore.opt,402).text }
   dccore.save
   ; checkupdates is the bot's own setting (#572 follow-up): sent only when
@@ -1647,9 +1867,12 @@ alias dccore.chat.relaying { return $iif(($dccore.st(state) == in) && ($dccore.s
 ; lit rather than taking the focus from whatever you were typing in.
 ; -l16: a side-listbox 16 characters wide, for the DCCore bots WHO has
 ; found (#371 follow-up) - plain nicknames, nothing else drawn on them.
+; $1 = start: opened when mIRC starts (#1201) - minimised too, with its
+; button at the end of the switchbar.
 alias dccore.chat.window {
   if ($window($dccore.chat.win)) { return }
   if ($1 == quiet) { window -enl16 $dccore.chat.win }
+  elseif ($1 == start) { window -enzl16 $dccore.chat.win }
   else { window -el16 $dccore.chat.win }
   if ($dccore.opt(font)) { font $dccore.chat.win $dccore.fontsize Lucida Console }
   dccore.chat.title

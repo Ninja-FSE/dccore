@@ -42,6 +42,7 @@ import defaults as config  # noqa: E402
 import platform_compat  # noqa: E402
 import runtime  # noqa: E402
 
+from tests import support  # noqa: E402
 from tests.support import DCCoreTestCase, RecordingSocket, no_disk_writes, silence_debug  # noqa: E402
 
 USER = "dave"
@@ -140,9 +141,7 @@ class TheThreadIsTheAnswer(DCCoreTestCase):
             self.let_rar_finish.wait(20)
             return subprocess.CompletedProcess(cmd, 1, "", "stopped by the test")
 
-        self._real_run = dcc.subprocess.run
-        dcc.subprocess.run = rar_that_waits
-        self.addCleanup(setattr, dcc.subprocess, "run", self._real_run)
+        support.fake_rar_runs(self, dcc.subprocess, rar_that_waits)
         self._real_rar = platform_compat.rar_command
         platform_compat.rar_command = lambda configured=None: "rar-for-the-test"
         self.addCleanup(setattr, platform_compat, "rar_command", self._real_rar)

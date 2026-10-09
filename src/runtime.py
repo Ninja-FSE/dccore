@@ -65,6 +65,15 @@ import time
 # it cannot say whether a pack is still running or merely left a stale flag.
 packer_thread = None
 
+# The folder pack that is running, while one runs (#1202): a dict with the
+# `rar` process handle (what a cancel terminates - that process, never an
+# image name), who it is for, the folder's name as the list shows it, the
+# archive's path, when it started and the folder's size. dcc.py owns the
+# fields; the lock is here for the same reason the thread is - a !rehash
+# reloads dcc.py and the new copy must see the pack the old one started.
+pack_job = None
+pack_lock = threading.Lock()
+
 # The stop-file watcher (#1065, stopping.py): one per process, kept here so a
 # !rehash cannot start a second.
 stop_watcher_thread = None
@@ -137,6 +146,7 @@ debug_drain_guard  = threading.Lock()  # announce.py's single-drain-worker start
 debug_sinks_lock   = threading.Lock()  # announce.py's admin-console debug sink list
 disk_lock          = threading.Lock()  # db.py's serialised on-disk writes
 told_queue_full_lock = threading.Lock()  # announce.py's queue-full notice memory (#888)
+banned_users_lock  = threading.Lock()  # security.py's config.banned_users (#1248 review)
 
 # dcc.py's library lookup (#580, #886), moved here in #749. They were built in
 # dcc.py as `x = globals().get("x") or threading.Lock()` - kept across a reload
@@ -302,6 +312,16 @@ list_grab_plan         = None
 list_grab_last         = None
 list_grab_state        = None
 list_grab_others_asked = {}
+
+# Automatic discovery of a bot's OTHER channel-bound lists (#1240), a
+# separate, much rarer pass from the grab above (that one finds a bot we hold
+# nothing from yet; this one finds a SECOND list for one we already do).
+# Its own guard/lock/timer so the two workers never block each other.
+secondary_channel_guard = threading.Lock()
+secondary_channel_started = False
+secondary_channel_lock = threading.Lock()
+secondary_channel_last = None
+secondary_channel_tries = None
 
 # DCCore Chat, relayed by the bot (#371) - serverschat.py. IN MEMORY ONLY:
 # chat_recent is what other people said in the channels, and none of it is

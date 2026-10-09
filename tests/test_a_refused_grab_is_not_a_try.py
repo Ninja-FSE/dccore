@@ -79,7 +79,7 @@ class AnArrivedListStartsOver(rules.GrabCase):
         seen = []
         real_unlocked = list_fetch._process_fetched_list_zip_unlocked
         real_note = list_grab.note_list_arrived
-        list_fetch._process_fetched_list_zip_unlocked = lambda bot, path: (True, None)
+        list_fetch._process_fetched_list_zip_unlocked = lambda bot, path, channel=None, secondary=False: (True, None)
         list_grab.note_list_arrived = seen.append
         self.addCleanup(setattr, list_fetch, "_process_fetched_list_zip_unlocked", real_unlocked)
         self.addCleanup(setattr, list_grab, "note_list_arrived", real_note)
@@ -87,7 +87,7 @@ class AnArrivedListStartsOver(rules.GrabCase):
         list_fetch.process_fetched_list_zip("PackBot", "unused.zip")
         self.assertEqual(seen, ["PackBot"])
 
-        list_fetch._process_fetched_list_zip_unlocked = lambda bot, path: (False, "not a list")
+        list_fetch._process_fetched_list_zip_unlocked = lambda bot, path, channel=None, secondary=False: (False, "not a list")
         list_fetch.process_fetched_list_zip("PackBot", "unused.zip")
         self.assertEqual(seen, ["PackBot"], "an unusable list is not an arrival")
 

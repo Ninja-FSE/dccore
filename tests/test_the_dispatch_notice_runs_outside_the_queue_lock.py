@@ -169,7 +169,7 @@ class LockHeldAtTheDiskCall(PathSecurityBase):
 
         self.assertNotIn("sending", self.held)
         self.assertNotIn("save", self.held)
-        self.assertIn(("error", ("dave", "global_full")), self.notices)
+        self.assertIn(("error", ("dave", "global_full", "#dccore-test")), self.notices)
         self.assertFalse(dcc.queue_lock.locked(), "queue_lock leaked")
 
 

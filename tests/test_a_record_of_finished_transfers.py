@@ -60,8 +60,9 @@ class WhatIsKept(Case):
         conn = sqlite3.connect(config.TRANSFER_LOG_FILE)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(transfers)")}
         conn.close()
+        # status: how it ended (#1203).
         self.assertEqual(columns, {"id", "direction", "nick", "kind", "ended_at", "item_key", "name",
-                                   "size", "bytes", "seconds", "speed", "waited"})
+                                   "size", "bytes", "seconds", "speed", "waited", "status"})
 
     def test_a_list_is_kept_without_its_name(self):
         self.sent("Bot-List-2026-10-01.zip", kind="list")

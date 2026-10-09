@@ -16,6 +16,8 @@ import os
 import threading
 import unittest
 
+from tests import support
+
 from tests.support import (DCCoreTestCase, no_disk_writes, silence_debug,
                            RecordingSocket)
 
@@ -310,7 +312,7 @@ class RarRequestTraversalTests(PathSecurityBase):
         self.request("Metallica/Black Album (1991)")
 
         self.assertNothingQueued("Metallica/Black Album (1991)")
-        self.assertIn(("error", ("dave", "rar_disabled")), self.notices,
+        self.assertIn(("error", ("dave", "rar_disabled", "#dccore-test")), self.notices,
                       "refused, but not for the reason this test is pinning")
 
     def test_rar_enabled_by_default(self):
@@ -380,6 +382,9 @@ class DownloadRequestChannelValidationTests(PathSecurityBase):
         self.assertIn("dave", config.dcc_queue)
 
     def test_the_bots_own_nick_is_accepted_a_private_request(self):
+        # From somebody in one of our channels: a private request from
+        # somebody in none is refused (#1242).
+        config.channel_users["#dccore-test"] = {"dave"}
         self.request(config.NICKNAME)
         self.assertIn("dave", config.dcc_queue)
 
@@ -415,7 +420,6 @@ class PoisonedQueueRowTests(PathSecurityBase):
         # Stub the packer engine: reaching it at all is the failure this class
         # is about, and a real "rar" binary must never be required by the suite.
         self.rar_calls = []
-        self._real_run = dcc.subprocess.run
 
         class FakeCompleted:
             returncode = 1
@@ -426,8 +430,7 @@ class PoisonedQueueRowTests(PathSecurityBase):
             self.rar_calls.append(cmd)
             return FakeCompleted()
 
-        dcc.subprocess.run = fake_run
-        self.addCleanup(lambda: setattr(dcc.subprocess, "run", self._real_run))
+        support.fake_rar_runs(self, dcc.subprocess, fake_run)
 
         # dcc.py now resolves the rar binary through platform_compat BEFORE calling
         # subprocess.run, and raises if it cannot find one. CI runners have no rar
@@ -532,7 +535,7 @@ class FileDirectoryUnsetRequestTests(PathSecurityBase):
         with quiet():
             dcc.handle_download_request(self.sock, "dave", "Song.flac", "#dccore-test")
 
-        self.assertIn(("error", ("dave", "not_configured")), self.notices)
+        self.assertIn(("error", ("dave", "not_configured", "#dccore-test")), self.notices)
         self.assertEqual(config.dcc_queue, {})
         self.assertEqual(self.dispatched_names(), [])
 
@@ -541,7 +544,7 @@ class FileDirectoryUnsetRequestTests(PathSecurityBase):
             dcc.handle_download_request(
                 self.sock, "dave", "!rar Metallica/Black Album (1991)", "#dccore-test")
 
-        self.assertIn(("error", ("dave", "not_configured")), self.notices)
+        self.assertIn(("error", ("dave", "not_configured", "#dccore-test")), self.notices)
         self.assertEqual(config.dcc_queue, {})
         self.assertEqual(self.dispatched_names(), [])
 
@@ -557,7 +560,7 @@ class FileDirectoryUnsetRequestTests(PathSecurityBase):
         with quiet():
             dcc.handle_download_request(self.sock, "dave", name, "#dccore-test")
 
-        self.assertNotIn(("error", ("dave", "not_configured")), self.notices)
+        self.assertNotIn(("error", ("dave", "not_configured", "#dccore-test")), self.notices)
         self.assertIn("sending", [kind for kind, _a in self.notices])
 
 

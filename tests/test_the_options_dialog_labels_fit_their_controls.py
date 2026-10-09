@@ -196,8 +196,9 @@ class TheControlsStayInTheirBoxes(unittest.TestCase):
 
     def test_every_control_in_a_box_is_inside_it_horizontally(self):
         boxes = [(x, y, w, h) for kind, _l, _i, x, y, w, h in controls() if kind == "box"]
-        # Show, Window, Connection - and DCCore Chat since #371.
-        self.assertEqual(len(boxes), 4)
+        # Show, Window, Connection - DCCore Chat since #371, and Open when
+        # mIRC starts since #1201.
+        self.assertEqual(len(boxes), 5)
         checked = 0
         for kind, _label, cid, x, y, w, _h in controls():
             if kind == "box":

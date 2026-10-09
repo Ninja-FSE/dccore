@@ -39,7 +39,7 @@ class ClearFailed(support.DCCoreTestCase):
     def test_a_request_given_up_on_for_silence_is_let_go_at_the_peer(self):
         self.row("Silent.flac", state="failed", reason="no response", offered_at=time.time())
         self.assertEqual(self.clear(), (200, {"cleared": 1}))
-        self.drop.assert_called_once_with("PeerBot", "Silent.flac")
+        self.drop.assert_called_once_with("PeerBot", "Silent.flac", channel=None)
 
     def test_a_request_that_failed_for_another_reason_is_not(self):
         self.row("Refused.flac", state="failed", reason="not found")

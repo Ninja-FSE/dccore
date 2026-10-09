@@ -108,6 +108,26 @@ class ItOnlySuggestsWhatTheBotWillDo(HelpCase):
         self.assertIn("!DCCoreWin", bodies)
         self.assertIn("-que", bodies)
 
+    def test_it_explains_search_when_it_is_on(self):
+        self.assertIn("@find", " ".join(self.bodies(self.ask())))
+
+    def test_it_says_nothing_about_search_when_it_is_off(self):
+        """#1249 review: with SEARCH_ENABLED off, @find and @locator get no
+        reply at all (list.execute_search() itself refuses), so -help
+        explaining them anyway sent a newcomer to a dead end - the same
+        mistake the RAR line above was already fixed for."""
+        self.set_config(SEARCH_ENABLED=False)
+
+        self.assertNotIn("@find", " ".join(self.bodies(self.ask())))
+
+    def test_the_rest_of_the_help_survives_with_search_off(self):
+        self.set_config(SEARCH_ENABLED=False)
+        bodies = " ".join(self.bodies(self.ask()))
+
+        self.assertIn("@DCCoreWin", bodies)
+        self.assertIn("!DCCoreWin", bodies)
+        self.assertIn("-que", bodies)
+
     def test_it_names_the_queue_commands_that_exist(self):
         """-que and -remove are real; anything else listed here would be a
         newcomer's first experience of the bot ignoring them."""
