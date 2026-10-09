@@ -104,7 +104,7 @@ Two pieces were worth doing carefully rather than quickly, and one of them turne
 
 ### Quality
 
-- **9036 tests**, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14, in CI on every push and pull request — and a preflight script that runs the whole suite twice, the second time with the host's own tooling hidden, so a test that only passes on a developer's machine fails before it is pushed.
+- **9052 tests**, on Linux, Windows and macOS, Python 3.10, 3.12 and 3.14, in CI on every push and pull request — and a preflight script that runs the whole suite twice, the second time with the host's own tooling hidden, so a test that only passes on a developer's machine fails before it is pushed.
 - **Stdlib-only** — the daemon and its test suite need no third-party packages; Flask is required only for the optional dashboard.
 - **No reloaded module owns a lock** — `!rehash` re-executes a module body, so a module-level `threading.Lock()` is rebound while a thread is still inside it. Every lock in a reloaded module is allocated in `runtime.py` and bound by name, and `tests/test_no_reloaded_module_owns_a_lock.py` fails if a new one appears — the class, not the four instances that prompted it.
 - **A cross-list search index** — SQLite FTS5, built as each bot list is fetched, so the dashboard can filter every held list live rather than re-reading them at 2-11 seconds a keystroke.

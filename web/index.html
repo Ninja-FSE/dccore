@@ -412,6 +412,16 @@
                   title="Forget every held list whose bot is not in a channel with you right now (the red dot above). A bot that is here, or one we have not finished checking, is left alone.">
             <span data-i18n="filelists.purgeOfflineLists">Purge offline bots' lists</span>
           </button>
+          <!-- Forgets EVERY held list, online or not (#1260): recommended once
+               after upgrading from before v1.16/#1232, since a list held from
+               back then never had a real channel of its own on record and can
+               have one stuck wrong from a weaker fallback. Each list rebuilds
+               on its own, with its channel resolved fresh. -->
+          <button type="button" class="btn btn-small" id="filelists-purge-all-btn"
+                  data-i18n-title="filelists.purgeAllTitle"
+                  title="Forget every held list, online or not. Recommended once after upgrading from before v1.16, since an older list's channel can be stuck wrong. Each rebuilds on its own.">
+            <span data-i18n="filelists.purgeAllLists">Purge every held list</span>
+          </button>
           <p class="broadcast-status" id="filelists-purge-status" hidden></p>
 
           <!-- A bot that never advertises has no row (#376): the sidebar is

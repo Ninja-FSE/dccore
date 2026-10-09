@@ -111,6 +111,23 @@ class TheWindowMenu(unittest.TestCase):
         self.assertIn("dccore.ask clearqueue ", self.menu)
         self.assertIn(".Ask a bot for its list...:dccore.ask fetch ", self.menu)
         self.assertNotRegex(self.menu, r"dccore\.send fetch\b", "a named fetch needs the bot's nick")
+
+    def test_purge_every_held_list_asks_first_and_sends_the_confirm_word(self):
+        """#1260: a plain `dccore.send purgealllists` with no "confirm" only
+        gets the usage line back - this must send the word, not just the
+        bare command, and only after its own $input says yes."""
+        self.assertIn(".Purge every held list...:", self.menu)
+        entry = self.menu.split(".Purge every held list...:", 1)[1].split("\n", 1)[0]
+        self.assertIn("$input(", entry)
+        self.assertIn("dccore.send purgealllists confirm", entry)
+        # $input(<text>,<type>,<title>) - exactly two commas. A comma inside
+        # the prompt text itself would end that argument early (#1260 review:
+        # the first draft of this prompt had one, caught only by writing
+        # this test, since the existing typo guard above only scans
+        # "dccore.ask "/"dccore.confirm " lines, not this if($input(...))
+        # shape).
+        args = entry.split("$input(", 1)[1].split(")", 1)[0]
+        self.assertEqual(args.count(","), 2, args)
         self.assertIn("Console command:dccore.askraw", self.menu)
         self.assertNotRegex(self.menu, r"dccore\.send ban\b", "a ban needs a pattern")
         self.assertNotRegex(self.menu, r"dccore\.send unban\b")

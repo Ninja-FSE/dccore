@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+## v1.16.1 — The Bot Forgets on Purpose
+
+- **New: purge every held list at once**, in the console (`purgealllists confirm`) or the List Browser ("Purge every held list"). Recommended once after upgrading from before v1.16, since a bot's list held from back then can have its channel stuck wrong - each list rebuilds on its own with its channel resolved fresh. Update `dccore.mrc` to 1.17.2 and reload it with `/reload -rs dccore.mrc`.
+
 ## v1.16.0 — The Channel-Aware Release
 
 - **Fixed (security, Windows): a list archive from another bot could make DCCore write to a device instead of a file.** A file inside a fetched zip or RAR list named like a Windows device (`NUL`, `COM1`, `con.txt`) was opened as that device, which could stall fetching lists. Such names are now unpacked with an underscore (`NUL_.txt`), as DCCore already does for names it is sent elsewhere.

@@ -90,7 +90,7 @@
 
 alias dccore.ini { return $qt($+($scriptdir,dccore.ini)) }
 alias dccore.bot { return $hget(dccore,bot) }
-alias dccore.ver { return 1.17.1 }
+alias dccore.ver { return 1.17.2 }
 ;  The feed's protocol minor this script was written for. The bot says
 ;  its own in HELLO as major.minor; a different minor means a field was
 ;  inserted on one side and the lines would read wrong - see HELLO below.
@@ -1557,6 +1557,7 @@ menu @DCCore {
   .Show the lists:dccore lists
   .Fetch the changed lists:dccore fetch
   .Ask a bot for its list...:dccore.ask fetch Ask which bot for its list
+  .Purge every held list...:if ($input(Forget every held bot list? Each rebuilds on its own - a changed advert or your next fetch - with its channel resolved fresh. Nothing of yours is touched.,yq,DCCore)) { dccore.send purgealllists confirm }
   Library
   .Find duplicate filenames:dccore.send verify
   .Rebuild the list...:dccore.confirm update Rebuild the list? It walks the whole library and can take minutes.

@@ -203,6 +203,7 @@
     filelistsRedownloadBtn: document.getElementById("filelists-redownload-btn"),
     filelistsBotList: document.getElementById("filelists-bot-list"),
     filelistsPurgeBtn:    document.getElementById("filelists-purge-offline-btn"),
+    filelistsPurgeAllBtn: document.getElementById("filelists-purge-all-btn"),
     filelistsPurgeStatus: document.getElementById("filelists-purge-status"),
     filelistsAddSourceForm:  document.getElementById("filelists-add-source-form"),
     filelistsAddSourceInput: document.getElementById("filelists-add-source-input"),
@@ -1770,14 +1771,16 @@
     el.filelistsFetchStatus.classList.toggle("is-error", !!isError);
   }
 
-  // Purging offline bots' held lists (#385) ---------------------------------
+  // Purging offline bots' held lists (#385), or every one of them regardless
+  // of status (#1260) - same shape, same status line, a different endpoint,
+  // confirmation and button to disable while it runs.
 
-  el.filelistsPurgeBtn.addEventListener("click", function () {
-    if (!window.confirm(t("filelists.confirmPurgeOffline"))) {
+  function purgeFetchedLists(endpoint, button, confirmKey, nothingKey) {
+    if (!window.confirm(t(confirmKey))) {
       return;
     }
-    el.filelistsPurgeBtn.disabled = true;
-    postJson("/api/filelists/purge-offline", {}).then(function (res) {
+    button.disabled = true;
+    postJson(endpoint, {}).then(function (res) {
       if (!res.ok) {
         showFilelistsPurgeStatus(
           t("filelists.couldNotPurge").replace("{error}", (res.data && res.data.error) || ("HTTP " + res.status)), true);
@@ -1786,7 +1789,7 @@
       var count = res.data.count || 0;
       var skipped = (res.data.skipped_in_flight || []).length;
       var text = count === 0
-        ? t("filelists.nothingToPurge")
+        ? t(nothingKey)
         : t(count === 1 ? "filelists.forgotOneList" : "filelists.forgotManyLists")
             .replace("{count}", count).replace("{names}", res.data.purged.join(", "));
       if (skipped > 0) {
@@ -1798,8 +1801,18 @@
     }).catch(function (err) {
       showFilelistsPurgeStatus(t("common.requestFailed").replace("{error}", err.message), true);
     }).then(function () {
-      el.filelistsPurgeBtn.disabled = false;
+      button.disabled = false;
     });
+  }
+
+  el.filelistsPurgeBtn.addEventListener("click", function () {
+    purgeFetchedLists("/api/filelists/purge-offline", el.filelistsPurgeBtn,
+      "filelists.confirmPurgeOffline", "filelists.nothingToPurge");
+  });
+
+  el.filelistsPurgeAllBtn.addEventListener("click", function () {
+    purgeFetchedLists("/api/filelists/purge-all", el.filelistsPurgeAllBtn,
+      "filelists.confirmPurgeAll", "filelists.nothingHeldAtAll");
   });
 
   function showFilelistsPurgeStatus(text, isError) {

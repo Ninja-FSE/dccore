@@ -1959,6 +1959,36 @@ def _cmd_fetch(session, args):
         session.send(f"  not asked: {line}")
 
 
+def _cmd_purgealllists(session, args):
+    """`purgealllists confirm`: forget every held bot list at once, not just
+    the offline ones the dashboard's "Purge offline" already clears (#1260).
+
+    Recommended once after upgrading from before v1.16/#1232: a list held
+    from back then never had a real channel of its own on record, so the
+    first ordinary re-fetch resolved one from a weaker fallback - and for a
+    bot that advertises the same list in several channels alike, whichever
+    one that landed on got stamped and reused from then on, sometimes
+    wrong. See webserver.build_purge_all_fetched_lists_result()'s own
+    docstring for the full story. Every list rebuilds from
+    AUTO_REFETCH_LISTS/AUTO_GRAB_LISTS, or a fresh `fetch <bot>`, with its
+    channel resolved clean instead of a stale one.
+
+    Asks for "confirm" first, the same reason `shutdown` asks for "now" -
+    one word away from the harmless "lists" is not a place for an action
+    this wide to fire by typo."""
+    if args.strip().lower() != "confirm":
+        session.send("This forgets EVERY held bot list - each rebuilds automatically or "
+                     "on a fresh fetch, with its channel resolved clean. Type "
+                     "'purgealllists confirm' to do it.")
+        return
+    import webserver
+    _status, result = webserver.build_purge_all_fetched_lists_result()
+    count = result.get("count", 0)
+    skipped = result.get("skipped_in_flight") or []
+    note = f" {len(skipped)} left alone (a request is in flight for them)." if skipped else ""
+    session.send(f"Forgot {count} held list(s).{note}")
+
+
 def _cmd_downloads(session, args):
     """`downloads on [rows]` / `downloads off`: what dccore.mrc's
     @DCCore-Downloads window says when it opens and closes (#1022). `rows` is
@@ -2416,6 +2446,7 @@ COMMANDS = {
     "verify":     (_cmd_verify,     "filenames listed in two folders",   "verify"),
     "lists":      (_cmd_lists,      "held bot lists, and which have changed", "lists"),
     "fetch":      (_cmd_fetch,      "ask the bots whose lists changed",  "fetch [bot]"),
+    "purgealllists": (_cmd_purgealllists, "forget every held bot list (rebuilds on its own)", "purgealllists confirm"),
     "downloads":  (_cmd_downloads,  "the Downloads window opening or closing", "downloads on [rows]|off"),
     "dlcancel":   (_cmd_dlcancel,   "cancel downloads that have not started", "dlcancel <id>... | all"),
     "dlqueue":    (_cmd_dlqueue,    "requests waiting to start, with their ids", "dlqueue"),

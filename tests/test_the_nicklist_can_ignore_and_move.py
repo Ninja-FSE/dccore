@@ -119,8 +119,8 @@ class TheTwoAliases(unittest.TestCase):
 
 class TheVersion(unittest.TestCase):
 
-    def test_the_script_is_1_17_1(self):
-        self.assertIn("alias dccore.ver { return 1.17.1 }", script_text().replace("\r\n", "\n"))
+    def test_the_script_is_1_17_2(self):
+        self.assertIn("alias dccore.ver { return 1.17.2 }", script_text().replace("\r\n", "\n"))
 
     def test_it_still_draws_the_queues_window(self):
         self.assertTrue(adminchat.script_draws_dlqueue("1.16"))
