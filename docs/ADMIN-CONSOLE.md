@@ -126,13 +126,14 @@ ADMIN_HOSTMASKS = ["operator.users.undernet.org"]        # bare host
 ADMIN_HOSTMASKS = ["*!*@operator.users.undernet.org"]    # familiar IRC form
 ```
 
-Wildcards work, and more than one entry is allowed:
+Wildcards work as they do everywhere on IRC - `*` is any run of characters and
+`?` exactly one - and more than one entry is allowed:
 
 ```python
 ADMIN_HOSTMASKS = ["operator.users.undernet.org", "operator2.users.undernet.org"]
 ```
 
-A pattern that reduces to bare `*` is refused and logged — it would admit the
+A pattern made of nothing but wildcards and dots is refused and logged — it would admit the
 whole network and make the gate decorative. A pattern that is accepted but
 names far more than one operator is warned about at start-up, on `!rehash` and
 by `setup_check.py`, and still works as written: `*.users.undernet.org` puts
@@ -143,7 +144,8 @@ documented shape is your own services host in full.
 ### 4. Restart the daemon
 
 `admin_config.py` is read at import. `!rehash` reloads `config`, so it picks up
-changes too, but a restart is the sure thing while you are setting this up.
+changes too - a line you delete or comment out included: the setting goes back to
+its default - but a restart is the sure thing while you are setting this up.
 
 ---
 
@@ -208,7 +210,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.16.1 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.16.2 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -242,7 +244,7 @@ prefix.
 
 | Command | Effect |
 |---|---|
-| `ban <pattern>` | add a permanent wildcard ban |
+| `ban <pattern>` | add a permanent wildcard ban: `*` is any run of characters, `?` exactly one (`ban *!*@10.0.0.?`) |
 | `unban <pattern>` | remove one |
 | `queuemove <nick> up\|down` | move a nick one place up or down the line for a free slot (#1206); `queue` lists the nicks in that order. Only the two nicks swap places; nobody else's moves. A nick with a list waiting is served first, so nobody is moved past it - that is refused, with the place the nick keeps. The order is kept in memory only: a restart puts it back to first-come |
 | `queuemove <nick> <number> up\|down` | move one of a nick's queued files up or down in its own queue — the one at the top is sent first. A file being sent or packed stays put and nothing is moved past it. The number is the one `queue <nick>` shows |
@@ -264,6 +266,18 @@ prefix.
 | `dlclear` | forget every finished download (the files stay on disk) |
 | `chat [#channel\|* <text>]` | say something in DCCore Chat, as the bot, in one channel or (`*`) the fewest that reach the other DCCore bots - **public**, see below; alone, the channels it can chat in |
 | `chat peers` / `chat who` | the other DCCore bots seen by WHO, and ask WHO again now |
+| `settings [<word>]` | every setting the dashboard's Settings page offers, with its value, grouped as the page groups them; with a word, only the settings whose name contains it (#1264) |
+| `set <KEY> <value>` | change one setting through the Settings page's own save, which starts a rehash; an empty value clears it. Inside `setbegin` it is buffered instead. Refused with the page's own reason - a value it would not save, a name it does not offer, and `ADMIN_PASSWORD_HASH` always. Clearing `DEBUG_CHANNEL` asks first: `setcommit confirm` goes ahead, `setabort` does not |
+| `setbegin` | start buffering `set` lines, to save as one: Apply in the settings window is one save and one rehash, not one per field. A second `setbegin` drops the first transaction (it says how many changes it dropped); a disconnect drops it too |
+| `setcommit [confirm]` | save everything buffered since `setbegin` in one go - or nothing, if any `set` in it was refused. A value equal to the current one is not written at all, so sending a page back untouched saves nothing |
+| `setabort` | drop the buffered changes |
+| `setpreview` | the sample advert and transfer notice drawn in the theme the open transaction would save (`THEME`, the `CUSTOM_THEME_*` colours, `SEARCH_ENABLED`), or in the saved one when none is open - the dashboard's preview, in colour |
+| `served` | the lists this bot serves: their names, which is primary, the channels each is bound to with the channel's mode (`normal`, `quiet`, `request_only`), and their folders. `served begin`, then `served list` / `served chan` / `served folder` rows and `served commit` replace the whole set, as the dashboard's lists page does (`served abort` drops it) |
+| `folders` | the served folders of a bot with one list (the dashboard's folder rows on "Your list"); `folders begin`, `folders row` rows and `folders commit` replace them (`folders abort` drops it) |
+| `onconnect` | the commands sent to the server once registered, in full (an X login with its password included, as the dashboard shows it - never in the bot's log), and the seconds between them; `onconnect begin`, `onconnect delay`, `onconnect line` rows and `onconnect commit` replace them (`onconnect abort` drops it); `onconnect resend` sends the saved ones again now |
+| `banlist` | the permanent ban patterns and the timed bans and ignores with the seconds left, as rows for the settings window; `bans` is the same for a person |
+| `consolecaps` | which of the settings window's commands this bot has, and their protocol versions |
+| `unlock <password>` | let a session that logged in with a paired token change settings: the admin password, checked as the login checks it, once per session. A session that logged in with the password is unlocked already. Three wrong passwords close the session, as at the login; the line is never logged |
 | `help` | the command list |
 | `hello <client> <version>` | switch this session to the structured feed (below) |
 | `pair <client> <version>` | mint a login token for a script (below) |
@@ -617,12 +631,28 @@ again. From then on the script answers `Enter Your Password:` with the token
 and is logged in exactly as with the password: the same hostmask check
 first, the same three attempts, the same IP block.
 
+**A typed password whose spaces must survive** (#1273). At the
+`Enter Your Password:` prompt the bot also takes `DCCORE PASSWORD <value>`:
+the password in the value encoding of "Settings over the console" below, so a
+space at either end and every space after another arrive as `%20`. A client
+whose input closes up runs of spaces - mIRC's does - sends a password that has
+such spaces this way; any other password goes as it is typed. The line as it
+arrives is tried first, so a password that really reads like this still opens
+the console, and a wrong one is one of the three attempts like any other.
+`unlock <password>` takes the password the same way (#1281): the argument is
+tried as it is, then decoded, and is one attempt either way. The settings
+window sends a password with such spaces encoded and any other as typed.
+
 **The script only sends the token to the bot it paired with.** It dials the
 bot's nick by itself, and on Undernet anyone can take a nick while the bot is
 away, so before answering `Enter Your Password:` it compares the host the nick
 has now with the one the bot had when the token was stored (`bothost` in
 `dccore.ini`, learned when the token arrives). A different host is not sent the
-token: the window says so and the script stops reconnecting by itself. If the bot
+token: the window says so and the script stops reconnecting by itself. The token
+itself is only taken as the answer to the script's own `pair`, sent after the
+login in a chat whose peer passed that check or that you typed the password in;
+a `DCCORE TOKEN` line any other time is ignored and said so in the window, and
+no `DCCORE` line is read at all before the login. If the bot
 really has moved, `/dccore trust` accepts its current host. A script paired
 before this check learns the host the first time the bot's is known; if it is
 not known yet (you share no channel with it) the token waits for `/dccore trust`.
@@ -637,10 +667,16 @@ host the bot is known to have (`bothost`); otherwise the window says so and the
 script stops reconnecting until you `/dccore connect`. A script with no
 `bothost` yet learns the host the first time it is known, as for the token.
 
-What a token does **not** do is open the dashboard. The web login checks the
-admin password hash and nothing else - the token store is never read there -
-so a stolen token costs you a console session and nothing more, and one
-`unpair` ends even that. For `dccore.mrc` the file that holds it is
+What a token does **not** do is open the dashboard, or change the bot's
+settings. The web login checks the admin password hash and nothing else - the
+token store is never read there. In the console, a session that logged in
+with a token can read the settings, the served lists, the folders and the
+bans, and drive the feed and the queue commands as before; changing a
+setting, the lists, the folders or the on-connect commands, reading or
+resending the on-connect commands (an X login among them holds a password),
+and pairing or revoking another script need the password, once per session:
+`unlock <password>` (see "Settings over the console"). A stolen token still
+costs you a console session, and one `unpair` ends it. For `dccore.mrc` the file that holds it is
 `dccore.ini` beside the script, and it is clear text: mIRC's hash-table save
 writes the token readable. The `.mrc` itself carries nothing. Keep `dccore.ini`
 as you would a password file - a copied mIRC folder or a shared PC is where it
@@ -667,8 +703,133 @@ unpair dccore.mrc-3f9a12c0   revoke one; its next login is a wrong password
 ```
 
 `pair` and `unpair` are console commands: you have to be logged in - with
-the password or with a token - to mint or revoke one. The file lives where
+the password or with a token - to mint or revoke one. When the token file cannot
+be written, both say so (`NOT revoked: ...`, `Could not pair ...`) and nothing
+changes: an `unpair` that answers "Revoked" has really revoked the token. The file lives where
 **Settings → Advanced → Paired console scripts file** points.
+
+## Settings over the console
+
+The commands `settings`, `set`, `setbegin`, `setcommit`, `setabort`,
+`setpreview`, `served`, `folders`, `onconnect`, `banlist` and `consolecaps`
+(#1264) give the console what the dashboard's Settings page has, for
+`dccore.mrc`'s settings window and for a person at a plain console. Each one
+runs the dashboard's own code - the same list of settings, the same checks,
+the same save, the same rehash - so the console can never accept a value the
+page would refuse, or the other way round.
+
+**Settings changes need the admin password, not only a paired token.** A
+session that logged in with the password can do all of it. One that logged in
+with a paired token - kept in clear text in `dccore.ini` - can read `settings`,
+`served`, `folders`, `banlist`, `setpreview` and `consolecaps`, and buffer
+`set` lines in a transaction, but is answered `DCCORE LOCKED <command>` for
+`setcommit`, a lone `set`, `served commit`, `folders commit`, `onconnect commit`,
+`onconnect resend`, the `onconnect` listing itself (an X login holds a
+password), `pair`, and `unpair` of anything but its own token - until
+`unlock <password>` succeeds once in that session. A refused commit leaves its
+transaction open, so the window can ask for the password, unlock, and send the
+commit again. The dashboard's own Console is behind the dashboard login, which
+is the password, and is never locked.
+
+They are console commands only. The admin commands typed in a channel are a
+fixed handful (`!rehash`, `!update`, `!ban`, `!unban`, `!clearqueue`) and never
+reach them. The dashboard's own Console page can run `settings`, `set`,
+`setpreview` and the listings, but not a transaction: it forgets everything
+between commands, so `setbegin` there would be gone before the first `set` -
+which would then save at once. It says so instead.
+
+A plain session gets sentences; a structured one (after `hello`) gets the
+lines below. Whatever the bot's log shows of these commands, it is never a
+value: it shows the command word, and the subcommand when it is a real one
+(`served begin`), never the rest of the line - not even after a typo; the rows
+of a transaction are not logged at all, and a commit logs the names of what it
+saved. A line may be up to 32768 characters once logged in (a `served folder`
+row with the longest label and path the dashboard allows fits), 4096 before.
+
+### The value encoding
+
+A value crosses in **one line, in its `settings.conf` form**: `true`/`false`
+for a switch, a number as written in the file (sizes in bytes, as stored - the
+dashboard only divides them for display), a list as its entries joined by
+`, `, a `CUSTOM_THEME_*` colour as its `\x03`-style escape text (exactly what
+the Settings page shows), and nothing at all for an empty value. A value that
+is the **last field** of its line is the rest of the line. Into that, exactly
+these characters are written as `%HH`, two hex digits of the character:
+
+- a control character, `%00`-`%1F` and `%7F`;
+- a space at the start or the end of the value, and every space that follows
+  another space, as `%20`;
+- a `%` that would otherwise read as one of these escapes, as `%25`.
+
+Those are the only escapes there are - `%00`-`%1F`, `%20`, `%25`, `%2D`, `%7F`,
+in either case - so `%admin%`, `%nick%` and `100%` cross as they are. An
+ordinary value is sent unchanged, and nothing on a line depends on a run of
+spaces surviving the trip (mIRC collapses them). To decode, replace every
+escape with its character in one pass, left to right (`%2520` is `%20`, not a
+space); in mIRC, `$regsubex(%v,/%(0[0-9a-f]|1[0-9a-f]|2[05d]|7f)/gi,$chr($base(\1,16,10)))`.
+Encode what you send back the same way. An empty value is a line that ends
+after the field before it: `set DEBUG_CHANNEL` clears the debug channel.
+
+A value that is **not** the last field (a folder's label, a channel) must stay
+one word, so it is a *token*: the same encoding with every space written as
+`%20`, `-` for an empty value, and `%2D` for a value that is exactly `-`.
+
+Fields are separated by the ASCII space only. Any other whitespace - a
+no-break space, U+3000, a tab escaped as `%09` - is part of the value, so a
+label like `My Music` written with a no-break space comes back as it went.
+Lines are UTF-8.
+
+### Machine-readable output
+
+Every snapshot is framed like the Download queues window's (`DQBEGIN` ...
+`DQEND`): a `...BEGIN` line, the rows, a `...END` line, both carrying the
+counts. A snapshot is queued without dropping a line: the bot waits for the
+session's 500-line outbox to have room rather than letting it drop the
+snapshot's first lines, keeping 100 lines free for the live feed. A client
+that takes nothing for 15 seconds is not waited for: the snapshot stops there,
+with a `DCCORE OUT` line saying so and no `...END`. So a client still checks
+that it received the `...BEGIN`, the `...END` and as many rows as their counts
+say before it lets anyone edit them - a page edited from half a snapshot would
+save half a configuration. A
+transaction's rows mirror its snapshot's rows word for word (`DCCORE SRVLIST`
+becomes `served list`, and so on), so a page sent back untouched is the
+snapshot's own lines, and saves nothing.
+
+A transaction replies to its rows only when one is refused; its commit always
+ends with exactly one `...DONE` line, after any `...ERR` lines. A row that was
+refused makes the commit save nothing. `...DONE` carries its status as the
+first field, and its last field is always a sentence to show.
+
+| line | when | fields |
+|---|---|---|
+| `DCCORE CAPS <name>:<version> ... machine:<name>` | `consolecaps` | today `settings:1 preview:1 served:1 folders:1 onconnect:1 banlist:1 unlock:1`, then `machine:` and this computer's name (spaces and colons as `-`), which a client compares with its own to know whether the bot is on the same machine - the console's address cannot tell, since a DCC chat to a bot on the same PC arrives from the public address. A bot without these commands answers `DCCORE OUT Unknown command: consolecaps. Type 'help'.` - say "update the bot" then. A version goes up when a field of that part moves; a part added later is a new name |
+| `DCCORE SETBEGIN <n>` / `DCCORE SETF <KEY> <type> <value>` / `DCCORE SETEND <n>` | `settings [<word>]` | one `SETF` per setting, in the Settings page's order; `type` is `str`, `int`, `float`, `bool` or `list`, the value last (empty: the line ends after the type - for `WEBUI_CONSOLE_ENABLED` that means "not set"). `ADMIN_PASSWORD_HASH` is never among them. Labels, help, units and choices are the dashboard's metadata, not sent here |
+| `DCCORE LOCKED <command> <sentence>` | any of the commands above that change something, on a session that logged in with a token and has not unlocked | `command` is what was refused, one or two words (`setcommit`, `set`, `served commit`, `folders commit`, `onconnect commit`, `onconnect resend`, `onconnect`, `pair`, `unpair`); the sentence says to unlock. Nothing was saved; an open transaction stays open |
+| `DCCORE UNLOCKED` | `unlock <password>` | the session may change settings now (also the answer when it already could) |
+| `DCCORE UNLOCK error <message>` | `unlock` with a wrong password | still locked; the third wrong one closes the session instead |
+| `DCCORE SETOPEN <dropped>` | `setbegin` | `dropped`: changes buffered by a transaction that was still open, now gone (0 normally) |
+| `DCCORE SETERR <KEY> <message>` | `set` refused | the Settings page's reason. `KEY` is the name as sent, uppercased |
+| `DCCORE SETDONE ok <written> <unchanged> <restart> <message>` | `setcommit`, or `set` outside a transaction | saved in one call, rehash started; `unchanged` counts the values equal to the current ones - what `settings.conf` holds for the setting, or the running value when the file does not set it - not written; `restart` is the comma-separated settings that need a restart of the bot (`WEBUI_*`, `SERVER`, `PORT`), or `-` |
+| `DCCORE SETDONE error <message>` | | nothing was saved; the transaction is closed |
+| `DCCORE SETDONE confirm <question>` | | the commit clears `DEBUG_CHANNEL`, and the bot leaves that channel at once: ask, then send `setcommit confirm` (or `setabort`). A transaction from `setbegin` stays open meanwhile. After a lone `set` the question holds only until the next line: anything but `setcommit confirm` or `setabort` first ends it with `SETDONE aborted <n>`, and is then run as usual - so a later lone `set` saves at once, as it says |
+| `DCCORE SETDONE aborted <n>` | `setabort` | `n` buffered changes dropped |
+| `DCCORE SETAPPLIED` | after `SETDONE ok` with something written | the save's rehash has finished, so the new values are in effect - reload the page now, not at `SETDONE`: the rehash first waits up to `REHASH_TRANSFER_WAIT` for transfers, and until it reloads, `settings` still shows the old values. Always after the `SETDONE ok` it belongs to; none for a save that wrote nothing or failed |
+| `DCCORE PVBEGIN 2` / `DCCORE PVLINE <advert\|notice> <line>` / `DCCORE PVEND 2` | `setpreview` | the sample advert and transfer notice, encoded like every other value - colour codes as `%03`, runs of spaces as `%20` - so a client decodes it and echoes it in colour. (mIRC collapses runs of spaces in a chat line, and a theme's frame is made of them.) |
+| `DCCORE SRVBEGIN <lists> <source> <max>` / `DCCORE SRVLIST <n> <primary> <name>` / `DCCORE SRVCHAN <n> <channel> <mode>` / `DCCORE SRVFOLDER <n> <label> <path>` / `DCCORE SRVEND <lists> <channels> <folders>` | `served` | per list, in order: its `SRVLIST` (`n` from 1, `primary` `1` or `0`, the name last), then a `SRVCHAN` per channel bound to it (`channel` a token, `mode` `normal`, `quiet` or `request_only`), then a `SRVFOLDER` per folder (`label` a token, the path last). `source` is `file` (`lists.json`) or `implied` (none: one list over the served folders - sending it back unchanged does not create the file). `max` is how many lists there may be |
+| `DCCORE SRVOPEN <dropped>` | `served begin` | then `served list <n> <0\|1> <name>` (`n` the next number), `served chan <n> <channel> <mode>`, `served folder <n> <label> <path>`, and `served commit` or `served abort` |
+| `DCCORE SRVERR <message>` | a row refused, or one problem of a refused set | |
+| `DCCORE SRVDONE ok <lists> <message>` / `DCCORE SRVDONE unchanged <message>` / `DCCORE SRVDONE error <message>` / `DCCORE SRVDONE aborted <n>` | `served commit` / `served abort` | `ok`: written, and the lists need a rebuild to be published. An empty set (`served begin` then `served commit`) goes back to one list over the served folders |
+| `DCCORE FLDBEGIN <n> <source>` / `DCCORE FLDROW <n> <label> <path>` / `DCCORE FLDEND <n>` | `folders` | `source` is `file`, `file_directory` (the one `FILE_DIRECTORY`) or `none`; `label` a token, the path last |
+| `DCCORE FLDOPEN <dropped>` | `folders begin` | then `folders row <n> <label> <path>`, and `folders commit` or `folders abort` |
+| `DCCORE FLDERR <message>` / `DCCORE FLDDONE ok <n> <message>` / `DCCORE FLDDONE unchanged <message>` / `DCCORE FLDDONE error <message>` / `DCCORE FLDDONE aborted <n>` | | as for `served`. An empty set goes back to the single `FILE_DIRECTORY` |
+| `DCCORE OCBEGIN <n> <delay> <max_commands> <max_delay>` / `DCCORE OCLINE <n> <command>` / `DCCORE OCEND <n>` | `onconnect` | the commands in the order they are sent, the seconds between them, and the two limits. A command is shown whole - it may be an X login with its password, which is why it is never logged |
+| `DCCORE OCOPEN <dropped>` | `onconnect begin` | then `onconnect delay <seconds>` (unsent: the saved delay is kept), `onconnect line <n> <command>`, and `onconnect commit` or `onconnect abort`. An empty set clears them |
+| `DCCORE OCERR <message>` / `DCCORE OCDONE ok <n> <message>` / `DCCORE OCDONE unchanged <message>` / `DCCORE OCDONE error <message>` / `DCCORE OCDONE aborted <n>` | | as for `served`; a problem names the command by its number, never by its text. Saved commands go out at the next connect, or now with `onconnect resend` |
+| `DCCORE OCRESEND ok <sent> <message>` / `DCCORE OCRESEND error <message>` | `onconnect resend` | the dashboard's Resend button |
+| `DCCORE BANBEGIN <permanent> <timed>` / `DCCORE BANP <pattern>` / `DCCORE BANT <seconds_left> <nick>` / `DCCORE BANEND <permanent> <timed>` | `banlist` | the permanent wildcard patterns (`hard_bans.txt`), then every timed ban or ignore still running - the bot keeps the two in one table, so it cannot say which a timed one is. At most 200 rows of each kind; the counts are the true totals. Change them with `ban` / `unban <pattern>` and `ignore <nick> <minutes>` / `unignore <nick>`; `ban` and `unban` run in the background and report with a `LOG` line, so ask `banlist` again after it |
+
+Every free-text value here is encoded as above, the preview lines too, and
+every message is plain text.
 
 ## The window, in mIRC
 
@@ -691,13 +852,15 @@ Save the file anywhere (your mIRC folder is fine) and, in mIRC:
 with your bot's nick in place of `MusicBot`. The `@DCCore` window opens,
 the chat is offered exactly as `/dcc chat` would (path 1 or 2 above, as
 the bot decides), and when the bot asks for the password you **type it in
-the window, once**. The script then sends `pair dccore.mrc-<id> 1.1` - the
+the window, once**. A password with a space at either end, or two spaces in a
+row, works too: the script sends it encoded so its spaces survive (#1273). The script then sends `pair dccore.mrc-<id> 1.1` - the
 id is this mIRC install's own, see "What a token does not do" above - keeps the
 token the bot answers with in `dccore.ini` beside the script (in clear
 text - see "What a token does not do" above), and from then on connects
 and logs in without you: on `/dccore connect`, when mIRC connects to IRC,
 and whenever the bot's nick joins a channel you share. The token opens the
-console and nothing else; the password never touches the disk.
+console and nothing else: changing settings asks for the password once in the
+session (`unlock`). The password never touches the disk.
 
 If your client cannot be dialled and the bot offers the chat back (path
 2), mIRC shows its usual incoming-chat dialog the first time - accept it,
@@ -708,11 +871,11 @@ Chat request** to auto-accept so it never asks again.
 
 | where | what |
 |---|---|
-| the text | one line per event, mIRC's own timestamp, a bold coloured tag - `[REQUEST]`, `[SENDING]`, `[SENT]`, `[FAILED]`, `[QUEUED]`, `[SEARCH]`, `[JOIN]`, `[BAN]`... - then the event in plain words, the file name in its own colour |
+| the text | one line per event, mIRC's own timestamp, a bold coloured tag - `[REQUEST]`, `[SENDING]`, `[SENT]`, `[FAILED]`, `[QUEUED]`, `[SEARCH]`, `[JOIN]`, `[BAN]`... - then the event in plain words, the file name in its own colour, and the nick, the channel and a searched term in theirs if you choose them in the options |
 | the side panel | **Sending n/m**: each running transfer with its size, percentage and speed; **Queue n**: who is waiting, in order, with `frozen m:ss` on a queue that is counting down; **Today**: files and bytes sent, the speed record; and what this window has seen since it opened |
 | the title bar | `MusicBot on Undernet · slots 2/3 · queue 14 · today 38 files / 12.4GB · 1.5MB/s`, updated with every status burst |
 | the editbox | anything you type is a console command - `status`, `queue helen`, `clearqueue ivan`, `ban *!*@bad.host` - and the reply comes back as `[CONSOLE]` lines, or into a second `@DCCore-console` window if you prefer |
-| right-click | **Cancel the running pack** at the very top while one runs, the common commands, **Script Settings** and **Console command** on top, then the groups **Info** (with **Download queues...**), **Lists**, **Library** (duplicate filenames, rebuild the list, **Read audio info**), **User control**, **Control** (update check, console feed, reload, **Stop the bot**), **Connection** and **Window** (DCCore Chat, Downloads window, panel, font); on a panel line, that user's queue, clearing it, ignoring them for a while, clearing and ignoring, or moving them earlier or later in line; in any channel's nick list, **DCCore → Queue of / Clear the queue of / Ignore for... / Clear the queue of and ignore for... / Stop ignoring** that nick |
+| right-click | **Cancel the running pack** at the very top while one runs, the common commands, **Script Settings**, **Bot Settings** and **Console command** on top, then the groups **Info** (with **Download queues...**), **Lists**, **Library** (duplicate filenames, rebuild the list, **Read audio info**), **User control**, **Control** (update check, console feed, reload, **Stop the bot**), **Connection** and **Window** (DCCore Chat, Downloads window, panel, font); on a panel line, that user's queue, clearing it, ignoring them for a while, clearing and ignoring, or moving them earlier or later in line; in any channel's nick list, **DCCore → Queue of / Clear the queue of / Ignore for... / Clear the queue of and ignore for... / Stop ignoring** that nick |
 | the window's button | on the switchbar or treebar, like any channel's: the **message** colour when there is new activity - a request, a queue position, a send, a search - and the **highlight** colour (the one mIRC uses when somebody says your nick) on a failed transfer or dropped lines, so a failure stands out. The `[STATUS]` line, joins, parts and bans do not light it, as they would not in a channel. mIRC 7 or later |
 | a beep | on a failed transfer, if you leave that on |
 
@@ -746,6 +909,13 @@ window can open the same way; both are off by default.
   lines - plus the colour of file names, of console replies and of the side
   panel's headings, and how
   often the `[STATUS]` line is written when the side panel is off (0 = never);
+- under those, the colours inside a line (dccore.mrc 1.18 or later): **Search
+  text** (the searched term; *same as File names* until you choose), **Nicks** and
+  **Channels** (both *same as the line*, no colour of their own, until you choose).
+  **Nicks** can also be *per nick*: each nick gets a colour of its own from its
+  name, the same every time whatever its case, out of the colours that can be
+  read on the window's background. A new choice colours new lines; what is
+  already in the window stays as it was drawn;
 - the side panel, the title bar figures, console replies in a separate
   window, the beep, the fixed-width font and its size (the Status window's
   size until you set one - on a high-resolution screen you may want a
@@ -762,6 +932,70 @@ These are the script's own filters, kept by mIRC in `dccore.ini`. The
 bot's **Settings → Console feed** tickboxes remain the ceiling on what is
 sent at all: what is off there never reaches the script.
 
+### The bot's settings
+
+`/dccore settings` (or right-click -> **Bot Settings**, or **Settings...** next to
+**Options...** in the other menus) opens the settings window (dccore.mrc 1.19 or
+later, mIRC 6.17 or later): the bot's own settings, as the dashboard's Settings
+page has them, over the console commands above. Six tabs - **General**,
+**Sharing**, **Downloads**, **Security**, **Dashboard & Console**, **Advanced** -
+each with its pages as a column of buttons on the left, and **Apply**, **OK** and **Cancel**
+at the bottom.
+
+- **The labels, units, choices and help are the dashboard's.** Point at a
+  setting and its help shows under the page. Sizes show in KB or MB and go back
+  in bytes, as on the dashboard.
+- **General Settings** gathers the switches used most, including four of this
+  mIRC's own: open @DCCore, Chat and Downloads when mIRC starts, and reconnect
+  to the bot by itself. Those are saved here, in `dccore.ini`, by Apply or OK.
+- **Apply** sends what changed - only that - as one transaction (`setbegin`, a
+  `set` for each, `setcommit`), so the bot saves it in one go and rehashes once.
+  A value the bot refuses comes back with the dashboard's reason in the status
+  line, the window shows the page it is on, and nothing is saved; your edits
+  stay. Clearing the debug channel asks first, as the dashboard does. A change
+  on **File locations** asks before it is sent. **OK** is Apply, then closes once
+  the bot has saved; **Cancel** closes and sends nothing.
+- **The admin password, once per connection.** The script logs in with its
+  paired token, which may read the settings but not change them. The first
+  time a save needs it, the window asks for the admin password (masked), sends
+  `unlock` with it, and saves; the password is not kept, shown or logged. No
+  password, or a wrong one, saves nothing and keeps your edits. The on-connect
+  commands, which may hold a login, show only after **Unlock** beside them. A
+  new connection starts locked again.
+- **After a save** the status line says *Applying...* until the bot has
+  reloaded (it may first wait for transfers to finish), then *Saved and
+  applied*, and the page shows the bot's values. If the console reconnects
+  while you have changes not saved, they are kept: **Reload** discards them.
+- **Structured pages** save with buttons of their own: the on-connect commands
+  on **IRC Server** (and **Resend now**), the served lists, their folders and
+  each channel's list and mode on **Lists & channels** (rows such as
+  `#music -> Main - Normal`; select one to edit it, then **Save lists**), and
+  **Bans & ignores** (lift a timed ban, ignore a nick for some minutes, add or
+  remove a permanent pattern). **Channels** edits `CHANNEL` as a list and is
+  saved by Apply. A save the bot refuses keeps your edits there. A row or a
+  command you did not touch goes back exactly as the bot sent it.
+- **Appearance**: the theme and the six custom colours as menus of mIRC's
+  sixteen. **Preview** draws the sample advert and notice, with the colours as
+  chosen and not saved, in `@DCCore-preview`.
+- **This mIRC window** opens the old **Options** dialog - `/dccore options` is
+  still that one.
+- **Paths** are the bot's. The **...** buttons that browse for one work only when
+  the bot runs on this PC - the console connection is 127.0.0.1, or the computer
+  name the bot reports (`machine:` in its `CAPS` line) is this one's; otherwise
+  type the path as it is on the bot's machine.
+- **A bot without these commands** answers `consolecaps` with "Unknown command",
+  and the window says to update the bot; only this mIRC's own switches can be
+  changed then. A snapshot that arrives cut short (the counts on its BEGIN and
+  END lines disagree, or the END never comes) is never shown half: press
+  **Reload** or **Refresh**.
+
+The dialog is generated: `scripts/mirc/build_settings_window.py` writes it into
+a marked block of `dccore.mrc` from the bot's own settings metadata and
+`scripts/mirc/settings_window_layout.py` (which setting is on which page). A
+setting added to the bot fails a test until it has a place in the window, or a
+reason not to; run the script after changing either, and `--check` says
+whether the block is up to date.
+
 ### Commands
 
 ```
@@ -771,6 +1005,7 @@ sent at all: what is off there never reaches the script.
 /dccore unpair               forget the token here and revoke it on the bot
 /dccore trust                accept the bot's current host as the one to send the token to
 /dccore options              what to show, colours, panel, title bar, beep, windows at start
+/dccore settings             the bot's own settings, as its dashboard's Settings page has them
 /dccore window               open or focus @DCCore
 /dccore chat [text]          open DCCore Chat, or say something in it (public)
 /dccore downloads            open @DCCore-Downloads: what the bot is fetching from other bots (needs 1.10)
@@ -996,6 +1231,13 @@ port during the window is dropped without a banner, logged as
 you. (A passive request advertises no address, so there the first connection is
 taken.)
 
+The default mode, `auto`, does the same when its dial to you fails and it falls
+back to listening. If your client advertised a LAN address (192.168.x.x, 10.x.x.x
+and the like - what a client behind a router reports when it does not know its
+public one), the listener takes the connection from the address in your IRC host
+instead, when the host is an address. When it is a name, nothing says where you
+will connect from, and the log says the listener takes the first connection.
+
 **The log says it could not connect to you at `0.0.0.0`.**
 
 ```
@@ -1026,7 +1268,11 @@ Every port in the range is busy with transfers. Wait for one to finish, or widen
 
 **"address is temporarily blocked."**
 Three wrong passwords from that IP. Wait 15 minutes, or restart the daemon — the
-block lives in memory only.
+block lives in memory only. The limit is per address, not per chat: a password is
+counted before it is checked, so chats opened side by side share the three, and a
+chat that was already open when the address was blocked is closed at its next
+attempt with "Too many failed password attempts from this address." An
+`unlock <password>` counts the same way, against the same three.
 
 **Locked out entirely.**
 Edit `admin_config.py` and restart. While `ADMIN_CHANNEL_COMMANDS` is on (it

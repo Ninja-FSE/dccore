@@ -14,6 +14,7 @@ import announce
 import hashlib
 import platform_compat
 import theme
+import unicodedata
 
 
 
@@ -234,8 +235,17 @@ def find_latest_list_file(name=None):
 # would be a new object after every reload while a caller still inside the
 # count held the old one. The cache dict IS constructed here, deliberately -
 # rebinding it on reload costs one recount, which is harmless.
+#
+# ONE ENTRY PER LIST, not one in all (#1270). With two lists the advert asks
+# for each in turn, and a single entry meant every call evicted the other
+# list's count: every advert cycle and every Stats poll read every list end
+# to end, the cost this cache exists to remove. Each list - each `slot` -
+# keeps its own entry and replaces only that one when its own files change.
+# At most _COUNT_SLOTS_KEPT, the least recently asked dropped first, so a
+# caller passing ever-new path sets cannot grow it without end.
 _count_lock = runtime.list_count_lock
-_count_cache = {}     # signature -> count
+_count_cache = {}     # slot -> (signature, count), least recently used first
+_COUNT_SLOTS_KEPT = 16
 
 
 def _list_signature(paths):
@@ -250,8 +260,12 @@ def _list_signature(paths):
     return tuple(parts)
 
 
-def count_request_lines(paths):
+def count_request_lines(paths, slot=None):
     """The number of request lines across `paths`, cached per file state.
+
+    `slot` names whose files these are - get_file_count_date_size_and_raw_bytes()
+    passes the list - so each list keeps its own cached count (#1270). Without
+    one, the path set itself is the slot.
 
     Count only real request lines, skipping the "===" folder separators,
     blank lines and text headers. This matches on "!" alone rather than on
@@ -269,10 +283,13 @@ def count_request_lines(paths):
     """
     paths = list(paths)
     signature = _list_signature(paths)
+    slot = tuple(paths) if slot is None else slot
     with _count_lock:
-        cached = _count_cache.get(signature)
-        if cached is not None:
-            return cached
+        cached = _count_cache.pop(slot, None)
+        if cached is not None and cached[0] == signature:
+            # Put back at the end: the most recently asked is kept longest.
+            _count_cache[slot] = cached
+            return cached[1]
 
         count = 0
         complete = True
@@ -292,12 +309,15 @@ def count_request_lines(paths):
         # count under it would serve that number until the next !update; the
         # uncached code retried on the next call, and so does this.
         #
-        # One entry. A stale signature is a list that no longer exists on
-        # disk in that form, and keeping its count around would only serve a
-        # later caller a number for a file nobody can read any more.
+        # One entry PER SLOT, replaced when that slot's signature changes. A
+        # stale signature is a list that no longer exists on disk in that
+        # form, and keeping its count around would only serve a later caller
+        # a number for a file nobody can read any more. A short count was
+        # popped above and is not put back.
         if complete:
-            _count_cache.clear()
-            _count_cache[signature] = count
+            _count_cache[slot] = (signature, count)
+            while len(_count_cache) > _COUNT_SLOTS_KEPT:
+                del _count_cache[next(iter(_count_cache))]
         return count
 
 
@@ -317,7 +337,10 @@ def get_file_count_date_size_and_raw_bytes(name=None):
         # than the library the bot actually serves - and smaller than what a
         # user sees when they open the archive. The date below still comes
         # from the master list, which is the one always present.
-        count = count_request_lines(all_list_paths(name))
+        # Slotted by the list's name (#1270), case-folded as list names
+        # are; no name is the primary.
+        count = count_request_lines(all_list_paths(name),
+                                    slot=("list", str(name or "").strip().lower()))
             
         mtime = os.path.getmtime(latest_list)
         dt = datetime.datetime.fromtimestamp(mtime)
@@ -450,10 +473,33 @@ def find_latest_list(name=None):
                              and not _has_marker(f, f"-{VIDEO_LIST_MARKER}-")
                              and not _has_marker(f, FULL_LIST_MARKER)]
         if true_master_lists:
-            return true_master_lists[-1]
+            return newest_by_date(true_master_lists, config.LIST_BASE_NAME + "-")
     except Exception as e:
         print(f"[SEARCH ERROR] Could not find the latest list: {e}")
     return None
+
+
+def newest_by_date(paths, prefix):
+    """The path whose name carries the latest date after `prefix`.
+
+    BY THE DATE, NOT BY THE WHOLE NAME (#1272). sorted(...)[-1] picked the
+    last name in code-point order, and that is only the newest while every
+    name starts with the same characters. Windows' glob ignores case, so
+    after the nickname was recapitalised it matched both "musicbot-..." and
+    "MusicBot-..." - and lowercase sorts after uppercase, so yesterday's
+    list under the old spelling beat every list built since, for @find and
+    for the advert alike. A name with no date after the prefix ranks below
+    every dated one; ties go to the name, as before.
+    """
+    def when(path):
+        name = os.path.basename(str(path))
+        stem = name[len(prefix):]
+        stem = stem.rsplit(".", 1)[0] if "." in stem else stem
+        try:
+            return (datetime.datetime.strptime(stem, "%Y-%m-%d"), name)
+        except ValueError:
+            return (datetime.datetime.min, name)
+    return max(paths, key=when)
 
 # The film-and-series list's name marker. update_list.py names that file
 # "<base>-VIDEO-<date>.txt", which the glob in find_latest_list() matches and
@@ -476,7 +522,8 @@ def find_latest_video_list(name=None):
             f"{glob.escape(config.LIST_BASE_NAME)}-{VIDEO_LIST_MARKER}-*.txt")
         found = sorted(glob.glob(pattern))
         if found:
-            return found[-1]
+            return newest_by_date(
+                found, f"{config.LIST_BASE_NAME}-{VIDEO_LIST_MARKER}-")
     except Exception as e:
         print(f"[SEARCH ERROR] Could not find the latest film list: {e}")
     return None
@@ -727,8 +774,12 @@ def _matching_lines(search_words, list_path):
     """
     # A tuple in the list is a quoted phrase (#774), compiled once per list
     # rather than once per line; a string is a word, matched as it always was.
-    plain_words = [item for item in search_words if not isinstance(item, tuple)]
-    phrase_patterns = [re.compile(_PHRASE_GAP.join(re.escape(word) for word in item))
+    #
+    # Both are NFC-normalised (#1270), as _searched_part() normalises each
+    # row: a name typed on one machine and listed from another can be the
+    # same letters in two different byte forms.
+    plain_words = [search_form(item) for item in search_words if not isinstance(item, tuple)]
+    phrase_patterns = [re.compile(_PHRASE_GAP.join(re.escape(search_form(word)) for word in item))
                        for item in search_words if isinstance(item, tuple)]
 
     current_list_path = list_path
@@ -750,6 +801,22 @@ def is_mxrarserver_list(path):
     return bool(_MXRARSERVER_LIST_RE.search(os.path.basename(str(path or ""))))
 
 
+def search_form(text):
+    """`text` as a search compares it: lower-cased and NFC-normalised (#1270).
+
+    A library copied from a Mac names "Beyonce" with the accent as its own
+    combining character (NFD); an IRC client sends the precomposed one (NFC).
+    The two print alike and share no substring, so @find answered 0 for a file
+    that was in the list. Only the COMPARISON is normalised: the list keeps
+    the bytes the filesystem gave it, which is what a pasted request has to
+    match. Pure-ASCII text, nearly every row, is returned without the call.
+    """
+    lowered = str(text).lower()
+    if lowered.isascii():
+        return lowered
+    return unicodedata.normalize("NFC", lowered)
+
+
 def _searched_part(line_strip):
     """The part of one "!" row a search word is matched against, lower-cased (#1199).
 
@@ -761,9 +828,12 @@ def _searched_part(line_strip):
     searched either, as in the index.
 
     The marker is looked for with str.find first: this runs on every row of
-    every list a search reads (#1126).
+    every list a search reads (#1126). NFC-normalised as search_form() does
+    (#1270), written out here so a pure-ASCII row costs no extra call.
     """
     lowered = line_strip.lower()
+    if not lowered.isascii():
+        lowered = unicodedata.normalize("NFC", lowered)
     start = lowered.find(" ") + 1
     if not start:
         return ""

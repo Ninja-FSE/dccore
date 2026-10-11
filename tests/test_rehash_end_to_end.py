@@ -60,7 +60,12 @@ work = tempfile.mkdtemp(prefix="rehash-e2e-", dir=os.path.dirname(OUT))
 
 conf = os.path.join(work, "settings.conf")
 io.open(conf, "w", encoding="utf-8").write(
-    "NICKNAME = RehashBot\\nCHANNEL = #one,#two\\nMAX_DCC_SLOTS = 4\\n")
+    "NICKNAME = RehashBot\\nCHANNEL = #one,#two\\nMAX_DCC_SLOTS = 4\\n"
+    # The folder alice's queued file sits in is SHARED: the dispatcher drops
+    # a row from a folder the operator no longer shares (#1268), and the
+    # rehash wakes the queue - an unshared row could be gone before the
+    # collect below, which is how a slow runner failed this test.
+    + "FILE_DIRECTORY = " + os.path.join(work, "music") + "\\n")
 os.environ["DCCORE_SETTINGS_FILE"] = conf
 os.makedirs(os.path.join(work, "data"), exist_ok=True)
 os.chdir(work)
@@ -136,7 +141,8 @@ try:
     # settings.conf changes under the running bot: the ordinary reason to
     # rehash, and exactly what a dashboard save does before triggering one.
     io.open(conf, "w", encoding="utf-8").write(
-        "NICKNAME = RehashBot\\nCHANNEL = #one,#two\\nMAX_DCC_SLOTS = 9\\n")
+        "NICKNAME = RehashBot\\nCHANNEL = #one,#two\\nMAX_DCC_SLOTS = 9\\n"
+        + "FILE_DIRECTORY = " + os.path.join(work, "music") + "\\n")
 
     result["stage"] = "rehash"
     commands.handle_rehash_request("admin", "#one", authorised=True)

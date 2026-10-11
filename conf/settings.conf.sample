@@ -71,7 +71,8 @@
 
 # The name your list files start with (for example DCCore-2026-09-18.txt).
 # Normally the same as the bot's nickname, which is what happens if you leave
-# it alone.
+# it alone. Letters, digits and - _ . [ ] { } ^ ` only, so it is a file name
+# on every system.
 #
 # Names every generated list file ("<LIST_BASE_NAME>-<date>.txt" and its
 # .zip/.rar counterparts). Automatically takes NICKNAME's own value once
@@ -124,8 +125,9 @@
 # REQUIRED - the daemon refuses to start until this is set.
 #ADMIN_NICK = 
 
-# The channel(s) the bot serves in, separated by commas. The first one is
-# where announcements go unless a request came from another channel. Required.
+# The channel(s) the bot serves in, each starting with #, separated by commas.
+# The first one is where announcements go unless a request came from another
+# channel. Required.
 #
 # The channel(s) to serve in, comma-separated; the first one is where announcements go by default
 # REQUIRED - the daemon refuses to start until this is set.
@@ -357,14 +359,17 @@
 #LIST_VIDEO_COMPANION_EXTENSIONS = .srt, .sub, .idx, .ass, .ssa, .vtt, .smi, .nfo, .sfv
 
 # A folder can be requested as a .rar only if it contains one of these file
-# types. The default is music formats, so albums can be packed but a folder
-# with one big film cannot.
+# types, directly or in its disc folders (CD1, Disc 2). The default is music
+# formats, so albums can be packed but a folder with one big film cannot.
 #
 # WHICH FOLDERS may be packed on demand with "!rar <folder>".
 # 
 # A folder earns a !rar row only if it holds one of these. Everything else is
 # still listed and still directly requestable by name - this decides packing,
-# nothing else.
+# nothing else. A multi-disc album counts as holding them when its disc
+# folders (CD1, Disc 2) do: its row names the album above them (#1270). The
+# library folder itself and an artist folder never get a row, whatever they
+# hold - the bot refuses to pack either.
 # 
 # It is a set of its own, and not simply "whatever is in the list", because
 # for a while it WAS that: a folder became packable if it held any file the
@@ -783,10 +788,10 @@
 
 [channel advertising (the advert clock)]
 # How often the bot posts its advert in the channel, in seconds. 300 is every
-# five minutes. Do not go much lower - channels do not like a bot that
+# five minutes. 60 is the least it accepts - channels do not like a bot that
 # advertises constantly.
 #
-# Time between each channel advert, in seconds
+# Time between each channel advert, in seconds (at least 60)
 #ANNOUNCE_INTERVAL = 300
 
 
@@ -1823,3 +1828,24 @@
 #
 # The dashboard's port; open http://WEBUI_HOST:WEBUI_PORT in a browser
 #WEBUI_PORT = 8420
+
+# Other names you open the dashboard by, separated by commas: a router's name
+# for this computer, a reverse proxy, a VPN name. An IP address, localhost and
+# this computer's own name always work; other names are refused. A single *
+# turns the check off.
+#
+# Extra host NAMES the dashboard answers to, beyond the ones it always does.
+# 
+# The dashboard always answers to an IP address (http://127.0.0.1:8420/,
+# http://192.168.1.20:8420/), to localhost, and - when WEBUI_HOST is not
+# loopback - to this computer's own name (http://my-pc:8420/). Any other
+# name in the browser's address bar is refused: that is how a web page
+# that points its own name at your machine (DNS rebinding) is kept away
+# from the login. If you open the dashboard by another name - a name your
+# router gives the machine, a reverse proxy, a VPN name - list it here,
+# separated by commas. The port is not part of the name.
+# 
+# WEBUI_ALLOWED_HOSTS = dccore.lan, dashboard.example.org
+# 
+# A single * turns the check off.
+#WEBUI_ALLOWED_HOSTS = 

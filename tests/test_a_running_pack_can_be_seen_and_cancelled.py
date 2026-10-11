@@ -51,6 +51,11 @@ class RunningPackTests(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
+        # A packer an earlier test left running (its cleanup's join can time
+        # out on a slow runner) would hold the pack slot this test needs.
+        leftover = runtime.packer_thread
+        if leftover is not None:
+            leftover.join(30)
         self.tree = self.make_tree()
         self.set_config(FILE_DIRECTORY=self.tree.music, LOCAL_LIST_DIR=self.tree.lists,
                         CHANNEL="#somechannel", MAX_DCC_SLOTS=3, RAR_ENABLED=True,
@@ -120,8 +125,24 @@ class RunningPackTests(DCCoreTestCase):
 
     def start_a_pack(self, user=USER, album="Metallica/Black Album (1991)"):
         self.request(user, album)
-        self.wait_for(lambda: dcc.pack_status() is not None and dcc.pack_status()["done"] > 0,
-                      "rar to start writing")
+        self.wait_for(self._our_rar_is_writing, "rar to start writing")
+
+    def _our_rar_is_writing(self):
+        """THIS test's rar is running and has written something.
+
+        "Some pack is running" is not enough. On a slow runner the previous
+        test's packer can outlive its cleanup's join timeout, and its job is
+        then the one pack_status() reports - the condition passed, the
+        request made here was still queued behind it, and self.rars was
+        empty (an IndexError seen in CI). So the job must be one this test
+        started: its archive in this test's TMP_ZIP_DIR, and its rar one of
+        ours.
+        """
+        job = runtime.pack_job
+        status = dcc.pack_status()
+        return (bool(self.rars) and job is not None and status is not None
+                and os.path.dirname(job["archive"]) == config.TMP_ZIP_DIR
+                and status["done"] > 0)
 
     def test_nothing_packing_has_no_status_and_a_cancel_is_a_no_op(self):
         self.assertIsNone(dcc.pack_status())

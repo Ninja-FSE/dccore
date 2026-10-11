@@ -512,27 +512,28 @@ class ActivationWakesTheSweepToo(unittest.TestCase):
     """Read from the source, the same way
     test_the_sweep_could_not_see_a_pm_requester.py's
     test_activation_runs_it_once_channel_users_is_trusted checks
-    dcc.wake_restored_queues: delayed_activate is a closure inside irc_loop,
-    and the call has to sit in the branch that just claimed channel sync,
-    after the claim - the auto-refetch sweep refuses outright before that
-    point (see refetch_due_lists()'s own guard), for the identical reason
-    dcc.py's presence decisions do."""
+    dcc.wake_restored_queues: the claim lives in irc.claim_channel_sync()
+    since #1271, shared by the activation and a NAMES that arrives after it,
+    and the call has to come after the claim, past the early return for a
+    connection that knows nobody yet - the auto-refetch sweep refuses
+    outright before that point (see refetch_due_lists()'s own guard), for
+    the identical reason dcc.py's presence decisions do."""
 
     def body(self):
         with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
-        block = source[source.index("def delayed_activate("):]
-        return block[:block.index("def background_nick_monitor(")]
+        block = source[source.index("def claim_channel_sync("):]
+        return block[:block.index("def ctcp_version_reply(")]
 
     def test_it_runs_after_channel_sync_is_claimed(self):
         body = self.body()
 
+        unsynced = body.index("runtime.channel_sync_waiting = epoch")
         claimed = body.index("config.bot_joined_channel = True")
         woken = body.index("threading.Thread(target=list_fetch.refetch_due_lists")
-        unsynced = body.index("No channel members known yet")
 
+        self.assertLess(unsynced, claimed, "the claim is made before the empty case returns")
         self.assertLess(claimed, woken, "the sweep runs before channel sync is claimed")
-        self.assertLess(woken, unsynced, "the sweep is not inside the synced branch")
 
     def test_it_only_runs_when_the_feature_is_on(self):
         """A thread started unconditionally would import list_fetch and spin

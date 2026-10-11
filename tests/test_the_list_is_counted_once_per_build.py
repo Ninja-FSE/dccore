@@ -246,7 +246,8 @@ class ItIsWiredIn(unittest.TestCase):
             source = handle.read()
         body = source[source.index("def get_file_count_date_size_and_raw_bytes("):]
         body = body[:body.index("\ndef ", 10)]
-        self.assertIn("count_request_lines(all_list_paths(name))", body)
+        # The list's own name goes along too since #1270, as its cache slot.
+        self.assertIn("count_request_lines(all_list_paths(name),", body)
         self.assertNotIn('startswith("!")', body,
                          "the counting loop must live in one place, the cached one")
 

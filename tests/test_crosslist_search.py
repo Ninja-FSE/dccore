@@ -593,7 +593,7 @@ class SwitchingOneListOffWhileFiltering(unittest.TestCase):
         one thing must not stay switched off, invisibly, for the next."""
         body = self.block("runFilelistsFilter")
 
-        self.assertIn("state.filelistsExcluded = {}", body)
+        self.assertIn("state.filelistsExcluded = Object.create(null);", body)
 
     def test_show_none_switches_off_only_the_lists_that_matched(self):
         """Not every bot in the sidebar: one with no matches is already

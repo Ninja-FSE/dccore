@@ -329,21 +329,23 @@ class ARestoredQueueIsLookedAtOnActivation(_SweepCase):
         self.assertEqual(spawned, [])
 
     def test_activation_runs_it_once_channel_users_is_trusted(self):
-        """Read from the source: delayed_activate is a closure inside
-        irc_loop. The call has to sit in the branch that just claimed
-        channel sync, after the claim - the same reason that branch exists:
-        with channel_users empty every waiting user looks absent."""
+        """Read from the source: the claim is irc.claim_channel_sync()
+        since #1271, which the activation and a late NAMES share. The call
+        has to come after the claim, past the early return for a connection
+        that knows nobody yet - the same reason that return exists: with
+        channel_users empty every waiting user looks absent.
+        tests/test_audit_irc_connection.py drives the function itself."""
         with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             source = handle.read()
-        body = source[source.index("def delayed_activate("):]
-        body = body[:body.index("def background_nick_monitor(")]
+        body = source[source.index("def claim_channel_sync("):]
+        body = body[:body.index("def ctcp_version_reply(")]
 
+        unsynced = body.index("runtime.channel_sync_waiting = epoch")
         claimed = body.index("config.bot_joined_channel = True")
         woken = body.index("dcc.wake_restored_queues")
-        unsynced = body.index("No channel members known yet")
 
+        self.assertLess(unsynced, claimed, "the claim is made before the empty case returns")
         self.assertLess(claimed, woken, "the sweep runs before channel sync is claimed")
-        self.assertLess(woken, unsynced, "the sweep is not inside the synced branch")
 
 
 class ANickIsNotAPlaceToAnnounce(DCCoreTestCase):

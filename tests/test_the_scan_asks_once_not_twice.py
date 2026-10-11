@@ -312,8 +312,11 @@ class TheTwoSymlinkDecisionsAreStated(unittest.TestCase):
     def test_but_it_is_not_descended_into(self):
         """os.walk's followlinks=False default, and the separate decision. A
         library with a link back up its own tree would otherwise walk
-        forever."""
-        self.assertIn("if not entry.is_symlink():", self.source())
+        forever. A Windows junction is the same decision since #1270, so the
+        walk asks is_link_dir(), and that asks is_symlink() first."""
+        import inspect
+        self.assertIn("if not is_link_dir(entry):", self.source())
+        self.assertIn("if entry.is_symlink():", inspect.getsource(update_list.is_link_dir))
 
     def test_but_sizes_are(self):
         body = self.source()

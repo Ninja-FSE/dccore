@@ -367,9 +367,11 @@ def bot_in_our_channel(bot, channel):
     same membership config.channel_users already tracks for
     dcc.channel_containing_user(), just asked about one channel instead of
     searched across all of them (#1232)."""
+    import irc
     wanted = str(bot).strip().lower()
+    key = irc.channel_key(channel)  # the server's casemapping (#1271)
     with runtime.channel_users_lock():
-        users = (getattr(config, "channel_users", {}) or {}).get(str(channel).strip().lower())
+        users = (getattr(config, "channel_users", {}) or {}).get(key)
         return bool(users) and wanted in {str(u).lower() for u in users}
 
 
@@ -399,7 +401,7 @@ def _resolve_fetch_channel(bot, preferred):
     configured = {chan.lower(): chan for chan in irc.configured_channels()}
 
     def _usable(raw):
-        chan = configured.get(str(raw or "").strip().lower())
+        chan = configured.get(irc.channel_key(raw))
         return chan if chan and bot_in_our_channel(bot, chan) else None
 
     chosen = _usable(preferred)
@@ -410,6 +412,29 @@ def _resolve_fetch_channel(bot, preferred):
     if chosen:
         return chosen
     return dcc.channel_containing_user(bot)
+
+
+def _list_channel_refusal(bot, secondary, preferred, channel):
+    """Why a "list" row must not go out in `channel`, or None (#1269).
+
+    A list is bound to the channel it is asked in, and the dispatcher's
+    fallback (another channel the bot is in) is right for a file but wrong
+    for a list whose channel already means something. A second channel's
+    request goes out in that channel or not at all: sent to the bot's main
+    channel instead, its answer was merged as that channel's list and took
+    the main and RAR lists with it. A main-list refresh is not sent to a
+    channel already held as a second channel's: its answer replaced the
+    main list with that channel's. list_fetch refuses both answers too."""
+    if secondary:
+        if str(channel or "").strip().lower() != str(preferred or "").strip().lower():
+            return (f"{bot} is not in {preferred or 'its channel'} now, and a second channel's "
+                    f"list is only asked for in that channel")
+        return None
+    import list_fetch
+    if list_fetch.held_channel_role(bot, channel) == "secondary":
+        return (f"{bot} is not in {preferred or 'its list channel'} now, and its list from "
+                f"{channel} is held as a second channel's list - not asked there")
+    return None
 
 
 _UNRESOLVED_FETCH_STATES = ("pending", "offered", "queued", "listening", "receiving")
@@ -700,12 +725,26 @@ def _has_room(size, room):
     return not size or room is None or room >= size + MIN_FREE_BYTES
 
 
+def _note_it_was_asked(row):
+    """Remember that this row's request really went out to the bot, before a
+    way back to "pending" clears offered_at (#1269). Every such way - a busy
+    reply, silence, a full disk, a restart, a passive offer with every slot
+    in use - sets offered_at=None, so offered_at alone can never tell a row
+    that was asked from one that is still waiting its first turn. The claim
+    that hands a late answer to a pending "file" row (#1244) tests this
+    instead. A line still waiting in the send queue was never asked, so it
+    does not count; a row asked once stays asked."""
+    if row.get("offered_at") is not None and not _request_is_unsent(row):
+        row["asked_before"] = True
+
+
 def _hold_for_space(row, size, reason):
     """Back to pending until `size` fits (#964), asked for as it was asked
     (#963). row["needs_bytes"] is what the dispatcher waits for: without it a
     file bigger than the free space - but with more than MIN_FREE_BYTES free,
     so the disk never counts as low - was asked for again on the next tick,
     filled the disk to nothing, failed, and was asked for again, for ever."""
+    _note_it_was_asked(row)
     row.update(state="pending", offered_at=None, bytes_received=0,
                reason=reason, waiting="disk-full", needs_bytes=int(size))
     _as_asked(row)
@@ -1187,8 +1226,12 @@ def _persist_fetch_history_locked(queue):
     snapshot = {rid: _restart_form(row) for rid, row in queue.items()}
     if snapshot == _last_persisted_terminal_snapshot:
         return
-    _last_persisted_terminal_snapshot = snapshot
-    db.save_fetch_history(snapshot)
+    # Remembered only once it is on disk (#1273), as irc._flush_known_bots()
+    # does (#691). Remembered before the write, one failed write - a sharing
+    # violation, a full disk - made every later tick see "unchanged", and
+    # nothing reached the file until the rows changed again.
+    if db.save_fetch_history(snapshot):
+        _last_persisted_terminal_snapshot = snapshot
 
 
 # QUEUED TOO (#978). A restart QUITs, and a file server drops the queue of a
@@ -1222,6 +1265,7 @@ def _restart_form(row):
     """A row as it should come back after a restart (#926)."""
     row = dict(row)
     if row.get("state") in _ASKED_AGAIN_AFTER_A_RESTART:
+        _note_it_was_asked(row)
         row.update(state="pending", offered_at=None, bytes_received=0)
         _as_asked(row)
         # Where it stood in the other bot's queue is theirs to say again.
@@ -1417,6 +1461,7 @@ def handle_bot_reply(bot, text):
             # dispatcher leaves it until then and it keeps its place.
             row["busy_retries"] = int(row.get("busy_retries", 0)) + 1
             _as_asked(row)
+            _note_it_was_asked(row)
             row.update(state="pending", offered_at=None, retry_at=now + BUSY_RETRY_SECONDS,
                        reason=f"busy: {reply.text}", waiting="retry")
             row.pop("queued_at", None)
@@ -1576,6 +1621,7 @@ def check_fetch_queue():
                     if (row.get("request_type", "file") == "file"
                             and int(row.get("silent_asks", 1)) < OFFER_ASKS):
                         row["silent_asks"] = int(row.get("silent_asks", 1)) + 1
+                        _note_it_was_asked(row)
                         row.update(state="pending", offered_at=None,
                                    reason=f"no response - asking again (attempt {row['silent_asks']} of {OFFER_ASKS})")
                     else:
@@ -1734,6 +1780,19 @@ def check_fetch_queue():
         # Only a bot in none of our channels at all falls through to the
         # fixed default, no worse than what every request did before #1232.
         channel = _resolve_fetch_channel(bot, preferred_channel) or default_channel
+        if request_type == "list":
+            # A list stays in its own channel (#1269): the fallback above is
+            # not one a list may take when its channel already means something.
+            with _fetch_lock():
+                row = queue.get(rid)
+                refusal = (_list_channel_refusal(bot, bool(row.get("secondary_channel")),
+                                                 preferred_channel, channel)
+                           if row is not None and row.get("state") == "offered" else None)
+                if refusal:
+                    _mark_failed_locked(row, refusal)
+            if refusal:
+                print(f"[FETCH] Not requesting {bot}'s list in {channel} (request {rid}): {refusal}.")
+                continue
         # Defense-in-depth only, expected to be unreachable: `bot` (and, for
         # a "file" row, `filename`) already passed
         # webserver.reject_if_unsafe_for_irc_line() - which now delegates to
@@ -2392,7 +2451,7 @@ def _claim_matching_offer_locked(queue, from_nick, filename):
             row["state"] = "receiving"
             return rid, row
 
-    # A PENDING FILE ROW (#1244 review), checked before the bot-alone "list"/
+    # A PENDING FILE ROW (#1244 review, #1269), checked before the bot-alone "list"/
     # "folder" matches below ever get a chance at this offer. A "file" row
     # goes back to "pending" - no longer awaiting an offer at all - when it
     # is asked again after silence, held for a busy-bot retry, or kept
@@ -2406,7 +2465,9 @@ def _claim_matching_offer_locked(queue, from_nick, filename):
     for rid, row in queue.items():
         if (row.get("state") == "pending"
                 and row.get("request_type", "file") == "file"
-                and row.get("offered_at") is not None  # was actually asked before, not merely queued
+                # Really asked before, not merely queued (#1269): offered_at is
+                # always None here, since every way back to pending clears it.
+                and row.get("asked_before")
                 and str(row.get("bot", "")).strip().lower() == wanted_bot
                 and _normalize_filename_for_match(row.get("filename", "")) == wanted_name):
             row["state"] = "receiving"
@@ -2615,8 +2676,60 @@ def _resolve_destination_path(request_id, raw_filename):
 # name built by that function.
 _REQUEST_ID_PREFIX_RE = re.compile(r"^[0-9a-f]{12}_")
 
+# Names at the top of FETCHED_FILES_DIR that DCCore itself uses, compared
+# without case (Windows would). "lists" is where list_fetch.list_extract_dir()
+# extracts every fetched list; a fetched file must never take that name.
+_RESERVED_FETCHED_NAMES = frozenset({"lists"})
 
-def _promote_clean_filename(dest_dir, stored_name):
+
+def names_one_file(directory, name, other):
+    """Whether two stored names in `directory` are one file on disk (#1269).
+
+    The same name is (folded for case where the platform folds it). Names
+    that differ only by case are one file only where the filesystem says
+    so - a case-insensitive macOS volume, say - and two files on Linux."""
+    if not name or not other:
+        return False
+    if os.path.normcase(name) == os.path.normcase(other):
+        return True
+    if name.casefold() != other.casefold():
+        return False
+    try:
+        return os.path.samefile(platform_compat.long_path(os.path.join(directory, name)),
+                                platform_compat.long_path(os.path.join(directory, other)))
+    except (OSError, ValueError):
+        return False
+
+
+def another_row_holds_file_locked(queue, directory, stored_name, row=None):
+    """Whether a row other than `row` names `stored_name`'s file as its own
+    (#1269). Caller holds _fetch_lock().
+
+    A plain name is free again as soon as the operator moves a finished
+    download out of the folder, so a later fetch of the same name from
+    another bot (cover.jpg, CD1.rar) was promoted to it too: two rows then
+    named one file, and deleting the OLD row removed the NEW row's file. A
+    promotion now leaves a name another row holds alone, and a delete
+    leaves a file another row still names."""
+    return bool(files_other_rows_hold_locked(queue, directory, [stored_name], row=row))
+
+
+def files_other_rows_hold_locked(queue, directory, names, row=None):
+    """The ones of `names` that a row other than `row` still names as its
+    own file - another_row_holds_file_locked() for a whole batch, in one
+    pass over the queue rather than one per name (a batch delete can carry
+    hundreds, #1246). Caller holds _fetch_lock()."""
+    held = {}
+    for other in queue.values():
+        name = other.get("stored_filename") if other is not row else None
+        if name:
+            held.setdefault(str(name).casefold(), []).append(name)
+    return {name for name in names
+            if name and any(names_one_file(directory, name, other)
+                            for other in held.get(str(name).casefold(), ()))}
+
+
+def _promote_clean_filename(dest_dir, stored_name, queue=None, row=None):
     """Rename a just-completed fetch from its ID-prefixed staging name to
     the plain name the peer offered, now that the collision the ID guarded
     against - two fetches racing for the same name while neither had
@@ -2639,6 +2752,9 @@ def _promote_clean_filename(dest_dir, stored_name):
     there - the same "log and leave both alone" rule note_nick_change()
     already applies for the identical reason (irc.py). No data is lost
     either way; the file just keeps its longer name on this one occasion.
+    Given the queue (the caller holding _fetch_lock()), a plain name another
+    row there still names is not taken either, even with no file at it
+    (#1269): that row's delete would remove this file.
 
     Never raises: a rename that fails for any OS-level reason costs a
     readable name, not the fetch, which has already succeeded by the time
@@ -2650,10 +2766,18 @@ def _promote_clean_filename(dest_dir, stored_name):
     plain_name = stored_name[match.end():]
     if not plain_name:
         return stored_name
+    # Never onto a name the fetch area keeps for itself. A file offered as
+    # "lists", on an install that had not fetched a list yet, became the plain
+    # file FETCHED_FILES_DIR/lists, and every list fetch from every bot then
+    # failed to make its directory there until someone deleted it by hand.
+    if plain_name.rstrip(" .").lower() in _RESERVED_FETCHED_NAMES:
+        return stored_name
 
     old_path = os.path.join(dest_dir, stored_name)
     new_path = os.path.join(dest_dir, plain_name)
     if os.path.exists(platform_compat.long_path(new_path)):
+        return stored_name
+    if queue is not None and another_row_holds_file_locked(queue, dest_dir, plain_name, row=row):
         return stored_name
     try:
         os.rename(platform_compat.long_path(old_path), platform_compat.long_path(new_path))
@@ -2794,6 +2918,7 @@ def handle_incoming_offer(irc_sock, from_nick, ctcp_payload):
         max_slots = int(getattr(config, "MAX_FETCH_SLOTS", 3))
         if (is_passive and states_before.get(request_id) in ("queued", "failed")
                 and count_active_fetches(queue) > max_slots):
+            _note_it_was_asked(row)
             row.update(state="pending", offered_at=None,
                        reason="its turn came with every fetch slot in use - asking again once one is free")
             _as_asked(row)
@@ -3352,8 +3477,12 @@ def _run_transfer(row, offer, dest_dir, stored_name, sock=None):
             # name - see _resolve_destination_path()'s own docstring. That
             # risk ends the moment the file is fully written, so the
             # operator's own copy does not have to go on carrying it.
-            final_name = _promote_clean_filename(dest_dir, stored_name)
-            row["stored_filename"] = final_name
+            # Under the lock, so no other row can be promoted to the same
+            # plain name between the check and the rename (#1269).
+            with _fetch_lock():
+                final_name = _promote_clean_filename(dest_dir, stored_name,
+                                                     queue=_ensure_fetch_queue(), row=row)
+                row["stored_filename"] = final_name
             print(f"[FETCH] Complete: {final_name} ({bytes_received} bytes) from {peer_desc}.")
         return
 

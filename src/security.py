@@ -146,11 +146,29 @@ def is_over_broad_hard_ban_pattern(pattern):
     two used to disagree silently: !ban would report success and this check
     would then decline to enforce it, logging only to stdout, which the admin
     who typed the command never sees.
+
+    "?" is a wildcard too (one character, as everywhere on IRC), so it is
+    stripped with "*": "?*!*@*" is every user on the network as surely as
+    "*!*@*" is.
     """
     residue = pattern
-    for separator in "*!@.":
+    for separator in "*?!@.":
         residue = residue.replace(separator, "")
     return not residue
+
+
+def mask_regex(pattern):
+    """An IRC wildcard mask as an anchored regex: "*" is any run of
+    characters, "?" exactly one, and everything else is literal.
+
+    "?" used to be literal here. "!ban *!*@10.0.0.?" and "!ban badnick?" -
+    the usual IRC form - were accepted, confirmed as added and listed as
+    active, and matched nobody, the same confirmed-but-not-enforced shape as
+    #225. adminchat.py's ADMIN_HOSTMASKS use this too, so a mask means one
+    thing everywhere the bot reads one.
+    """
+    escaped = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+    return re.compile("^" + escaped + "$")
 
 
 # #1131: hard_bans.txt used to be opened, read and every pattern re.escape()d
@@ -199,8 +217,6 @@ def _parse_hard_ban_rules(text, hard_file):
     """The rules in `text`, in file order, as (pattern, is_full_mask,
     is_host_pattern, match) tuples. Over-broad patterns are left out and
     reported here, once per version of the file (#1131)."""
-    import re
-
     rules = []
     # The file is read in text mode, so "\r\n" and "\r" are already "\n" -
     # the same lines `for line in f` used to give, unlike str.splitlines(),
@@ -219,7 +235,6 @@ def _parse_hard_ban_rules(text, hard_file):
             print(f"[SECURITY WARNING] Ignored an over-broad pattern in {hard_file}: {pattern!r}")
             continue
 
-        regex_pattern = "^" + re.escape(pattern).replace(r"\*", ".*") + "$"
         # THREE shapes of pattern, and they match three different
         # things. A nick can never contain "!", "@", "." or ":" -
         # RFC 2812 allows letters, digits and the specials
@@ -253,7 +268,7 @@ def _parse_hard_ban_rules(text, hard_file):
         is_host_pattern = not is_full_mask and any(
             ch in pattern for ch in ".:")
         rules.append((pattern, is_full_mask, is_host_pattern,
-                      re.compile(regex_pattern).match))
+                      mask_regex(pattern).match))
     return tuple(rules)
 
 

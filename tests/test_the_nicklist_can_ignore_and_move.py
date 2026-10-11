@@ -119,8 +119,10 @@ class TheTwoAliases(unittest.TestCase):
 
 class TheVersion(unittest.TestCase):
 
-    def test_the_script_is_1_17_2(self):
-        self.assertIn("alias dccore.ver { return 1.17.2 }", script_text().replace("\r\n", "\n"))
+    def test_the_script_is_at_least_1_17_2(self):
+        found = re.search(r"(?m)^alias dccore\.ver \{ return (\d+)\.(\d+)\.(\d+) \}\r?$", script_text())
+        self.assertIsNotNone(found)
+        self.assertGreaterEqual(tuple(int(part) for part in found.groups()), (1, 17, 2))
 
     def test_it_still_draws_the_queues_window(self):
         self.assertTrue(adminchat.script_draws_dlqueue("1.16"))

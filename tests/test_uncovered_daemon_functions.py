@@ -469,6 +469,14 @@ class TheFirstRunWizardsEntryPoint(unittest.TestCase):
         # test_configure.py's subject, and what main() does with it is only
         # that it is reached, which the first test below asserts off this.
         self.import_offer = self.stub("offer_to_import_omenserve_stats")
+        # main() asks settings.conf whether it can take the answers before
+        # writing anything (#1272). That is tests/test_a_broken_settings_file_
+        # is_not_a_first_run.py's subject; here the writers are stubs, and the
+        # answers name folders that need not exist on this machine.
+        self.stub("settings_conf_problem")
+        import settings_file
+        self.addCleanup(setattr, settings_file, "check_save", settings_file.check_save)
+        settings_file.check_save = lambda *args, **kwargs: None
 
     def stub(self, name, result=None):
         calls = []

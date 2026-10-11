@@ -166,9 +166,14 @@ class NeitherLauncherCarriesChecks(unittest.TestCase):
 
     def test_the_checks_live_in_exactly_one_place(self):
         """DCC_PORT_START is the marker: it is the knowledge that was
-        duplicated, so counting where it appears counts the copies."""
+        duplicated, so counting where it appears counts the copies.
+
+        Not scripts/mirc: the settings window's layout (#1264) names every
+        setting as data - which page it sits on - and checks nothing."""
         holders = []
         for root, _dirs, files in os.walk(SCRIPTS):
+            if os.path.relpath(root, SCRIPTS).split(os.sep)[0] == "mirc":
+                continue
             for filename in files:
                 if filename.endswith(".py") and "DCC_PORT_START" in source(
                         os.path.join(root, filename)):

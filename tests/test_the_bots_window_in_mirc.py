@@ -171,44 +171,44 @@ class TheFieldPositionsMatchTheBot(unittest.TestCase):
 
     def test_request(self):
         self.check("REQUEST", {"nick": "N1", **self.CHAN, "kind": "folder", "name": "The Name"},
-                   {"$2 $+ $dccore.in($3) asked for": "N1", "$dccore.in($3)": "#chan",
+                   {"$dccore.nick($2) $+ $dccore.in($3) asked for": "N1", "$dccore.in($3)": "#chan",
                     "$iif($4 == folder": "folder", "$dccore.name($5-)": "The Name"})
 
     def test_queued(self):
         self.check("QUEUED", {"nick": "N1", **self.CHAN, "pos": 7, "busy": 2, "slots": 3, "name": "The Name"},
-                   {"for $2 $+ $dccore.in($3) at": "N1", "$dccore.in($3)": "#chan",
+                   {"for $dccore.nick($2) $+ $dccore.in($3) at": "N1", "$dccore.in($3)": "#chan",
                     "# $+ $4": "7", "( $+ $5 $+ / $+ $6 slots busy)": "2",
                     "$6 slots busy": "3", "$dccore.name($7-)": "The Name"})
 
     def test_sending(self):
         self.check("SENDING", {"nick": "N1", **self.CHAN, "slot": 2, "slots": 3, "bytes": 999, "name": "The Name"},
-                   {"to $2 $+ $dccore.in($3) (slot": "N1", "$dccore.in($3)": "#chan",
+                   {"to $dccore.nick($2) $+ $dccore.in($3) (slot": "N1", "$dccore.in($3)": "#chan",
                     "(slot $4 $+ /": "2", "/ $+ $5 $+ ,": "3",
                     "$dccore.bytes($6)": "999", "$dccore.name($7-)": "The Name"})
 
     def test_resumed(self):
         self.check("RESUMED", {"nick": "N1", **self.CHAN, "at_bytes": 10, "total_bytes": 20, "name": "The Name"},
-                   {"for $2 $+ $dccore.in($3) at": "N1", "$dccore.in($3)": "#chan",
+                   {"for $dccore.nick($2) $+ $dccore.in($3) at": "N1", "$dccore.in($3)": "#chan",
                     "at $dccore.bytes($4) of": "10",
                     "of $dccore.bytes($5)": "20", "$dccore.name($6-)": "The Name"})
 
     def test_sent(self):
         self.check("SENT", {"nick": "N1", **self.CHAN, "bytes": 5, "seconds": 7.5, "bytes_per_s": 9, "name": "The Name"},
-                   {"to $2 $+ $dccore.in($3) $+ :": "N1", "$dccore.in($3)": "#chan",
+                   {"to $dccore.nick($2) $+ $dccore.in($3) $+ :": "N1", "$dccore.in($3)": "#chan",
                     "$dccore.bytes($4) in": "5", "in $dccore.dur($5)": "7.5",
                     "at $dccore.speed($6)": "9", "$dccore.name($7-)": "The Name"})
 
     def test_fail(self):
         self.check("FAIL", {"nick": "N1", **self.CHAN, "acked": 3, "total": 4, "name": "The Name", "reason": "why"},
-                   {"to $2 $+ $dccore.in($3) -": "N1", "$dccore.in($3)": "#chan",
+                   {"to $dccore.nick($2) $+ $dccore.in($3) -": "N1", "$dccore.in($3)": "#chan",
                     "( $+ $dccore.bytes($4) of": "3",
                     "of $dccore.bytes($5) arrived)": "4", "var %rest = $6-": "The Name :: why"})
         self.assertIn("::", self.handler("FAIL"), "the name/reason split")
 
     def test_search(self):
         self.check("SEARCH", {"nick": "N1", **self.CHAN, "results": 12, "term": "the term"},
-                   {"$2 $+ $dccore.in($3) searched": "N1", "$dccore.in($3)": "#chan",
-                    "-> $4 result(s)": "12", "$dccore.name($5-)": "the term"})
+                   {"$dccore.nick($2) $+ $dccore.in($3) searched": "N1", "$dccore.in($3)": "#chan",
+                    "-> $4 result(s)": "12", "$dccore.term($5-)": "the term"})
 
     def test_a_channel_less_event_says_dash_and_the_script_prints_nothing_for_it(self):
         """A request by private message has no channel: the bot sends "-" so

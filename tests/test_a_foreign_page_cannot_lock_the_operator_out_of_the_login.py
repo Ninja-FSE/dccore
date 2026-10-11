@@ -106,6 +106,9 @@ class TheOperatorsOwnBrowserIsUntouched(RouteCase):
         self.assertEqual(resp.status_code, 302)
 
     def test_the_hostname_comparison_ignores_case_and_a_default_port(self):
+        # A name the dashboard answers to only because it is configured:
+        # an unconfigured name is refused before the login is read.
+        self.set_config(WEBUI_ALLOWED_HOSTS=["dashboard.example"])
         resp = self.client.post("/login", data={"password": PASSWORD},
                                 headers={"Origin": "http://Dashboard.Example:80"},
                                 base_url="http://dashboard.example")

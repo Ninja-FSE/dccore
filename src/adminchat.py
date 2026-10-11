@@ -45,7 +45,10 @@ gets no banner, no connection, no reply of any kind, and no way to learn whether
 the mask was wrong. The cost of an unauthorised attempt is one regex. When the
 bot listens instead of dialling, the listener takes a connection only from the
 address the operator's CTCP advertised (#680) - a scanner that reaches the port
-first is dropped without a word and the window stays open for the operator.
+first is dropped without a word and the window stays open for the operator. That
+holds for auto mode's fallback after a failed dial too; an offer naming a LAN
+address is matched against the operator's IRC host instead, when that is an
+address (_fallback_expected_ip()).
 
 CONNECTION DIRECTION, AND THE INBOUND SURFACE
 ---------------------------------------------
@@ -68,6 +71,7 @@ listen-mode work, and tests/test_adminchat.py drives it end to end.
 """
 
 import binascii
+import codecs
 import collections
 import hashlib
 import hmac
@@ -80,6 +84,7 @@ import time
 
 import defaults as config
 import platform_compat
+import runtime
 
 # --------------------------------------------------------------------------
 # Tunables. Deliberately module constants rather than config entries: these are
@@ -99,6 +104,17 @@ MAX_PASSWORD_ATTEMPTS = 3
 WRONG_PASSWORD_DELAY = 1.0    # slows scripted guessing without tying up the reader
 BAD_IP_BLOCK_SECONDS = 900.0
 OUTBOX_MAX = 500              # bounded: a stalled client drops lines, never grows
+# A framed snapshot (`served`, `settings`, ...) is queued with back-pressure
+# instead (#1264 review): it waits for the writer to make room, keeping this
+# many lines free for the live feed, and gives up - saying so - when the
+# client has not taken a line for BULK_WAIT seconds.
+BULK_HEADROOM = 100
+BULK_WAIT = 15.0
+# The longest line a client may send: before the password, and after it - a
+# `served folder` row holds a label and a path of up to 4096 characters each
+# (webserver.MAX_FOLDER_PATH_LEN), and an escaped character is three.
+PASSWORD_LINE_MAX = 4096
+LINE_MAX = 32768
 
 PBKDF2_ITERATIONS = 200_000
 
@@ -115,7 +131,7 @@ _listening = False            # at most one passive listener WAITING to be diall
 _state_lock = threading.Lock()
 
 _bad_ips = {}                 # ip -> [failure_count, blocked_until, last_failure]
-_bad_lock = threading.Lock()
+_bad_lock = runtime.admin_bad_ip_lock  # see runtime.py: check-and-count is one step
 
 
 def forget_stale_failures(pool, now, window=None):
@@ -183,8 +199,10 @@ def host_pattern_of(mask):
 
 
 def _compile(pattern):
-    """Wildcard pattern to anchored regex, matching security.py's hard-ban idiom."""
-    return re.compile("^" + re.escape(pattern).replace(r"\*", ".*") + "$")
+    """Wildcard pattern to anchored regex - security.mask_regex() itself, so
+    "*" and "?" mean here exactly what they mean in a hard ban."""
+    import security
+    return security.mask_regex(pattern)
 
 
 def admin_host_patterns():
@@ -230,18 +248,18 @@ def broad_host_patterns():
     broad = []
     for pattern in admin_host_patterns():
         literal = pattern
-        for separator in "*!@":
+        for separator in "*?!@":
             literal = literal.replace(separator, "")
         labels = [label for label in literal.split(".") if label]
         if not labels:
             continue  # refused outright by is_admin_host()
-        if "*" not in pattern:
+        if "*" not in pattern and "?" not in pattern:
             continue  # one host, spelled out
         if len(labels) == 1:
             broad.append((pattern, f"it names the whole top-level domain .{labels[0]}"))
             continue
         head, _dot, rest = pattern.partition(".")
-        if rest.lower() in SHARED_ACCOUNT_HOST_SUFFIXES and set(head) <= set("*"):
+        if rest.lower() in SHARED_ACCOUNT_HOST_SUFFIXES and set(head) <= set("*?"):
             broad.append((pattern, f"every logged-in user of the network has a {rest} host; "
                                    f"the account name goes where the * is"))
     return broad
@@ -264,8 +282,8 @@ def is_admin_host(prefix_or_line):
     would admit every host on the network and make the whole gate decorative.
     security.py refuses an all-wildcard hard ban for the mirror-image reason.
 
-    Strips "*!@." - the same four characters security.py's own hard-ban guard
-    strips, not just "*". A HOST cannot contain "!" or "@" (only a full
+    Strips "*?!@." - the same characters security.py's own hard-ban guard
+    strips, not just "*" ("?" is a one-character wildcard in both). A HOST cannot contain "!" or "@" (only a full
     <nick>!<ident>@<host> hostmask can), so those two are no-ops here - but a
     host is made of dot-separated labels, and "*.*" reduces to a lone "." under
     a stars-only strip: truthy, so it passed and compiled to a pattern
@@ -277,7 +295,7 @@ def is_admin_host(prefix_or_line):
         return False
     for pattern in admin_host_patterns():
         residue = pattern
-        for separator in "*!@.":
+        for separator in "*?!@.":
             residue = residue.replace(separator, "")
         if not residue:
             print(f"[ADMINCHAT] Refusing dangerously broad ADMIN_HOSTMASKS entry: {pattern!r}")
@@ -353,6 +371,39 @@ def note_bad_ip(ip):
             print(f"[ADMINCHAT] {ip} blocked for {int(BAD_IP_BLOCK_SECONDS)}s "
                   f"after {entry[0]} failed password attempt(s).")
         _bad_ips[ip] = entry
+
+
+def reserve_password_attempt(ip):
+    """Count one password attempt from `ip` BEFORE it is verified; False,
+    and nothing counted, when the address is blocked.
+
+    The check and the count are one step under the lock. When the attempt
+    was checked against the block first and counted only after the verify
+    (PBKDF2, deliberately slow), parallel logins from one address each passed
+    the check before any of them had been counted, and got more guesses than
+    MAX_PASSWORD_ATTEMPTS between them. The attempt that reaches the limit
+    sets the block here, so nothing from that address is verified after it
+    until it is settled: a right password clears the address (clear_bad_ip),
+    a wrong one leaves the count and the block as they are.
+    """
+    if not ip:
+        return True
+    with _bad_lock:
+        now = time.time()
+        forget_stale_failures(_bad_ips, now)
+        entry = _bad_ips.get(ip)
+        if entry and entry[1]:
+            if now < entry[1]:
+                return False
+            del _bad_ips[ip]      # block expired, as in is_bad_ip()
+            entry = None
+        entry = entry or [0, 0.0, now]
+        entry[0] += 1
+        entry[2] = now
+        if entry[0] >= MAX_PASSWORD_ATTEMPTS:
+            entry[1] = now + BAD_IP_BLOCK_SECONDS
+        _bad_ips[ip] = entry
+        return True
 
 
 def is_bad_ip(ip):
@@ -1081,6 +1132,26 @@ class Session:
         self._wake = threading.Event()
         self._lock = threading.Lock()
         self._writer = None
+        # The settings window's open transactions (#1264), one per page kind:
+        # see console_settings.py. On the session, so a disconnect - or a
+        # login that takes the console over - drops them with it.
+        self.settings_txn = None
+        self.served_txn = None
+        self.folders_txn = None
+        self.onconnect_txn = None
+        # HOW this session logged in (#1264 audit). The password unlocks it
+        # from the start; a paired token - kept in clear text in the script's
+        # dccore.ini - does not: changing settings, reading the on-connect
+        # commands (an X login holds a password) and minting tokens need
+        # `unlock <password>` once in the session. Locked until
+        # _check_password() says otherwise.
+        self.unlocked = False
+        self.paired_as = None
+        self.unlock_failures = 0
+
+    # A DCC CHAT session keeps state between its lines, so it can hold a
+    # transaction; the dashboard Console's per-request stand-in cannot.
+    holds_transactions = True
 
     # -- output ------------------------------------------------------------
 
@@ -1102,6 +1173,33 @@ class Session:
             self.dropped += 1
         self._outbox.append(text)
         self._wake.set()
+
+    def send_lines(self, lines):
+        """Queue a framed snapshot WITHOUT dropping any of it (#1264 review).
+
+        send() lets a full outbox drop its oldest line, which is right for
+        the live feed and wrong for a snapshot: `served` within the
+        dashboard's own limits is ~700 lines, queued by the reader thread
+        far faster than the writer sends, so the client got DROPPED and no
+        SRVBEGIN - every time. This waits for room instead, leaving
+        BULK_HEADROOM lines for the feed. A client that takes nothing for
+        BULK_WAIT seconds is not waited for: the snapshot ends there with a
+        line saying so, and its missing END is what a client's count check
+        catches. Returns whether every line was queued.
+        """
+        for line in lines:
+            deadline = time.monotonic() + BULK_WAIT
+            while len(self._outbox) >= OUTBOX_MAX - BULK_HEADROOM:
+                if self.closed:
+                    return False
+                if time.monotonic() >= deadline:
+                    self.send("The rest of that list was not sent: this window stopped "
+                              "reading it. Ask for it again.")
+                    return False
+                self._wake.set()
+                time.sleep(0.01)
+            self.send(line)
+        return True
 
     def start_writer(self):
         self._writer = threading.Thread(target=self._writer_loop, daemon=True)
@@ -2323,14 +2421,26 @@ def _cmd_pair(session, args):
     import datetime
     import secrets
     import db
+    import console_settings
+    if console_settings.refused_while_locked(session, "pair"):
+        return
     name = (args.split() or ["client"])[0]
     token = secrets.token_urlsafe(32)
-    tokens = db.load_admin_tokens()
-    replaced = name in tokens
-    tokens[name] = {"hash": make_password_hash(token),
-                    "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "by": session.nick}
-    db.save_admin_tokens(tokens)
+    entry = {"hash": make_password_hash(token),
+             "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+             "by": session.nick}
+    # Load, change and save as one step (runtime.admin_tokens_lock): a `pair`
+    # in another session must not write back a token this one just revoked.
+    with runtime.admin_tokens_lock:
+        tokens = db.load_admin_tokens()
+        replaced = name in tokens
+        tokens[name] = entry
+        saved = db.save_admin_tokens(tokens)
+    if not saved:
+        # A token that was never stored would be refused at the next login.
+        session.send(f"Could not pair {name}: the token store could not be written "
+                     f"(see the bot's log). Nothing was changed.")
+        return
     print(f"[ADMINCHAT] {session.nick} paired a console client as {name!r}.")
     if session.structured:
         session.send(f"DCCORE TOKEN {name} {token}")
@@ -2350,8 +2460,12 @@ def _cmd_pair(session, args):
 def _cmd_unpair(session, args):
     """`unpair [name]`: list the paired clients, or revoke one."""
     import db
-    tokens = db.load_admin_tokens()
     name = (args.split() or [""])[0]
+    import console_settings
+    if (not name or name != getattr(session, "paired_as", None)) \
+            and console_settings.refused_while_locked(session, "unpair"):
+        return
+    tokens = db.load_admin_tokens()
     if not name:
         if not tokens:
             session.send("No paired clients.")
@@ -2362,11 +2476,26 @@ def _cmd_unpair(session, args):
             session.send(f"  {key:<20} paired {entry.get('created', '?')} by {entry.get('by', '?')}")
         session.send("Revoke one with: unpair <name>")
         return
-    if name not in tokens:
-        session.send(f"No paired client called {name}.")
+    _revoke_token(session, name)
+
+
+def _revoke_token(session, name):
+    """`unpair <name>`: load, remove and save as one step, and say what
+    really happened - a failed write has revoked nothing."""
+    import db
+    with runtime.admin_tokens_lock:
+        tokens = db.load_admin_tokens()
+        if name not in tokens:
+            session.send(f"No paired client called {name}.")
+            return
+        del tokens[name]
+        saved = db.save_admin_tokens(tokens)
+    if not saved:
+        print(f"[ADMINCHAT] {session.nick} could not revoke the console token {name!r}: "
+              f"the token store could not be written.")
+        session.send(f"NOT revoked: the token store could not be written (see the bot's log), "
+                     f"so {name}'s token still logs in. Try again once the bot can write its data folder.")
         return
-    del tokens[name]
-    db.save_admin_tokens(tokens)
     print(f"[ADMINCHAT] {session.nick} revoked the console token {name!r}.")
     session.send(f"Revoked {name}. A client still logged in with it stays until it disconnects.")
 
@@ -2401,6 +2530,34 @@ def _cmd_chat(session, args):
     # person at a plain console is told it went.
     if not ok or not session.structured:
         session.send(message)
+
+
+# --------------------------------------------------------------------------
+# The settings window's commands (#1264). The work is console_settings.py's,
+# over the dashboard's own functions in webserver.py; imported per call, as
+# webserver itself is above, so importing this module pulls in neither.
+# --------------------------------------------------------------------------
+
+def _settings_command(name):
+    def run(session, args):
+        import console_settings
+        getattr(console_settings, "cmd_" + name)(session, args)
+    run.__name__ = "_cmd_" + name
+    return run
+
+
+_cmd_settings = _settings_command("settings")
+_cmd_set = _settings_command("set")
+_cmd_setbegin = _settings_command("setbegin")
+_cmd_setcommit = _settings_command("setcommit")
+_cmd_setabort = _settings_command("setabort")
+_cmd_setpreview = _settings_command("setpreview")
+_cmd_served = _settings_command("served")
+_cmd_folders = _settings_command("folders")
+_cmd_onconnect = _settings_command("onconnect")
+_cmd_banlist = _settings_command("banlist")
+_cmd_consolecaps = _settings_command("consolecaps")
+_cmd_unlock = _settings_command("unlock")
 
 
 def _cmd_help(session, args):
@@ -2453,6 +2610,18 @@ COMMANDS = {
     "dlagain":    (_cmd_dlagain,    "ask again for a download that failed", "dlagain <id>"),
     "dlclear":    (_cmd_dlclear,    "forget the finished downloads",     "dlclear"),
     "chat":       (_cmd_chat,       "public operator chat in a channel", "chat [#chan|*|nick text]"),
+    "settings":   (_cmd_settings,   "every setting the dashboard's Settings page offers", "settings [word]"),
+    "set":        (_cmd_set,        "change a setting (buffered inside setbegin)", "set <KEY> <value>"),
+    "setbegin":   (_cmd_setbegin,   "start buffering set lines, to save as one", "setbegin"),
+    "setcommit":  (_cmd_setcommit,  "save the buffered settings in one go", "setcommit [confirm]"),
+    "setabort":   (_cmd_setabort,   "drop the buffered settings",        "setabort"),
+    "setpreview": (_cmd_setpreview, "the advert and notice in the theme being set", "setpreview"),
+    "served":     (_cmd_served,     "the lists served, their channels and folders", "served [begin|list|chan|folder|commit|abort]"),
+    "folders":    (_cmd_folders,    "the served folders of a one-list bot", "folders [begin|row|commit|abort]"),
+    "onconnect":  (_cmd_onconnect,  "the commands sent on connect; resend them", "onconnect [begin|delay|line|commit|abort|resend]"),
+    "banlist":    (_cmd_banlist,    "the bans, as rows for the settings window", "banlist"),
+    "consolecaps": (_cmd_consolecaps, "which settings-window commands this bot has", "consolecaps"),
+    "unlock":     (_cmd_unlock,     "let a token login change settings (once per session)", "unlock <password>"),
     "hello":      (_cmd_hello,      "switch to the structured feed (dccore.mrc)", "hello <client> <version>"),
     "pair":       (_cmd_pair,       "mint a login token for a script",   "pair <client> [version]"),
     "unpair":     (_cmd_unpair,     "list or revoke paired scripts",     "unpair [name]"),
@@ -2468,19 +2637,62 @@ COMMANDS = {
 CONSOLE_SOURCE = "DCC-CONSOLE"
 
 
+# The settings window's commands (#1264) are logged by their command word,
+# and their subcommand when it is a real one - never the rest of the line.
+# An on-connect command is very often an X login with its password
+# (on_connect.py never logs one), a `set` may name ADMIN_PASSWORD_HASH with a
+# value - refused, but not after being printed - and a typo such as
+# `onconnect lines 1 ...` must not print what follows it either. The rows a
+# window sends one per field or folder are not logged at all, which would
+# bury the log; the commits log what they saved, by name.
+_SETTINGS_FAMILY = {
+    "settings": (), "set": (), "setbegin": (), "setcommit": ("confirm",), "setabort": (),
+    "setpreview": (), "banlist": (), "consolecaps": (), "unlock": (),
+    "served": ("begin", "list", "chan", "folder", "commit", "abort"),
+    "folders": ("begin", "row", "commit", "abort"),
+    "onconnect": ("begin", "delay", "line", "commit", "abort", "resend"),
+}
+_UNLOGGED_ROWS = {("set", ""), ("served", "list"), ("served", "chan"), ("served", "folder"),
+                  ("folders", "row"), ("onconnect", "line"), ("onconnect", "delay")}
+
+
+def _logged(command, stripped, args):
+    """The line as handle_command() logs it, or None to log nothing."""
+    if command not in _SETTINGS_FAMILY:
+        return stripped
+    sub = args.strip(" ").split(" ", 1)[0].lower()
+    sub = sub if sub in _SETTINGS_FAMILY[command] else ""
+    if (command, sub) in _UNLOGGED_ROWS:
+        return None
+    return f"{command} {sub}".rstrip()
+
+
 def handle_command(session, text):
-    """Dispatch one authenticated line."""
-    stripped = text.strip()
+    """Dispatch one authenticated line.
+
+    Stripped of ASCII spaces and tabs only (#1264 review): str.strip() also
+    takes a no-break or ideographic space, and a settings value may end in
+    one - it would be saved without it."""
+    stripped = text.strip(" \t")
     if not stripped:
         return
     command, _, args = stripped.partition(" ")
+    if command.lower() == "unlock":
+        # The password verbatim, as the login takes it (#622): a trailing
+        # space is part of it, and the strip above took it off.
+        args = text.lstrip(" \t").partition(" ")[2]
     entry = COMMANDS.get(command.lower())
     if entry is None:
         session.send(f"Unknown command: {command}. Type 'help'.")
         return
     session.last_activity = time.time()
-    print(f"[ADMINCHAT] {session.nick} ran: {stripped}")
+    logged = _logged(command.lower(), stripped, args)
+    if logged is not None:
+        print(f"[ADMINCHAT] {session.nick} ran: {logged}")
     try:
+        if getattr(getattr(session, "settings_txn", None), "implicit", False):
+            import console_settings
+            console_settings.end_implicit_transaction(session, command.lower(), args)
         entry[0](session, args)
     except Exception as err:
         # One bad command must not take the session down with it.
@@ -2501,6 +2713,10 @@ def _forget(session):
             _pending = None
 
 
+# What _promote() answers for a session that is no longer the pending one.
+_SUPERSEDED = object()
+
+
 def _promote(session):
     """A newly authenticated session replaces any live one.
 
@@ -2515,6 +2731,14 @@ def _promote(session):
     """
     global _session, _pending
     with _state_lock:
+        # SUPERSEDED WHILE ITS PASSWORD WAS CHECKED (#1273). A newer
+        # connection replaces the pending one under this lock, and checking a
+        # password takes a moment (PBKDF2, once more per paired token). The
+        # session it replaced must not log in afterwards: it is closed, or
+        # about to be, and promoting it closed the operator's live console
+        # and left no console at all.
+        if session.closed or (_pending is not None and _pending is not session):
+            return _SUPERSEDED
         previous = _session
         _session = session
         if _pending is session:
@@ -2525,6 +2749,11 @@ def _promote(session):
         import announce
         announce.add_debug_sink(session.debug_sink)
         announce.add_event_sink(session.event_sink)
+        if session.closed:
+            # Closed in between: its close() has already run and would never
+            # remove them (#1273).
+            announce.remove_debug_sink(session.debug_sink)
+            announce.remove_event_sink(session.event_sink)
     except Exception as sink_err:
         print(f"[ADMINCHAT] Could not attach the debug sink: {sink_err}")
 
@@ -2548,6 +2777,11 @@ def _promote(session):
 
 def _reader_loop(session):
     buffer = ""
+    # One decoder for the session's life (#1264 review): each recv() decoded
+    # on its own turned a character whose UTF-8 bytes straddle two chunks
+    # into two U+FFFD, and a settings window sending a page of rows at once
+    # saved a folder with two replacement characters where one letter was.
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
     try:
         while not session.closed:
             if session.expired():
@@ -2563,7 +2797,7 @@ def _reader_loop(session):
                 break
 
             session.last_activity = time.time()
-            buffer += data.decode("utf-8", "replace")
+            buffer += decoder.decode(data)
             # Clients disagree about the terminator; normalise before splitting.
             buffer = buffer.replace("\r\n", "\n").replace("\r", "\n")
             while "\n" in buffer:
@@ -2574,8 +2808,11 @@ def _reader_loop(session):
                     handle_command(session, line)
                 else:
                     _check_password(session, line)
-            # A client that never sends a newline must not grow the buffer forever.
-            if len(buffer) > 4096:
+            # A client that never sends a newline must not grow the buffer
+            # forever. Before the password, a line is a password and 4096 is
+            # plenty; after it, a settings row can carry a folder label and a
+            # path of up to webserver.MAX_FOLDER_PATH_LEN characters each.
+            if len(buffer) > (LINE_MAX if session.authenticated else PASSWORD_LINE_MAX):
                 session.close(announce_text="Line too long.")
                 break
     finally:
@@ -2595,6 +2832,24 @@ def _token_matches(supplied):
     return None
 
 
+# A password sent as `DCCORE PASSWORD <value>` (#1273): the value encoded as
+# the settings commands encode one (console_settings.encode_value), so its
+# leading, trailing and doubled spaces survive. dccore.mrc sends a typed
+# password this way only when it has such spaces, which mIRC's $1- would
+# collapse; every other password still goes as it is typed.
+_SPACED_PASSWORD_PREFIX = "DCCORE PASSWORD "
+
+
+def _spaced_password(line):
+    """The password in a `DCCORE PASSWORD <value>` line, or None. Tried only
+    after the line itself, so a password that really is such a line still
+    opens the console."""
+    if not line.startswith(_SPACED_PASSWORD_PREFIX):
+        return None
+    import console_settings
+    return console_settings.decode_value(line[len(_SPACED_PASSWORD_PREFIX):]) or None
+
+
 def _check_password(session, line):
     # Verbatim, bar the newline the reader already split on: the setup page,
     # POST /api/settings/password and the dashboard's login all hash and
@@ -2604,17 +2859,35 @@ def _check_password(session, line):
     supplied = line
     if not supplied:
         return
+    # Counted before it is verified (see reserve_password_attempt()): a second
+    # login from the same address cannot slip past the block while this one
+    # is still being checked.
+    if not reserve_password_attempt(session.peer_ip):
+        print(f"[ADMINCHAT] Password attempt from {session.nick} ({session.peer_ip}) refused: "
+              f"the address is blocked after {MAX_PASSWORD_ATTEMPTS} failed attempts.")
+        session.close(announce_text="Too many failed password attempts from this address. Try again later.")
+        _forget(session)
+        return
     # The password, or a paired client's token (#550, step 3). A token opens
     # a chat and nothing else: the dashboard's login checks
     # ADMIN_PASSWORD_HASH alone and never sees the token store.
     paired = _token_matches(supplied)
     if paired:
         print(f"[ADMINCHAT] {session.nick} logged in with the token paired as {paired!r}.")
-    if paired or verify_password(getattr(config, "ADMIN_PASSWORD_HASH", ""), supplied):
+    spaced = _spaced_password(supplied)
+    if paired or verify_password(getattr(config, "ADMIN_PASSWORD_HASH", ""), supplied) or (
+            spaced is not None and verify_password(getattr(config, "ADMIN_PASSWORD_HASH", ""), spaced)):
         session.authenticated = True
+        session.paired_as = paired
+        session.unlocked = not paired
         session.last_activity = time.time()
         clear_bad_ip(session.peer_ip)
         replaced = _promote(session)
+        if replaced is _SUPERSEDED:
+            session.authenticated = False
+            print(f"[ADMINCHAT] {session.nick} ({session.peer_ip}) gave the password after a newer "
+                  f"connection had replaced it; not logged in.")
+            return
         session.send("")
         session.send("Entering DCC Chat Admin Interface")
         session.send('For help type "help"')
@@ -2625,9 +2898,12 @@ def _check_password(session, line):
         return
 
     session.attempts += 1
-    note_bad_ip(session.peer_ip)
+    # Already counted against the address by reserve_password_attempt().
     print(f"[ADMINCHAT] Failed password from {session.nick} ({session.host}), "
           f"attempt {session.attempts}/{MAX_PASSWORD_ATTEMPTS}.")
+    if is_bad_ip(session.peer_ip):
+        print(f"[ADMINCHAT] {session.peer_ip} blocked for {int(BAD_IP_BLOCK_SECONDS)}s "
+              f"after {MAX_PASSWORD_ATTEMPTS} failed password attempt(s).")
     if session.attempts >= MAX_PASSWORD_ATTEMPTS:
         session.close(announce_text="Incorrect Password.")
         _forget(session)
@@ -2879,9 +3155,49 @@ def _connect_and_serve(irc_sock, nick, host, ip, port, token=None):
         print(f"[ADMINCHAT] Could not connect to {nick} at {ip}:{port} ({err}); "
               f"falling back to listening. Set ADMIN_CHAT_MODE = \"listen\" in "
               f"admin_config.py to go straight here and skip the wait.")
-        _listen_and_serve(irc_sock, nick, host, token)
+        # Only the operator, as in listen mode (#680): without an address the
+        # listener took the first peer from anywhere.
+        expected_ip = _fallback_expected_ip(ip, host)
+        if expected_ip is None:
+            print(f"[ADMINCHAT] {nick}'s offer named a LAN address and the IRC host "
+                  f"is not an address, so the listener cannot tell the operator from "
+                  f"anyone else and takes the first connection.")
+        _listen_and_serve(irc_sock, nick, host, token, expected_ip)
         return
     _serve(sock, ip, nick, host, f"opened to {ip}:{port}")
+
+
+# What a client behind NAT reports as its own address when it does not know
+# the public one: the LAN, link-local and carrier-grade NAT ranges. An offer
+# naming one of these says nothing about where the client's connection to
+# the bot's listener will come from.
+_SELF_REPORTED_LAN = tuple(ipaddress.ip_network(net) for net in
+                           ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                            "169.254.0.0/16", "100.64.0.0/10"))
+
+
+def _fallback_expected_ip(advertised_ip, host):
+    """The address auto mode's fallback listener takes a connection from,
+    or None when nothing says.
+
+    The address the offer advertised, as listen mode uses it (#680) - unless
+    it is a LAN address: such a client cannot be dialled, which is why the
+    fallback exists, and its connection to the listener comes from its
+    router's public address instead. Then the address its IRC host is, when
+    the host is an address and not a name (a name is not resolved: a cloak
+    or a wildcard would resolve to somebody else's). Neither: None, and the
+    listener takes the first peer, as for a passive offer.
+    """
+    try:
+        address = ipaddress.IPv4Address(advertised_ip)
+    except (ipaddress.AddressValueError, ValueError):
+        address = None
+    if address is not None and not any(address in net for net in _SELF_REPORTED_LAN):
+        return str(address)
+    try:
+        return str(ipaddress.IPv4Address(str(host or "")))
+    except (ipaddress.AddressValueError, ValueError):
+        return None
 
 
 def _listen_and_serve(irc_sock, nick, host, token=None, expected_ip=None):
@@ -3047,7 +3363,7 @@ def _listen_and_serve_locked(irc_sock, nick, host, token=None, expected_ip=None)
         # Guarded by tests/test_no_socket_write_is_a_partial_write.py.
         irc_sock.sendall(offer.encode("utf-8", errors="ignore"))
         print(f"[ADMINCHAT] Offered DCC CHAT to {nick} on "
-              f"{getattr(config, 'MY_IP_OR_DOCK', '?')}:{port}; waiting for the connection.")
+              f"{dcc.dcc_address() or '?'}:{port}; waiting for the connection.")
         deadline = time.monotonic() + LISTEN_TIMEOUT
         while True:
             listener.settimeout(max(0.001, deadline - time.monotonic()))

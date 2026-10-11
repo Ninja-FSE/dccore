@@ -56,7 +56,13 @@ class TheGuideSaysSo(unittest.TestCase):
         guide = read("docs/ADMIN-CONSOLE.md")
 
         self.assertNotIn("a stolen `.mrc`", guide)
-        self.assertIn("so a stolen token costs you a console session and nothing more", guide)
+        # A token no longer changes settings without the password (#1264), so
+        # the cost is a console session - and no longer "nothing more" than
+        # one that can serve any folder or read the X login.
+        flat = " ".join(guide.split())
+        self.assertIn("A stolen token still costs you a console session, and one `unpair` ends it.", flat)
+        self.assertIn("`unlock <password>`", flat)
+        self.assertNotIn("costs you a console session and nothing more", flat)
         self.assertIn("`dccore.ini` beside the script, and it is clear text", guide)
         self.assertIn("The `.mrc` itself carries nothing.", guide)
         self.assertIn("Keep `dccore.ini`\nas you would a password file", guide)

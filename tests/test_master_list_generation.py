@@ -1131,7 +1131,9 @@ class RarExtensionsIsAGateNotADisplayRule(MasterListCase):
                       "the !rar request path never consults RAR_EXTENSIONS, so "
                       "a folder kept out of the album list is still packable "
                       "by anyone who names it")
-        self.assertIn("is_packable_file(", rar_block)
+        # Through the disc folders of a multi-disc album since #1270;
+        # folder_holds_packable() asks is_packable_file() of each file.
+        self.assertIn("folder_holds_packable(", rar_block)
 
     def test_the_refusal_says_the_files_are_still_available(self):
         """Refusing a pack must not read as refusing the content: every file

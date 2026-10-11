@@ -271,9 +271,14 @@ class TheScanDecidesAsBefore(DCCoreTestCase):
         return music, video, packable, total, sorted(reads)
 
     def rar_rows(self, folders):
+        """The rows the writer makes of these packable folders. Through
+        rar_row_folder(), because since #1270 the writer leaves out a folder
+        dcc.py refuses to pack - the scan folder itself and an artist root -
+        which is a rule about the album list, not about classifying files."""
         import list as list_mod
-        return {"!SomeBot !rar " + (list_mod.LIST_FOLDER_PREFIX + folder + BACKSLASH).replace("/", BACKSLASH)
-                for folder in folders}
+        rows = (update_list.rar_row_folder(folder) for folder in folders)
+        return {"!SomeBot !rar " + (list_mod.LIST_FOLDER_PREFIX + row + BACKSLASH).replace("/", BACKSLASH)
+                for row in rows if row is not None}
 
     def test_every_setting_classifies_every_file_as_the_old_loop_did(self):
         for number, settings in enumerate(SETTINGS):

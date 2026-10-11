@@ -300,6 +300,10 @@ class TheRejoinBlockCanReadOserveOnItsFirstCycle(DCCoreTestCase):
         # current_worker_id check quickly once this test is done observing
         # it, rather than sleeping out a production-sized ANNOUNCE_INTERVAL.
         self.set_config(ANNOUNCE_INTERVAL=0.01, CHANNEL=OURS)
+        # settings_file.MINIMUMS floors the real wait at a minute (#1272).
+        self._real_advert_interval = announce.advert_interval
+        self.addCleanup(setattr, announce, "advert_interval", self._real_advert_interval)
+        announce.advert_interval = lambda: 0.01
         irc.note_kicked_from(OURS, "someop")
 
     def start_worker(self):

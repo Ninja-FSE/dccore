@@ -86,7 +86,7 @@
     // One row per held list, keyed by bot, as /api/filelists/bots last
     // reported it - so the staleness banner can be rendered for whichever
     // source is selected without asking again.
-    filelistsBots: {},
+    filelistsBots: Object.create(null),
     folders: null, foldersSource: "", foldersDraft: null, foldersNote: null,
     downloads: [],
     lists: null, listsSource: "", listsDraft: null, listsNote: null,
@@ -116,7 +116,7 @@
     // answer the server gave. Toggling re-renders from that answer rather
     // than asking again: the rows are already here, and a round trip per
     // click would be slower than the search that produced them.
-    filelistsExcluded: {}, filelistsFilterPayload: null, filelistsMatchTerms: [],
+    filelistsExcluded: Object.create(null), filelistsFilterPayload: null, filelistsMatchTerms: [],
     // #948: the "Online only" box, and the rows the sidebar was last built
     // from - kept so ticking the box redraws the sidebar at once instead of
     // waiting for the next poll to hand it the same rows again.
@@ -474,6 +474,13 @@
   function pollBroadcastStatus() {
     fetchJson("/api/search/broadcast/status").then(function (payload) {
       markConnection(true);
+      // Stopped BEFORE the replies are drawn: they are anybody's text, and a
+      // render that throws on one must not leave this poll running for ever,
+      // reporting the dashboard as disconnected every second.
+      if (!payload.listening && broadcast.pollTimer) {
+        clearInterval(broadcast.pollTimer);
+        broadcast.pollTimer = null;
+      }
       renderBroadcastResults(payload.results);
       if (payload.listening) {
         var remaining = Math.max(0, Math.ceil((payload.deadline * 1000 - Date.now()) / 1000));
@@ -484,10 +491,6 @@
         var doneKey = !payload.results.length ? "search.doneNoReplies"
           : payload.results.length === 1 ? "search.doneOneReply" : "search.doneManyReplies";
         showBroadcastStatus(t(doneKey).replace("{count}", payload.results.length));
-        if (broadcast.pollTimer) {
-          clearInterval(broadcast.pollTimer);
-          broadcast.pollTimer = null;
-        }
       }
     }).catch(function (err) {
       markConnection(false);
@@ -516,7 +519,7 @@
   // paste into the channel.
   function groupBroadcastResults(results) {
     var order = [];
-    var groups = {};
+    var groups = Object.create(null);
     results.forEach(function (entry) {
       var who = entry.from || "?";
       if (!groups[who]) {
@@ -1494,7 +1497,7 @@
     }
     // The queue is drawn again every few seconds; a nick's open list of files
     // has to stay open through it, or it shuts under the operator's finger.
-    var opened = {};
+    var opened = Object.create(null);
     Array.prototype.forEach.call(el.queueBody.querySelectorAll("details.queue-files[open]"), function (d) {
       opened[d.getAttribute("data-user")] = true;
     });
@@ -2130,7 +2133,7 @@
     var list = el.filelistsBotList;
     var previous = state.filelistsSource || "__own__";
 
-    state.filelistsBots = {};
+    state.filelistsBots = Object.create(null);
     list.innerHTML = "";
 
     // OUR OWN LISTS COME FROM THE SERVER NOW, one row each, rather than a
@@ -2148,7 +2151,7 @@
     // grouping never merges them - only a FETCHED bot's own several lists
     // group under its one nick.
     var groupOrder = [];
-    var groupsByNick = {};
+    var groupsByNick = Object.create(null);
     rows.forEach(function (row) {
       state.filelistsBots[row.bot] = row;
       var nickKey = String(row.nick || row.bot).toLowerCase();
@@ -2218,7 +2221,7 @@
   // #376: the other nicks a merged row stands for - the real nick of each
   // entry, where it is not the one the row is shown under.
   function otherNicks(group) {
-    var seen = {};
+    var seen = Object.create(null);
     var others = [];
     var shown = String(group.nick || "").toLowerCase();
     group.entries.forEach(function (entry) {
@@ -3305,7 +3308,7 @@
   function applyFilterHighlight(payload) {
     var rows = el.filelistsBotList.querySelectorAll(".bot-row");
     var filtering = !!(state.filelistsFilter || "").trim();
-    var empty = {};
+    var empty = Object.create(null);
     if (payload && Array.isArray(payload.empty)) {
       payload.empty.forEach(function (name) { empty[String(name).toLowerCase()] = true; });
     }
@@ -3463,7 +3466,7 @@
   }
 
   function setEveryListShown(shown) {
-    state.filelistsExcluded = {};
+    state.filelistsExcluded = Object.create(null);
     if (!shown) {
       var payload = state.filelistsFilterPayload;
       var names = (payload && payload.matched) || [];
@@ -3493,7 +3496,7 @@
     // off while looking for one thing should not be silently switched off
     // while looking for the next, and rows put back on screen for one term
     // should not still be there, unasked, for the next.
-    state.filelistsExcluded = {};
+    state.filelistsExcluded = Object.create(null);
     state.filelistsRevealEmpty = false;
     state.filelistsOffset = 0;
     state.filelistsHistory = [];
@@ -4581,7 +4584,7 @@
     var raw = Object.prototype.hasOwnProperty.call(state.settingsDirty, "CHANNEL")
       ? state.settingsDirty.CHANNEL
       : settingsValueToString(field.value);
-    var seen = {};
+    var seen = Object.create(null);
     var out = [];
     String(raw || "").split(",").forEach(function (part) {
       var name = part.trim();
@@ -5021,6 +5024,7 @@
     WEBUI_ENABLED: "settings.field.WEBUI_ENABLED",
     WEBUI_HOST: "settings.field.WEBUI_HOST",
     WEBUI_PORT: "settings.field.WEBUI_PORT",
+    WEBUI_ALLOWED_HOSTS: "settings.field.WEBUI_ALLOWED_HOSTS",
     WEBUI_FOLDER_BROWSER_ENABLED: "settings.field.WEBUI_FOLDER_BROWSER_ENABLED",
     WEBUI_CONSOLE_ENABLED: "settings.field.WEBUI_CONSOLE_ENABLED",
     WEBUI_OPEN_BROWSER: "settings.field.WEBUI_OPEN_BROWSER",
@@ -5494,11 +5498,11 @@
     var bound = (entry.channels || []).map(function (name) {
       return String(name).trim();
     }).filter(function (name) { return name.length > 0; });
-    var boundKeys = {};
+    var boundKeys = Object.create(null);
     bound.forEach(function (name) { boundKeys[name.toLowerCase()] = true; });
 
     var offered = configuredChannels();
-    var offeredKeys = {};
+    var offeredKeys = Object.create(null);
     offered.forEach(function (name) { offeredKeys[name.toLowerCase()] = true; });
 
     var extra = bound.filter(function (name) {
@@ -5560,7 +5564,7 @@
   // {channel: mode} for what is ticked and not Normal, read off the DOM for
   // the same reason tickedChannels() is.
   function channelModes(block) {
-    var out = {};
+    var out = Object.create(null);
     block.querySelectorAll(".served-list-channel-item").forEach(function (item) {
       var box = item.querySelector(".served-list-channel-box");
       var select = item.querySelector(".served-list-channel-mode");
@@ -5583,7 +5587,7 @@
       return String(name).trim();
     }).filter(function (name) { return name.length > 0; });
     var offered = configuredChannels();
-    var offeredKeys = {};
+    var offeredKeys = Object.create(null);
     offered.forEach(function (name) { offeredKeys[name.toLowerCase()] = true; });
     return offered.concat(bound.filter(function (name) {
       return !offeredKeys[name.toLowerCase()];

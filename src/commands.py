@@ -184,7 +184,12 @@ def handle_queue_check(s, user, target):
     formatted_total_files = ""
     list_date = ""
     if file_count <= 0:
-        file_count_total, list_date, total_size, raw_bytes = list.get_file_count_date_size_and_raw_bytes()
+        # THE LIST THIS CHANNEL IS BOUND TO (#1270), as the advert in the
+        # same channel reports it - not the primary's figures. A private
+        # message is the primary.
+        import library
+        file_count_total, list_date, total_size, raw_bytes = list.get_file_count_date_size_and_raw_bytes(
+            library.list_name_for_request(target))
         formatted_total_files = f"{file_count_total:,}"
     
     active_dl = oserve.active_downloads if oserve else 0
@@ -270,21 +275,51 @@ def _take_rows_out(user_key, choose):
     return gone, removed_archives
 
 
+def _stop_withdrawn_packs(rows):
+    """The user's own remove took these rows: stop a pack of one of them (#1268).
+
+    Called once the rows are out of the queue and queue_lock is released. A
+    pack that ends before this lands finds its row gone and does not send.
+    """
+    import dcc
+    for row in rows:
+        if dcc.cancel_pack(row=row) is not None:
+            print(f"[COMMANDS] Stopped the pack of a folder its requester removed: "
+                  f"{row.get('file', '?') if isinstance(row, dict) else row}")
+
+
 def handle_queue_remove_file(s, user, target, filename):
     """`@<nick>-remove <file>`: take that one file out of the user's queue and
-    leave the rest. Without a file, handle_queue_remove() clears the lot."""
+    leave the rest. Without a file, handle_queue_remove() clears the lot.
+
+    A file being SENT stays, and the user is told so (#1268): the send runs
+    on, and "removed" was not true. A folder being PACKED goes, and its pack
+    is stopped - the user's own operator-free version of #1245's rule.
+    """
     user_key = user.lower()
     oserve = sys.modules.get('oserve')
     import list as list_mod
+    import dcc
 
     wanted = list_mod.printable_text(str(filename)).strip()
     shown = wanted[:120]
-    gone, removed_archives = _take_rows_out(user_key, lambda rows: [
-        r for r in rows if isinstance(r, dict) and _same_file_name(r.get('file', ''), wanted)])
+    sending = []
+
+    def choose(rows):
+        # Under queue_lock (_take_rows_out holds it), so "in flight" is
+        # read in the same hold that takes the rows.
+        matched = [r for r in rows if isinstance(r, dict) and _same_file_name(r.get('file', ''), wanted)]
+        sending[:] = [r for r in matched if dcc.queued_row_in_flight(r) == "sending"]
+        return [r for r in matched if not any(r is busy for busy in sending)]
+
+    gone, removed_archives = _take_rows_out(user_key, choose)
+    _stop_withdrawn_packs(gone)
     removed = len(gone)
 
     if removed:
         msg = f"NOTICE {user} :Removed \"{shown}\" from your queue. \r\n"
+    elif sending:
+        msg = f"NOTICE {user} :\"{shown}\" is being sent to you right now, so it cannot be removed. \r\n"
     else:
         msg = f"NOTICE {user} :\"{shown}\" is not in your queue. \r\n"
     if oserve and not _silent_in(user, target):
@@ -295,29 +330,51 @@ def handle_queue_remove_file(s, user, target, filename):
 
 
 def handle_queue_remove(s, user, target):
-    """Clear the user's queue from memory and remove it from dcc_queue.txt on disk."""
+    """Clear the user's queue from memory and remove it from dcc_queue.txt on disk.
+
+    Except a file being SENT right now (#1268), which stays until its send
+    ends and is named in the notice: the send runs on regardless, and saying
+    the queue was "completely removed" was not true. A folder being PACKED
+    goes, and its pack is stopped - otherwise it finished and was sent anyway.
+    """
     user_key = user.lower()
     oserve = sys.modules.get('oserve')
     import dcc
 
     removed_archives = []
+    dropped = []
+    sending = []
     with dcc.queue_lock:
         # Remove them from the ordinary queue
         if hasattr(config, 'dcc_queue') and user_key in config.dcc_queue:
+            rows = config.dcc_queue[user_key]
+            sending = [r for r in rows if dcc.queued_row_in_flight(r) == "sending"]
+            dropped = [r for r in rows if not any(r is busy for busy in sending)]
             # BEFORE dropping the rows: they are the only record that the temp
             # archives exist. The freeze sweep, the freeze timer and !clearqueue
             # all cleaned up here; this path - the one users actually type - did
             # not, so every archive it orphaned stayed in TMP_ZIP_DIR until
             # somebody noticed the disk filling.
-            removed_archives = dcc.discard_orphaned_temp_archives(user_key)
-            del config.dcc_queue[user_key]
+            removed_archives = dcc.discard_orphaned_temp_archives(user_key, rows=dropped)
+            if sending:
+                config.dcc_queue[user_key] = sending
+            else:
+                del config.dcc_queue[user_key]
             db.save_dcc_queue()  # Write the cleared queue straight to disk
 
         # Also drop them from the freezer, in case they were frozen
         if hasattr(config, 'frozen_queues') and user_key in config.frozen_queues:
             del config.frozen_queues[user_key]
 
-    msg = f"NOTICE {user} :Your queue has been completely removed. \r\n"
+    _stop_withdrawn_packs(dropped)
+
+    if sending:
+        import list as list_mod
+        names = ", ".join(list_mod.printable_text(str(r.get('file', '?'))).strip()[:120] for r in sending)
+        msg = (f"NOTICE {user} :Your queue has been removed, except \"{names}\", "
+               f"which is being sent to you right now. \r\n")
+    else:
+        msg = f"NOTICE {user} :Your queue has been completely removed. \r\n"
     if oserve and not _silent_in(user, target):
         oserve.queue_message(user, msg)
     if removed_archives:
@@ -356,9 +413,9 @@ def handle_admin_clear_queue(user, target_chan, msg_text, authorised=False, user
         if hasattr(config, 'dcc_queue') and target_key in config.dcc_queue:
             removed_count = len(config.dcc_queue[target_key])
 
-            # Shared with @<nick>-remove and, in a cruder form, the two freeze
-            # sweeps in dcc.py. Must run before the rows are dropped, because they
-            # are the only record that these archives exist.
+            # Shared with @<nick>-remove and the two freeze sweeps in dcc.py
+            # (#1268). Must run before the rows are dropped, because they are
+            # the only record that these archives exist.
             for temp_path in dcc.discard_orphaned_temp_archives(target_key):
                 print(f"[ADMIN CLEARQUEUE] Removed orphaned temp archive: {temp_path}")
 
@@ -928,6 +985,16 @@ def restore_preserved_runtime(cfg, preserved_runtime):
 CORE_MODULES = ('admin_config', 'defaults', 'list', 'dcc', 'announce',
                 'security', 'db', 'stats_mgr')
 
+# Modules reloaded from scratch: their names are cleared before the reload,
+# so the file defines exactly what it says now. importlib.reload() re-runs a
+# file in the module's own namespace and never removes a name the new text
+# no longer defines, and defaults.py's `from admin_config import *` then
+# copied the old value back - a line deleted or commented out in
+# admin_config.py (ADMIN_PASSWORD_HASH, ADMIN_NICK, ADMIN_HOSTMASKS) stayed
+# live until a restart. admin_config.py holds settings only; nothing in it
+# is runtime state a reload must keep.
+RELOAD_FROM_SCRATCH = ('admin_config',)
+
 
 def _channels_to_sync(config):
     """Every channel the bot should be in: CHANNEL, plus the debug channel.
@@ -1164,6 +1231,24 @@ def _restore_advert_worker_token(live_worker_id):
     return True
 
 
+def _reload_from_scratch(module):
+    """importlib.reload() `module` with its own names cleared first, so a name
+    its file no longer defines is gone (see RELOAD_FROM_SCRATCH). A reload
+    that fails puts them back: the file's last good values stay, never none.
+    """
+    import importlib
+
+    names = {name: value for name, value in vars(module).items()
+             if not (name.startswith('__') and name.endswith('__'))}
+    for name in names:
+        delattr(module, name)
+    try:
+        return importlib.reload(module)
+    except BaseException:
+        vars(module).update(names)
+        raise
+
+
 def reload_modules_in_order(modules=CORE_MODULES, reload_self=True):
     """Reload the daemon's modules in place and return the names reloaded.
 
@@ -1196,6 +1281,9 @@ def reload_modules_in_order(modules=CORE_MODULES, reload_self=True):
     live = sys.modules.get('defaults')
     before = ({name: getattr(live, name, None) for name in settings_file.REQUIRED}
               if live is not None else {})
+    # ADMIN_NICK's other half: kept with it below, so a backstop that keeps the
+    # admin nick never leaves it without the hostmasks that narrowed it.
+    hostmasks_before = getattr(live, 'ADMIN_HOSTMASKS', None) if live is not None else None
 
     # Everything from here to the end of the reload is one window as far as any
     # other thread is concerned - see runtime.config_reload_lock's own comment
@@ -1204,7 +1292,10 @@ def reload_modules_in_order(modules=CORE_MODULES, reload_self=True):
         reloaded = []
         for mod_name in modules:
             if mod_name in sys.modules:
-                importlib.reload(sys.modules[mod_name])
+                if mod_name in RELOAD_FROM_SCRATCH:
+                    _reload_from_scratch(sys.modules[mod_name])
+                else:
+                    importlib.reload(sys.modules[mod_name])
                 reloaded.append(mod_name)
 
         # The lock hides the window; it cannot help if the window never closes.
@@ -1232,6 +1323,13 @@ def reload_modules_in_order(modules=CORE_MODULES, reload_self=True):
                 print(f"[REHASH CONFIG] {name} came back blank from the reload, so the "
                       f"value that was already running was kept. Check that settings.conf "
                       f"is readable - the next restart will use whatever it says.")
+                # Never the nick without its hostmasks: ADMIN_HOSTMASKS back to
+                # none makes the kept nick an admin from any host.
+                if (name == 'ADMIN_NICK' and hostmasks_before
+                        and not getattr(live, 'ADMIN_HOSTMASKS', None)):
+                    live.ADMIN_HOSTMASKS = hostmasks_before
+                    print("[REHASH CONFIG] ADMIN_HOSTMASKS came back empty with it and "
+                          "was kept as well, so the admin nick is still checked against them.")
 
         # Last, and separately: reloading this module rebinds the very names the
         # caller is executing out of. The running frame keeps its old code object,
@@ -3072,8 +3170,13 @@ def handle_stats_request(s, user, target):
     def figure(text, colour=green):
         return f"{bold}{colour}{text}{reset}"
 
+    # This channel's list (#1270), as the advert here reports it; a private
+    # message is the primary. It used to be the primary everywhere, so a
+    # channel bound to another list heard two library sizes from one bot.
+    import library
     shared_count, list_date, shared_size, _raw = \
-        list_mod.get_file_count_date_size_and_raw_bytes()
+        list_mod.get_file_count_date_size_and_raw_bytes(
+            library.list_name_for_request(target))
 
     total_sent = stats_mgr.get_total_sent()
     total_bytes = stats_mgr.get_total_sent_bytes()

@@ -29,7 +29,8 @@ class TheAlias(unittest.TestCase):
         return script().split("alias dccore.in {", 1)[1].split("\n", 1)[0]
 
     def test_the_spaces_around_in_are_non_breaking(self):
-        self.assertIn("return $+($chr(160),in,$chr(160),$1)", self.line())
+        # The channel is $1 through dccore.chan, its colour from Options (#1259).
+        self.assertIn("return $+($chr(160),in,$chr(160),$dccore.chan($1))", self.line())
 
     def test_it_no_longer_starts_with_a_plain_space(self):
         self.assertNotIn("$+($chr(32)", self.line())
@@ -49,11 +50,12 @@ class TheAlias(unittest.TestCase):
             self.assertNotRegex(line, r"return \$\+\(\$chr\(32\)", f"line {number}: {line.strip()}")
 
     def test_every_use_joins_the_nick_with_dollar_plus(self):
-        """`$2 $+ $dccore.in($3)`: the nick, then the alias's own spaces."""
+        """`$dccore.nick($2) $+ $dccore.in($3)`: the nick (in its own colour
+        since #1259), then the alias's own spaces."""
         uses = re.findall(r"(\S+ \$\+ \$dccore\.in\(\$3\))", script())
         self.assertGreaterEqual(len(uses), 7)
         for use in uses:
-            self.assertRegex(use, r"^\$\d \$\+ \$dccore\.in\(\$3\)$")
+            self.assertRegex(use, r"^\$dccore\.nick\(\$\d\) \$\+ \$dccore\.in\(\$3\)$")
 
     def test_what_the_line_reads_like(self):
         """Simulate the join: nick, then the alias's result, then the rest."""

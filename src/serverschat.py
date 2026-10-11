@@ -156,6 +156,18 @@ def channels():
                   if str(name)[:1] in _CHANNEL_PREFIXES)
 
 
+def _channel_key(name):
+    """A channel name as channels() and config.channel_users key it:
+    irc.channel_key(), which compares under the server's casemapping
+    (#1271). A WHO reply names the channel the way the server spells it -
+    "#music{1}" for a configured "#music[1]" on an RFC 1459 server - and a
+    plain .lower() never matched the round refresh_peers() opened for it.
+
+    Deferred import, like dcc.py's: irc.py imports half the daemon."""
+    import irc
+    return irc.channel_key(name)
+
+
 def _next_id(now):
     """A line's id: its time in milliseconds, strictly increasing. The window
     remembers the last one it drew, so a replay after a reconnect is not
@@ -272,7 +284,7 @@ def note_who_reply(line, now=None):
     found = _WHO_REPLY.match(str(line or "").strip())
     if not found:
         return None
-    chan, nick, real = found.group(1).lower(), found.group(2), found.group(3)
+    chan, nick, real = _channel_key(found.group(1)), found.group(2), found.group(3)
     if chan[:1] not in _CHANNEL_PREFIXES or not _is_peer_realname(real):
         return None
     if nick.lower() == str(getattr(config, "NICKNAME", "")).lower():
@@ -350,7 +362,7 @@ def note_gone(nick, chan=None, now=None):
             touched = list(seen.keys())
             runtime.chat_peers.pop(key, None)
         else:
-            chan = str(chan).lower()
+            chan = _channel_key(chan)
             if chan in seen:
                 seen.pop(chan, None)
                 touched = [chan]
@@ -374,7 +386,7 @@ def finish_who_round(chan, now=None):
 
     A silent no-op when no round is open for `chan` - a WHO the operator's
     own client asked for outside refresh_peers() must not read as one."""
-    chan = str(chan or "").lower()
+    chan = _channel_key(chan)
     with runtime.chat_lock:
         seen = runtime.chat_who_round.pop(chan, None)
         if seen is None:
@@ -472,7 +484,7 @@ def peers_channel_line(chan, now=None):
     """`DCCORE PEERS <chan> <nick1> <nick2> ...` - the DCCore bots seen in
     one channel right now, for dccore.mrc's side-listbox. No nicks is a
     valid line: it says the channel's list is now empty."""
-    chan = str(chan or "").lower()
+    chan = _channel_key(chan)
     members = peer_channels(now).get(chan, set())
     return ("DCCORE PEERS " + chan + " " + " ".join(sorted(members))).rstrip()
 
@@ -588,6 +600,7 @@ def say(sender, channel, text, now=None):
             return False, ("No other DCCore bot seen in the bot's channels yet, so "
                            "there is nobody to say it to (chat peers, chat who).")
     elif chan[:1] in _CHANNEL_PREFIXES:
+        chan = _channel_key(raw)
         if chan not in channels():
             return False, f"Not in {chan}: the bot can only chat in its own channels ({', '.join(channels()) or 'none yet'})."
         targets = [chan]

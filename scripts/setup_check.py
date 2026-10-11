@@ -136,7 +136,7 @@ def library_report(config, ok, warn, fail, detail):
     dashboard and left FILE_DIRECTORY blank was told at every start that the
     daemon "cannot search or serve anything until it is set", which was simply
     untrue. oserve.py's own startup check received exactly this correction
-    (see its comment above `configured = library.folders()`); the setup check
+    (see its comment above `configured = library.every_folder()`); the setup check
     had kept the old rule, and it is what the operator reads first.
 
     The three outcomes are the daemon's own, so this cannot say "ready" for a
@@ -167,7 +167,11 @@ def library_report(config, ok, warn, fail, detail):
     import library
     import update_list
 
-    configured = library.folders()
+    # EVERY LIST'S folders (#1272), the same question oserve.startup() asks:
+    # library.folders() is the primary list alone, and a multi-list install
+    # whose primary drive was unplugged was told FAIL while its other lists
+    # were perfectly readable.
+    configured = library.every_folder()
     if not configured:
         warn("no music folders configured yet - the daemon will start, but cannot "
              "search or serve anything until a folder is added from the web "
@@ -194,8 +198,9 @@ def library_report(config, ok, warn, fail, detail):
         ok(f"{'over 5000' if count > 5000 else count} file(s) would be "
            f"listed - the first scan walks all of them")
 
-    # No folder file: the single FILE_DIRECTORY, exactly as before.
-    if library.load_folders() is None:
+    # No folder file and no lists: the single FILE_DIRECTORY, exactly as before.
+    every_list = library.lists()
+    if library.load_folders() is None and len(every_list) < 2:
         music = configured[0].path
         if not os.path.isdir(music):
             fail(f"FILE_DIRECTORY does not exist: {music}  "
@@ -209,8 +214,10 @@ def library_report(config, ok, warn, fail, detail):
     present = [f for f in configured if os.path.isdir(f.path)]
     missing = [f for f in configured if f not in present]
 
+    source = (library.lists_file() if len(every_list) > 1
+              else library.folders_file())
     ok(f"library: {len(configured)} folder(s) from "
-       f"{os.path.basename(library.folders_file())}, {len(present)} reachable")
+       f"{os.path.basename(source)}, {len(present)} reachable")
     for folder in configured:
         state = "ok     " if folder in present else "MISSING"
         detail(f"{state}  {folder.name} -> {folder.path}")
@@ -224,6 +231,14 @@ def library_report(config, ok, warn, fail, detail):
              f"now - the list build skips a missing folder with a warning, so "
              f"the daemon will start, but its list will be short until the "
              f"drive is back")
+    # A list with NOTHING readable is worth its own line: its channels get
+    # nothing at all, not a short list.
+    if len(every_list) > 1:
+        for served in every_list:
+            if served.folders and not any(os.path.isdir(f.path) for f in served.folders):
+                where = ", ".join(served.channels) or "its channels"
+                warn(f"list {served.name!r} has none of its folders reachable - "
+                     f"{where} will have nothing to serve until they are back")
     report_count(present)
 
 
@@ -364,6 +379,20 @@ def main(platform):
         return 1
 
     ok(f"version {getattr(config, 'SCRIPT_VERSION', '?')}")
+
+    # A settings.conf that could not be read is applied as NOTHING (#1272):
+    # every setting in it is back at its default, and the REQUIRED ones then
+    # read as "unconfigured" below - which on its own sends the operator to
+    # configure.py, not to the one broken line. Said first, with the line.
+    try:
+        import settings_file as _settings_reread
+        settings_report = _settings_reread.recheck(vars(config))
+    except Exception:
+        settings_report = {"read_error": None}
+    if settings_report.get("read_error"):
+        fail(f"{settings_report.get('path', 'settings.conf')} could not be read: "
+             f"{settings_report['read_error']} - every setting in it is ignored "
+             f"until that is fixed")
     ok(f"nickname {getattr(config, 'NICKNAME', '?')} "
        f"(alt {getattr(config, 'ALT_NICKNAME', '?')})")
 

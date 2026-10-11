@@ -256,9 +256,9 @@ class TheOptionsDialogHasTheThreeCheckboxes(unittest.TestCase):
     def test_the_checkboxes_are_in_their_own_box(self):
         table = block("dialog dccore.opt {")
 
-        self.assertIn('box "Open when mIRC starts (minimised)", 700, 5 274 312 24', table)
+        self.assertIn('box "Open when mIRC starts (minimised)", 700, 5 298 312 24', table)
         for _setting, cid, label in self.SETTINGS:
-            self.assertRegex(table, r'\n  check "%s", %d, \d+ 284 \d+ 10\n' % (re.escape(label), cid))
+            self.assertRegex(table, r'\n  check "%s", %d, \d+ 308 \d+ 10\n' % (re.escape(label), cid))
 
     def test_init_ticks_each_from_its_setting(self):
         init = code("on *:dialog:dccore.opt:init:0: {")
@@ -278,8 +278,9 @@ class TheOptionsDialogHasTheThreeCheckboxes(unittest.TestCase):
     def test_the_buttons_moved_below_the_new_box(self):
         table = block("dialog dccore.opt {")
 
-        self.assertIn("size -1 -1 322 316", table)
-        self.assertIn('button "OK", 1, 232 302 40 12, ok default', table)
+        # 24 dbu lower again since #1259 put a row of colours in the Show box
+        self.assertIn("size -1 -1 322 340", table)
+        self.assertIn('button "OK", 1, 232 326 40 12, ok default', table)
 
 
 class TheScriptVersionMovedOn(unittest.TestCase):

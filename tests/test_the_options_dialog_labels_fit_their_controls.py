@@ -213,8 +213,11 @@ class TheControlsStayInTheirBoxes(unittest.TestCase):
     def test_the_right_column_starts_after_the_left_checks_end(self):
         left = [(x + w) for kind, _l, i, x, _y, w, _h in controls()
                 if kind == "check" and x == 10 and i < 400]
+        # The colour row under the checks (#1259, 220-225) spans the box
+        # instead: it is below the last check, not beside it.
         right = [x for kind, _l, i, x, _y, _w, _h in controls()
-                 if kind in ("combo", "check", "text") and 100 < i < 400 and x > 10]
+                 if kind in ("combo", "check", "text") and 100 < i < 400 and x > 10
+                 and not 220 <= i <= 225]
         self.assertEqual(len(left), 11)
         self.assertLess(max(left), min(right))
 

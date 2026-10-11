@@ -36,6 +36,7 @@ here rather than left to callers:
 
 import io
 import json
+import math
 import os
 import re
 
@@ -150,7 +151,9 @@ def problems(commands, delay_seconds, ignore_blanks=False):
     except (TypeError, ValueError):
         found.append(f"the delay must be a number of seconds.")
     else:
-        if delay < 0 or delay > MAX_DELAY_SECONDS:
+        # not isfinite first: nan compares false with both bounds and was
+        # saved, then read back as the 60-second maximum (#1264 review).
+        if not math.isfinite(delay) or delay < 0 or delay > MAX_DELAY_SECONDS:
             found.append(f"the delay must be between 0 and "
                          f"{MAX_DELAY_SECONDS} seconds.")
 

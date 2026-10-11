@@ -303,9 +303,11 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
         # list - where rebinding loses work in progress. Re-reading which file
         # types to skip is the whole reason an operator runs !rehash after
         # editing it.
+        # WEBUI_ALLOWED_HOSTS likewise: the names the dashboard answers
+        # to, a setting re-read on a rehash so an edit takes effect.
         allowed = {"ADMIN_HOSTMASKS", "LIST_IGNORED_EXTENSIONS",
                    "LIST_VIDEO_EXTENSIONS", "LIST_VIDEO_COMPANION_EXTENSIONS",
-                   "RAR_EXTENSIONS"}
+                   "RAR_EXTENSIONS", "WEBUI_ALLOWED_HOSTS"}
 
         with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
             tree = parse_source(handle.read())

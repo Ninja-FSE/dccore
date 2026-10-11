@@ -453,6 +453,7 @@ class Pairing(DCCoreTestCase):
         s = adminchat.Session(socket.socket(), "127.0.0.1", "SysOp", "h")
         self.addCleanup(s.close, None)
         s.authenticated = authenticated
+        s.unlocked = authenticated      # as a password login is (#1264)
         s.structured = structured
         return s
 

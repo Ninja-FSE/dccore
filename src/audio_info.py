@@ -337,6 +337,38 @@ def cache_path():
     return getattr(config, "LIST_AUDIO_INFO_CACHE", "./data/audio_info.db")
 
 
+def _is_damage(err):
+    """True when sqlite3 says the FILE is wrong (#1273): a bare DatabaseError
+    ("file is not a database", "database disk image is malformed"), or a
+    DataError, which is how damaged pages read as an impossibly long value
+    come back. A locked file, a full disk or a folder that cannot be written
+    is another subclass, and must not move a healthy cache aside."""
+    return type(err) in (sqlite3.DatabaseError, sqlite3.DataError)
+
+
+def _move_aside(path):
+    """Rename a damaged cache, and any -wal/-shm beside it, out of the way;
+    returns the new name. A WAL left beside a fresh file would be replayed
+    into it and carry the damage back."""
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    aside = f"{path}.corrupt-{stamp}"
+    n = 1
+    while os.path.exists(aside):
+        n += 1
+        aside = f"{path}.corrupt-{stamp}-{n}"
+    os.rename(path, aside)
+    for suffix in ("-wal", "-shm"):
+        if os.path.exists(path + suffix):
+            try:
+                os.replace(path + suffix, aside + suffix)
+            except OSError:
+                try:
+                    os.remove(path + suffix)
+                except OSError:
+                    pass
+    return aside
+
+
 class Cache:
     """What a rebuild knows about each audio file, kept between rebuilds.
 
@@ -350,8 +382,10 @@ class Cache:
     close() without it keeps what was read and drops nothing, so an aborted
     scan that saw half the library does not forget the other half.
 
-    Opening can fail (a read-only data directory, a damaged file); then open()
-    returns None, the caller says so, and the list is written size-only.
+    Opening can fail (a read-only data directory, a damaged file that cannot
+    be moved aside); then open() returns None, the caller says so, and the
+    list is written size-only. A damaged file that can be moved is moved, and
+    a new cache started in its place (#1273).
     """
 
     def __init__(self, conn, reader=None, scope=""):
@@ -384,6 +418,36 @@ class Cache:
         whose rows are this list's now (#979): taken over - where this scope
         has no row for the same file - and the rest dropped."""
         path = path or cache_path()
+        try:
+            return cls._open(path, reader, scope, formerly)
+        except (sqlite3.Error, OSError) as err:
+            failure = err
+        # A DAMAGED CACHE IS MOVED ASIDE (#1273), as transfer_log.py,
+        # list_index.py and the download counts in db.py do. Left in place,
+        # every rebuild from then on failed to open it and wrote its list with
+        # sizes only, until the operator found the file and deleted it. A
+        # fresh cache costs reading each audio file once more; the old one is
+        # kept beside it as <file>.corrupt-<timestamp>.
+        if _is_damage(failure) and os.path.isfile(path):
+            try:
+                aside = _move_aside(path)
+            except OSError as move_err:
+                log(f"[LIST-GEN] The audio info cache at {path!r} is damaged ({failure}) and could "
+                    f"not be moved aside ({move_err}); this list is written with sizes only. "
+                    f"Delete the file to start a new one.")
+                return None
+            log(f"[LIST-GEN] The audio info cache at {path!r} is damaged ({failure}); it was "
+                f"moved to {aside!r} and a new one was started. Audio lengths are read again.")
+            try:
+                return cls._open(path, reader, scope, formerly)
+            except (sqlite3.Error, OSError) as err:
+                failure = err
+        log(f"[LIST-GEN] Could not open the audio info cache at {path!r} ({failure}); "
+            f"this list is written with sizes only.")
+        return None
+
+    @classmethod
+    def _open(cls, path, reader, scope, formerly):
         conn = None
         try:
             folder = os.path.dirname(path)
@@ -399,12 +463,10 @@ class Cache:
                 conn.execute("DELETE FROM audio WHERE scope = ?", (formerly,))
             conn.commit()
             return cls(conn, reader, scope or "")
-        except (sqlite3.Error, OSError) as err:
+        except BaseException:
             if conn is not None:
                 conn.close()
-            log(f"[LIST-GEN] Could not open the audio info cache at {path!r} ({err}); "
-                f"this list is written with sizes only.")
-            return None
+            raise
 
     def note(self, key, path, size):
         """One listed audio file. No request is made here: a file whose size

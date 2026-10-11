@@ -175,9 +175,9 @@ def channels_we_should_be_in():
     channel named "".
     """
     chans = configured_channels()
-    seen = {name.lower() for name in chans}
+    seen = {irc_lower(name) for name in chans}
     debug_chan = str(getattr(config, "DEBUG_CHANNEL", "") or "").strip()
-    if debug_chan and debug_chan.lower() not in seen:
+    if debug_chan and irc_lower(debug_chan) not in seen:
         chans = chans + [debug_chan]
     return chans
 
@@ -490,6 +490,80 @@ def isupport_nicklen(line):
     except ValueError:
         return None
     return value if value > 0 else None
+
+
+# What each CASEMAPPING folds on top of A-Z (#1271). RFC 1459 counts "[]\~"
+# as the upper case of "{}|^", which is what ircu and most servers say in
+# their 005; strict-rfc1459 leaves "~" and "^" alone. "ascii" folds A-Z only.
+# A name this does not know folds like ascii: str.lower(), what every
+# comparison here did before.
+_CASEMAP_EXTRA = {
+    "rfc1459": str.maketrans("[]\\~", "{}|^"),
+    "strict-rfc1459": str.maketrans("[]\\", "{}|"),
+}
+DEFAULT_CASEMAPPING = "rfc1459"
+
+
+def isupport_casemapping(line):
+    """The CASEMAPPING a 005 RPL_ISUPPORT line advertises, lower case, or
+    None if this line does not name one. A server sends 005 over several
+    lines, so None from one of them means "not in this line", nothing more.
+    """
+    if not is_server_numeric(line, "005"):
+        return None
+    body = line.split(" :", 1)[0]
+    match = re.search(r"(?:^|\s)CASEMAPPING=(\S+)", body)
+    return match.group(1).lower() if match else None
+
+
+def irc_lower(text):
+    """`text` folded the way this server folds case (#1271).
+
+    str.lower() was the fold everywhere, and it misses what RFC 1459 adds:
+    on ircu, and on every server whose 005 says CASEMAPPING=rfc1459,
+    "#music[1]" and "#music{1}" are one channel. An operator who configured
+    the first was joined to the second under its own spelling, every reply
+    named it that way, and the configured channel was never confirmed: the
+    advert skipped it and the rejoin was sent every advert cycle for ever.
+    Before any 005 the RFC 1459 default applies, which is what the RFC says
+    and what most networks use.
+    """
+    low = str(text or "").lower()
+    mapping = _CASEMAP_EXTRA.get(str(runtime.server_casemapping or "").lower())
+    return low.translate(mapping) if mapping else low
+
+
+def configured_spelling(channel):
+    """The entry of CHANNEL or DEBUG_CHANNEL that names the same channel as
+    `channel` under the server's casemapping, as the operator wrote it, or
+    None when it is none of ours (#1271)."""
+    name = str(channel or "").strip()
+    if not name:
+        return None
+    folded = irc_lower(name)
+    for configured in channels_we_should_be_in():
+        if irc_lower(configured) == folded:
+            return configured
+    return None
+
+
+def channel_key(channel):
+    """The key `channel` is filed under: in config.channel_users,
+    config.kicked_channels and every channel comparison this file makes.
+
+    Compared under the server's casemapping (irc_lower()), so a server's
+    spelling and the configured one meet. A channel the operator configured
+    keeps the configured spelling, lower-cased - the key every other module
+    already looks up with `chan.lower()` on a name from CHANNEL - so only
+    the names the server sends are translated, and the modules that look a
+    configured channel up need no change. Any other channel is keyed by its
+    folded name.
+    """
+    name = str(channel or "").strip()
+    if not name:
+        return ""
+    configured = configured_spelling(name)
+    return configured.lower() if configured else irc_lower(name)
 
 
 def is_user_event(line, command):
@@ -981,6 +1055,15 @@ def note_nick_change(old_nick, new_nick):
             lock.discard(old_key)
             lock.add(new_key)
             moved.append("user_processing_lock")
+        # The folder packer holds its claim by nick (#1268): told here, in the
+        # same hold of queue_lock, so it lets go of - and sends to - the nick
+        # the lock was just moved to. It used to release the old one, and the
+        # new nick stayed "already claimed" until a restart.
+        owner = runtime.pack_owner
+        if isinstance(owner, dict) and str(owner.get("nick", "")).lower() == old_key:
+            owner["nick"] = new_nick
+            if "pack_owner" not in moved:
+                moved.append("pack_owner")
 
         # hasattr(..., "append"), not isinstance(transfers, list) - this
         # module already shadows the builtin with its own `import list`
@@ -1111,7 +1194,7 @@ def note_observed_departure(nick, channel, now=None):
             # alias - "somebot", lowercased for matching, is not what the
             # List Browser should say the bot is called.
             "nick": str(nick).strip(),
-            "channel": str(channel or "").strip().lower(),
+            "channel": channel_key(channel),
             "at": time.time() if now is None else now,
         }
         base = _collision_base(key)
@@ -1222,7 +1305,7 @@ def note_kicked_from(channel, by=""):
     been removed from CHANNEL - and rejoining it would be the bot deciding
     where it belongs.
     """
-    name = str(channel or "").strip().lower()
+    name = channel_key(channel)
     if not name or name not in channels_we_should_be_in_set():
         return False
     with runtime.kicked_channels_lock:
@@ -1234,7 +1317,20 @@ def note_kicked_from(channel, by=""):
             # of merging into it - see learn_channel_names().
             "members_stale": True,
         }
+    # With REJOIN_ATTEMPTS at 0 there is no rejoin to keep the member list
+    # for (#1271): the channel is given up on as it is recorded.
+    if int(getattr(config, "REJOIN_ATTEMPTS", 3)) <= 0:
+        forget_channel_members(name)
     return True
+
+
+def kicked_notice(channel, by):
+    """What the operator is told when the bot is kicked from a channel it
+    serves. With REJOIN_ATTEMPTS at 0 no rejoin follows, so it says that
+    instead of promising one on the next advert (#1281)."""
+    if int(getattr(config, "REJOIN_ATTEMPTS", 3)) <= 0:
+        return f"Kicked from {channel} by {by}. Not rejoining: REJOIN_ATTEMPTS is 0."
+    return f"Kicked from {channel} by {by}. Will try to rejoin on the next advert."
 
 
 def note_user_kicked(nick, channel):
@@ -1252,7 +1348,7 @@ def note_user_kicked(nick, channel):
     were finally discarded as send failures instead.
     """
     key = str(nick or "").strip().lower()
-    chan = str(channel or "").strip().lower()
+    chan = channel_key(channel)
     with runtime.channel_users_lock():
         members = config.channel_users.get(chan)
         found = members is not None and key in members
@@ -1276,7 +1372,7 @@ def forget_channel_members(channel):
     way back in. That list is rebuilt from scratch instead - see
     learn_channel_names().
     """
-    name = str(channel or "").strip().lower()
+    name = channel_key(channel)
     with runtime.channel_users_lock():
         config.channel_users.pop(name, None)
 
@@ -1290,7 +1386,7 @@ def learn_channel_names(channel, names):
     was out would otherwise stay "present" for the life of the connection,
     since the bot saw neither their PART nor their QUIT.
     """
-    chan = str(channel or "").strip().lower()
+    chan = channel_key(channel)
     with runtime.kicked_channels_lock:
         entry = config.kicked_channels.get(chan)
         rebuild = bool(entry) and bool(entry.pop("members_stale", False))
@@ -1324,7 +1420,7 @@ def note_join_unconfirmed(channel):
     An existing entry is left alone. A kick is the more specific answer, and a
     channel already being retried does not need a second reason to be.
     """
-    name = str(channel or "").strip().lower()
+    name = channel_key(channel)
     if not name or name not in channels_we_should_be_in_set():
         return False
     with runtime.kicked_channels_lock:
@@ -1344,19 +1440,27 @@ def note_join_refused(channel):
     refusal for anything else is the ordinary business of a JOIN that was
     never going to work, and inventing a retry schedule for it would start
     the bot knocking on doors nobody asked it to.
+
+    The refusal that uses up REJOIN_ATTEMPTS gives the channel up, and its
+    member list goes with it (#1271), as forget_channel_members() describes:
+    the bot will not be back in there on this connection and sees no PART
+    or QUIT from it, so everyone who was there stayed "present" to dcc.py -
+    offered to, never frozen, never reaped.
     """
-    name = str(channel or "").strip().lower()
+    name = channel_key(channel)
     with runtime.kicked_channels_lock:
         entry = config.kicked_channels.get(name)
         if entry is None:
             return 0
-        entry["refusals"] = int(entry.get("refusals", 0)) + 1
-        return entry["refusals"]
+        entry["refusals"] = count = int(entry.get("refusals", 0)) + 1
+    if count >= int(getattr(config, "REJOIN_ATTEMPTS", 3)):
+        forget_channel_members(name)
+    return count
 
 
 def note_joined(channel):
     """A join succeeded, so stop tracking it. Returns what was cleared."""
-    name = str(channel or "").strip().lower()
+    name = channel_key(channel)
     with runtime.kicked_channels_lock:
         return config.kicked_channels.pop(name, None)
 
@@ -2053,7 +2157,7 @@ def _record_channel_signature(entry, channel, advert, now):
     reads it to require a difference to have held for a while before acting
     on it, rather than a single advert that might just be a bot mid-scan.
     """
-    key = str(channel or "").strip().lower()
+    key = channel_key(channel)
     if not key:
         return
     if not isinstance(entry.get("channels"), dict):
@@ -2968,9 +3072,115 @@ def resolve_dcc_address(lookup=None, log=print):
         log("[WARNING] No public address is known, so DCC sends will be refused "
             "rather than offered to nobody. Set MY_IP_OR_DOCK in admin_config.py "
             "to your public address to serve without this lookup. Not "
-            "settings.conf (#465): this address is detected at startup rather "
+            "settings.conf (#465): this address is detected when the bot connects rather "
             "than read from a file, so it is not a setting that file carries.")
         return ""
+
+
+# How long a detected DCC address is trusted before a new connection looks
+# again (#1271). A link that drops and comes back every few seconds asks the
+# lookup service at most this often; one that drops once a day - the ISP
+# reconnect that also hands the line a new address - always looks again.
+DCC_ADDRESS_RECHECK_SECONDS = 300.0
+
+
+def refresh_dcc_address(lookup=None, log=print, now=None, force=False):
+    """Detect the DCC address again unless MY_IP_OR_DOCK pins it. Returns
+    the address offers now carry: the pin, or what was detected.
+
+    It was looked up once per process, before the reconnect loop, and the
+    answer was written into MY_IP_OR_DOCK - the name that means "pinned" -
+    so nothing could ever look again (#1271). A bot that started before the
+    network was up refused every send until a restart, and one whose ISP
+    reconnect brought a new public address kept offering the old one, so
+    every transfer timed out. The answer lives in runtime.dcc_address_detected
+    now; MY_IP_OR_DOCK is only ever the operator's.
+
+    Called at startup and at every registration. It asks again when the last
+    lookup found nothing, or found something more than
+    DCC_ADDRESS_RECHECK_SECONDS ago (`force` asks regardless). A lookup that
+    fails keeps the address found before it: an old address may still be
+    right, and none at all refuses every send.
+    """
+    pinned = str(getattr(config, "MY_IP_OR_DOCK", "") or "").strip()
+    if pinned:
+        return resolve_dcc_address(lookup=lookup, log=log)
+    with runtime.dcc_address_lock:
+        now = time.monotonic() if now is None else now
+        found_at = runtime.dcc_address_found_at
+        if (not force and runtime.dcc_address_detected and found_at is not None
+                and now - found_at < DCC_ADDRESS_RECHECK_SECONDS):
+            return runtime.dcc_address_detected
+        found = resolve_dcc_address(lookup=lookup, log=log)
+        if found:
+            if runtime.dcc_address_detected and found != runtime.dcc_address_detected:
+                log(f"[IP CHECK] The public address changed from "
+                    f"{runtime.dcc_address_detected} to {found}.")
+            runtime.dcc_address_detected = found
+            runtime.dcc_address_found_at = now
+        elif runtime.dcc_address_detected:
+            log(f"[IP CHECK] Keeping the address found earlier, "
+                f"{runtime.dcc_address_detected}, until a lookup succeeds.")
+        return runtime.dcc_address_detected
+
+
+def claim_channel_sync(sock, epoch, late=False, log=print):
+    """Set config.bot_joined_channel for connection `epoch`, and start what
+    waits for it. Returns True if this call claimed it.
+
+    Only once something is known about who is in the channels. dcc.py's
+    stale-freeze sweep treats the flag as proof that channel_users is
+    authoritative; with it empty, every frozen user looks absent and their
+    queue gets reaped. So an activation that finds nobody - every channel
+    refused the first JOIN, a +r channel and an X login slower than the JOIN
+    - does not claim, and remembers that it is waiting.
+
+    `late` is the read loop asking, after a NAMES list (#1271). That half
+    was missing: the activation runs once per connection, so when the rejoin
+    on the advert timer got the bot in and the member list arrived, nothing
+    claimed sync until the next reconnect, which can be days away. Until
+    then cross-bot fetches waited as "joining", debug-channel lines piled up
+    unsent, users who left were never frozen and auto-refetch stayed off. A
+    late claim is only for a connection whose activation is already waiting,
+    so it never runs ahead of the activation's own settle.
+    """
+    with runtime.channel_sync_lock:
+        if config.connection_epoch != epoch:
+            return False
+        if late and runtime.channel_sync_waiting != epoch:
+            return False
+        if not getattr(config, 'channel_users', None):
+            runtime.channel_sync_waiting = epoch
+            return False
+        runtime.channel_sync_waiting = None
+        config.bot_joined_channel = True
+    if late:
+        log("[ACTIVATE] A channel's member list arrived after the activation; "
+            "channel sync claimed now.")
+    oserve_mod = sys.modules.get('oserve')
+    if oserve_mod:
+        oserve_mod.bot_joined_channel = True
+    # Before anything below runs the sweep (#652): the frozen timestamps get
+    # the outage added, so wake_restored_queues() judges them by online time
+    # only.
+    dcc.resume_freeze_clock()
+    # #530: queues restored from disk have no trigger of their own - a JOIN
+    # wakes only FROZEN users, and the global sweep otherwise runs when some
+    # other transfer completes. Look once, now that channel_users can be
+    # trusted.
+    threading.Thread(target=dcc.wake_restored_queues, args=(sock,), daemon=True).start()
+    # Same reasoning, for the auto-refetch sweep: it refuses outright until
+    # this same flag is set (see list_fetch.refetch_due_lists()'s own
+    # comment), and its background worker would otherwise wait up to an hour
+    # for its next scheduled pass before trying again - on a fresh start,
+    # exactly when a stale list is most likely to be sitting there due. Cheap
+    # to call on every reconnect too: lists_worth_refetching() already
+    # respects AUTO_REFETCH_INTERVAL_HOURS, so this is a no-op whenever
+    # nothing is actually due.
+    if getattr(config, 'AUTO_REFETCH_LISTS', False):
+        import list_fetch
+        threading.Thread(target=list_fetch.refetch_due_lists, daemon=True).start()
+    return True
 
 
 def ctcp_version_reply(user):
@@ -3007,7 +3217,9 @@ def irc_loop():
     import announce
     oserve = sys.modules.get('oserve')
     
-    config.MY_IP_OR_DOCK = resolve_dcc_address()
+    # Into runtime.dcc_address_detected, never MY_IP_OR_DOCK (#1271) - and
+    # looked up again at every registration, see refresh_dcc_address().
+    refresh_dcc_address(force=True)
     
      # ---------------------------------------------------------------------
     
@@ -3122,7 +3334,10 @@ def irc_loop():
         except Exception as state_err:
             print(f"[CONNECT] Could not reset the on-connect check: {state_err}")
         announce.is_ready = False
-        
+        # Until this server's 005 says otherwise (#1271): a reconnect may
+        # land on a server that folds differently from the last one.
+        runtime.server_casemapping = DEFAULT_CASEMAPPING
+
         # FIXED (issue #9): tracks WHICH channels were confirmed by 366, not just
         # a loose count. The old code counted every 366 line it saw, including the
         # debug channel's, so the threshold could be reached even if a real channel
@@ -3181,36 +3396,13 @@ def irc_loop():
                 print("[ACTIVATE] Connection changed while settling. Abandoning stale activation.")
                 return
 
-            # Only claim channel sync if NAMES actually populated something. The watchdog
-            # path can reach here without any 353 having arrived, and dcc.py's stale-freeze
-            # sweep treats bot_joined_channel as proof that channel_users is authoritative -
-            # with it empty, every frozen user looks absent and their queue gets reaped.
-            if getattr(config, 'channel_users', None):
-                config.bot_joined_channel = True
-                # Before anything below runs the sweep (#652): the frozen
-                # timestamps get the outage added, so wake_restored_queues()
-                # judges them by online time only.
-                dcc.resume_freeze_clock()
-                # #530: queues restored from disk have no trigger of their
-                # own - a JOIN wakes only FROZEN users, and the global sweep
-                # otherwise runs when some other transfer completes. Look
-                # once, now that channel_users can be trusted.
-                threading.Thread(target=dcc.wake_restored_queues, args=(sock,), daemon=True).start()
-                # Same reasoning, for the auto-refetch sweep: it refuses
-                # outright until this same flag is set (see
-                # list_fetch.refetch_due_lists()'s own comment), and its
-                # background worker would otherwise wait up to an hour for
-                # its next scheduled pass before trying again - on a fresh
-                # start, exactly when a stale list is most likely to be
-                # sitting there due. Cheap to call on every reconnect too:
-                # lists_worth_refetching() already respects
-                # AUTO_REFETCH_INTERVAL_HOURS, so this is a no-op whenever
-                # nothing is actually due.
-                if getattr(config, 'AUTO_REFETCH_LISTS', False):
-                    import list_fetch
-                    threading.Thread(target=list_fetch.refetch_due_lists, daemon=True).start()
-            else:
-                print("[ACTIVATE] No channel members known yet; advertising without claiming channel sync.")
+            # Only claim channel sync if NAMES actually populated something -
+            # see claim_channel_sync(). When nothing has, the claim waits for
+            # the first NAMES of this connection instead of the next one.
+            if not claim_channel_sync(sock, epoch):
+                print("[ACTIVATE] No channel members known yet; advertising "
+                      "without claiming channel sync until a channel's member "
+                      "list arrives.")
 
             oserve_mod = sys.modules.get('oserve')
             if oserve_mod:
@@ -3385,7 +3577,13 @@ def irc_loop():
                     # :Closing Link: <nick> (Max SendQ exceeded)" and the
                     # like. That line is the answer, and it was being read,
                     # matched by nothing, and dropped.
-                    recent_lines.append(line.strip()[:200])
+                    #
+                    # Printable text only: these are other people's lines too
+                    # (any channel member's message), printed to the
+                    # operator's terminal on the next drop, and an escape
+                    # sequence in one would act on that terminal (#670's
+                    # rule, on a path it did not cover).
+                    recent_lines.append(list.printable_text(line.strip())[:200])
                     # Our own modes (221), a hidden host (396) and a MODE on
                     # ourselves, for the check that the on-connect commands
                     # worked (#1066). Returns at once for anything else.
@@ -3400,18 +3598,18 @@ def irc_loop():
                     # setting nobody has on when the thing they need it for
                     # happens.
                     if line.startswith("ERROR ") or line.startswith("ERROR:"):
-                        print(f"[SERVER ERROR] {line.strip()}")
+                        print(f"[SERVER ERROR] {list.printable_text(line.strip())}")
                     if getattr(config, 'DEBUG_MODE', False):
                         is_channel_traffic = " PRIVMSG #" in line
                         is_for_me = f"PRIVMSG {config.NICKNAME}" in line or f" {config.NICKNAME} " in line or f"@{config.NICKNAME.lower()}" in line.lower()
                         if not is_channel_traffic or is_for_me or "ERROR" in line:
-                            print(f"[RAW IN] {line.strip()}")
+                            print(f"[RAW IN] {list.printable_text(line.strip())}")
                     # The server's last word before it hangs up (#663). It
                     # was read and dropped: a throttled reconnect printed
                     # "Server closed connection" and nothing about why, and
                     # the retry cadence that caused it stayed the same.
                     if line.startswith("ERROR ") or line.startswith("ERROR:"):
-                        print(f"[SERVER] {line}")
+                        print(f"[SERVER] {list.printable_text(line)}")
                         lowered = line.lower()
                         if "throttl" in lowered or "too fast" in lowered:
                             print("[SERVER] The server refuses a client that comes back too "
@@ -3453,6 +3651,13 @@ def irc_loop():
                         pong_code = parts[-1].strip()
                         s.sendall(f"PONG {pong_code}\r\n".encode("utf-8", errors="ignore"))
 
+                    # How this server folds case (#1271). Every channel
+                    # name the bot compares goes through irc_lower(), and
+                    # the JOIN goes out a few seconds after 005.
+                    if is_server_numeric(line, "005"):
+                        server_casemapping = isupport_casemapping(line)
+                        if server_casemapping:
+                            runtime.server_casemapping = server_casemapping
                     # 005 is where the server states its own limits, and it
                     # arrives after 001 - so by now the shortened nick has
                     # already been adopted above. This is the EXPLANATION, not
@@ -3544,6 +3749,14 @@ def irc_loop():
                             adopt_registered_nick(line)
                         joined = True
                         print(f"[INFO] Connected to the server. Waiting 5 seconds to settle before JOIN...")
+                        # The DCC address, looked at again for this
+                        # connection (#1271): the network is plainly up now,
+                        # and the drop that preceded it may have been the
+                        # ISP handing out a new address. Off the read thread
+                        # - the lookup can take five seconds.
+                        if not str(getattr(config, "MY_IP_OR_DOCK", "") or "").strip():
+                            threading.Thread(target=refresh_dcc_address,
+                                             daemon=True).start()
                         
                         def delayed_join(socket_conn, channels, epoch=my_epoch):
                             time.sleep(5)
@@ -3678,6 +3891,10 @@ def irc_loop():
                             announce.send_debug(
                                 f"Rejoined {back.group(1)}.", category="JOIN",
                                 notice="warning")
+                        # The member list an activation that found nobody
+                        # was waiting for (#1271) - see claim_channel_sync().
+                        if back and runtime.channel_sync_waiting == my_epoch:
+                            claim_channel_sync(s, my_epoch, late=True)
 
                     if joined and not getattr(config, 'activation_triggered', False) and " 366 " in line:
                         # FIXED (issue #9): parses WHICH channel the 366 line refers to instead
@@ -3693,7 +3910,7 @@ def irc_loop():
                         # never counted as confirmed at startup.
                         m366 = re.match(r"^:\S+ 366 \S+ (\S+)", line)
                         if m366 and is_valid_irc_target(m366.group(1)):
-                            confirmed_chan = m366.group(1).lower()
+                            confirmed_chan = channel_key(m366.group(1))
                             channels_confirmed.add(confirmed_chan)
                             print(f"[INFO] Received End of NAMES for {confirmed_chan} ({len(channels_confirmed & target_channels)}/{len(target_channels)} target channels confirmed)")
                         
@@ -3777,7 +3994,7 @@ def irc_loop():
                             r"^:\S+\s+353\s+\S+\s+(?:[=*@]\s+)?(\S+)\s+:(.+)$",
                             line)
                         if name_match and is_valid_irc_target(name_match.group(1)):
-                            chan = name_match.group(1).lower()
+                            chan = channel_key(name_match.group(1))
                             names = [n.strip("@+~&%").lower() for n in name_match.group(2).split()]
                             # A merge, except for the first line after a
                             # kick - see learn_channel_names().
@@ -3821,11 +4038,12 @@ def irc_loop():
                             joined_user = join_match[0]
                             joined_chan = join_match[1]
                             j_key = joined_user.lower()
+                            j_chan = channel_key(joined_chan)
                             
                             with runtime.channel_users_lock():
-                                if joined_chan.lower() not in config.channel_users:
-                                    config.channel_users[joined_chan.lower()] = set()
-                                config.channel_users[joined_chan.lower()].add(j_key)
+                                if j_chan not in config.channel_users:
+                                    config.channel_users[j_chan] = set()
+                                config.channel_users[j_chan].add(j_key)
 
                             # #376: does this look like a nick we just saw leave,
                             # reconnecting under the ordinary collision suffix?
@@ -3861,7 +4079,7 @@ def irc_loop():
                         part_match = parse_part(line)
                         if part_match and is_valid_irc_target(part_match[1]):
                             p_user = part_match[0].lower()
-                            p_chan = part_match[1].lower()
+                            p_chan = channel_key(part_match[1])
                             _forget_chat_peer(p_user, p_chan)
                             with runtime.channel_users_lock():
                                 if p_chan in config.channel_users and p_user in config.channel_users[p_chan]:
@@ -3924,8 +4142,7 @@ def irc_loop():
                                                          config.NICKNAME)).lower():
                             if note_kicked_from(kicked_chan, kicker):
                                 announce.send_debug(
-                                    f"Kicked from {kicked_chan} by {kicker}. "
-                                    f"Will try to rejoin on the next advert.",
+                                    kicked_notice(kicked_chan, kicker),
                                     category="PART", notice="warning")
                             else:
                                 # Not coming back, so nothing will ever
@@ -4012,6 +4229,12 @@ def irc_loop():
                     privmsg_parsed = parse_privmsg(line)
                     if privmsg_parsed:
                         user, user_host, target_chan, msg = privmsg_parsed
+                        # One of our channels under the server's spelling
+                        # ("#music{1}" for a configured "#music[1]") is
+                        # carried on in the configured one (#1271): the
+                        # queue rows, the per-channel lists and the replies
+                        # all look the channel up by what CHANNEL says.
+                        target_chan = configured_spelling(target_chan) or target_chan
                         msg = msg.strip()
                         if user.lower() == config.NICKNAME.lower():
                             continue
@@ -4326,9 +4549,9 @@ def irc_loop():
                                 if not commands.diagnostics_are_for_the_admin(user, user_host):
                                     continue
                                 with runtime.channel_users_lock():
-                                    have_count = hasattr(config, 'channel_users') and target_chan.lower() in config.channel_users
+                                    have_count = hasattr(config, 'channel_users') and channel_key(target_chan) in config.channel_users
                                     if have_count:
-                                        current_qty = len(config.channel_users[target_chan.lower()])
+                                        current_qty = len(config.channel_users[channel_key(target_chan)])
                                 # Queued VIP and paced, not sent straight to the
                                 # socket - same reasoning as the CTCP VERSION
                                 # reply above (#406): a direct send here shares

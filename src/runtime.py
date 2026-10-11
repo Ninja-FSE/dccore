@@ -74,6 +74,15 @@ packer_thread = None
 pack_job = None
 pack_lock = threading.Lock()
 
+# Who the folder packer holds user_processing_lock for, from the moment it
+# claims a nick until it releases it or hands the archive to its send (#1268):
+# {"nick": ...}. irc.note_nick_change() moves the lock to the new nick and
+# renames this holder under queue_lock in the same step, so the packer
+# releases the key the lock was moved to - not the nick it started with, which
+# left the new nick locked out for good. Here, with pack_job, because a
+# !rehash reloads dcc.py while a pack runs.
+pack_owner = None
+
 # The stop-file watcher (#1065, stopping.py): one per process, kept here so a
 # !rehash cannot start a second.
 stop_watcher_thread = None
@@ -84,6 +93,31 @@ stop_watcher_thread = None
 # timestamp is moved forward by the time spent here. Kept in this module so a
 # !rehash during the outage cannot lose it; None while the bot is up.
 freeze_clock_paused_at = None
+
+# CHANNEL SYNC THAT ARRIVES LATE (#1271). irc.claim_channel_sync() sets
+# config.bot_joined_channel once per connection, and two threads can get
+# there: the activation (after its five-second settle) and the read loop,
+# when a rejoin's NAMES fills channel_users on a connection whose activation
+# found it empty. `channel_sync_waiting` is the epoch of the connection whose
+# activation found nobody and is still waiting for a member list; None
+# otherwise. The lock keeps the two from claiming twice.
+channel_sync_lock = threading.Lock()
+channel_sync_waiting = None
+
+# HOW THIS SERVER FOLDS CASE (#1271): the CASEMAPPING token of its 005 line,
+# reset to the RFC 1459 default at every connection. irc.irc_lower() reads it.
+server_casemapping = "rfc1459"
+
+# THE DCC ADDRESS THE BOT DETECTED (#1271), kept apart from MY_IP_OR_DOCK,
+# which is the operator's pin and nothing else. Writing the detection into
+# MY_IP_OR_DOCK made the first answer look like a pin to every later lookup,
+# so the address was found once per process: a lookup that failed at boot,
+# or a public address the ISP changed, stayed wrong until a restart.
+# `dcc_address_found_at` is the time.monotonic() of the last lookup that
+# found one; the lock keeps two lookups from running at once.
+dcc_address_lock = threading.Lock()
+dcc_address_detected = ""
+dcc_address_found_at = None
 
 # Per-user bookkeeping -------------------------------------------------------
 failed_transfers = {}    # Failed-transfer counter, per user
@@ -465,6 +499,15 @@ private_message_decline_sends = []
 # payload, so a second lock would buy nothing but an ordering question.
 private_messages_lock = threading.Lock()
 
+# announce.py's save of the private messages, which is made from a thread of
+# its own a moment after a message is recorded - off the IRC read thread - and
+# shared by every message recorded before it runs. Whether one is on its way,
+# and that thread with the Event that cuts its wait short. Here rather than in
+# announce.py because !rehash reloads that module.
+private_messages_save_guard = threading.Lock()
+private_messages_save_pending = False
+private_messages_saver = None   # (thread, wake event) while one is waiting
+
 kicked_channels = {}
 kicked_channels_lock = threading.Lock()
 
@@ -589,6 +632,48 @@ def resolve_display_nick(nick):
 # lines from one recv() buffer both walked the master list at once. One lock
 # for both flags, so a search and a rebuild cannot slip past each other.
 list_update_gate = threading.Lock()
+
+# The dashboard login (webserver.py) --------------------------------------
+#
+# web_login_lock guards webserver._web_bad_ips and _web_logins_in_flight,
+# and it makes "may this address try again?" and "this attempt counts" ONE
+# step. They used to be two: the login checked the address, spent a tenth
+# of a second hashing the password, and only then counted the failure - so
+# a burst of parallel POSTs from one address all passed the check before
+# any of them was counted, and the limit of MAX_PASSWORD_ATTEMPTS guesses
+# per block window became as many guesses as could be sent at once.
+#
+# web_password_checks caps how many dashboard passwords are hashed at the
+# same time, across every address. Each check is a deliberately slow PBKDF2
+# run, and a flood of logins - even from many addresses, each within its
+# own limit - must not take the CPU from the transfers.
+#
+# web_sessions_lock guards the dashboard's table of live sessions (kept per
+# app inside webserver.create_app()), which is what lets a logout end a
+# session on the server and not only in the browser that clicked it.
+WEB_PASSWORD_CHECKS_AT_ONCE = 2
+web_login_lock = threading.Lock()
+web_password_checks = threading.BoundedSemaphore(WEB_PASSWORD_CHECKS_AT_ONCE)
+web_sessions_lock = threading.Lock()
+
+# The DCC console's login and token store. adminchat.py is not reloaded by
+# !rehash, but db.py is, and both locks are taken around db.py's own calls;
+# here for the same reason as every other lock in this file.
+#
+# admin_bad_ip_lock: adminchat._bad_ips, the per-address count of failed
+# console passwords. A login attempt is checked against the block AND counted
+# under one hold of it, before the password is verified - checked first and
+# counted only after the (slow, PBKDF2) verify, parallel logins from one
+# address each passed the check before any of them was counted, and got more
+# guesses than MAX_PASSWORD_ATTEMPTS between them.
+#
+# admin_tokens_lock: the paired-client token store's load-modify-save in the
+# console's `pair` and `unpair`. Without it a `pair` in one session could
+# write back the store it loaded before an `unpair` in another removed a
+# token, and the revoked token worked again. Lock order: this one first, then
+# disk_lock (db.save_admin_tokens() takes it inside).
+admin_bad_ip_lock = threading.Lock()
+admin_tokens_lock = threading.Lock()
 
 # Live transfer rate ---------------------------------------------------------
 # Sampled by stats_mgr.live_speed(); kept here rather than in that module so a

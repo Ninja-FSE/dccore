@@ -14,7 +14,6 @@
 # now, and are bound below in section 8. See that module's docstring for why:
 # !rehash reloads THIS file, which reset every one of them.
 import os
-import re
 import sys
 import runtime
 
@@ -22,7 +21,7 @@ import runtime
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
-SCRIPT_VERSION: str = "DCCore v1.16.1"
+SCRIPT_VERSION: str = "DCCore v1.16.2"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
@@ -250,7 +249,10 @@ LIST_VIDEO_COMPANION_EXTENSIONS: list = [
 #
 # A folder earns a !rar row only if it holds one of these. Everything else is
 # still listed and still directly requestable by name - this decides packing,
-# nothing else.
+# nothing else. A multi-disc album counts as holding them when its disc
+# folders (CD1, Disc 2) do: its row names the album above them (#1270). The
+# library folder itself and an artist folder never get a row, whatever they
+# hold - the bot refuses to pack either.
 #
 # It is a set of its own, and not simply "whatever is in the list", because
 # for a while it WAS that: a folder became packable if it held any file the
@@ -540,7 +542,7 @@ ANNOUNCE_TRANSFERS: bool = True
 # ---------------------------------------------------------------------
 # 4. CHANNEL ADVERTISING (THE ADVERT CLOCK)
 # ---------------------------------------------------------------------
-ANNOUNCE_INTERVAL: int = 300     # Time between each channel advert, in seconds
+ANNOUNCE_INTERVAL: int = 300     # Time between each channel advert, in seconds (at least 60)
 
 # ---------------------------------------------------------------------
 # 5. LIMITS, SLOTS AND QUEUE CONTROL
@@ -1335,6 +1337,22 @@ WEBUI_FOLDER_BROWSER_ENABLED: bool = False
 WEBUI_HOST: str = "127.0.0.1"
 WEBUI_PORT: int = 8420    # The dashboard's port; open http://WEBUI_HOST:WEBUI_PORT in a browser
 
+# Extra host NAMES the dashboard answers to, beyond the ones it always does.
+#
+# The dashboard always answers to an IP address (http://127.0.0.1:8420/,
+# http://192.168.1.20:8420/), to localhost, and - when WEBUI_HOST is not
+# loopback - to this computer's own name (http://my-pc:8420/). Any other
+# name in the browser's address bar is refused: that is how a web page
+# that points its own name at your machine (DNS rebinding) is kept away
+# from the login. If you open the dashboard by another name - a name your
+# router gives the machine, a reverse proxy, a VPN name - list it here,
+# separated by commas. The port is not part of the name.
+#
+#   WEBUI_ALLOWED_HOSTS = dccore.lan, dashboard.example.org
+#
+# A single * turns the check off.
+WEBUI_ALLOWED_HOSTS: list = []
+
 # ---------------------------------------------------------------------
 # 9. LOCAL OVERRIDES (not in git)
 # ---------------------------------------------------------------------
@@ -1493,7 +1511,27 @@ try:
 except ImportError:
     pass
 
-settings_file.apply_to(globals())
+# The report is kept (_SETTINGS_REPORT) so a reload can tell an unreadable
+# settings.conf from one that says less. A !rehash re-executes this file in
+# the same namespace, so the report of the previous read is still here. When
+# the file cannot be read now - saved in the wrong encoding, held by
+# antivirus, on a share that dropped out - what it said at the last read is
+# applied again rather than the shipped defaults: those would quietly widen
+# who is admin (ADMIN_HOSTMASKS back to none, so the nick alone) on a bot that
+# is already running. At startup there is no previous read, and
+# oserve.startup()'s REQUIRED gate says what is wrong, as before.
+_PREVIOUS_SETTINGS_REPORT = globals().get("_SETTINGS_REPORT")
+_SETTINGS_REPORT = settings_file.apply_to(globals())
+if (_SETTINGS_REPORT.get("read_error") and _PREVIOUS_SETTINGS_REPORT
+        and _PREVIOUS_SETTINGS_REPORT.get("path") == _SETTINGS_REPORT.get("path")
+        and _PREVIOUS_SETTINGS_REPORT.get("applied")):
+    globals().update(_PREVIOUS_SETTINGS_REPORT["applied"])
+    _SETTINGS_REPORT["applied"] = dict(_PREVIOUS_SETTINGS_REPORT["applied"])
+    _SETTINGS_REPORT["kept_last_read"] = True
+    print(f"[CONFIG] Kept the {len(_SETTINGS_REPORT['applied'])} setting(s) settings.conf "
+          f"held at its last good read, since it cannot be read now. Fix the file and "
+          f"rehash again; a restart would refuse to start with it like this.")
+del _PREVIOUS_SETTINGS_REPORT
 
 # ---------------------------------------------------------------------
 # 10. DERIVED VALUES (computed AFTER local overrides, never before)
@@ -1558,13 +1596,12 @@ if not BROADCAST_SEARCH_CHANNEL and CHANNEL:
 # is legal in a path are different sets, and only one of them is ours to
 # choose. Not imported from there - list.py and list_fetch.py both `import
 # defaults as config`, and defaults.py loads first.
-_LIST_BASE_NAME_CHARSET_RE = re.compile(r'[^\w\-.\[\]{}^`]')
-
-
+#
+# The rule itself lives in settings_file (#1272), which also refuses a typed
+# LIST_BASE_NAME that breaks it: the derived name and the typed one are now
+# held to the same charset, and settings_file is imported above.
 def _sanitize_list_base_name(name):
-    cleaned = _LIST_BASE_NAME_CHARSET_RE.sub('_', str(name or ''))
-    cleaned = cleaned.strip().strip('.').strip()
-    return cleaned or "DCCore"
+    return settings_file.sanitize_list_base_name(name)
 
 
 def derive_list_base_name():

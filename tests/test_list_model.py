@@ -779,7 +779,8 @@ class FileDirectoryIsOnlyTheFallback(ListCase):
                                 for line in handle.read().splitlines())
         body = code.split("def startup(", 1)[1].split(chr(10) + "def ", 1)[0]
 
-        self.assertIn("library.folders()", body)
+        # Every list's folders since #1272, not only the primary's.
+        self.assertIn("configured = library.every_folder()", body)
         self.assertNotIn("if not config.FILE_DIRECTORY:", body)
         self.assertNotIn("os.path.exists(config.FILE_DIRECTORY)", body)
 
