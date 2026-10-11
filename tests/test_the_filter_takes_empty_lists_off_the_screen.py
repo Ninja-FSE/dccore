@@ -186,7 +186,7 @@ class ANewTermIsANewQuestion(unittest.TestCase):
         body = function("runFilelistsFilter")
 
         self.assertIn("state.filelistsRevealEmpty = false;", body)
-        self.assertIn("state.filelistsExcluded = {};", body)
+        self.assertIn("state.filelistsExcluded = Object.create(null);", body)
 
     def test_it_starts_off(self):
         source = read("app.js")

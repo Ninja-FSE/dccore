@@ -206,10 +206,14 @@ class TheWrittenList(DCCoreTestCase):
         return re.sub(rb" in \d\d:\d\d:\d\d \( [\d,]+ Files Per Second \)", b"", data, count=1)
 
     def rows(self, tree):
-        """(folder, name, size) as the rebuild keys them, in list order."""
+        """(folder, name, size) as the rebuild keys them, in list order.
+
+        Case-insensitive, with the exact folder and then the exact name
+        breaking a tie (#1270): Case/ABC and Case/abc are two blocks, not
+        rows interleaved by name."""
         rows = [(os.path.join(self.label, *folder.split("/")) if folder else self.label, name, size)
                 for folder, files in tree for name, size in files]
-        return sorted(rows, key=lambda r: (r[0].lower(), r[1].lower()))
+        return sorted(rows, key=lambda r: (r[0].lower(), r[0], r[1].lower(), r[1]))
 
     def rendered(self, rows):
         """Headings, summaries and rows, rendered with the OLD _one_line()."""
@@ -250,8 +254,11 @@ class TheWrittenList(DCCoreTestCase):
         packable = tuple(config.RAR_EXTENSIONS)
         folders = []
         for folder, name, _size in self.rows(MUSIC):
-            if name.lower().endswith(packable) and folder not in folders:
-                folders.append(folder)
+            # The library root's loose track earns no row since #1270: dcc.py
+            # refuses to pack the scan folder itself.
+            row = update_list.rar_row_folder(folder)
+            if name.lower().endswith(packable) and row is not None and row not in folders:
+                folders.append(row)
         expected = [f"!SomeBot !rar "
                     + old_one_line(f"{list_mod.LIST_FOLDER_PREFIX}{folder}{BACKSLASH}".replace("/", BACKSLASH))
                     for folder in folders]
@@ -294,10 +301,12 @@ class TheWrittenList(DCCoreTestCase):
         self.assertEqual(nick_folders, nick_small)
 
     def test_each_folder_is_one_write_however_many_rows_it_holds(self):
-        """Without the case twins: two folders differing only in case share
-        one place in the sort, so their rows interleave by name and each
-        change of folder repeats a heading - as it always has. That makes
-        their heading count grow with their rows."""
+        """Without the case twins, as before #1270: two folders differing
+        only in case used to share one place in the sort, so their rows
+        interleaved by name and each change of folder repeated a heading.
+        They are two contiguous blocks now - see
+        test_folders_differing_in_case_stay_apart.py - and are left out here
+        only so this count stays the one it always was."""
         tree = [entry for entry in MUSIC + FILMS if not entry[0].startswith("Case/")]
         _nick, small = self.counted(tree, "small")
         _nick, large = self.counted(more_rows(tree, 4), "large")

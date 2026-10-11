@@ -184,6 +184,11 @@ class TheRewriteIsAFullRebuildZipped(TheRewriteIsAFullRebuild):
     fmt = "zip"
 
     def test_the_archive_holds_the_album_and_film_lists_too(self):
+        # An album dcc.py would pack, <label>/<artist>/<album>. The fixture's
+        # albums sit directly in the library - artist roots, which dcc.py
+        # refuses - and earn no album row since #1270.
+        self.write(os.path.join("Example Artist", "Album Four"),
+                   "Example Artist - 01 - Fourth.mp3", frames(500))
         with self.frozen():
             self.rebuild()
         names = sorted(self.members(self.artifact()))

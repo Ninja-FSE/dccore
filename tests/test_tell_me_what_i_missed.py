@@ -484,10 +484,12 @@ class TheThingsWorthTellingSomebodyAbout(DCCoreTestCase):
         self.assertIn('notice="error"', gave_up)
 
     def test_a_kick_is_a_warning(self):
-        """It happened, and a rejoin is already scheduled. Worth knowing,
-        nothing to do right now."""
+        """It happened, and a rejoin is already scheduled - or, with
+        REJOIN_ATTEMPTS at 0, the operator chose none. Worth knowing,
+        nothing to do right now. Found by the call that sends the text
+        (#1281 moved the text into kicked_notice())."""
         body = self.source("irc.py")
-        kicked = body.split("Kicked from {kicked_chan}", 1)[1]
+        kicked = body.split("kicked_notice(kicked_chan, kicker)", 1)[1]
 
         self.assertIn('notice="warning"', kicked.split("else:", 1)[0])
 

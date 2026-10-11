@@ -669,6 +669,7 @@
   "settings.field.WEBUI_ENABLED": "Enable web dashboard",
   "settings.field.WEBUI_HOST": "Host",
   "settings.field.WEBUI_PORT": "Port",
+  "settings.field.WEBUI_ALLOWED_HOSTS": "Other names the dashboard answers to",
   "settings.field.WEBUI_FOLDER_BROWSER_ENABLED": "Folder picker on the Settings page",
   "settings.field.WEBUI_CONSOLE_ENABLED": "Enable the Console page (remote admin)",
   "settings.field.WEBUI_OPEN_BROWSER": "Open the dashboard in a browser at startup",

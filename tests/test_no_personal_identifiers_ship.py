@@ -199,6 +199,9 @@ def word_hash(word):
 ALLOWED_IP = re.compile(
     r"^(127\.|0\.0\.0\.0|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|"
     r"192\.0\.2\.|198\.51\.100\.|203\.0\.113\.|1\.2\.3\.4|8\.8\.8\.8|1\.1\.1\.1|"
+    # 100.64.0.0/10: carrier-grade NAT's shared space (RFC 6598), which is
+    # never routed on the internet - a range like 10/8, not a machine.
+    r"100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|"
     # 224-255: multicast, reserved and broadcast. Not anybody's machine, and
     # the address tests use them deliberately to check they are refused.
     r"2(2[4-9]|[3-4]\d|5[0-5])\.)")

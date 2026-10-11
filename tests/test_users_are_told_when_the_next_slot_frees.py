@@ -312,6 +312,8 @@ class TheCtcpSlotsLineIsUnchanged(UserNoticeCase):
     def setUp(self):
         super().setUp()
         self.set_config(CHANNEL=CHANNEL, ANNOUNCE_INTERVAL=0.01, SCRIPT_VERSION="DCCore-test")
+        # settings_file.MINIMUMS floors the real wait at a minute (#1272).
+        self.patch(announce, "advert_interval", lambda: 0.01)
         self.patch(announce, "current_worker_id", announce.current_worker_id)
         self.patch(announce, "is_ready", announce.is_ready)
         self.patch(library, "list_name_for_request", lambda channel=None: "main")

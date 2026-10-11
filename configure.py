@@ -142,6 +142,42 @@ def _current(name, fallback=""):
     return value if value else fallback
 
 
+def settle_music_directory(answer, current_file_directory=""):
+    """The music folder from the first `answer` to its question, or "" to
+    set it later - asking again until it is a folder or blank.
+
+    #1272: Explorer's "Copy as path" always adds double quotes, and dragging
+    a folder onto a terminal quotes it too. The answer was used as typed, so
+    an existing folder was reported as not existing, the offer to create it
+    failed with WinError 123, and the question looped; on Linux and macOS
+    answering y CREATED a folder literally named with the quotes, relative
+    to wherever this ran, and wrote that as FILE_DIRECTORY. The quoting is
+    taken off the way the vars.ini question already does it, and only a full
+    path is ever offered for creating.
+    """
+    file_directory = settings_file.unquote_path(answer) or current_file_directory
+    while file_directory and not os.path.isdir(file_directory):
+        if not os.path.isabs(file_directory):
+            print(f"  {file_directory!r} is not a full path - give the whole path, "
+                  f"starting from the drive or from /.")
+            file_directory = settings_file.unquote_path(
+                input("  Music directory (full path, or leave blank to set it later): "))
+            continue
+        print(f"  {file_directory!r} does not exist.")
+        create = input("  Create it now? [y/N]: ").strip().lower()
+        if create in ("y", "yes"):
+            try:
+                os.makedirs(file_directory, exist_ok=True)
+            except OSError as err:
+                print(f"  Could not create it: {err}")
+            else:
+                break
+        else:
+            file_directory = settings_file.unquote_path(
+                input("  Music directory (full path, or leave blank to set it later): "))
+    return file_directory
+
+
 def collect_answers():
     """Returns (changes, password_hash). `changes` is already the exact
     {NAME: value} dict write_settings_conf() writes as-is - built here,
@@ -170,7 +206,11 @@ def collect_answers():
                   check=settings_file.server_problem)
     changes["SERVER"] = server
 
-    channel = _ask("Channel(s), comma-separated", default=_current("CHANNEL"))
+    # The browser page's rule, through settings_file (#1272): "music" and
+    # "#music #rock" were written here, and the bot then sent "JOIN music"
+    # or joined #music with "#rock" as its key.
+    channel = _ask("Channel(s), comma-separated", default=_current("CHANNEL"),
+                   check=settings_file.channels_problem)
     changes["CHANNEL"] = channel
 
     admin_nick = _ask("Admin nick (who may run !ban/!rehash/!update/!clearqueue)",
@@ -242,20 +282,8 @@ def collect_answers():
     print("page once it is running, if you would rather do it there.")
     current_file_directory = _current("FILE_DIRECTORY")
     suffix = f" [{current_file_directory}]" if current_file_directory else ""
-    file_directory = input(f"Music directory (full path){suffix}: ").strip() or current_file_directory
-    while file_directory and not os.path.isdir(file_directory):
-        print(f"  {file_directory!r} does not exist.")
-        create = input("  Create it now? [y/N]: ").strip().lower()
-        if create in ("y", "yes"):
-            try:
-                os.makedirs(file_directory, exist_ok=True)
-            except OSError as err:
-                print(f"  Could not create it: {err}")
-            else:
-                break
-        else:
-            file_directory = input("  Music directory (full path, or leave "
-                                   "blank to set it later): ").strip()
+    file_directory = settle_music_directory(
+        input(f"Music directory (full path){suffix}: "), current_file_directory)
     if file_directory:
         changes["FILE_DIRECTORY"] = file_directory
     else:
@@ -646,12 +674,49 @@ def offer_to_generate_master_list(file_directory_set):
         print("        the problem is fixed.")
 
 
+def settings_conf_problem():
+    """Why settings.conf cannot be edited right now, or None.
+
+    #1272: one malformed line makes the whole file unreadable, and every
+    answer below was then asked for, the password written, and the save of
+    the rest died with a SettingsWriteError traceback. Asked before the
+    first question instead, with the line to fix.
+    """
+    report = settings_file.recheck(vars(config))
+    if report["read_error"]:
+        return f"{report['path']} cannot be read: {report['read_error']}"
+    return None
+
+
 def main():
+    """The guided setup. Returns the exit code: 0 when it is done, 1 when
+    settings.conf could not take the answers - said on the console, never
+    as a traceback (#1272)."""
+    problem = settings_conf_problem()
+    if problem:
+        print(f"[SETUP] {problem}")
+        print("[SETUP] Nothing was asked and nothing was written. Fix that line (or put")
+        print("        the file aside), then run this again.")
+        return 1
     changes, password_hash = collect_answers()
+    # Asked BEFORE the password is written (#1272): the two writes below are
+    # not one transaction, and a settings.conf that refused the save used to
+    # fail after admin_config.py already held the new password.
+    try:
+        settings_file.check_save(vars(config), changes)
+    except settings_file.SettingsWriteError as err:
+        print(f"[SETUP] Your answers cannot be saved to settings.conf: {err}")
+        print("[SETUP] Nothing was written - the admin password is unchanged too.")
+        return 1
     # The password file first - the only order that fails safe if the second
     # write does not happen; webserver.apply_setup() says why (#624).
     write_admin_config_password(password_hash)
-    write_settings_conf(changes)
+    try:
+        write_settings_conf(changes)
+    except (settings_file.SettingsWriteError, OSError) as err:
+        print(f"[SETUP] The password was saved, but settings.conf was not: {err}")
+        print("[SETUP] Fix that and run this again - your answers are asked for again.")
+        return 1
     offer_to_generate_master_list("FILE_DIRECTORY" in changes)
     offer_to_import_omenserve_stats()
 
@@ -665,6 +730,7 @@ def main():
     print("    scripts\\windows\\start-dccore.bat check     (Windows)")
     print()
     print("Then start the daemon the same way, without \"check\".")
+    return 0
 
 
 def offer_flask_if_the_dashboard_is_on():
@@ -777,7 +843,7 @@ if __name__ == "__main__":
             print("\n  Skipped.")
             sys.exit(0)
     try:
-        main()
+        sys.exit(main())
     except (KeyboardInterrupt, EOFError):
         print("\nSetup cancelled - nothing was written past what already "
               "completed above.")

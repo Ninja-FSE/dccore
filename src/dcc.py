@@ -67,6 +67,64 @@ def names_a_remote_or_absolute_path(name, windows=None):
     return False
 
 
+def names_a_hidden_part_of_a_file(name, windows=None):
+    """True for a requested name that would open something other than the file
+    the list names: a hidden stream or fork of it, or the file under a second
+    spelling.
+
+    The containment check cannot see these. They resolve INSIDE the library,
+    to a path that exists, because they are a file of the library read a
+    different way:
+
+    - On Windows, a ':' in a name component addresses an NTFS alternate data
+      stream ("track.flac:Zone.Identifier", or "track.flac::$DATA" for the
+      main stream under another name). A stream is never in any list, and the
+      one Windows writes on every downloaded file records where the file was
+      downloaded from - the operator's own browsing, URL and all.
+    - On Windows, a component that ends in a dot or a space is trimmed by the
+      file system before it is opened, so "track.flac." opens "track.flac"
+      under a name no list ever wrote, and the queue's "already asked for"
+      check (#1077) and the download counter both see a different file.
+    - On macOS, a "..namedfork" component opens a file's resource fork.
+
+    No Windows file can have ':' in its name or end in a dot or a space, so
+    no legitimate request on Windows ever contains them, and refusing them
+    there takes nothing away. On Linux and macOS both are ordinary, legal
+    characters ("Live: 1999.flac", "R.E.M."), so those two are refused only
+    on Windows (`windows` overrides, for tests, as it does above).
+    "..namedfork" is refused everywhere: no library holds a folder by that
+    name. Device names ("NUL", "CON") need nothing here - every file system
+    call on a request goes through platform_compat.long_path(), whose \\\\?\\
+    prefix makes Windows look for a file by that literal name instead.
+    """
+    if windows is None:
+        windows = platform_compat.IS_WINDOWS
+    for part in re.split(r"[\\/]", str(name)):
+        if part in ("", ".", ".."):
+            continue
+        if part.lower() == "..namedfork":
+            return True
+        if windows and (":" in part or part[-1] in ". "):
+            return True
+    return False
+
+
+def resolves_to_a_stream(path, windows=None):
+    """True for a resolved path whose part after the drive holds a ':'.
+
+    The second gate behind names_a_hidden_part_of_a_file(): that one reads
+    the request, this reads the path the lookup settled on, whichever of the
+    memories, the list scan or the walk produced it. On Windows a ':' after
+    the drive can only be an alternate data stream.
+    """
+    if windows is None:
+        windows = platform_compat.IS_WINDOWS
+    if not windows:
+        return False
+    import ntpath
+    return ":" in ntpath.splitdrive(str(path))[1]
+
+
 # A LIBRARY-WIDE LOOKUP IS THE EXPENSIVE THING A REQUEST CAN ASK FOR (#580).
 # A name that is not in the first folder's root makes handle_download_request()
 # read every published list and then walk every configured folder; each request
@@ -963,6 +1021,58 @@ def channel_containing_user(user_key):
     return None
 
 
+def _archive_key(path):
+    """One spelling of an archive's path, for comparing two of them (#1268)."""
+    return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+
+
+def _transfer_path(tx):
+    """The file a transfer row is sending: its own "path" (the direct send and
+    a packed archive's handoff carry one), else its queue row's (#1268)."""
+    held = tx.get("path")
+    if not held and isinstance(tx.get("queue_row"), dict):
+        held = tx["queue_row"].get("path")
+    return held
+
+
+def temp_archive_in_use(path, ignoring=()):
+    """Does anything still need the temp archive at `path`? Caller holds queue_lock.
+
+    THE ONE ANSWER TO "MAY THIS ARCHIVE GO" (#1268). A packed archive's disk
+    name comes from its FOLDER, not from who asked (_rar_archive_disk_name()),
+    so every nick that queued the same album ends up naming one file. Four
+    places deleted it, each with its own idea of "still needed": the freeze
+    sweep and the freeze timer asked nobody, and the send's cleanup and
+    discard_orphaned_temp_archives() compared the OFFERED name - the leaf
+    alone, so a different album with the same leaf name kept an archive on
+    disk for good. The packer asked nobody either and deleted another nick's
+    waiting archive as "stale".
+
+    Needed means, by path:
+      * a queue row of any nick that names it as a packed archive - except the
+        rows in `ignoring`, the ones the caller is about to drop;
+      * a transfer sending it right now;
+      * the pack that is writing it.
+    """
+    wanted = _archive_key(path)
+    for rows in list(getattr(config, "dcc_queue", {}).values()):
+        for row in rows or ():
+            if not isinstance(row, dict) or any(row is gone for gone in ignoring):
+                continue
+            if row.get("is_temporary_zip") is not True or row.get("is_unpacked_rar_folder"):
+                continue
+            if row.get("path") and _archive_key(row["path"]) == wanted:
+                return True
+    for tx in getattr(config, "active_transfers", []):
+        held = _transfer_path(tx)
+        if held and _archive_key(held) == wanted:
+            return True
+    job = runtime.pack_job
+    if job is not None and job.get("archive") and _archive_key(job["archive"]) == wanted:
+        return True
+    return False
+
+
 def discard_orphaned_temp_archives(user_key, rows=None):
     """Delete the temp .rar files that only `user_key`'s queue rows still name.
 
@@ -973,16 +1083,19 @@ def discard_orphaned_temp_archives(user_key, rows=None):
     Four paths delete a whole queue - the freeze-timeout sweep, the per-user
     freeze timer, !clearqueue, and the user's own @<nick>-remove / CTCP REMOVE.
     Only the first three cleaned up; REMOVE, the one users actually type, did
-    not. This is that cleanup, in one place.
+    not. This is that cleanup, in one place - and since #1268 the two freeze
+    paths use it too: their own loops deleted every archive the expired queue
+    named, including one another nick's row was still waiting to send.
 
     Two rows are deliberately skipped:
 
     * is_unpacked_rar_folder rows, whose "path" is the source album directory in
       the music library, not a temp file. Deleting that would delete the music.
-    * archives another queue still points at, or that a transfer is streaming
-      right now. Archive names come from the FOLDER, not the user
-      (dcc.py builds "{clean_folder_name}.rar"), so two people who queued the
-      same album share one file on disk.
+    * archives another queue row still points at, that a transfer is streaming
+      right now or that a pack is writing - temp_archive_in_use(), by path.
+      Archive names come from the FOLDER, not the user
+      (_rar_archive_disk_name()), so two people who queued the same album
+      share one file on disk.
 
     `rows`: only these rows are being dropped (one file out of a queue), so the
     archives the user's OTHER rows still name are kept. None means the whole
@@ -995,9 +1108,7 @@ def discard_orphaned_temp_archives(user_key, rows=None):
     if user_key not in queue:
         return removed
 
-    dropping = queue[user_key] if rows is None else rows
-    staying = [] if rows is None else [
-        r for r in queue[user_key] if not any(r is d for d in rows)]
+    dropping = list(queue[user_key] if rows is None else rows)
     for f_obj in dropping:
         if not isinstance(f_obj, dict):
             continue
@@ -1007,15 +1118,10 @@ def discard_orphaned_temp_archives(user_key, rows=None):
         if not temp_path or not os.path.exists(temp_path):
             continue
 
-        still_needed = any(
-            isinstance(other, dict) and other.get('path') == temp_path
-            for other_key, files in queue.items() if other_key != user_key
-            for other in files
-        ) or any(isinstance(other, dict) and other.get('path') == temp_path for other in staying)
-        if not still_needed:
-            still_needed = any(tx.get('file') == f_obj.get('file')
-                               for tx in getattr(config, 'active_transfers', []))
-        if still_needed:
+        # By PATH, through the one answer every deleter now shares (#1268):
+        # the offered name is the leaf alone, and a different album with the
+        # same leaf name kept this archive on disk for good.
+        if temp_archive_in_use(temp_path, ignoring=dropping):
             continue
 
         try:
@@ -1212,6 +1318,12 @@ class _ShortSend(Exception):
     reported as "[DB ERROR] Could not increment the sharing statistics" would
     send the next reader looking for a database fault that never happened.
     """
+
+
+class _AlreadyHeld(Exception):
+    """Raised, like _ShortSend, to skip the completion bookkeeping - for a send
+    that completed with nothing on the wire because the receiver resumed at
+    the end of the file. See `already_held` in start_dcc_send()."""
 
 
 def release_queue_entry(user, next_file, delivered, reason="", cancelled=False, shown_name=None):
@@ -1430,8 +1542,21 @@ def get_total_queued_count():
         total += len(files)
     return total
 
+def dcc_address():
+    """The address a DCC offer carries: MY_IP_OR_DOCK when the operator
+    pinned one, otherwise the one irc.refresh_dcc_address() detected, or ""
+    while nothing is known (#1271).
+
+    Two names because they are two facts. The detection used to be written
+    into MY_IP_OR_DOCK, and from then on it read as a pin, so it was never
+    looked up again for the life of the process.
+    """
+    pinned = str(getattr(config, "MY_IP_OR_DOCK", "") or "").strip()
+    return pinned or str(runtime.dcc_address_detected or "").strip()
+
+
 def get_public_ip_long():
-    """Convert config.MY_IP_OR_DOCK into the mIRC-compatible long format, or 0
+    """Convert dcc_address() (MY_IP_OR_DOCK, or the detected address) into the mIRC-compatible long format, or 0
     if it is blank or not a dotted-quad at all.
 
     Deliberately a pure converter, and it stays one. An earlier version of this
@@ -1442,7 +1567,7 @@ def get_public_ip_long():
     that purpose. Only the file-transfer path needs the stricter rule, so the
     stricter rule lives there - see is_offerable_to_strangers() below.
     """
-    text = str(getattr(config, "MY_IP_OR_DOCK", "") or "").strip()
+    text = dcc_address()
     if not text:
         return 0
     try:
@@ -1476,8 +1601,7 @@ def is_offerable_to_strangers(ip_text=None):
     """
     import ipaddress
 
-    text = str(ip_text if ip_text is not None
-               else getattr(config, "MY_IP_OR_DOCK", "") or "").strip()
+    text = str(ip_text if ip_text is not None else dcc_address()).strip()
     if not text:
         return False
     try:
@@ -1610,8 +1734,12 @@ def frozen_users_channel_is_synced(user_key):
     chan = announce_channel_for(rows[0]) if rows else None
     if not chan:
         return True
+    # Under the server's casemapping (#1271): a row queued before the read
+    # loop carried the configured spelling may still hold the server's.
+    import irc
+    key = irc.channel_key(chan)
     with runtime.channel_users_lock():
-        return str(chan).lower() in getattr(config, "channel_users", {})
+        return key in getattr(config, "channel_users", {})
 
 
 def freeze_absent_user(irc_sock, user, target_chan):
@@ -1714,10 +1842,9 @@ def freeze_absent_user(irc_sock, user, target_chan):
             if isinstance(frozen, dict):
                 still_frozen = frozen.pop(t_key, None) is not None
             if still_frozen and t_key in config.dcc_queue:
-                for f_obj in config.dcc_queue[t_key]:
-                    if isinstance(f_obj, dict) and f_obj.get('is_temporary_zip') is True and os.path.exists(f_obj['path']) and not f_obj.get('is_unpacked_rar_folder'):
-                        try: os.remove(f_obj['path'])
-                        except: pass
+                # Not every archive the queue names (#1268): another nick's
+                # row may be waiting to send the same one.
+                discard_orphaned_temp_archives(t_key)
                 del config.dcc_queue[t_key]
                 db.save_dcc_queue()
         if still_frozen:
@@ -1825,10 +1952,8 @@ def check_queue_and_send(irc_sock, completed_user):
                 # absence - see frozen_users_channel_is_synced().
                 if (current_time - freeze_timestamp) > FREEZE_TIMEOUT and frozen_users_channel_is_synced(f_user):
                     if f_user in config.dcc_queue:
-                        for f_obj in config.dcc_queue[f_user]:
-                            if isinstance(f_obj, dict) and f_obj.get('is_temporary_zip') is True and os.path.exists(f_obj['path']) and not f_obj.get('is_unpacked_rar_folder'):
-                                try: os.remove(f_obj['path'])
-                                except: pass
+                        # The archives no other row or send needs (#1268).
+                        discard_orphaned_temp_archives(f_user)
                         del config.dcc_queue[f_user]
                         db.save_dcc_queue()
                     if f_user in config.frozen_queues:
@@ -1938,6 +2063,11 @@ def check_queue_and_send(irc_sock, completed_user):
                         if not hasattr(config, 'user_processing_lock'):
                             config.user_processing_lock = set()
                         config.user_processing_lock.add(completed_user.lower())
+                        # Who holds the claim, kept where a rename can follow
+                        # it (#1268): irc.note_nick_change() renames this
+                        # holder under queue_lock as it moves the lock.
+                        pack_owner = {"nick": completed_user}
+                        runtime.pack_owner = pack_owner
 
                 if pack_turned_away:
                     # A pack that takes no slot leaves the one just freed to the
@@ -1965,31 +2095,43 @@ def check_queue_and_send(irc_sock, completed_user):
                     try:
                         handed_off = _inline_rar_packer_body(sock)
                     except Exception as packer_err:
-                        print("[LINJAR RAR ERROR] Packing failed for " + str(completed_user) + ": " + str(packer_err))
+                        print("[LINJAR RAR ERROR] Packing failed for " + str(owner_nick()) + ": " + str(packer_err))
                         try:
-                            announce_mod.send_pack_error_notice(sock, completed_user, next_file.get('channel') if isinstance(next_file, dict) else None)
+                            announce_mod.send_pack_error_notice(sock, owner_nick(), next_file.get('channel') if isinstance(next_file, dict) else None)
                         except Exception:
                             pass
-                        release_queue_entry(completed_user, next_file, delivered=False,
+                        release_queue_entry(owner_nick(), next_file, delivered=False,
                                             reason="pack failed: " + str(packer_err))
                         # A pack that raised - rar missing, a timeout, a full
                         # disk - is a request that ended unsent (#1203).
-                        _record_pack_outcome(completed_user, next_file, transfer_log.STATUS_PACK_FAILED)
+                        _record_pack_outcome(owner_nick(), next_file, transfer_log.STATUS_PACK_FAILED)
                     finally:
                         # The pack itself is over either way (#651): what is
                         # handed off is the SEND, which active_transfers
                         # already counts.
                         if runtime.packer_thread is threading.current_thread():
                             runtime.packer_thread = None
+                        # The claim is let go of under queue_lock, the lock a
+                        # rename moves it under (#1268): by the nick it is
+                        # held under now. A handed-off send follows the
+                        # rename through its own transfer row (#598).
+                        with queue_lock:
+                            if runtime.pack_owner is pack_owner:
+                                runtime.pack_owner = None
+                            holder = owner_nick()
                         if not handed_off:
                             config.rar_inprogress = False
                             # #215: this release is the only moment another user's held pack can
                             # start. Nothing else revisits them - every check_queue_and_send()
                             # caller passes the user who just finished, never the one turned
                             # away at [RAR-HOLD].
-                            redispatch_waiting_pack(irc_sock, just_finished=completed_user)
+                            redispatch_waiting_pack(irc_sock, just_finished=holder)
                             if hasattr(config, 'user_processing_lock'):
-                                config.user_processing_lock.discard(completed_user.lower())
+                                config.user_processing_lock.discard(holder.lower())
+
+                def owner_nick():
+                    # The nick the claim is filed under now (#1268).
+                    return str(pack_owner["nick"])
 
                 def _inline_rar_packer_body(sock):
                     true_source_dir = next_file['path']
@@ -2019,15 +2161,18 @@ def check_queue_and_send(irc_sock, completed_user):
                     # logged as a poisoned queue entry, and the user's queue
                     # row deleted with it.
                     if not path_is_in_our_library(true_source_dir):
-                        print(f"[SECURITY] Blocked a poisoned queue entry for {completed_user}: {true_source_dir}")
+                        print(f"[SECURITY] Blocked a poisoned queue entry for {owner_nick()}: {true_source_dir}")
                         with queue_lock:
-                            if completed_user.lower() in config.dcc_queue:
-                                config.dcc_queue[completed_user.lower()] = [
-                                    e for e in config.dcc_queue[completed_user.lower()] if e is not next_file
-                                ]
-                                # The save no longer prunes an emptied key (#606).
-                                if not config.dcc_queue[completed_user.lower()]:
-                                    del config.dcc_queue[completed_user.lower()]
+                            # By the row itself, under whichever nick a rename
+                            # filed it (#1268).
+                            for q_key, q_rows in list(config.dcc_queue.items()):
+                                kept = [e for e in q_rows if e is not next_file]
+                                if len(kept) != len(q_rows):
+                                    # The save no longer prunes an emptied key (#606).
+                                    if kept:
+                                        config.dcc_queue[q_key] = kept
+                                    else:
+                                        del config.dcc_queue[q_key]
                         db.save_dcc_queue()
                         # The interlocks are released ONCE, by the wrapper's
                         # finally (#714, audit L50): this exit used to clear
@@ -2038,7 +2183,7 @@ def check_queue_and_send(irc_sock, completed_user):
                         # wake had just handed to another user's pack, leaving
                         # two rar processes on one archive path.
                         announce_mod.send_debug(
-                            f"Poisoned queue entry discarded for {config.C_BOLD}{completed_user}{config.C_RESET}: path outside the music root.",
+                            f"Poisoned queue entry discarded for {config.C_BOLD}{owner_nick()}{config.C_RESET}: path outside the music root.",
                             category="HARDBAN")
                         return
 
@@ -2073,77 +2218,7 @@ def check_queue_and_send(irc_sock, completed_user):
                     if isinstance(true_source_dir, str):
                         true_source_dir = true_source_dir.strip()
 
-                    # `rar a` ADDS to an existing archive rather than
-                    # replacing it - a stale file left behind by an earlier
-                    # crashed run would otherwise silently have the new
-                    # album packed on TOP of whatever was already there.
-                    # Removed first so a fresh pack always starts from
-                    # nothing, regardless of what used to be at this path.
-                    long_target = platform_compat.long_path(target_rar_path)
-                    if os.path.exists(long_target):
-                        try:
-                            os.remove(long_target)
-                        except OSError as unlink_err:
-                            print(f"[LINEAR RAR] Could not remove a stale archive at "
-                                  f"{target_rar_path}: {unlink_err}")
-
-                    print(f"[LINEAR RAR] Starting to pack: {true_source_dir} -> {target_rar_path}")
-                    announce_mod.send_debug(f"Packing {folder_leaf} for {completed_user}", category="PACK")
-
-
-                    # Arguments are passed as a list, never through a shell:
-                    work_dir_switch = f"-w{os.path.abspath(config.TMP_ZIP_DIR)}"
-                    # Resolve the binary rather than trusting a bare name on PATH:
-                    # WinRAR installs rar.exe outside PATH entirely.
-                    rar_bin = platform_compat.rar_command(getattr(config, 'RAR_BINARY', None))
-                    if not rar_bin:
-                        raise FileNotFoundError(
-                            "rar executable not found - set config.RAR_BINARY or put rar on PATH")
-                    cmd = [rar_bin, "a", "-ep1", work_dir_switch, os.path.abspath(target_rar_path), os.path.abspath(true_source_dir)]
-                    # A timeout is essential: with timeout=None a hung rar blocks this
-                    # thread forever while config.rar_inprogress stays True, wedging folder
-                    # packing for EVERY user until the daemon is restarted.
-                    rar_timeout = getattr(config, 'RAR_TIMEOUT', 1800)
-                    # See commands.py's note on the same call. rar is not
-                    # Python, so nothing can guard what it writes - a
-                    # filename in its error output is decoded here or
-                    # nowhere, and a pack that failed for a nameable
-                    # reason must not become a pack that failed silently.
-                    #
-                    # Run as a process this module holds a handle to (#1202),
-                    # so the operator can see how far it has got and stop
-                    # THAT process. The timeout stays: it is the backstop for
-                    # a rar nobody is watching.
-                    job = _begin_pack_job(completed_user, folder_leaf, true_source_dir, target_rar_path, row=next_file)
-                    try:
-                        process = _run_rar(job, cmd, rar_timeout)
-                    except subprocess.TimeoutExpired:
-                        # rar was killed mid-write: whatever it wrote sits at
-                        # the target path, and nothing else ever names that
-                        # file (#717). Removed here; the wrapper's handling of
-                        # the failure is unchanged.
-                        _discard_partial_archive(target_rar_path, "timed out")
-                        raise
-                    finally:
-                        _end_pack_job(job)
-
-                    if job["cancelled"]:
-                        _discard_partial_archive(target_rar_path, "was cancelled")
-                        announce_mod.send_debug(
-                            f"Pack for {completed_user} cancelled: {folder_leaf}", category="PACK")
-                        release_queue_entry(completed_user, next_file, delivered=False,
-                                            reason="cancelled by the operator", cancelled=True,
-                                            shown_name=rar_filename)
-                        _record_pack_outcome(completed_user, next_file, transfer_log.STATUS_CANCELLED, job=job)
-                        return False
-
-                    if process.returncode == 0 and os.path.exists(target_rar_path):
-                        print(f"[LINEAR RAR] Compression succeeded. Waiting 2.0s for the disk to sync...")
-                        time.sleep(2.0)
-                        
-                        final_size = os.path.getsize(target_rar_path)
-                        print(f"[LINEAR RAR] The archive is settled on disk: {final_size:,} bytes")
-                        
+                    def point_row_at_archive():
                         # The folder it was packed from stays on the row: a
                         # repeat !rar of it is still a repeat while the
                         # archive is being sent (#1077).
@@ -2151,7 +2226,116 @@ def check_queue_and_send(irc_sock, completed_user):
                         next_file['path'] = target_rar_path
                         next_file['file'] = rar_filename
                         next_file['is_unpacked_rar_folder'] = False
-                        
+
+                    # THE ARCHIVE MAY ALREADY BE SOMEBODY ELSE'S (#1268). The
+                    # disk name comes from the folder, so a second nick's !rar
+                    # of an album lands on the path the first nick's finished
+                    # archive is waiting at - and this used to delete it as
+                    # "stale", or let a failed run remove it outright. A
+                    # finished archive another row still names is reused
+                    # as it is; nothing is packed. Decided, and the pack
+                    # registered, under one hold of queue_lock, so a send's
+                    # cleanup cannot remove it in between.
+                    long_target = platform_compat.long_path(target_rar_path)
+                    job = None
+                    with queue_lock:
+                        withdrawn = not row_is_still_queued()
+                        reuse = (not withdrawn and os.path.exists(long_target)
+                                 and temp_archive_in_use(target_rar_path))
+                        if reuse:
+                            point_row_at_archive()
+                        elif not withdrawn:
+                            # `rar a` ADDS to an existing archive rather than
+                            # replacing it - a stale file left behind by an
+                            # earlier crashed run would otherwise silently have
+                            # the new album packed on TOP of whatever was
+                            # already there. Removed first so a fresh pack
+                            # always starts from nothing. Nothing needs it:
+                            # temp_archive_in_use() said so above.
+                            if os.path.exists(long_target):
+                                try:
+                                    os.remove(long_target)
+                                except OSError as unlink_err:
+                                    print(f"[LINEAR RAR] Could not remove a stale archive at "
+                                          f"{target_rar_path}: {unlink_err}")
+                            # Registered here, under the lock that answered,
+                            # so temp_archive_in_use() counts this pack from
+                            # now on (#1202 for the job itself).
+                            job = _begin_pack_job(owner_nick(), folder_leaf, true_source_dir, target_rar_path, row=next_file)
+
+                    if withdrawn:
+                        # The user took the row out of their queue before the
+                        # pack began (#1268): nothing to pack, nothing to send.
+                        print(f"[LINEAR RAR] {owner_nick()} removed {folder_leaf} before it was packed.")
+                        _record_pack_outcome(owner_nick(), next_file, transfer_log.STATUS_CANCELLED)
+                        return False
+
+                    if reuse:
+                        print(f"[LINEAR RAR] {folder_leaf} is already packed and waiting for another "
+                              f"request; {owner_nick()} is sent the same archive: {target_rar_path}")
+                    else:
+                        print(f"[LINEAR RAR] Starting to pack: {true_source_dir} -> {target_rar_path}")
+                        announce_mod.send_debug(f"Packing {folder_leaf} for {owner_nick()}", category="PACK")
+
+                        # A timeout is essential: with timeout=None a hung rar blocks this
+                        # thread forever while config.rar_inprogress stays True, wedging folder
+                        # packing for EVERY user until the daemon is restarted.
+                        rar_timeout = getattr(config, 'RAR_TIMEOUT', 1800)
+                        # See commands.py's note on the same call. rar is not
+                        # Python, so nothing can guard what it writes - a
+                        # filename in its error output is decoded here or
+                        # nowhere, and a pack that failed for a nameable
+                        # reason must not become a pack that failed silently.
+                        #
+                        # Run as a process this module holds a handle to (#1202),
+                        # so the operator can see how far it has got and stop
+                        # THAT process. The timeout stays: it is the backstop for
+                        # a rar nobody is watching.
+                        try:
+                            # Arguments are passed as a list, never through a shell:
+                            work_dir_switch = f"-w{os.path.abspath(config.TMP_ZIP_DIR)}"
+                            # Resolve the binary rather than trusting a bare name on PATH:
+                            # WinRAR installs rar.exe outside PATH entirely.
+                            rar_bin = platform_compat.rar_command(getattr(config, 'RAR_BINARY', None))
+                            if not rar_bin:
+                                raise FileNotFoundError(
+                                    "rar executable not found - set config.RAR_BINARY or put rar on PATH")
+                            cmd = [rar_bin, "a", "-ep1", work_dir_switch, os.path.abspath(target_rar_path), os.path.abspath(true_source_dir)]
+                            process = _run_rar(job, cmd, rar_timeout)
+                        except subprocess.TimeoutExpired:
+                            # rar was killed mid-write: whatever it wrote sits at
+                            # the target path, and nothing else ever names that
+                            # file (#717). Removed here; the wrapper's handling of
+                            # the failure is unchanged.
+                            _discard_partial_archive(target_rar_path, "timed out")
+                            raise
+                        finally:
+                            _end_pack_job(job)
+
+                    if job is not None and job["cancelled"]:
+                        _discard_partial_archive(target_rar_path, "was cancelled")
+                        if job.get("withdrawn"):
+                            # The user's own remove stopped it (#1268), and
+                            # that remove already took the row and told them.
+                            print(f"[LINEAR RAR] {owner_nick()} removed {folder_leaf} while it was "
+                                  f"being packed; the pack is stopped.")
+                        else:
+                            announce_mod.send_debug(
+                                f"Pack for {owner_nick()} cancelled: {folder_leaf}", category="PACK")
+                            release_queue_entry(owner_nick(), next_file, delivered=False,
+                                                reason="cancelled by the operator", cancelled=True,
+                                                shown_name=rar_filename)
+                        _record_pack_outcome(owner_nick(), next_file, transfer_log.STATUS_CANCELLED, job=job)
+                        return False
+
+                    if reuse or (process.returncode == 0 and os.path.exists(target_rar_path)):
+                        if not reuse:
+                            print(f"[LINEAR RAR] Compression succeeded. Waiting 2.0s for the disk to sync...")
+                            time.sleep(2.0)
+
+                        final_size = os.path.getsize(target_rar_path)
+                        print(f"[LINEAR RAR] The archive is settled on disk: {final_size:,} bytes")
+
                         # CAPACITY RE-CHECKED HERE, UNDER THE LOCK. The check
                         # this branch already passed happened before rar even
                         # started, which for a large album is minutes ago -
@@ -2166,23 +2350,49 @@ def check_queue_and_send(irc_sock, completed_user):
                         # a wait - the same outcome, and the same message, the
                         # two sibling dispatch paths use when they find no
                         # slot.
+                        #
+                        # To the nick the claim is filed under NOW (#1268): a
+                        # rename while rar ran used to have the archive offered
+                        # to a nick that had gone. The row the claim carries
+                        # names the archive, so temp_archive_in_use() sees it.
+                        #
+                        # AND THE ROW MAY HAVE GONE WHILE RAR RAN (#1268): the
+                        # user's own remove, between the pack ending and this
+                        # point, when nothing marks the row as in flight.
+                        # Looked at in the same hold that claims the slot, so
+                        # a removed folder is never sent - and its archive
+                        # goes unless another row is waiting for it.
+                        room = False
                         with queue_lock:
-                            room = len(config.active_transfers) < config.MAX_DCC_SLOTS
-                            if room:
-                                config.active_transfers.append({"user": completed_user, "file": rar_filename, "bytes_sent": 0, "next_file_obj": rar_filename,
-                                                                 "queue_row": next_file})
+                            withdrawn = not row_is_still_queued()
+                            if withdrawn:
+                                if not temp_archive_in_use(target_rar_path):
+                                    _discard_partial_archive(target_rar_path, "was packed for a removed request")
+                            else:
+                                if not reuse:
+                                    point_row_at_archive()
+                                send_to = owner_nick()
+                                room = len(config.active_transfers) < config.MAX_DCC_SLOTS
+                                if room:
+                                    config.active_transfers.append({"user": send_to, "file": rar_filename, "bytes_sent": 0, "next_file_obj": rar_filename,
+                                                                     "queue_row": next_file})
+                        if withdrawn:
+                            print(f"[LINEAR RAR] {owner_nick()} removed {folder_leaf} while it was "
+                                  f"being packed; it is not sent.")
+                            _record_pack_outcome(owner_nick(), next_file, transfer_log.STATUS_CANCELLED, job=job)
+                            return False
                         if not room:
-                            print(f"[DCC-BLOCK] {completed_user}: all {config.MAX_DCC_SLOTS} slot(s) busy, "
+                            print(f"[DCC-BLOCK] {send_to}: all {config.MAX_DCC_SLOTS} slot(s) busy, "
                                   f"the packed archive stays queued for the next trigger.")
                             # Released by the wrapper's finally, once (#714).
                             return
                         if oserve: oserve.active_downloads = len(config.active_transfers)
 
-                        announce_mod.send_dcc_sending_notice(completed_user, rar_filename, channel=target_chan)
-                        
+                        announce_mod.send_dcc_sending_notice(send_to, rar_filename, channel=target_chan)
+
                         threading.Thread(
-                            target=start_dcc_send, 
-                            args=(sock, completed_user, target_rar_path, rar_filename, target_chan, next_file, True), 
+                            target=start_dcc_send,
+                            args=(sock, send_to, target_rar_path, rar_filename, target_chan, next_file, True),
                             daemon=True
                         ).start()
                         # Ownership of both interlocks now belongs to that send thread (the
@@ -2193,16 +2403,23 @@ def check_queue_and_send(irc_sock, completed_user):
                         error_msg = process.stderr.strip() if process.stderr else "Unknown RAR engine issue"
                         print(f"[LINJAR RAR ERROR] {error_msg}")
                         _discard_partial_archive(target_rar_path, "rar exited " + str(process.returncode))
-                        announce_mod.send_debug(f"Pack FAILED in queue slot for {completed_user}: {error_msg}", category="PART")
+                        announce_mod.send_debug(f"Pack FAILED in queue slot for {owner_nick()}: {error_msg}", category="PART")
                         # Charge the failure to the retry budget instead of recursing. The old
                         # code cleared the interlocks and called check_queue_and_send inline,
                         # which re-selected the SAME row and started another packer thread from
                         # inside this one - unbudgeted, and the wrapper finally would then strip
                         # the interlocks that new thread had just claimed.
-                        release_queue_entry(completed_user, next_file, delivered=False,
+                        release_queue_entry(owner_nick(), next_file, delivered=False,
                                             reason="rar exited " + str(process.returncode))
-                        _record_pack_outcome(completed_user, next_file, transfer_log.STATUS_PACK_FAILED, job=job)
+                        _record_pack_outcome(owner_nick(), next_file, transfer_log.STATUS_PACK_FAILED, job=job)
                         return False
+
+                def row_is_still_queued():
+                    # Caller holds queue_lock. By the row itself, under any
+                    # nick: a rename moves it to another key (#1268).
+                    return any(row is next_file
+                               for rows in config.dcc_queue.values() if rows
+                               for row in rows)
 
                 # At exactly the right level, so it wakes the function above immediately
                 threading.Thread(target=inline_rar_packer, args=(irc_sock,), daemon=True).start()
@@ -2271,6 +2488,15 @@ def check_queue_and_send(irc_sock, completed_user):
                 if list_cap_reached:
                     # The slot goes to whoever has waited longest instead.
                     print(f"[DCC QUEUE] {completed_user}'s list waits: another list went first meanwhile.")
+                    check_queue_and_send(irc_sock, "system_next_trigger_fallback")
+                    return
+
+                # STILL SHARED? (#1268) The row carries the path it was
+                # resolved to when it was asked for, and the dashboard's
+                # Folders page takes a folder out of the library live. A
+                # folder pack is re-checked before rar runs; a plain file was
+                # sent from the folder the operator had just stopped sharing.
+                if drop_an_unshared_row(completed_user, next_file):
                     check_queue_and_send(irc_sock, "system_next_trigger_fallback")
                     return
 
@@ -2447,7 +2673,14 @@ def check_queue_and_send(irc_sock, completed_user):
                         claim["list_went_first"] = True
                     config.active_transfers.append(claim)
                     promoted = (real_username, g_path, g_name, g_chan, g_next)
+                    promoted_key = queue_key
                     break
+
+    if promoted is not None and drop_an_unshared_row(promoted[0], promoted[4], lock_key=promoted_key):
+        # Not shared any more (#1268): the slot goes to the next in line.
+        promoted = None
+        threading.Thread(target=check_queue_and_send, args=(irc_sock, "system_next_trigger_fallback"),
+                         daemon=True).start()
 
     if promoted is not None:
         real_username, g_path, g_name, g_chan, g_next = promoted
@@ -2986,7 +3219,7 @@ def _pack_status_of(job, now=None):
             "cancelled": bool(job["cancelled"])}
 
 
-def cancel_pack():
+def cancel_pack(row=None):
     """Stop the pack that is running. Returns its status as it was, or None
     when nothing is packing - a cancel of nothing changes nothing (#1202).
 
@@ -2994,11 +3227,20 @@ def cancel_pack():
     mark when rar returns, removes the partial archive, settles the queue row
     without charging the retry budget, tells the user and lets the next
     request start.
+
+    With `row`, only a pack of that very queue row is stopped, and it is the
+    user withdrawing it (#1268): their own remove has already taken the row
+    and told them, so the packer neither settles it again nor says the
+    operator cancelled it.
     """
     with runtime.pack_lock:
         job = runtime.pack_job
         if job is None or job["cancelled"]:
             return None
+        if row is not None:
+            if job.get("row") is not row:
+                return None
+            job["withdrawn"] = True
         job["cancelled"] = True
         process = job["process"]
     status = _pack_status_of(job)
@@ -3310,14 +3552,17 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
             #
             # Checked with scandir and stopped at the first match: the pack
             # about to run walks this whole folder anyway.
+            #
+            # Through the disc folders too (#1270): a multi-disc album's row
+            # names the album above CD1 and CD2, whose own top level holds no
+            # track, and checking only that level refused every one of them.
+            # folder_holds_packable() is the rule update_list.rar_row_folder()
+            # writes those rows by, so the list and this gate cannot drift.
             packable = update_list.rar_extensions()
             if packable:
                 try:
-                    has_packable = any(
-                        entry.is_file()
-                        and update_list.is_packable_file(entry.name, packable)
-                        for entry in os.scandir(
-                            platform_compat.long_path(true_source_dir)))
+                    has_packable = update_list.folder_holds_packable(
+                        true_source_dir, packable)
                 except OSError as scan_err:
                     print(f"[PACK] Could not read {true_source_dir!r} to check "
                           f"what is in it: {scan_err}")
@@ -3457,6 +3702,13 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
             print(f"[SECURITY] Refused {user}'s request: {requested_file!r} names a location, not a file in the library.")
             announce.send_dcc_error(user, "invalid_path", target_chan)
             return
+        # A stream, a fork or a trimmed second spelling of a library file:
+        # inside the library, so the containment check below would let it
+        # through. Refused on the text too, before any file system call.
+        if names_a_hidden_part_of_a_file(requested_file):
+            print(f"[SECURITY] Refused {user}'s request: {requested_file!r} names a hidden part of a file, not a file in the library.")
+            announce.send_dcc_error(user, "invalid_path", target_chan)
+            return
         requested_file = requested_file.lstrip("/")
 
         # The master list lives in LOCAL_LIST_DIR, everything else in the
@@ -3488,6 +3740,20 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
             # whole of what send_file_list() just offered them.
             base_directory = os.path.abspath(list_mod.list_dir(wanted_list))
             full_path = os.path.join(base_directory, requested_file)
+            # THIS list's archive and no other. A list archive is asked for by
+            # its file name alone - that is all send_file_list() offers - but
+            # the name is matched on its last component, and a non-primary
+            # list's directory sits INSIDE the primary's. So a name with a
+            # folder in front of it passed the containment check below and
+            # reached another list's archive - one bound to channels this
+            # request did not come from (#26). Only a file directly in this
+            # list's own directory is served.
+            if (os.path.normcase(os.path.dirname(os.path.abspath(full_path)))
+                    != os.path.normcase(base_directory)):
+                print(f"[SECURITY] Refused {user}'s request: {requested_file!r} "
+                      f"is not an archive of the list this channel is bound to.")
+                announce.send_dcc_error(user, "invalid_path", target_chan)
+                return
             # One root per list, and deliberately so: a list's files live in
             # exactly one place regardless of how many folders it spans.
             search_roots = [base_directory]
@@ -3782,6 +4048,12 @@ def handle_download_request(irc_sock, user, requested_file, target_chan):
         if not any(is_safe_path(root, full_path) for root in search_roots):
             announce.send_dcc_error(user, "invalid_path", target_chan)
             return
+        # Inside the library is not enough: a stream of a library file is
+        # inside it too. Whatever produced full_path, it must name a file.
+        if resolves_to_a_stream(full_path):
+            print(f"[SECURITY] Refused {user}'s request: {full_path!r} is a stream of a file, not a file.")
+            announce.send_dcc_error(user, "invalid_path", target_chan)
+            return
 
         if not os.path.exists(platform_compat.long_path(full_path)) or os.path.isdir(platform_compat.long_path(full_path)):
             announce.send_dcc_error(user, "file_not_found", target_chan)
@@ -4046,6 +4318,71 @@ def _wait_for_final_ack(conn, tracker, file_size):
     return tracker.last_advance_at
 
 
+def drop_an_unshared_row(user, row, lock_key=None):
+    """Refuse a claimed queue row whose file is no longer shared (#1268).
+
+    Called by the dispatcher after it claimed the slot and released
+    queue_lock - the library check resolves paths, and a hung mount must not
+    hold the lock (#605). Returns False for a row that may be sent. Otherwise
+    the claim is let go of, the row is dropped (never retried, like a
+    poisoned pack row), the user is told, and True is returned.
+    """
+    file_path = row.get("path", "") if isinstance(row, dict) else str(row)
+    if may_still_be_sent(file_path, row):
+        return False
+    file_name = row.get("file", "") if isinstance(row, dict) else os.path.basename(file_path)
+    print(f"[SECURITY] Refused to send {file_name} to {user}: it is no longer "
+          f"inside any shared folder. The row is dropped.")
+    with queue_lock:
+        config.active_transfers[:] = [tx for tx in config.active_transfers
+                                      if tx.get("queue_row") is not row]
+        getattr(config, "user_processing_lock", set()).discard(str(lock_key or user).lower())
+        # By the row itself, under whichever nick holds it now.
+        for q_key, q_rows in list(config.dcc_queue.items()):
+            kept = [held for held in q_rows if held is not row]
+            if len(kept) != len(q_rows):
+                if kept:
+                    config.dcc_queue[q_key] = kept
+                else:
+                    del config.dcc_queue[q_key]
+    try:
+        db.save_dcc_queue()
+    except Exception as save_err:
+        print("[DCC QUEUE ERROR] Could not persist the queue: " + str(save_err))
+    go_to_the_back(str(lock_key or user).lower())
+    oserve_mod = sys.modules.get("oserve")
+    if oserve_mod:
+        def _build(shown_name):
+            return (f"NOTICE {user} :{config.C_BOLD}Error{config.C_RESET}: {shown_name} "
+                    f"is no longer shared here. Removed from your queue.\r\n")
+        oserve_mod.queue_message(user, announce.fit_irc_line(_build, str(file_name)))
+    return True
+
+
+def may_still_be_sent(file_path, next_file):
+    """Is this file still one the bot serves? (#1268)
+
+    A file inside a shared folder, by the CURRENT library - or one the bot
+    made itself: a packed archive or a list in TMP_ZIP_DIR, a list in its
+    list directory, or a row marked as the list (#1205). Those live outside
+    every shared folder by design.
+
+    Never a stream of a file: one sits inside a shared folder as far as the
+    containment check can tell. handle_download_request() refuses such a
+    request, but a row can also come back from dcc_queue.txt - queued by a
+    version without that guard, or written into the file - and this is the
+    check every queued row passes on its way to a send.
+    """
+    if resolves_to_a_stream(file_path):
+        return False
+    if is_a_list_row(next_file):
+        return True
+    for own_dir in (getattr(config, "TMP_ZIP_DIR", None), getattr(config, "LOCAL_LIST_DIR", None)):
+        if own_dir and is_safe_path(own_dir, file_path):
+            return True
+    return path_is_in_our_library(file_path)
+
+
 def _find_transfer_row(user, file_name):
     """The active_transfers row a send was started for, or None.
 
@@ -4140,6 +4477,8 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
     # Only a send loop that ran to completion counts as delivered. A socket timeout, a
     # refused connection or a half-finished stream must not consume the queue row.
     transfer_completed = False
+    # A completed send that moved nothing: see where it is set below.
+    already_held = False
 
     # #430: `irc_sock` is whatever socket was live when the caller captured
     # it - which can be several minutes stale by the time this actually
@@ -4191,10 +4530,10 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
             reason = ("this bot has no usable public address configured, so it "
                       "cannot offer a transfer")
             print(f"[DCC CRITICAL ABORT] No usable public address "
-                  f"(MY_IP_OR_DOCK={getattr(config, 'MY_IP_OR_DOCK', '')!r}); refused "
+                  f"({dcc_address()!r}); refused "
                   f"the send for {user} rather than offering one nobody can dial. "
                   f"Set MY_IP_OR_DOCK in admin_config.py. Not settings.conf "
-                  f"(#465): this address is detected at startup rather than "
+                  f"(#465): this address is detected when the bot connects rather than "
                   f"read from a file, so it is not a setting that file carries.")
         else:
             reason = "file access issue or empty payload. Please try again"
@@ -4272,23 +4611,41 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
         return
 
 
-    dcc_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # SO_REUSEADDR means the OPPOSITE thing on Windows - it lets another process
-    # bind this same port and take the incoming connection, which on a DCC
-    # listener is a hijack. platform_compat picks the right option per platform.
-    platform_compat.prepare_listener(dcc_sock)
-    
+    # CREATING THE LISTENER CAN FAIL TOO (#1268). listen() moved inside the
+    # try below for EMFILE, but socket.socket() is the first call to fail when
+    # the process is out of descriptors, and it sat out here: the OSError
+    # killed this thread with the slot in active_transfers and the nick in
+    # user_processing_lock - one slot gone and that nick never served again,
+    # and a pack handoff's rar_inprogress latched for everyone. A listener
+    # that cannot be made is treated like no free port: same release, same
+    # delayed retry, not charged to the row.
+    dcc_sock = None
+    listener_error = None
     assigned_port = None
-    for port in range(config.DCC_PORT_START, config.DCC_PORT_END + 1):
-        try:
-            dcc_sock.bind(('0.0.0.0', port))
-            assigned_port = port
-            break
-        except socket.error:
-            continue
+    try:
+        dcc_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # SO_REUSEADDR means the OPPOSITE thing on Windows - it lets another process
+        # bind this same port and take the incoming connection, which on a DCC
+        # listener is a hijack. platform_compat picks the right option per platform.
+        platform_compat.prepare_listener(dcc_sock)
+
+        for port in range(config.DCC_PORT_START, config.DCC_PORT_END + 1):
+            try:
+                dcc_sock.bind(('0.0.0.0', port))
+                assigned_port = port
+                break
+            except socket.error:
+                continue
+    except Exception as sock_err:
+        listener_error = sock_err
 
     if assigned_port is None:
-        try: irc_sock.sendall(f"NOTICE {user} :{config.C_BOLD}Error:{config.C_RESET} No available DCC ports.\r\n".encode("utf-8", errors="ignore"))
+        if listener_error is not None:
+            print(f"[DCC PORTS] Could not open a listener for {user}: {listener_error}")
+            refusal = "Could not open a DCC port right now. Your file stays queued."
+        else:
+            refusal = "No available DCC ports."
+        try: irc_sock.sendall(f"NOTICE {user} :{config.C_BOLD}Error:{config.C_RESET} {refusal}\r\n".encode("utf-8", errors="ignore"))
         except: pass
         with queue_lock:
             config.active_transfers[:] = [tx for tx in config.active_transfers if not _mine(tx)]
@@ -4338,10 +4695,11 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
         # every 45 seconds. On a bot whose ports are genuinely exhausted that is
         # a steady file-descriptor leak for as long as the condition lasts,
         # which is exactly when the daemon can least afford one.
-        try:
-            dcc_sock.close()
-        except Exception:
-            pass
+        if dcc_sock is not None:
+            try:
+                dcc_sock.close()
+            except Exception:
+                pass
         return
 
     conn = None
@@ -4557,6 +4915,18 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
         else:
             final_ack_at = _wait_for_final_ack(conn, acks, file_size)
         transfer_completed = final_ack_at is not None
+        # A RESUME AT THE END OF THE FILE COMPLETES WITH NOTHING SENT.
+        # handle_resume_request() clamps a position past the end to the size,
+        # on purpose: the receiver already holds all of it, and the ACCEPT
+        # lets its transfer finish instead of hanging. That is still the
+        # outcome here - the queue row is settled as delivered - but nothing
+        # moved, so nothing is credited: not the files-sent total, not the
+        # download counter, not the transfer record, not the speed record,
+        # and no "Sent:" line in the channel. Otherwise a peer could raise
+        # any file's count, and the bot's totals, without a byte of traffic -
+        # what #656 closed for a forged final acknowledgement.
+        already_held = bool(transfer_completed and resume_offset
+                            and resume_offset >= file_size)
         if not transfer_completed and not short_read:
             if not acks.received_any:
                 report_failure(user, file_name,
@@ -4594,7 +4964,10 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
         # was. It also fed the speed RECORD and the advert, so the figure the
         # channel saw was wrong in the same direction.
         transfer_finished_at = final_ack_at if transfer_completed else time.time()
-        if transfer_completed:
+        if already_held:
+            print(f"[DCC-RESUME] {user} resumed {file_name} at its end and "
+                  f"already held all {file_size} bytes; nothing was sent.")
+        elif transfer_completed:
             print(f"[DCC-SUCCESS] Sent the whole file to {user}; the receiver "
                   f"acknowledged all {file_size} bytes.")
         # The 1.5-second "let mIRC close its file calmly" pause is gone: the
@@ -4630,6 +5003,8 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
             # the elapsed time covers a transfer that stopped early.
             if not transfer_completed:
                 raise _ShortSend()
+            if already_held:
+                raise _AlreadyHeld()
             stats = db.update_stats_on_complete(file_size - resume_offset)
             print(f"[DB COUNTER] Statistics updated on disk. (Files sent: {stats[0]})")
 
@@ -4670,6 +5045,10 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
                   f"short at {bytes_sent} of {file_size} bytes. A partial send "
                   f"is not a completed transfer, so it is left out of the "
                   f"totals, the download counter and the speed record.")
+        except _AlreadyHeld:
+            print(f"[DB COUNTER] Not counted: {user} already held all "
+                  f"{file_size} bytes of {file_name} and resumed at the end, "
+                  f"so nothing was sent.")
         except Exception as db_err:
             print(f"[DB ERROR] Could not increment the sharing statistics through the db module: {db_err}")
         # ---------------------------------------------------------------------
@@ -4780,11 +5159,13 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
         # part-way has moved real bytes in real time, so its rate looks like a
         # legitimate sample and is not one.
         if transfer_completed:
-            try:
-                import stats_mgr as stats_mgr_mod
-                stats_mgr_mod.update_speed_record(final_calc_speed, acute_duration)
-            except Exception as record_err:
-                print(f"[STATS ERROR] Could not update the speed record: {record_err}")
+            # Not a sample at all when nothing moved (a resume at the end).
+            if not already_held:
+                try:
+                    import stats_mgr as stats_mgr_mod
+                    stats_mgr_mod.update_speed_record(final_calc_speed, acute_duration)
+                except Exception as record_err:
+                    print(f"[STATS ERROR] Could not update the speed record: {record_err}")
         else:
             # How it ended, in the record (#1203), while the row is still in
             # active_transfers: a stop cutting it off now finds it claimed.
@@ -4812,7 +5193,8 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
             # re-offer the same file on every attempt.
             # A private request is not announced (#1242): the operator's
             # decision, though the channel it belongs to is known by now.
-            if transfer_completed:
+            # Nor is a resume at the end: nothing was sent.
+            if transfer_completed and not already_held:
                 announce_mod.send_transfer_complete(channel, user, file_name, file_size, start_time, reported_speed,
                                                     duration=acute_duration,
                                                     private=is_private_row(next_file))
@@ -4855,29 +5237,17 @@ def start_dcc_send(irc_sock, user, file_path, file_name, channel, next_file, own
             safe_path = str(file_path)
 
             if _is_temp_zip_cache_file(safe_path):
+                # Still queued for anybody, being sent in another slot, or
+                # being packed: asked BY PATH (#1268). The offered name is
+                # the leaf alone, and another nick's different album with the
+                # same leaf name kept this one on disk for good. Removed under
+                # the lock that answered, so a pack of the same folder cannot
+                # start writing it in between.
                 with queue_lock:
-                    # A. Is the file still QUEUED for some OTHER user in dcc_queue.txt?
-                    for q_user, q_files in getattr(config, 'dcc_queue', {}).items():
-                        if q_user.lower() != user.lower():
-                            for q_obj in q_files:
-                                if isinstance(q_obj, dict) and (q_obj.get('file') == file_name or q_obj.get('path') == file_path):
-                                    file_still_needed = True
-                                    break
-                    
-                    # B. Is the file still being sent ACTIVELY to somebody in another slot?
-                    active_matches = 0
-                    for tx in getattr(config, 'active_transfers', []):
-                        if tx.get('file') == file_name:
-                            active_matches += 1
-                    
-                    if active_matches > 0:
-                        file_still_needed = True
-
-                # If no other user and no active slot still needs it, delete it from disk
-                if not file_still_needed:
-                    if os.path.exists(platform_compat.long_path(file_path)):
-                        os.remove(file_path)
-                        print(f"[DCC CLEANUP] Safely deleted the temporary archive from disk: {file_name}")
+                    if not file_still_needed and not temp_archive_in_use(file_path):
+                        if os.path.exists(platform_compat.long_path(file_path)):
+                            os.remove(file_path)
+                            print(f"[DCC CLEANUP] Safely deleted the temporary archive from disk: {file_name}")
         except Exception as file_rm_err:
             print(f"[DCC CLEANUP ERROR] Could not run the disk cleanup: {file_rm_err}")
         

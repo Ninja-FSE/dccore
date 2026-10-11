@@ -11,6 +11,7 @@
 # ---------------------------------------------------------------------
 
 import os
+import re
 import shutil
 import socket
 import sys
@@ -213,6 +214,35 @@ def install_console_encoding_guard(streams=None):
 # wraps it, so a later reconfigure() must still reach the real one. Not a
 # platform difference - a console-hygiene one, kept with its sibling.
 
+# Every character a terminal acts on rather than prints - C0 controls other
+# than tab, newline and carriage return, DEL, and the C1 range (a terminal in
+# UTF-8 can read U+009B as CSI). ESC is one of them.
+_TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+# What terminal_safe() removes: a whole terminated OSC/DCS/SOS/PM/APC string,
+# a whole CSI sequence, or any other single control character. An OSC that is
+# never terminated loses only its ESC: what follows it is then plain text, and
+# swallowing it would hide whatever the line went on to say.
+_TERMINAL_SEQUENCE_RE = re.compile(
+    r"\x1b[\]PX^_][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b\[[0-?]*[ -/]*[@-~]"
+    r"|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+
+def terminal_safe(text):
+    r"""`text` with everything a terminal would act on taken out.
+
+    The console prints what other people typed: a channel member's line in the
+    disconnect report, a bot's notice, a file name. "\x1b]0;...\x07" retitles
+    the window and "\x1b[2J" clears it; "\x1b[8m" would hide every line after
+    it. Tab, newline and carriage return are kept - they are how lines are
+    laid out. Text with none of the rest is returned as it is.
+    """
+    if _TERMINAL_CONTROL_RE.search(text) is None:
+        return text
+    return _TERMINAL_SEQUENCE_RE.sub("", text)
+
+
 class _TimestampedStream:
     """A stream proxy that prefixes every LINE with the time it was written.
 
@@ -222,6 +252,11 @@ class _TimestampedStream:
     tracks whether the last character it saw ended a line, and stamps the
     start of every line that begins on this stream, however the text was
     split up to reach it.
+
+    And never anything a terminal acts on (terminal_safe()): every line the
+    daemon prints passes through here, so this is the one place that covers
+    text from other people wherever a message happens to include it - the
+    window and the console log both get the cleaned text.
 
     Everything else - encoding, isatty(), fileno(), reconfigure(), flush() -
     is delegated to the real stream untouched, so code that inspects
@@ -256,10 +291,19 @@ class _TimestampedStream:
                 f"write() argument must be str, not {type(text).__name__}")
         if not text:
             return 0
+        given = len(text)
+        safe = terminal_safe(text)
         fmt = self._formatter()
         log = _console_log if _console_log.active() else None
         if not fmt and log is None:
-            return self._stream.write(text)
+            if safe is text:
+                return self._stream.write(text)
+            if safe:
+                self._stream.write(safe)
+            return given
+        text = safe
+        if not text:
+            return given
         with self._lock:
             out = []
             logged = []
@@ -285,7 +329,7 @@ class _TimestampedStream:
         # Report what the CALLER wrote, not what reached the stream. A caller
         # comparing the return value to len(text) must not be told its write
         # was longer than the text it gave.
-        return len(text) if written else 0
+        return given if written else 0
 
     def writelines(self, lines):
         for line in lines:
@@ -466,8 +510,43 @@ def install_console_log(settings):
 _console_timestamp_format = ""
 
 
+# Where the format comes from once the daemon has its config (#1272): a
+# callable returning the setting's CURRENT value, and the last value it gave.
+_console_timestamp_source = None
+_console_timestamp_seen = None
+
+
+def follow_console_timestamp_format(source):
+    """Read the format from `source()` on every line from now on.
+
+    CONSOLE_TIMESTAMP_FORMAT was applied once, in oserve's __main__, so a
+    change saved on the Settings page did nothing until a restart - and the
+    page did not say so, since a rehash runs on every save. The neighbouring
+    CONSOLE_LOG_FILE is read per line and takes effect at once; this makes
+    the stamp behave the same. A new value goes through
+    set_console_timestamp_format(), so an invalid one is refused there, said
+    once, and the previous format kept. None stops following.
+    """
+    global _console_timestamp_source, _console_timestamp_seen
+    _console_timestamp_source = source
+    _console_timestamp_seen = None
+
+
 def console_timestamp_format():
     """The strftime format currently stamped on every console line, or ""."""
+    global _console_timestamp_seen
+    source = _console_timestamp_source
+    if source is not None:
+        try:
+            wanted = source()
+        except Exception:
+            wanted = _console_timestamp_seen
+        if wanted != _console_timestamp_seen:
+            # Remembered BEFORE it is applied: an invalid format is reported
+            # with a print(), which comes back through this very function on
+            # its way to the console, and must find nothing new to apply.
+            _console_timestamp_seen = wanted
+            set_console_timestamp_format(wanted)
     return _console_timestamp_format
 
 
@@ -530,6 +609,33 @@ def install_console_timestamps(fmt="%H:%M:%S"):
         setattr(sys, name, _TimestampedStream(stream, console_timestamp_format))
         changed.append(name)
     return changed
+
+
+def ignores_case(directory):
+    """True when the filesystem holding `directory` treats two names that
+    differ only in case as one file - NTFS and APFS by default, not ext4.
+
+    Asked of the filesystem rather than of the OS (#1272): a Linux box can
+    mount an NTFS or exFAT drive and a Mac can have a case-sensitive volume.
+    Read-only: an entry already in the directory is looked up with its case
+    swapped. A directory with nothing to try it on answers False, which is
+    the old, case-sensitive behaviour.
+    """
+    try:
+        entries = os.listdir(directory)
+    except OSError:
+        return False
+    for name in entries:
+        swapped = name.swapcase()
+        if swapped == name:
+            continue
+        first = os.path.join(directory, name)
+        second = os.path.join(directory, swapped)
+        try:
+            return os.path.exists(second) and os.path.samefile(first, second)
+        except OSError:
+            return False
+    return False
 
 
 # ---------------------------------------------------------------------

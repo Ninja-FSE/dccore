@@ -120,7 +120,8 @@ class WriteSettingsConfTests(DCCoreTestCase):
             "SERVER": "irc.undernet.org",
             "CHANNEL": "#my-channel",
             "ADMIN_NICK": "MyAdmin",
-            "FILE_DIRECTORY": "/tmp/some-music-folder",
+            # A folder that exists: save() refuses one that does not (#1272).
+            "FILE_DIRECTORY": self.tmp,
         }
         configure.write_settings_conf(answers, path=self.path)
 

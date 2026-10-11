@@ -246,8 +246,12 @@ def walk_with_sizes(top, onerror=None, workers=None):
                 # Caught by CI on Linux, where a symlink can be created without
                 # elevation, while the same test skipped on the Windows box
                 # that wrote it.
+                #
+                # A Windows directory junction is classified and NOT
+                # descended, exactly like a symlink (#1270) - see
+                # is_link_dir().
                 if entry.is_dir():
-                    if not entry.is_symlink():
+                    if not is_link_dir(entry):
                         subdirs.append(entry.path)
                     continue
             except OSError as err:
@@ -309,6 +313,18 @@ def walk_with_sizes(top, onerror=None, workers=None):
         # this cancels still run their done-callback and land in `finished`,
         # which nobody reads any more; that is harmless.
         pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _row_order(row):
+    """The order a list's (folder, name, size) rows are written in.
+
+    Case-insensitive, as a reader expects, with the exact folder and then the
+    exact name to break a tie: folders that differ only in case stay two
+    contiguous blocks rather than interleaving (#1270), and the order of two
+    names that differ only in case no longer depends on the walk's.
+    """
+    folder, name = str(row[0]), str(row[1])
+    return folder.lower(), folder, name.lower(), name
 
 
 def scan_workers():
@@ -384,6 +400,112 @@ def is_packable_file(name, packable=None):
     RAR_EXTENSIONS in defaults.py for what that cost.
     """
     return _has_extension(name, rar_extensions() if packable is None else packable)
+
+
+def rar_row_folder(rel_dir):
+    """The folder a packable folder's !rar row names, or None for no row.
+
+    `rel_dir` is a folder that holds a file in RAR_EXTENSIONS directly, as
+    the scan spells it: the folder's label first (#164), then the path below
+    it. The answer is written with "/" between its segments.
+
+    NO ROW BELOW THREE SEGMENTS (#1270). dcc.py refuses to pack the scan
+    folder itself and any folder directly in it - an artist root - so a
+    track sitting loose in either used to publish a row that was refused
+    every time it was pasted, and that AutoQ kept queuing for ever.
+    <label>/<artist>/<album> is the shortest path dcc.py will pack.
+
+    A MULTI-DISC ALBUM IS NAMED ONCE, above its discs: Album/CD1 and
+    Album/CD2 both give Album. The disc folders are matched as whole PATH
+    SEGMENTS against _BOX_WORD_RE - a substring match let "disc" fire on
+    "Discography" and "media" on "Media Markt Hits", collapsing a real album
+    to its artist root. The cut is made only where EVERY segment after it is
+    a disc folder and at least three segments stay, so the album above them
+    is never an artist root, and dcc.py's folder_holds_packable() - which
+    looks through exactly such a chain of disc folders - finds the tracks
+    when the row comes back. Cutting at the first box word wherever it sat
+    wrote rows the gate could not follow (Album/CD1/Bonus gave Album), and
+    before #1270 the gate followed none: every multi-disc album's row was
+    refused.
+    """
+    segments = re.split(r'[\\/]', str(rel_dir))
+    if len(segments) < 3:
+        return None
+    for cut in range(3, len(segments)):
+        if all(_BOX_WORD_RE.match(segment.strip()) for segment in segments[cut:]):
+            return "/".join(segments[:cut])
+    return "/".join(segments)
+
+
+def folder_holds_packable(path, packable=None):
+    """Does a !rar request for `path` have anything to pack?
+
+    True when a file in RAR_EXTENSIONS sits directly in `path`, or in a disc
+    folder below it - CD1, Disc 2, a chain of them - which is the album row
+    rar_row_folder() writes for a multi-disc album (#1270). Any other
+    subfolder is not looked into: a folder earns its row from its own files,
+    and a folder of films or a whole artist does not become packable because
+    something packable sits further down.
+
+    Stops at the first match. An unreadable `path` raises OSError, as the
+    scandir it replaces did; an unreadable disc folder below it is skipped.
+    Links and junctions are not followed, as the scan does not follow them.
+    """
+    packable = rar_extensions() if packable is None else packable
+    pending = [platform_compat.long_path(path)]
+    first = True
+    while pending:
+        current = pending.pop()
+        try:
+            with os.scandir(current) as scanning:
+                entries = list(scanning)
+        except OSError:
+            if first:
+                raise
+            continue
+        first = False
+        for entry in entries:
+            try:
+                if entry.is_file():
+                    if is_packable_file(entry.name, packable):
+                        return True
+                elif (entry.is_dir() and not is_link_dir(entry)
+                      and _BOX_WORD_RE.match(entry.name.strip())):
+                    pending.append(entry.path)
+            except OSError:
+                continue
+    return False
+
+
+# The reparse tag a directory junction (mklink /J) carries - and a volume
+# mounted into a folder, which Python's own os.path.isjunction() answers True
+# for as well.
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+
+
+def is_link_dir(entry):
+    """Is this os.DirEntry a directory the scan must not descend into?
+
+    A symlink, or a Windows directory junction (#1270). A junction is not a
+    symlink to Python - is_symlink() answers False for one - so the walk used
+    to descend it: a junction pointing at an ancestor was walked 63 levels
+    deep, every file listed 64 times, until Windows gave up with OSError 22
+    and every rebuild after that kept the previous index for ever.
+
+    DirEntry.is_junction() where Python has it (3.12); before that the reparse
+    tag, which a Windows DirEntry has from the directory listing itself, with
+    no further call to the disk. On every other platform both answer False.
+    """
+    if entry.is_symlink():
+        return True
+    is_junction = getattr(entry, "is_junction", None)
+    if is_junction is not None:
+        return bool(is_junction())
+    try:
+        tag = getattr(entry.stat(follow_symlinks=False), "st_reparse_tag", 0)
+    except OSError:
+        return False
+    return tag == _IO_REPARSE_TAG_MOUNT_POINT
 
 
 def has_backslash_component(relative_path, separator=None):
@@ -582,9 +704,17 @@ def _publish_artifacts(swaps):
                 backup = destination + ".previous"
                 platform_compat.replace_with_retry(destination, backup,
                                                    attempts=PUBLISH_REPLACE_ATTEMPTS)
+            # RECORDED THE MOMENT THE OLD FILE IS OUT OF THE WAY, not after
+            # the new one lands (#1270). The second rename fails too - an AV
+            # scanner or an indexer still holding the freshly written
+            # temporary past every retry - and a pair recorded only on full
+            # success was then never undone: the live list stayed renamed to
+            # .previous, which no "<base>-*.txt" glob matches, so @find
+            # answered "No MasterList found" and the advert went quiet while
+            # the log said the previous list was still in use.
+            done.append((destination, backup))
             platform_compat.replace_with_retry(temporary, destination,
                                                attempts=PUBLISH_REPLACE_ATTEMPTS)
-            done.append((destination, backup))
     except Exception:
         # Reverse order because that is the convention for undoing a
         # sequence, not because it is required here: each swap touches only
@@ -598,8 +728,12 @@ def _publish_artifacts(swaps):
                     platform_compat.replace_with_retry(backup, destination)
                 else:
                     # There was nothing here before; leaving the new file
-                    # would publish half a rebuild.
-                    os.remove(platform_compat.long_path(destination))
+                    # would publish half a rebuild. Nothing to remove when
+                    # it was this pair's own rename that failed.
+                    try:
+                        os.remove(platform_compat.long_path(destination))
+                    except FileNotFoundError:
+                        pass
             except OSError as undo_err:
                 print(f"[LIST-GEN ERROR] Could not roll {destination} back: "
                       f"{undo_err}")
@@ -634,8 +768,25 @@ def _prune_superseded_lists(keep, directory=None):
         print(f"[LIST-CLEAN ERROR] Could not read {directory}: {err}")
         return
 
+    # IN THE FILESYSTEM'S OWN TERMS (#1272). On NTFS and APFS "musicbot-..." and
+    # "MusicBot-..." are one name, so after the nickname was recapitalised the
+    # old lists were never matched below and never removed - and Windows'
+    # case-blind glob in find_latest_list() went on finding them. On a
+    # case-sensitive filesystem the two really are different names, and this
+    # stays exactly as strict as it was.
+    if platform_compat.ignores_case(directory):
+        def same(name):
+            return name.casefold()
+    else:
+        def same(name):
+            return name
+    keep = {same(name) for name in keep}
+    side_files = {same(os.path.basename(str(getattr(config, setting, ""))))
+                  for setting in ("LIST_SIZE_FILE", "LIST_RAWBYTES_FILE")}
+    prefix = same(config.LIST_BASE_NAME + "-")
+
     for item in entries:
-        if item in keep:
+        if same(item) in keep:
             continue
         # The HYPHEN is the point. Every generated list is
         # f"{LIST_BASE_NAME}-{today}.txt" or f"{LIST_BASE_NAME}-RAR-{today}.txt",
@@ -650,18 +801,17 @@ def _prune_superseded_lists(keep, directory=None):
         # bytes, on every interval, for ever - and the log line for it read
         # "[LIST-CLEAN] Removed 2 superseded list(s)", which sounds like
         # housekeeping working. Found by audit.
-        if not item.startswith(config.LIST_BASE_NAME + "-"):
+        if not same(item).startswith(prefix):
             continue
 
         # Belt and braces: never remove a file this run just wrote, whatever
         # the name matching decides.
-        if item in (os.path.basename(str(getattr(config, "LIST_SIZE_FILE", ""))),
-                    os.path.basename(str(getattr(config, "LIST_RAWBYTES_FILE", "")))):
+        if same(item) in side_files:
             continue
         # ".rar" is here because LIST_FORMAT can publish one. Only names that
         # also start with LIST_BASE_NAME are considered, and this is the lists
         # directory, so no album archive a user is waiting on is in reach.
-        if not item.endswith((".txt", ".zip", ".rar")):
+        if not same(item).endswith((".txt", ".zip", ".rar")):
             continue
         try:
             os.remove(os.path.join(directory, item))
@@ -813,6 +963,39 @@ def migrate_list_base_name(log=print):
     return moved
 
 
+def _same_file(first, second):
+    """True when the two paths name one file - on a case-insensitive
+    filesystem, two spellings of the same name."""
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
+
+
+def _rename_through_a_temporary_name(old_path, new_path):
+    """Rename `old_path` to `new_path` when the filesystem already calls
+    them the same file (#1272).
+
+    Two steps, through a name of its own: a rename onto what the filesystem
+    considers the same name is not one every platform will do in one step.
+    POSIX rename() is a successful no-op when both names are already links
+    to one file, which leaves the temporary name behind - removed here, since
+    `new_path` is that same file.
+    """
+    temporary = old_path + ".case-rename"
+    platform_compat.replace_with_retry(old_path, temporary)
+    try:
+        platform_compat.replace_with_retry(temporary, new_path)
+    except OSError:
+        try:
+            platform_compat.replace_with_retry(temporary, old_path)
+        except OSError:
+            pass
+        raise
+    if os.path.lexists(temporary) and _same_file(temporary, new_path):
+        os.remove(temporary)
+
+
 def _migrate_one_list_directory(directory, log=print):
     """migrate_list_base_name() for ONE list's directory. Returns the
     (old, new) basenames actually moved."""
@@ -853,10 +1036,18 @@ def _migrate_one_list_directory(directory, log=print):
         new_name = config.LIST_BASE_NAME + item[len(previous):]
         old_path = os.path.join(directory, item)
         new_path = os.path.join(directory, new_name)
+        rename = platform_compat.replace_with_retry
         if os.path.exists(new_path):
-            continue
+            # A CASE-ONLY RENAME (#1272): "musicbot" -> "MusicBot". On NTFS and
+            # APFS the new name "exists" because it is this very file, so every
+            # file was skipped, the marker kept the old name, and the bot stayed
+            # on its old list for good. Only a DIFFERENT file at the new name
+            # is the rebuild that already happened and wins.
+            if not _same_file(old_path, new_path):
+                continue
+            rename = _rename_through_a_temporary_name
         try:
-            platform_compat.replace_with_retry(old_path, new_path)
+            rename(old_path, new_path)
             moved.append((item, new_name))
         except OSError as err:
             log(f"[MIGRATE] Could not rename {item} to {new_name}: {err}. "
@@ -1821,15 +2012,21 @@ def generate_master_list(list_name=None, reading_jobs=None):
               f"{', '.join(repr(p) for p in unlistable_dirs[:5])}"
               f"{' ...' if len(unlistable_dirs) > 5 else ''}")
 
-    # Sort by the real folder and file names
-    all_files_data.sort(key=lambda x: (str(x[0]).lower(), str(x[1]).lower()))
+    # Sort by the real folder and file names, case-insensitively - and then
+    # by the EXACT folder, so each folder's rows stay together (#1270). On a
+    # case-sensitive filesystem Metallica/Live and metallica/Live are two
+    # folders whose lower-cased names tie, and with no tiebreak their files
+    # interleaved by filename: the writer starts a heading whenever the
+    # folder changes, so the list repeated both headings once per row, each
+    # with the whole folder's summary line above a single file.
+    all_files_data.sort(key=_row_order)
     # THE SAME ORDER, FOR THE SAME REASON (#443). all_files_data has been
     # sorted here since the beginning; video_files_data is built by the same
     # walk and was only ever appended to, so the film and series list came out
     # in whatever order the filesystem handed the directories over - which is
     # reverse-ish on NTFS and arbitrary elsewhere. A reader scanning for a
     # title has no way to guess where it is.
-    video_files_data.sort(key=lambda x: (str(x[0]).lower(), str(x[1]).lower()))
+    video_files_data.sort(key=_row_order)
 
     total_files_count = len(all_files_data)
     scan_end = time.time()
@@ -1892,6 +2089,12 @@ def generate_master_list(list_name=None, reading_jobs=None):
     # is skipped, no rows are written, the empty temp file fails the size test
     # for the archive, and the `if not serve_albums:` branch removes it instead
     # of publishing it.
+    # A folder dcc.py would refuse to pack gets no row (#1270): the scan
+    # folder itself and an artist root, holding loose tracks. Dropped here,
+    # before the question below, so a list whose only packable folders are
+    # those ships no album list rather than a masthead with nothing under it.
+    packable_folders = {folder for folder in packable_folders
+                        if rar_row_folder(folder) is not None}
     if serve_albums and not packable_folders:
         serve_albums = False
         print("[LIST-GEN] No folder in this list can be packed - skipping the "
@@ -1988,25 +2191,10 @@ def generate_master_list(list_name=None, reading_jobs=None):
                     chunk.append(f"\n{folder_rule}\n{folder_line}\n{folder_rule}\n")
                     chunk.append(folder_summary_line(*music_totals[folder], format_size_human) + "\n")
                     
-                    # Strip multi-disc suffixes, for the !rar album list ONLY.
+                    # The !rar album list's row for this folder. How the
+                    # multi-disc suffixes are stripped, and which folders get
+                    # no row at all, is rar_row_folder()'s docstring.
                     #
-                    # Matched as a whole PATH SEGMENT (split on the same
-                    # separators the folder can carry), not a substring
-                    # anywhere in the path - a substring match let "\disc"
-                    # fire on "\Discography" and "\media" fire on "\Media
-                    # Markt Hits", collapsing a real album folder to the
-                    # ARTIST root, which dcc.py refuses outright ("Artist
-                    # root folders cannot be requested"). The album then had
-                    # no requestable row at all: written_rar_folders
-                    # deduplicates on the truncated (wrong) string.
-                    #
-                    # Also requires the truncation to leave at least two
-                    # segments below FILE_DIRECTORY - i.e. never collapse to
-                    # the artist root - and finds the EARLIEST matching
-                    # segment by walking the path in order, rather than the
-                    # old "first box word in LIST order" behaviour, which
-                    # made the truncation point depend on the order this
-                    # list happened to be written in.
                     # A folder earns a !rar row from holding something
                     # worth PACKING, not from holding anything at all. Before
                     # this the only conditions were "has a folder" and
@@ -2016,32 +2204,15 @@ def generate_master_list(list_name=None, reading_jobs=None):
                     # packable - a season of a series, or a folder holding one
                     # text note - with no size cap anywhere behind a line
                     # anybody in the channel can paste. See RAR_EXTENSIONS.
-                    if folder and serve_albums and folder in packable_folders:
-                        folder_segments = re.split(r'[\\/]', folder)
-                        truncate_at = None
-                        for seg_index, segment in enumerate(folder_segments):
-                            if _BOX_WORD_RE.match(segment.strip()):
-                                truncate_at = seg_index
-                                break
-                        # Three, not two. The threshold means "leave at least
-                        # two segments below the FOLDER" - artist and album -
-                        # and rel_dir now begins with the folder's label
-                        # (#164), so every index shifted by one. Left at 2, a
-                        # library shaped <label>/<artist>/<disc 1> would
-                        # truncate to <label>/<artist>: the artist root, which
-                        # dcc.py refuses outright, leaving that album with no
-                        # requestable row at all - the exact failure the
-                        # threshold was added to prevent.
-                        if truncate_at is not None and truncate_at >= 3:
-                            rar_folder_clean = "/".join(folder_segments[:truncate_at])
-                        else:
-                            # Truncating here would collapse to the artist
-                            # root (or nothing) - offering the untruncated
-                            # real path, box word and all, is still a
-                            # request dcc.py will actually serve; the
-                            # refused artist root is not.
-                            rar_folder_clean = folder
-
+                    # The folder the row names - the album above its disc
+                    # folders - is rar_row_folder()'s answer, the one rule
+                    # dcc.py's pack gate is written against (#1270). None
+                    # means a row dcc.py would refuse; packable_folders has
+                    # already dropped those, so it is not seen here.
+                    rar_folder_clean = (rar_row_folder(folder)
+                                        if folder and serve_albums
+                                        and folder in packable_folders else None)
+                    if rar_folder_clean is not None:
                         raw_rar_str = f"{list_mod.LIST_FOLDER_PREFIX}{rar_folder_clean}\\"
                         display_rar_folder = raw_rar_str.replace("/", "\\")
                         

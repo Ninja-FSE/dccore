@@ -2,7 +2,8 @@
 
 It had grown without a plan: Stop the bot sat under Library, Reload under Admin,
 Console command stood alone and nine queries and toggles filled the top level.
-Now: Script Settings and the Console command first, then Info, Lists, Library,
+Now: Script Settings, Bot Settings (the settings window, #1264) and the Console
+command first, then Info, Lists, Library,
 User control and Control, then Connection and Window; the two windows are in
 Window and the command list is in Info. Stop the bot and Reload are last in Control, behind
 a separator, and still ask first.
@@ -73,13 +74,16 @@ class TheTopLevel(unittest.TestCase):
         top, _ = parse()
         loose = [label for label, action in top if action is not None]
         self.assertEqual([label for label in loose if not label.startswith("$iif($dccore.sel")],
-                         ["$iif($dccore.st(packing) != $null,Cancel the running pack...)", "Script Settings", "Console command", "Clear finished..."])
+                         ["$iif($dccore.st(packing) != $null,Cancel the running pack...)", "Script Settings", "Bot Settings",
+                          "Console command", "Clear finished..."])
 
     def test_the_settings_and_the_console_command_come_first(self):
         top, _ = parse()
         rest = [item for item in top if not item[0].startswith("$iif($dccore.st(packing)")]
-        self.assertEqual(names(rest)[:3], ["Script Settings", "Console command", SEPARATOR])
+        self.assertEqual(names(rest)[:4], ["Script Settings", "Bot Settings", "Console command", SEPARATOR])
         self.assertEqual(dict(top)["Script Settings"], "dccore.options")
+        # #1264: the bot's own settings, next to this mIRC's
+        self.assertEqual(dict(top)["Bot Settings"], "dccore.settings")
 
     def test_cancelling_a_running_pack_is_on_the_top_level_and_only_while_one_runs(self):
         top, groups = parse()

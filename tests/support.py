@@ -283,6 +283,9 @@ _ORPHANED_QUEUE_SINK = os.path.join(_ORPHANED_WRITE_DIR, "dcc_queue.txt")
 _ORPHANED_SPEED_RECORD_SINK = os.path.join(_ORPHANED_WRITE_DIR, "speed_record.txt")
 _ORPHANED_DOWNLOAD_COUNTS_SINK = os.path.join(_ORPHANED_WRITE_DIR, "download_counts.json")
 _ORPHANED_TRANSFER_LOG_SINK = os.path.join(_ORPHANED_WRITE_DIR, "transfers.db")
+# A recorded private message is written from a thread of its own a moment later
+# (announce._save_private_messages_soon()), which can outlive its test.
+_ORPHANED_PRIVATE_MESSAGES_SINK = os.path.join(_ORPHANED_WRITE_DIR, "private_messages.json")
 
 
 def reset_config(**overrides):
@@ -334,6 +337,10 @@ def reset_config(**overrides):
     webserver_module = sys.modules.get("webserver")
     if webserver_module is not None:
         webserver_module._web_bad_ips.clear()
+        # And the attempts a login claimed and a test left unsettled.
+        in_flight = getattr(webserver_module, "_web_logins_in_flight", None)
+        if in_flight is not None:
+            in_flight.clear()
 
     # What the version check (#572) last found. Read from runtime.py itself,
     # not through config, so reset there: a release "found" by one test would
@@ -361,6 +368,14 @@ def reset_config(**overrides):
                         # earlier test - minutes - so a queue that test expects
                         # to expire is kept.
                         ("freeze_clock_paused_at", None),
+                        # #1271: a connection's late channel sync, the
+                        # server's casemapping and the detected DCC address
+                        # belong to the test that drove irc_loop(). A
+                        # detected address left behind would make the next
+                        # test's blank MY_IP_OR_DOCK look offerable.
+                        ("channel_sync_waiting", None),
+                        ("server_casemapping", "rfc1459"),
+                        ("dcc_address_detected", ""), ("dcc_address_found_at", None),
                         # #1182: one test's background audio reading, or
                         # its result, is not the next one's.
                         ("audio_reading", None), ("audio_reading_last", None),
@@ -560,10 +575,14 @@ def no_disk_writes(db_module):
 
 
 def queue_row(user="dave", filename="Song.flac", **extra):
-    """Build a dcc_queue entry in the shape dcc.py actually creates."""
+    """Build a dcc_queue entry in the shape dcc.py actually creates.
+
+    Its path is inside FILE_DIRECTORY, as a real row's is: the dispatcher
+    refuses a row whose file is no longer inside any shared folder (#1268).
+    """
     row = {
         "file": filename,
-        "path": "/srv/library/Artist/Album/" + filename,
+        "path": os.path.join(config.FILE_DIRECTORY or "/srv/library", "Artist", "Album", filename),
         "channel": "#dccore-test",
         "user_raw": user,
         "is_temporary_zip": False,
@@ -1146,7 +1165,13 @@ class DCCoreTestCase(unittest.TestCase):
         # a target at any point in the run.
         db.FETCH_HISTORY_FILE = _ORPHANED_WRITE_SINK
         db.NOTICES_FILE = self._real_notices_file
-        db.PRIVATE_MESSAGES_FILE = self._real_pm_file
+        # NOT RESTORED either, for the fetch history's reason: a recorded
+        # private message is written from a thread of its own. Anything still
+        # waiting is written into this test's own file first, so that thread
+        # finds nothing left to do; one started after this line writes a sink.
+        import announce
+        announce.flush_private_messages()
+        db.PRIVATE_MESSAGES_FILE = _ORPHANED_PRIVATE_MESSAGES_SINK
         db.KNOWN_BOTS_FILE = self._real_known_bots_file
         db.LIST_GRABS_FILE = self._real_list_grabs_file
         db.SECONDARY_CHANNEL_GRABS_FILE = self._real_secondary_channel_grabs_file

@@ -54,7 +54,10 @@ if REPO_ROOT not in sys.path:
 # at rather than something this list waves through.
 # serverschat.py (#371) hands a chat line to the same AdminSession - its
 # send() queues onto the session outbox, like every adminchat caller.
-SESSION_SEND = {"adminchat.py": {"session", "self"}, "serverschat.py": {"session"}}
+# console_settings.py (#1264) is the settings window's commands, called from
+# adminchat's command table with the same session.
+SESSION_SEND = {"adminchat.py": {"session", "self"}, "serverschat.py": {"session"},
+                "console_settings.py": {"session"}}
 
 
 def daemon_modules():

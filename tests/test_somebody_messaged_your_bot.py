@@ -209,8 +209,11 @@ class WhatSurvivesARestart(DCCoreTestCase):
         super().setUp()
         announce._pm_last_recorded.clear()
 
-    def test_a_message_is_on_disk_as_soon_as_it_arrives(self):
+    def test_a_message_is_on_disk_once_its_save_has_run(self):
+        """Written a moment later, from a timer rather than the IRC read
+        thread that records it - flush_private_messages() is that write."""
         announce.record_private_message("SomeUser", "hello")
+        self.assertTrue(announce.flush_private_messages())
 
         with io.open(db.PRIVATE_MESSAGES_FILE, encoding="utf-8") as handle:
             stored = json.load(handle)

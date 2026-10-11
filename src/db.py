@@ -1298,14 +1298,21 @@ def load_admin_tokens():
 
 
 def save_admin_tokens(tokens):
+    """Write the token store; True when it was written, False when it was not.
+
+    `pair` and `unpair` report what this returns: an `unpair` whose write
+    failed has revoked nothing, and must not say "Revoked".
+    """
     try:
         with _disk_lock:
             # Secrets: owner-only from the first write (#692).
             _atomic_write(ADMIN_TOKENS_FILE,
                           json.dumps(tokens, indent=1, sort_keys=True, ensure_ascii=False),
                           mode=0o600)
+        return True
     except Exception as err:
         print(f"[DB ERROR] Could not save the console token store: {err}")
+        return False
 
 
 def load_list_grabs():
@@ -1581,13 +1588,19 @@ def save_fetch_history(rows):
     """Write the finished-fetch history, atomically. Called from
     dcc_fetch.py's dispatcher tick (every 2s, skipped when nothing changed)
     and immediately on a dashboard delete, so a row disappears from disk
-    right away rather than only up to one tick later."""
+    right away rather than only up to one tick later.
+
+    Returns whether the file was written (#1273), as save_known_bots() does:
+    the tick counts a snapshot as on disk only then, so a failed write is
+    tried again on the next tick instead of being taken for done."""
     try:
         with _disk_lock:
             _atomic_write(FETCH_HISTORY_FILE,
                           json.dumps(rows, indent=1, sort_keys=True, ensure_ascii=False))
+        return True
     except Exception as err:
         print(f"[DB ERROR] Could not save the fetch history: {err}")
+        return False
 
 
 def save_dcc_queue():
@@ -1625,9 +1638,14 @@ def save_dcc_queue():
         # settled on for get_total_queued_count() for the same reason: a
         # concurrent change can leave this snapshot one entry stale, never
         # raise.
-        live = dict(config.dcc_queue)
-
+        #
+        # TAKEN INSIDE _disk_lock (#1273), so the copies reach the file in the
+        # order they were taken. Copied before it, a save that waited for the
+        # lock wrote its older copy after a newer save had already landed:
+        # an erased queue came back in the file and a new one was missing
+        # from it until the next save - and a restart in between kept that.
         with _disk_lock:
+            live = dict(config.dcc_queue)
             snapshot = {k: list(v) for k, v in live.items() if v}
             _atomic_write(DCC_QUEUE_FILE, json.dumps(snapshot, indent=4))
 

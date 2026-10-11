@@ -1,0 +1,234 @@
+"""Where every setting sits in dccore.mrc's settings window (#1264).
+
+PURE DATA. scripts/mirc/build_settings_window.py reads this file, takes the
+labels, units, choices, types and help texts from the bot's own metadata
+(webserver.SETTINGS_LABELS and friends), lays the controls out and writes the
+dialog into a marked block of dccore.mrc. Nothing here is mIRC code and
+nothing here is a position: move a setting by moving its line.
+
+The grouping is the settings-window mockup's: six tabs, a column of page
+buttons on the left of each, sections inside a page, in the mockup's order. It is NOT the
+dashboard's SETTINGS_CATEGORIES order on purpose - the mockup moved the
+switches used most onto General Settings, so SEARCH_ENABLED is there and not
+on Search.
+
+An item is one of:
+
+    "KEY"                                  a setting, with its dashboard label
+    {"key": "KEY", "label": "..."}         the same, with the mockup's shorter label
+    {"local": "option", "label": "..."}    one of this mIRC's own switches (dccore.ini)
+    {"note": "..."}                        a line or two of explanation
+    {"widget": "name", "keys": [...]}      a structured control the script drives
+                                           by hand; `keys` are the settings it edits
+
+THE PLACEMENT RULE. Every key in webserver.SETTINGS_CATEGORIES is placed
+exactly once - as an item or in a widget's `keys` - or listed in EXCLUDED with
+the reason it is not in the window. tests/test_the_mirc_settings_window.py
+fails on a key that is in neither, so a setting added to the bot cannot
+silently miss the window.
+
+Examples in notes are invented (#music, host.example): this file ships.
+"""
+
+# The keys of the File locations page: Apply asks before it saves a change to
+# any of them, since a wrong path there can lose a queue or a statistics file.
+CONFIRM_PAGES = ("File locations",)
+
+GROUPS = (
+    ("General", (
+        ("IRC Server", (
+            ("Connection", ("SERVER", "PORT", "NICKNAME", "ALT_NICKNAME")),
+            ("Reconnection", ("REJOIN_ATTEMPTS", "ON_CONNECT_CHECK_MINUTES")),
+            ("On connect", ({"widget": "onconnect"},)),
+        )),
+        ("General Settings", (
+            ("", ({"note": "The on/off switches used most, here from their own pages so there is one "
+                           "place to check."},)),
+            ("Open when mIRC starts (minimised)", (
+                {"local": "start.main", "label": "DCCore window"},
+                {"local": "start.chat", "label": "Chat"},
+                {"local": "start.downloads", "label": "Downloads"},
+            )),
+            ("Connection", (
+                {"local": "auto", "label": "Reconnect and log in to the bot by itself when it comes back"},
+            )),
+            ("Sharing & search", ("SEARCH_ENABLED", "ANNOUNCE_TRANSFERS", "RAR_ENABLED")),
+            ("Messaging & dashboard", ("PRIVATE_MESSAGES_ENABLED", "WEBUI_ENABLED", "CTCP_VERSION_REPLY")),
+            ("Updates", ("CHECK_FOR_UPDATES",)),
+        )),
+        ("Channels", (
+            ("Admin channels", (
+                {"note": "A separate channel the bot sends its own diagnostic lines to - never one it "
+                         "also serves files in."},
+                "DEBUG_CHANNEL",
+            )),
+            ("Serving channels", (
+                {"note": "Which channels the bot joins and sits in. What each one serves - which list, "
+                         "which folders, Normal, Silent or Request only - is set per list under "
+                         "Sharing > Lists & channels."},
+                {"widget": "channels", "keys": ["CHANNEL"]},
+            )),
+        )),
+        ("Operator", (
+            ("Admin", ("ADMIN_NICK",)),
+        )),
+        ("Appearance", (
+            ("What the channel sees", (
+                "THEME",
+                {"widget": "preview"},
+            )),
+            ("Custom override - surface colours", (
+                {"note": "Set any of these and it replaces that one role in the theme above. Keep "
+                         "previous keeps whatever background the segment before left."},
+                {"key": "CUSTOM_THEME_BORDER", "label": "Border colour"},
+                {"key": "CUSTOM_THEME_SEPARATOR", "label": "Separator colour"},
+                {"key": "CUSTOM_THEME_TEXTBOX", "label": "Text box colour"},
+            )),
+            ("Custom override - text colours", (
+                {"key": "CUSTOM_THEME_VALUE", "label": "Value colour"},
+                {"key": "CUSTOM_THEME_ALERT", "label": "Alert colour"},
+                {"key": "CUSTOM_THEME_ACCENT", "label": "Accent colour"},
+            )),
+        )),
+        ("Advertising", (
+            ("Advert", ("ANNOUNCE_INTERVAL",)),
+            ("Broadcast search", ("BROADCAST_SEARCH_CHANNEL", "BROADCAST_SEARCH_COOLDOWN")),
+            ("Timing", ("MSG_DELAY", "DEBUG_MSG_DELAY")),
+        )),
+    )),
+    ("Sharing", (
+        ("Search", (
+            ("Sending", ("MAX_DCC_SLOTS", "MAX_USER_QUEUE", "MAX_GLOBAL_QUEUE")),
+            ("Search (@find)", (
+                {"note": "How much the bot says back once it answers (the on/off switch is under "
+                         "General > General Settings)."},
+                "MAX_SEARCH_RESULTS", "SEARCH_SHOW_FOLDER", "SEARCH_FOLDER_MAX_CHARS",
+            )),
+            ("During a rebuild", ("PAUSE_ON_UPDATE", "PAUSE_FOR_WHOLE_UPDATE", "REHASH_TRANSFER_WAIT")),
+        )),
+        ("Transfers", (
+            ("Buffers & packet size", ("DCC_BLOCK_SIZE", "DCC_SEND_BUFFER")),
+            ("Ports & reliability", ("DCC_PORT_START", "DCC_PORT_END", "DCC_ACCEPT_TIMEOUT",
+                                     "MAX_SEND_FAILS")),
+        )),
+        ("Your list", (
+            ("Library", ("FILE_DIRECTORY", "LIST_BASE_NAME", "LIST_FORMAT", "LIST_IGNORED_EXTENSIONS")),
+            ("Film & series", ("SEPARATE_VIDEO_LIST", "LIST_VIDEO_EXTENSIONS",
+                               "LIST_VIDEO_COMPANION_EXTENSIONS")),
+            ("!rar packing", ("RAR_EXTENSIONS", "RAR_BINARY", "MAX_RAR_FOLDER_SIZE", "RAR_TIMEOUT")),
+            ("List banner", ("LIST_HEADER_FILE", "LIST_HEADER_MAX_BYTES", "LIST_SHOW_AUDIO_INFO")),
+        )),
+        ("Lists & channels", (
+            ("", (
+                {"note": "What each list shares: a name, its folders, and whether it is primary (it "
+                         "answers a private message, and any channel bound to none). Then which list "
+                         "answers in each channel, and that channel's mode."},
+                {"widget": "served"},
+            )),
+        )),
+        ("Rebuild", (
+            ("Automatic rebuild", ("LIST_REBUILD_SCHEDULE", "LIST_UPDATE_TIMEOUT",
+                                   "LIST_UPDATE_STALL_SECONDS")),
+            ("Performance", ("LIST_AUDIO_INFO_MINUTES", "LIST_AUDIO_INFO_THREADS", "LIST_SCAN_THREADS")),
+        )),
+    )),
+    ("Downloads", (
+        ("List discovery", (
+            ("Auto-grab", ("AUTO_GRAB_LISTS", "AUTO_GRAB_EVERY_MINUTES", "AUTO_GRAB_MIN_FILES",
+                           "AUTO_GRAB_MIN_SPEED_KB")),
+            ("Discover lists", ("AUTO_DISCOVER_CHANNEL_LISTS", "MULTI_CHANNEL_LIST_STABLE_SECONDS")),
+        )),
+        ("Fetch tuning", (
+            ("Slots & re-fetch", ("MAX_FETCH_SLOTS", "AUTO_REFETCH_LISTS", "AUTO_REFETCH_INTERVAL_HOURS",
+                                  "AUTO_REFETCH_MAX_PER_RUN")),
+            ("Timeouts", ("FETCH_OFFER_TIMEOUT", "FETCH_TRANSFER_TIMEOUT", "FETCH_FOLDER_OFFER_TIMEOUT",
+                          "FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED", "FETCH_FOLDER_TRANSFER_TIMEOUT")),
+            ("Size limits", ("MAX_FETCH_FILE_SIZE", "MAX_FETCH_FOLDER_FILE_SIZE", "MAX_FETCH_LIST_FILE_SIZE",
+                             "MAX_LIST_TEXT_SIZE")),
+            ("History", ("FETCH_HISTORY_DAYS", "FETCH_HISTORY_MAX_ROWS")),
+        )),
+        ("Queue", (
+            ("Fetch queue", ("FETCH_MAX_PER_BOT", "FETCH_QUEUED_TIMEOUT", "FETCH_BOT_MAX_FAILS",
+                             "FETCH_BOT_COOLDOWN_MINUTES")),
+        )),
+    )),
+    ("Security", (
+        ("Anti-flood", (
+            ("Flood protection", ("MAX_REQUESTS", "REQUEST_WINDOW", "MUTE_TIME", "FLOOD_BAN_SECONDS")),
+        )),
+        ("Bans & ignores", (
+            ("Temporary (by nick)", (
+                {"note": "Flood protection bans a nick by itself; Ignore is the same timed block, "
+                         "started by hand."},
+                {"widget": "bantimed"},
+            )),
+            ("Permanent (by hostmask pattern)", (
+                {"note": "Wildcard patterns such as *!*@host.example - the same as ban and unban in "
+                         "the console."},
+                {"widget": "banperm"},
+            )),
+        )),
+        ("Private messages", (
+            ("Auto-reply", ("PRIVATE_MESSAGE_COOLDOWN_SECONDS", "PRIVATE_MESSAGE_DECLINE_TEXT",
+                            "PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS")),
+            ("Rate limit", ("PRIVATE_MESSAGE_DECLINE_BURST", "PRIVATE_MESSAGE_DECLINE_BURST_SECONDS")),
+        )),
+        ("Admin console", (
+            ("Access", ("ADMIN_HOSTMASKS", "ADMIN_CHAT_MODE")),
+            ("Behaviour", ("ADMIN_CHANNEL_COMMANDS", "ADMIN_CHAT_COLOURS")),
+        )),
+    )),
+    ("Dashboard & Console", (
+        ("Web dashboard", (
+            ("Server", ("WEBUI_HOST", "WEBUI_PORT", "WEBUI_ALLOWED_HOSTS")),
+            ("Console & browser", ("WEBUI_CONSOLE_ENABLED", "WEBUI_OPEN_BROWSER",
+                                   "WEBUI_FOLDER_BROWSER_ENABLED")),
+        )),
+        ("Console feed", (
+            ("What shows in @DCCore", ("CONSOLE_SHOW_REQUESTS", "CONSOLE_SHOW_QUEUE", "CONSOLE_SHOW_SENDS",
+                                       "CONSOLE_SHOW_FAILURES", "CONSOLE_SHOW_SEARCHES")),
+            ("Debug channel", ("DEBUG_CHANNEL_FEED",)),
+        )),
+        ("This mIRC window", (
+            ("", ({"widget": "mircwin"},)),
+        )),
+    )),
+    ("Advanced", (
+        ("Debug & logging", (
+            ("Debug", ("DEBUG_MODE", "DEBUG_TO_CHANNEL", "DEBUG_TO_CONSOLE")),
+            ("Logging", ("CONSOLE_TIMESTAMP_FORMAT", "CONSOLE_LOG_FILE", "CONSOLE_LOG_MAX_MB",
+                         "CONSOLE_LOG_KEEP")),
+            ("Window & project", ("BOT_WINDOW", "PROJECT_URL")),
+        )),
+        ("File locations", (
+            ("Library & lists", ("TMP_ZIP_DIR", "LOCAL_LIST_DIR", "FETCHED_FILES_DIR", "LIBRARY_FOLDERS_FILE",
+                                 "LISTS_FILE")),
+            ("Security", ("BANS_FILE", "HARD_BANS_FILE")),
+            ("Stats & bots", ("STATS_FILE", "KNOWN_BOTS_FILE", "FETCHED_BOT_LISTS_FILE")),
+            ("Search & audio", ("LIST_INDEX_FILE", "LIST_AUDIO_INFO_CACHE")),
+            ("Fetch history", ("FETCH_HISTORY_FILE", "DOWNLOAD_COUNTS_FILE", "TRANSFER_LOG_FILE")),
+            ("List build", ("LIST_SIZE_FILE", "LIST_RAWBYTES_FILE", "LIST_PROGRESS_FILE")),
+            ("Console & messaging", ("ADMIN_TOKENS_FILE", "ON_CONNECT_FILE", "NOTICES_FILE",
+                                     "PRIVATE_MESSAGES_FILE", "DCC_QUEUE_FILE")),
+        )),
+    )),
+)
+
+# Settings the window does not show, and why. Every other key of
+# webserver.SETTINGS_CATEGORIES has a place above.
+EXCLUDED = {
+    "ADMIN_PASSWORD_HASH": "never sent over the console (`settings` leaves it out and `set` refuses it): "
+                           "the password is changed on the dashboard's Settings page or with "
+                           "python src/adminchat.py",
+}
+
+# The settings whose value is a path on the BOT's machine, and whether it is a
+# folder or a file: they get a "..." browse button, enabled only when the
+# console connection is local (the bot runs on this PC).
+FOLDER_KEYS = ("FILE_DIRECTORY", "TMP_ZIP_DIR", "LOCAL_LIST_DIR", "FETCHED_FILES_DIR")
+FILE_KEYS = ("RAR_BINARY", "LIST_HEADER_FILE", "CONSOLE_LOG_FILE", "LIBRARY_FOLDERS_FILE", "LISTS_FILE",
+             "BANS_FILE", "HARD_BANS_FILE", "STATS_FILE", "KNOWN_BOTS_FILE", "FETCHED_BOT_LISTS_FILE",
+             "LIST_INDEX_FILE", "LIST_AUDIO_INFO_CACHE", "FETCH_HISTORY_FILE", "DOWNLOAD_COUNTS_FILE",
+             "TRANSFER_LOG_FILE", "LIST_SIZE_FILE", "LIST_RAWBYTES_FILE", "LIST_PROGRESS_FILE",
+             "ADMIN_TOKENS_FILE", "ON_CONNECT_FILE", "NOTICES_FILE", "PRIVATE_MESSAGES_FILE",
+             "DCC_QUEUE_FILE")

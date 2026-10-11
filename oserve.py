@@ -46,9 +46,22 @@ if __name__ == "__main__":
 
 # Load the bot's modules
 import defaults as config
+
+
+def current_console_timestamp_format():
+    """CONSOLE_TIMESTAMP_FORMAT as the config holds it NOW (#1272).
+
+    Through sys.modules, like _console_log_settings() below: a settings save
+    reloads defaults, and the stamp follows on the next line instead of at
+    the next restart.
+    """
+    current = sys.modules.get("defaults") or config
+    return str(getattr(current, "CONSOLE_TIMESTAMP_FORMAT", "%H:%M:%S") or "")
+
+
 if __name__ == "__main__":
-    platform_compat.set_console_timestamp_format(
-        getattr(config, "CONSOLE_TIMESTAMP_FORMAT", "%H:%M:%S"))
+    platform_compat.set_console_timestamp_format(current_console_timestamp_format())
+    platform_compat.follow_console_timestamp_format(current_console_timestamp_format)
 
     # `oserve.py --stop` (#1065): ask the bot running from this folder to stop,
     # wait until it has, and exit - before anything below starts, and before
@@ -177,6 +190,54 @@ def queue_message(user, message, is_vip=False):
 
 
 
+def _refuse_an_unreadable_settings_file(settings_file, unconfigured):
+    """Exit 1 when the REQUIRED settings read as unconfigured only because
+    settings.conf could not be read, or refused their values (#1272).
+
+    Returns without doing anything when the file is fine - the install
+    really is unconfigured, and the setup page or the plain refusal below
+    is the right answer.
+    """
+    report = settings_file.recheck(vars(config))
+    path = report["path"]
+    if report["read_error"]:
+        print(f"[CRITICAL] {path} could not be read: {report['read_error']}")
+        print("[CRITICAL] Every setting in it is ignored until that is fixed - "
+              "including " + ", ".join(sorted(unconfigured)) + ", which is why "
+              "they look unconfigured. Correct that line in the file (or put the "
+              "file aside) and start again.")
+        print("[CRITICAL] The first-run setup is not offered: this install is "
+              "configured, and the setup would replace its admin password.")
+        sys.exit(1)
+    refused = {name: why for name, why in report["bad"] if name in unconfigured}
+    if refused:
+        for name in sorted(refused):
+            print(f"[CRITICAL] {path} sets {name}, but the value was refused: "
+                  f"{refused[name]}.")
+        print("[CRITICAL] Correct it in the file and start again. The first-run "
+              "setup is not offered: this install is configured.")
+        sys.exit(1)
+
+
+def _warn_about_lists_with_nothing_readable(library):
+    """A [WARNING] per list whose folders are ALL unavailable (#1272).
+
+    The daemon starts while any list has something to serve; a list with
+    nothing is still worth saying, by name and channel, because its channels
+    go unserved until the drive is back.
+    """
+    every = library.lists()
+    if len(every) < 2:
+        return
+    for served in every:
+        if served.folders and not any(os.path.exists(folder.path)
+                                      for folder in served.folders):
+            where = ", ".join(served.channels) or "its channels"
+            print(f"[WARNING] None of list {served.name!r}'s folders exist right "
+                  f"now ({', '.join(folder.path for folder in served.folders)}) - "
+                  f"{where} will have nothing to serve until they are back.")
+
+
 def startup(setup_page=None):
     """Everything the daemon does before it touches the network.
 
@@ -237,6 +298,15 @@ def startup(setup_page=None):
     # regardless of how it was started.
     import settings_file
     unconfigured = settings_file.unconfigured_required(vars(config), config.SHIPPED_DEFAULTS)
+    if unconfigured:
+        # CONFIGURED, BUT UNREADABLE IS NOT A FIRST RUN (#1272). One malformed
+        # line in settings.conf makes apply_to() skip the whole file, so the
+        # three REQUIRED names it holds read as blank - and this used to open
+        # the first-run setup page on a working install. Filling that form
+        # replaced the admin password and then failed to save, because the
+        # broken line was still there. The file's own problem is the message,
+        # with its line, and the page is not offered.
+        _refuse_an_unreadable_settings_file(settings_file, unconfigured)
     if unconfigured and setup_page is not False:
         # SET IT UP IN THE BROWSER (#547, Proposal 4). A blank config on a
         # machine with Flask is a first run, not a mistake: serve the setup
@@ -299,7 +369,13 @@ def startup(setup_page=None):
     # reads any more was able to stop the bot starting.
     import library
 
-    configured = library.folders()
+    # EVERY LIST'S folders, not the primary's (#1272). library.folders() is
+    # the primary list alone, so a multi-list install whose primary drive was
+    # unplugged at boot - or a mapped drive not yet reconnected at logon -
+    # refused to start, while every other list's folders sat there readable
+    # and their channels went unserved. The rule is still the one below:
+    # refuse only a library with nothing readable at all.
+    configured = library.every_folder()
     if not configured:
         print("[WARNING] No music directory configured yet - the daemon will "
               "connect, but cannot search or serve anything. Set it from the "
@@ -314,6 +390,8 @@ def startup(setup_page=None):
         print("[CRITICAL] None of the configured music folders exist: "
               + ", ".join(folder.path for folder in configured))
         sys.exit(1)
+    else:
+        _warn_about_lists_with_nothing_readable(library)
 
     # The side-file migration that used to run here was removed before the
     # public release: it renamed two files whose old name was one operator's
@@ -379,6 +457,17 @@ def startup(setup_page=None):
     config.fetched_bot_lists.update(db.load_fetched_bot_lists())
     if config.fetched_bot_lists:
         print(f"[STARTUP] Fetched lists: {len(config.fetched_bot_lists)} bot(s) remembered.")
+
+        # A held list whose directory name changed - a nick or channel that
+        # had to be cleaned up to make one now carries a short tag, so two
+        # of them can never share a directory - is moved to it once, here,
+        # before anything reads or replaces it.
+        try:
+            import list_fetch
+            list_fetch.migrate_held_list_directories()
+        except Exception as err:
+            print(f"[STARTUP] Could not move held lists to their new folders ({err}); "
+                  f"each is still read where it is.")
 
         # And index any of them the search index has never seen. Only a fetch
         # writes that index, while these lists survive restarts - so an
@@ -632,6 +721,13 @@ def _shut_down():
         try:
             import irc as _irc_flush
             _irc_flush._flush_known_bots(force=True)
+        except Exception:
+            pass
+        # A private message is written a moment after it arrives, off the
+        # read thread; one that came in just before the stop is written now.
+        try:
+            import announce as _announce_flush
+            _announce_flush.flush_private_messages()
         except Exception:
             pass
         # A background audio reading (#1182) is the rebuild's own process

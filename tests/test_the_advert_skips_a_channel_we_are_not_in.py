@@ -111,6 +111,10 @@ class TheWorkerSkipsThem(DCCoreTestCase):
         library.list_name_for_request = lambda channel=None: "somelist"
         list_mod.get_file_count_date_size_and_raw_bytes = (
             lambda name: (10, "2026-09-01", "1.0GB", 10 ** 9))
+        # settings_file.MINIMUMS floors the real wait at a minute (#1272).
+        self._real_advert_interval = announce.advert_interval
+        self.addCleanup(setattr, announce, "advert_interval", self._real_advert_interval)
+        announce.advert_interval = lambda: 0.01
         self.set_config(ANNOUNCE_INTERVAL=0.01, REJOIN_ATTEMPTS=3,
                         CHANNEL="%s, %s, %s" % (KICKED, NEVER_LET_IN, FINE))
         irc.note_kicked_from(KICKED, "someop")

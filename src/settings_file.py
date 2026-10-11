@@ -42,6 +42,7 @@ clearly which line it ignored.
 
 import configparser
 import io
+import math
 import os
 import sys
 import re
@@ -317,7 +318,7 @@ NOT_SETTINGS = frozenset({"SCRIPT_VERSION"})
 # comment: MY_IP_OR_DOCK is the address DETECTED at startup, and a value in
 # the file would freeze one session's answer into every session after it.
 RUNTIME_ASSIGNED = {
-    "MY_IP_OR_DOCK": ("the daemon detects this address at startup rather than "
+    "MY_IP_OR_DOCK": ("the daemon detects this address when it connects rather than "
                       "reading it from a file. Set it in admin_config.py if "
                       "you need to pin it"),
     "ORIGINAL_NICK": ("the daemon remembers this for itself, from NICKNAME, so "
@@ -394,7 +395,7 @@ def parse(text):
     try:
         parser.read_string(f"[{_SYNTHETIC_SECTION}]\n" + text)
     except configparser.Error as err:
-        raise SettingsError(str(err)) from err
+        raise SettingsError(_describe_parse_error(err, text)) from err
 
     flat = {}
     seen_in = {}
@@ -403,12 +404,72 @@ def parse(text):
             upper = key.upper()
             if upper in flat:
                 raise SettingsError(
-                    f"{key!r} is set twice - once in [{seen_in[upper]}] and "
-                    f"again in [{section}]. Remove one; there is no way to "
+                    f"{key!r} is set twice - once {_where(seen_in[upper])} and "
+                    f"again {_where(section)}. Remove one; there is no way to "
                     f"tell which was meant.")
             flat[upper] = raw
             seen_in[upper] = section
     return flat
+
+
+def _where(section):
+    """A section as the operator sees it. The synthetic one parse() puts in
+    front of the file is not in their file at all - it is the top of it."""
+    if section == _SYNTHETIC_SECTION:
+        return "at the top of the file"
+    return f"in [{section}]"
+
+
+def _describe_parse_error(err, text):
+    """configparser's error, in the operator's own line numbers (#1272).
+
+    parse() hands configparser one line the file does not have - the
+    synthetic section header - so every line number configparser reports
+    is one past the line it means, and a duplicate key is said to be in a
+    section called "__dccore__" that appears nowhere in the file. An operator
+    told "line 4" looked at the wrong line of the one file whose single error
+    had just put every setting back to its default. The indented-line check
+    above already counted correctly, so the two messages disagreed.
+
+    The offending text is taken from `text` itself rather than from the
+    exception: configparser stored it as repr() up to 3.12 and as the raw
+    line from 3.13, and the operator should read the same thing on both.
+    """
+    lines = text.split("\n")
+
+    def own(lineno):
+        """configparser's line number -> (the file's line number, its text)."""
+        if not isinstance(lineno, int) or lineno < 2:
+            return None, ""
+        number = lineno - 1
+        return number, (lines[number - 1].strip() if number <= len(lines) else "")
+
+    if isinstance(err, configparser.DuplicateOptionError):
+        number, _line = own(err.lineno)
+        at = f"line {number} sets" if number else "the file sets"
+        return (f"{at} {err.option} a second time ({_where(err.section)}). Remove "
+                f"one of the two - there is no way to tell which was meant.")
+    if isinstance(err, configparser.DuplicateSectionError):
+        number, _line = own(err.lineno)
+        at = f"line {number} starts" if number else "the file starts"
+        return (f"{at} the section [{err.section}] a second time. A heading "
+                f"may appear once; settings can sit under either copy, so "
+                f"delete the second heading line.")
+    if isinstance(err, configparser.ParsingError) and getattr(err, "errors", None):
+        bad = [own(lineno) for lineno, _raw in err.errors]
+        bad = [(number, line) for number, line in bad if number]
+        if bad:
+            number, line = bad[0]
+            more = len(bad) - 1
+            also = (f" {'Lines' if more > 1 else 'Line'} "
+                    f"{', '.join(str(n) for n, _l in bad[1:6])}"
+                    f"{' and more' if more > 5 else ''} "
+                    f"{'have' if more > 1 else 'has'} the same problem."
+                    if more else "")
+            return (f"line {number} is not a setting: {line[:60]!r}. Every line "
+                    f"is NAME = value, a comment starting with #, or a "
+                    f"[section] heading.{also}")
+    return str(err).replace(_SYNTHETIC_SECTION, "the top of the file")
 
 
 def declared_types(namespace):
@@ -678,6 +739,151 @@ def nicks_problem(value):
     return None
 
 
+# WHAT A CHANNEL NAME MAY BE (#1272). The browser setup page refused "music"
+# and "#music #rock"; the terminal setup and the Settings page wrote both. The
+# bot then sent "JOIN music" (no such channel) or "JOIN #music #rock", which
+# joins #music with "#rock" taken as its KEY - in no channel, or one of two,
+# with nothing pointing at the setting. One rule now, here, for all three.
+#
+# "#" or "&", the two prefixes library.list_problems() already accepts for a
+# list's channels. No space, comma or control character: the protocol ends a
+# channel name at any of them (irc.py's own comment on what a channel is).
+CHANNEL_PREFIXES = ("#", "&")
+CHANNEL_LIST_SETTINGS = frozenset({"CHANNEL"})
+ONE_CHANNEL_SETTINGS = frozenset({"DEBUG_CHANNEL", "BROADCAST_SEARCH_CHANNEL"})
+
+
+def channel_problem(channel):
+    """Why `channel` cannot be one IRC channel name, or None if it can."""
+    text = str(channel)
+    if not text:
+        return "a channel name cannot be empty"
+    if not text.startswith(CHANNEL_PREFIXES):
+        return f"{text!r} does not start with #; a channel is written like #{text.lstrip('#&') or 'mychannel'}"
+    if len(text) < 2:
+        return f"{text!r} is only the # - the channel needs a name after it"
+    for character in text:
+        if character == " ":
+            return (f"{text!r} has a space in it; a channel name has none - "
+                    f"separate several channels with commas")
+        if character == ",":
+            return f"{text!r} is more than one channel; this setting takes one"
+        if ord(character) < 32 or character == "\x7f":
+            return f"{text!r} has a control character in it"
+    return None
+
+
+def channels_problem(value):
+    """The same for a comma-separated list (CHANNEL): every entry a channel.
+
+    Empty entries are ignored the way irc.configured_channels() ignores
+    them, so "#a, #b," is fine; a list with nothing in it is not.
+    """
+    parts = [part.strip() for part in str(value).split(",")]
+    if not any(parts):
+        return "at least one channel is needed, like #mychannel"
+    for part in parts:
+        if not part:
+            continue
+        problem = channel_problem(part)
+        if problem:
+            return problem
+    return None
+
+
+# LIST_BASE_NAME names every generated list file, "<name>-<date>.txt", so it
+# must be a file name on every platform the bot runs on (#1272). defaults.py
+# has sanitised the name it DERIVES from NICKNAME since #427 - "|" and "\\"
+# are ordinary nick characters and illegal in an NTFS name - but a name typed
+# into the setting went through untouched: "DJ|Music" saved, and every list
+# rebuild, manual or scheduled, failed with "[Errno 22] Invalid argument" on
+# Windows. Defined here so the derivation and the check are one rule;
+# defaults.py imports settings_file before it derives anything.
+_LIST_BASE_NAME_CHARSET_RE = re.compile(r'[^\w\-.\[\]{}^`]')
+
+
+def sanitize_list_base_name(name):
+    """`name` with every character a file name cannot safely hold replaced
+    by "_", and no leading or trailing dots or spaces. "DCCore" if nothing
+    is left."""
+    cleaned = _LIST_BASE_NAME_CHARSET_RE.sub('_', str(name or ''))
+    cleaned = cleaned.strip().strip('.').strip()
+    return cleaned or "DCCore"
+
+
+def list_base_name_problem(value):
+    """Why `value` cannot be LIST_BASE_NAME, or None if it can."""
+    text = str(value)
+    cleaned = sanitize_list_base_name(text)
+    if cleaned == text:
+        return None
+    odd = sorted({ch for ch in text if _LIST_BASE_NAME_CHARSET_RE.match(ch)})
+    if odd:
+        shown = " ".join(repr(ch) for ch in odd)
+        return (f"{text!r} has {shown}, which a file name cannot hold on every "
+                f"system; use letters, digits and - _ . [ ] {{ }} ^ ` - for "
+                f"example {cleaned!r}")
+    return (f"{text!r} starts or ends with a dot or a space, which a file name "
+            f"cannot do on Windows - for example {cleaned!r}")
+
+
+def unquote_path(text, posix=None):
+    """A folder path as typed or pasted, without the quoting a shell adds.
+
+    Explorer's "Copy as path" always wraps the path in double quotes, and
+    dragging a folder onto a terminal quotes it too - on Windows with double
+    quotes, on Linux with single ones. macOS Terminal escapes each space
+    with a backslash instead. The path inside is what the operator meant.
+
+    One pair of MATCHING quotes around the whole answer, nothing more: a
+    quote inside a name is a real character. Backslash escapes are undone
+    only on POSIX and only for an unquoted answer, because on Windows a
+    backslash is the path separator.
+    """
+    text = str(text or "").strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("\"", "'"):
+        return text[1:-1].strip()
+    if posix is None:
+        posix = os.name != "nt"
+    if posix and "\\" in text:
+        text = re.sub(r"\\(.)", r"\1", text)
+    return text
+
+
+def folder_problem(path):
+    """Why `path` cannot be a music folder, or None when it is an existing
+    directory."""
+    text = str(path)
+    if os.path.isdir(text):
+        return None
+    if text != unquote_path(text) and os.path.isdir(unquote_path(text)):
+        return (f"{text!r} has quotes or escapes around it - the folder is "
+                f"{unquote_path(text)!r}, without them")
+    return f"{text!r} does not exist or is not a folder"
+
+
+# The smallest value a number setting may have (#1272), checked in coerce() so
+# settings.conf, the Settings page and the admin console all refuse the same
+# values. Most neighbouring settings use 0 for "off", so 0 is what an operator
+# who wants no advert types - and ANNOUNCE_INTERVAL = 0 made the advert worker
+# sleep(0) and rebuild and queue the advert in a tight loop: one core busy,
+# thousands of lines queued a second, and the channel adverted to every
+# MSG_DELAY instead of every five minutes - the flood that gets a bot banned.
+# announce.advert_interval() applies the same floor to a value that arrives
+# without coerce(), from admin_config.py.
+MINIMUMS = {
+    "ANNOUNCE_INTERVAL": 60,
+}
+
+
+def minimum_problem(name, value):
+    """Why `value` is below the smallest `name` may be, or None."""
+    floor = MINIMUMS.get(name)
+    if floor is None or value >= floor:
+        return None
+    return f"{value} is below the minimum of {floor}"
+
+
 def coerce(name, raw, default, declared=None):
     """Convert `raw` to `declared`, or to the type of `default` without one.
 
@@ -732,6 +938,21 @@ def coerce(name, raw, default, declared=None):
             raise ValueError(problem)
         return text
 
+    if name in CHANNEL_LIST_SETTINGS and text:
+        problem = channels_problem(text)
+        if problem:
+            raise ValueError(f"not a channel list: {problem}")
+
+    if name in ONE_CHANNEL_SETTINGS and text:
+        problem = channel_problem(text)
+        if problem:
+            raise ValueError(f"not a channel name: {problem}")
+
+    if name == "LIST_BASE_NAME" and text:
+        problem = list_base_name_problem(text)
+        if problem:
+            raise ValueError(f"not a usable list name: {problem}")
+
     if default is None and not text:
         # A setting whose default is None is "unset unless you say otherwise"
         # - RAR_BINARY is the example, meaning "look on PATH". An empty value
@@ -753,15 +974,25 @@ def coerce(name, raw, default, declared=None):
 
     if kind is int:
         try:
-            return int(text)
+            number = int(text)
         except ValueError:
             raise ValueError(f"expected a whole number, got {raw!r}") from None
+        problem = minimum_problem(name, number)
+        if problem:
+            raise ValueError(problem)
+        return number
 
     if kind is float:
         try:
-            return float(text)
+            number = float(text)
         except ValueError:
             raise ValueError(f"expected a number, got {raw!r}") from None
+        # float() also reads "nan" and "inf" (#1264 review). No setting has a
+        # meaning for either - a delay of inf never ends, and nan compares
+        # false with everything, so it slips past every range check.
+        if not math.isfinite(number):
+            raise ValueError(f"expected a number, got {raw!r}")
+        return number
 
     if kind is list:
         return [part.strip() for part in text.split(",") if part.strip()]
@@ -777,6 +1008,96 @@ def coerce(name, raw, default, declared=None):
     return raw.strip("\n")
 
 
+# WHAT A FILE THAT WORKED YESTERDAY STILL DOES TODAY (#1272 review). The rules
+# above are for WRITING: the Settings page, the admin console, configure.py and
+# the browser setup refuse a value that cannot work, and the operator retypes
+# it there and then. Read from a settings.conf written before those rules,
+# the same refusal would put the setting back to its default at the next
+# start - and for CHANNEL, a REQUIRED setting, that is a bot that ran
+# yesterday and now refuses to start. So a value READ from the file keeps
+# whatever part of it works, and the log says what was dropped and on which
+# line:
+#
+#   CHANNEL           the entries that are channels are joined; the others
+#                     are dropped. Refused only when none is a channel.
+#   LIST_BASE_NAME    kept where it is a usable file name on THIS system (a
+#                     "|" is fine on Linux, and renaming it would rename the
+#                     published list); otherwise sanitised, as the name
+#                     derived from a nickname is.
+#   ANNOUNCE_INTERVAL and anything else in MINIMUMS: raised to the minimum,
+#                     not reset to the shipped default.
+#
+# Everything else reads exactly as coerce() says.
+_WINDOWS_FILE_NAME_FORBIDDEN = set('<>:"/\\|?*')
+
+
+def _file_name_works_here(name, windows=None):
+    """Whether `name` can start a file name on this system (or on Windows
+    when `windows` says so) - the platform's own rule, not the portable
+    charset list_base_name_problem() asks a NEW value to keep to."""
+    if windows is None:
+        windows = os.name == "nt"
+    text = str(name)
+    if not text.strip() or text in (".", "..") or "/" in text or "\x00" in text:
+        return False
+    if windows and any(ch in _WINDOWS_FILE_NAME_FORBIDDEN or ord(ch) < 32 for ch in text):
+        return False
+    return True
+
+
+def load_value(name, raw, default, declared=None, windows=None):
+    """coerce() for a value READ from settings.conf: (value, note).
+
+    `note` is None when the value read cleanly, or what was done to keep the
+    working part of it - see the comment above. Raises ValueError exactly
+    where coerce() would for anything with no working part.
+    """
+    text = raw.strip()
+
+    if name in CHANNEL_LIST_SETTINGS and text and channels_problem(text):
+        parts = [part.strip() for part in text.split(",") if part.strip()]
+        kept = [part for part in parts if channel_problem(part) is None]
+        dropped = [part for part in parts if channel_problem(part) is not None]
+        if kept and dropped:
+            value = coerce(name, ",".join(kept), default, declared)
+            return value, (
+                f"ignoring {', '.join(repr(part) for part in dropped)} "
+                f"({channel_problem(dropped[0])}) and joining {', '.join(kept)}. "
+                f"Correct the line; the Settings page and configure.py only "
+                f"save a list where every entry is a channel")
+
+    if name == "LIST_BASE_NAME" and text:
+        problem = list_base_name_problem(text)
+        if problem:
+            if _file_name_works_here(text, windows):
+                return text, (
+                    f"kept as it is, since it works on this system - but {problem}, "
+                    f"and it cannot be saved like this from the Settings page")
+            cleaned = sanitize_list_base_name(text)
+            return cleaned, f"using {cleaned!r}: {problem}"
+
+    if name in MINIMUMS and (declared or type(default)) is int:
+        try:
+            number = int(text)
+        except ValueError:
+            number = None
+        floor = MINIMUMS[name]
+        if number is not None and number < floor:
+            return floor, f"{number} is below the minimum of {floor}; using {floor}"
+
+    return coerce(name, raw, default, declared), None
+
+
+def _active_line_numbers(text):
+    """{NAME: line number} of each active (uncommented) setting in `text`."""
+    numbers = {}
+    for number, line in enumerate(text.split("\n"), start=1):
+        found = _ASSIGNMENT_RE.match(line)
+        if found and found.group("comment") is None and not found.group("indent"):
+            numbers.setdefault(found.group("key").upper(), number)
+    return numbers
+
+
 def apply_to(namespace, path=None, log=print):
     """Read the settings file and write recognised values into `namespace`.
 
@@ -786,7 +1107,7 @@ def apply_to(namespace, path=None, log=print):
     """
     path = path or settings_path()
     report = {"path": path, "applied": {}, "unknown": [], "bad": [], "shadowed": [],
-              "read_error": None}
+              "read_error": None, "repaired": []}
 
     if not os.path.exists(path):
         return report
@@ -800,7 +1121,8 @@ def apply_to(namespace, path=None, log=print):
         # the operator looks at a file that plainly sets it. utf-8-sig
         # consumes a BOM when present and is identical to utf-8 when not.
         with io.open(path, encoding="utf-8-sig") as handle:
-            entries = parse(handle.read())
+            text = handle.read()
+        entries = parse(text)
     except (OSError, UnicodeDecodeError, SettingsError) as err:
         report["read_error"] = str(err)
         log(f"[CONFIG] Could not read {os.path.basename(path)}, "
@@ -813,10 +1135,12 @@ def apply_to(namespace, path=None, log=print):
             report["unknown"].append(key)
             continue
         try:
-            value = coerce(key, raw, namespace[key], types.get(key))
+            value, note = load_value(key, raw, namespace[key], types.get(key))
         except ValueError as err:
             report["bad"].append((key, str(err)))
             continue
+        if note:
+            report["repaired"].append((key, _active_line_numbers(text).get(key), note))
         namespace[key] = value
         report["applied"][key] = value
 
@@ -871,6 +1195,9 @@ def _log_summary(report, path, log):
             continue
         log(f"[CONFIG] {name}: ignoring {key!r} - not a setting this version "
             f"recognises. Check the spelling against settings.conf.sample.")
+    for key, line, note in report.get("repaired", ()):
+        where = f" line {line}" if line else ""
+        log(f"[CONFIG] {name}{where}: {key} - {note}.")
     for key, why in report["bad"]:
         log(f"[CONFIG] {name}: ignoring {key} - {why}. Keeping the default.")
 
@@ -995,6 +1322,22 @@ def _check_writable(name, value, namespace, types):
             f"Clearing it here would leave no way to set it again except by "
             f"editing settings.conf by hand.")
 
+    # A music folder that is not there, for the same reason (#1272). The
+    # daemon refuses to start when every configured folder is missing, so a
+    # typo ("D:\Muisc") or a pasted quoted path saved fine, the bot ran on,
+    # and at the next restart it - and the dashboard the folder was set from -
+    # did not come back. The browser setup page already refuses the same value.
+    # Blank stays allowed: it is "not chosen yet".
+    # Only a CHANGE is checked: the folder already configured may be on a
+    # drive that is unplugged right now, and re-saving it unchanged - the
+    # console's round trip, a client that sends a whole page - must not be
+    # refused for it.
+    if (name == "FILE_DIRECTORY" and str(value or "").strip()
+            and str(value).strip() != str(namespace.get("FILE_DIRECTORY") or "").strip()):
+        problem = folder_problem(str(value))
+        if problem:
+            raise SettingsWriteError(f"FILE_DIRECTORY: {problem}")
+
     # Nor can a setting the daemon has no blank behaviour FOR, which REQUIRED
     # does not cover: it holds the three an operator must supply, not the many
     # that already work and simply cannot be empty.
@@ -1094,6 +1437,19 @@ def _check_writable(name, value, namespace, types):
             f"{name}: {value!r} would be read back as {back!r}.")
 
     return text, value
+
+
+def check_change(namespace, name, value):
+    """save()'s own check of ONE value, without writing anything: the value
+    it would be read back as, or SettingsWriteError with the reason.
+
+    For the admin console's settings transaction (#1264), which answers
+    each `set` with that setting's own error as it arrives, so the window
+    can mark the field - save() stops at the first bad value of a batch.
+    The same function save() runs on every value, so the two cannot
+    disagree about what is writable.
+    """
+    return _check_writable(name, value, namespace, declared_types(namespace))[1]
 
 
 # The explanation appended above a setting that was not already in the file.
@@ -1246,7 +1602,7 @@ def shadowed_by_admin_config(names):
     return sorted(name for name in names if hasattr(admin_config, name))
 
 
-def save(namespace, changes, path=None, log=print):
+def save(namespace, changes, path=None, log=print, dry_run=False):
     """Write `changes` into the settings file, editing it rather than
     replacing it.
 
@@ -1264,6 +1620,11 @@ def save(namespace, changes, path=None, log=print):
     otherwise each read the same starting file and each write back a version
     containing only their own change, silently losing whichever one lost the
     race even though each individual write is atomic on its own.
+
+    `dry_run` does every one of those checks - the existing file read, the
+    edit, the read-back - and stops before the write: the same answer save()
+    would give, with nothing on disk changed. check_save() is the name to
+    call it by.
     """
     path = path or settings_path()
     if not changes:
@@ -1320,6 +1681,10 @@ def save(namespace, changes, path=None, log=print):
                     f"{name} would read back as {back!r} rather than {value!r}, "
                     f"so nothing was written.")
 
+        if dry_run:
+            return {"path": path, "written": [], "added": added,
+                    "shadowed": [], "checked": sorted(changes)}
+
         _atomic_write(path, text if ending == "\n"
                       else text.replace("\n", ending))
 
@@ -1332,3 +1697,30 @@ def save(namespace, changes, path=None, log=print):
 
     return {"path": path, "written": sorted(changes), "added": added,
             "shadowed": shadowed}
+
+
+def check_save(namespace, changes, path=None):
+    """Raise SettingsWriteError exactly when save() would, writing nothing.
+
+    For a caller with ANOTHER file to write first (#1272). The browser setup
+    and configure.py write admin_config.py before settings.conf, the order
+    that fails safe (#624) - but a settings.conf that could not be edited
+    (one malformed line in it) failed the second write AFTER the first had
+    already replaced the admin password. The page reported a failed save,
+    the bot exited, and the password had changed anyway. Asking first means
+    a save that is going to fail fails before anything is written.
+    """
+    return save(namespace, changes, path=path, log=lambda *_a, **_k: None,
+                dry_run=True)
+
+
+def recheck(namespace, path=None):
+    """The settings file read again the way apply_to() reads it, with
+    nothing applied: apply_to()'s report, on a copy of `namespace`.
+
+    defaults.py applies the file at import and keeps no report, so this is
+    how a later caller - oserve.startup(), the setup check, configure.py -
+    asks whether the file could be read at all and which values it refused.
+    Silent: apply_to() has already said all of it once, at import.
+    """
+    return apply_to(dict(namespace), path=path, log=lambda *_a, **_k: None)

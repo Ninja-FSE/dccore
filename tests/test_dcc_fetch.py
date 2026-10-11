@@ -2147,11 +2147,27 @@ class APendingFileRowIsMatchedBeforeABotAloneFolderClaim(DCCoreTestCase):
     bot-alone match (the ONLY test it makes) could not tell this exact-name
     answer apart from its own, and claimed it instead - confirmed live,
     much more likely since #1234 made an offered folder row for the same
-    bot the ordinary case rather than a rare one."""
+    bot the ordinary case rather than a rare one.
+
+    Reached through the real busy reply (#1269): these tests used to set
+    state="pending" with offered_at still set, a state no real path
+    produces - every way back to pending clears offered_at - so they passed
+    while the claim never ran. tests/test_fetching_keeps_each_answer_its_own.py
+    drives every other way back to pending too."""
+
+    def asked_then_busy(self, filename):
+        bots_in_the_channel("goodbot")
+        rid = dcc_fetch.enqueue_fetch("goodbot", filename, request_type="file")
+        dcc_fetch.check_fetch_queue()
+        self.assertEqual(config.fetch_queue[rid]["state"], "offered")
+        self.assertEqual(dcc_fetch.handle_bot_reply(
+            "goodbot", "Error: The server's global queue is full"), "busy")
+        self.assertEqual(config.fetch_queue[rid]["state"], "pending")
+        self.assertIsNone(config.fetch_queue[rid]["offered_at"])
+        return rid
 
     def test_a_pending_file_row_that_was_offered_before_wins_over_a_live_folder(self):
-        file_rid = dcc_fetch.enqueue_fetch("goodbot", "Song.flac", request_type="file")
-        config.fetch_queue[file_rid].update(state="pending", offered_at=time.time() - 5)
+        file_rid = self.asked_then_busy("Song.flac")
         folder_rid = dcc_fetch.enqueue_fetch("goodbot", "!rar Artist/Album", request_type="folder")
         config.fetch_queue[folder_rid].update(state="offered", offered_at=time.time())
 
@@ -2180,8 +2196,7 @@ class APendingFileRowIsMatchedBeforeABotAloneFolderClaim(DCCoreTestCase):
         self.assertEqual(config.fetch_queue[file_rid]["state"], "pending", "untouched")
 
     def test_a_pending_file_row_with_a_different_name_does_not_block_the_folder_claim(self):
-        file_rid = dcc_fetch.enqueue_fetch("goodbot", "Other.flac", request_type="file")
-        config.fetch_queue[file_rid].update(state="pending", offered_at=time.time() - 5)
+        self.asked_then_busy("Other.flac")
         folder_rid = dcc_fetch.enqueue_fetch("goodbot", "!rar Artist/Album", request_type="folder")
         config.fetch_queue[folder_rid].update(state="offered", offered_at=time.time())
 

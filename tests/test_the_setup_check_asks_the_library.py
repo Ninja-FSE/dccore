@@ -201,7 +201,8 @@ class MainUsesItAndNothingElse(unittest.TestCase):
     def test_the_report_asks_the_library_module(self):
         body = self.source[self.source.index("def library_report("):
                            self.source.index("def main(platform):")]
-        self.assertIn("library.folders()", body)
+        # Every list's folders since #1272, not only the primary's.
+        self.assertIn("configured = library.every_folder()", body)
 
     def test_the_report_prints_nothing_itself(self):
         """It sits above main()'s console-encoding guard in the file. A print()

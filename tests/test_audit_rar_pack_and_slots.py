@@ -152,11 +152,13 @@ class ThePackRechecksItsSlotBeforeTakingOne(DCCoreTestCase):
     def test_a_refused_pack_lets_a_waiting_one_start(self):
         """redispatch_waiting_pack() is the only thing that revisits a user
         turned away at [RAR-HOLD]; without it they wait for a trigger that
-        never comes. It is the wrapper's finally that calls it, once."""
+        never comes. It is the wrapper's finally that calls it, once - for
+        the nick the claim is held under now, which a rename may have changed
+        since the pack started (#1268)."""
         source = self.source()
         finally_block = source.split("if not handed_off:", 1)[1][:600]
 
-        self.assertIn("redispatch_waiting_pack(irc_sock, just_finished=completed_user)", finally_block)
+        self.assertIn("redispatch_waiting_pack(irc_sock, just_finished=holder)", finally_block)
 
     def test_the_pre_dispatch_checks_are_all_still_there(self):
         """Control on the control: this fix is about the ONE append that had

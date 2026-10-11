@@ -133,7 +133,7 @@ class TheReadLoopFeedsAndUsesIt(unittest.TestCase):
         self.assertLessEqual(irc.RECENT_LINE_MEMORY, 100)
 
     def test_every_inbound_line_is_recorded(self):
-        self.assertIn("recent_lines.append(line.strip()[:200])", self.source())
+        self.assertIn("recent_lines.append(list.printable_text(line.strip())[:200])", self.source())
 
     def test_a_long_line_is_truncated(self):
         """A NAMES burst carries lines of hundreds of nicks. Which commands

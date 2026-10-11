@@ -63,6 +63,7 @@ import os
 import sqlite3
 import threading
 import time
+import unicodedata
 
 import defaults as config
 
@@ -99,7 +100,11 @@ _HELD_KEYS_PER_QUERY = 500
 
 # 2: the prefix index and folder ids below (#1130, #1135). One version for
 # both, so an upgrade rebuilds the index once and not twice.
-_SCHEMA_VERSION = 2
+# 3: names indexed in their composed Unicode form, the name as it is kept in
+# `original` when that differs (#1281). An index written before holds names
+# in whatever form the list had them, which a query in the other form misses,
+# so it is rebuilt once - see _open().
+_SCHEMA_VERSION = 3
 
 # The FTS5 table's options. Kept as one string because _open() also looks for
 # it in the stored CREATE statement: CREATE ... IF NOT EXISTS keeps a table
@@ -146,6 +151,42 @@ def _index_path():
     redirect it per case, and !rehash can move it.
     """
     return getattr(config, "LIST_INDEX_FILE", INDEX_FILE)
+
+
+def match_form(text):
+    """`text` as the index matches it: NFC-normalised (#1281), the rule
+    list.search_form() applies for @find (#1270).
+
+    A library copied from a Mac writes a name with its accents as combining
+    characters of their own (NFD); an IRC client and a browser send the
+    precomposed ones (NFC). unicode61 already folds a single Latin accent
+    either way, but not a letter with two (Vietnamese), a Cyrillic short i,
+    a kana with its voicing mark or a Hangul syllable: those split into other
+    tokens, and a Vietnamese word typed in the filter bar missed a list that
+    holds it.
+    Only the MATCHING is normalised: the name a row shows and a request uses
+    is the one the list holds (see _counted_values()). Case is left to FTS5,
+    which folds it. Pure-ASCII text, nearly every row, is returned as it is.
+    """
+    text = str(text)
+    if text.isascii():
+        return text
+    return unicodedata.normalize("NFC", text)
+
+
+def _stored_schema(conn):
+    """The schema version the last code to open this file wrote, or 0 when
+    it wrote none (or something that is not a number)."""
+    has_meta = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'meta'").fetchone()
+    if has_meta is None:
+        return 0
+    row = conn.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+    try:
+        return int(row[0]) if row is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _connect():
@@ -232,6 +273,15 @@ def _open(path):
     rather than the meta row, which every earlier version wrote on every
     open: an index the old code reopened keeps its options and is not
     rebuilt twice.
+
+    AN INDEX FROM BEFORE SCHEMA 3 IS REBUILT TOO (#1281), and here the meta
+    row IS the question, for the reason the paragraph above sets it aside:
+    every version writes its own number there on every open. A schema-2
+    index holds names in the form the list had them, and so does one this
+    version made and an older one then wrote to after a downgrade - in both
+    the row says less than 3, and the names go in again composed. The
+    `folders` table goes with the rows, or the headings of every list not
+    held any more would stay behind for good.
     """
     global _rebuild_pending
     conn = None
@@ -245,16 +295,23 @@ def _open(path):
         stored = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' "
             "AND name = 'entries'").fetchone()
-        rebuilt = stored is not None and _FTS_OPTIONS not in str(stored[0])
+        options_missing = stored is not None and _FTS_OPTIONS not in str(stored[0])
+        rebuilt = options_missing or (
+            stored is not None and _stored_schema(conn) < _SCHEMA_VERSION)
         if rebuilt:
             conn.execute("DROP TABLE entries")
+            conn.execute("DROP TABLE IF EXISTS folders")
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS entries USING fts5("
             # bot is INDEXED - that is the whole point. It lets the existence
             # question below be asked per bot and stop at the first hit,
             # instead of enumerating every match to find out who is missing.
             # folder holds an id into `folders`, not the heading (#1135).
+            # filename is what is MATCHED, in match_form(); original is the
+            # name as the list holds it, kept only when the two differ, which
+            # is what a row shows (#1281).
             "bot, filename, folder UNINDEXED, size UNINDEXED, "
+            "original UNINDEXED, "
             + _FTS_OPTIONS + ")")
         # EACH FOLDER ONCE (#1135). Every row stored its full heading, which
         # repeats about nine times per folder at the median, and the index was
@@ -277,12 +334,19 @@ def _open(path):
             except Exception:
                 pass
         raise
-    if rebuilt:
+    if rebuilt and options_missing:
         print("[LIST-INDEX] Rebuilding the search index once, to make "
               "short prefixes in the dashboard's filter fast: the lists you "
               "hold are indexed again from disk, up to about a minute per "
               "million files, and the file comes out about half as big again "
               "as before. Browsing and @find are unaffected.")
+    elif rebuilt:
+        print("[LIST-INDEX] Rebuilding the search index once, so the "
+              "dashboard's filter finds a name whichever Unicode form a list "
+              "writes it in: the lists you hold are indexed again from disk, "
+              "up to about a minute per million files. Browsing and @find "
+              "are unaffected.")
+    if rebuilt:
         # The same flag a repaired file sets: the readers run the backfill
         # before they answer, so an emptied table is never reported as
         # holding no match even when no startup backfill ran first.
@@ -533,7 +597,9 @@ def build_match_query(segments, prefix_last=True):
     wrong question. The "*" the operator types is a separator here and never
     reaches the expression - it is consumed by filter_segments().
     """
-    cleaned = [str(part).strip().lower() for part in (segments or [])]
+    # In the form the names were indexed in (#1281): a query typed in one
+    # Unicode form finds a name a list writes in the other.
+    cleaned = [match_form(str(part).strip().lower()) for part in (segments or [])]
     cleaned = [part for part in cleaned if part]
     if not cleaned:
         return None
@@ -630,8 +696,8 @@ def index_bot_list(bot, rows):
             next_id = conn.execute(
                 "SELECT COALESCE(MAX(id), 0) + 1 FROM folders").fetchone()[0]
             conn.executemany(
-                "INSERT INTO entries (bot, filename, folder, size) "
-                "VALUES (?, ?, ?, ?)",
+                "INSERT INTO entries (bot, filename, folder, size, original) "
+                "VALUES (?, ?, ?, ?, ?)",
                 # "title" is the key entries_to_filelist_rows() writes;
                 # "filename" is accepted too because find_matching_entries()
                 # uses that name and a future caller may reasonably pass its
@@ -675,10 +741,15 @@ def _counted_values(name, rows, indexed, folder_ids, next_id):
         folder_id = folder_ids.get(folder)
         if folder_id is None:
             folder_id = folder_ids[folder] = next_id + len(folder_ids)
+        # Matched in match_form(), shown as the list has it (#1281): the
+        # second copy only for a name the two forms write differently.
+        title = str(row.get("title") or row.get("filename") or "")
+        matched = match_form(title)
         yield (name,
-               str(row.get("title") or row.get("filename") or ""),
+               matched,
                folder_id,
-               str(row.get("size") or ""))
+               str(row.get("size") or ""),
+               None if matched == title else title)
 
 
 def drop_bot(bot):
@@ -960,8 +1031,10 @@ def search(terms, limit=None, bots=None):
                 if keys is not None and all(_has_tokens(k) for k in keys):
                     match = ("(" + " OR ".join(f"bot:{_quote(k)}" for k in keys)
                              + ") AND " + query)
+                # The name as the list holds it: `original` when the index
+                # matched it in another form (#1281), else the indexed text.
                 found += conn.execute(
-                    "SELECT bot, filename, "
+                    "SELECT bot, COALESCE(original, filename), "
                     "CASE WHEN typeof(folder) = 'integer' THEN COALESCE("
                     "(SELECT f.folder FROM folders f WHERE f.id = entries.folder), "
                     "'') ELSE folder END, size FROM entries "
