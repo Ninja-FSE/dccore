@@ -18,10 +18,15 @@ what is left for it:
 import io
 import os
 import re
+import sys
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "mirc", "dccore.mrc")
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from tests.support import without_menu_icons  # noqa: E402
 
 # A command that puts something on the wire, at the start of a statement.
 SENDS = re.compile(r"(?:^|[{|]\s*)\.?(?:notice|msg|ctcp|describe|say|raw|quote|amsg|ame|"
@@ -30,7 +35,7 @@ SENDS = re.compile(r"(?:^|[{|]\s*)\.?(?:notice|msg|ctcp|describe|say|raw|quote|a
 
 def script():
     with io.open(SCRIPT, encoding="ascii", newline="") as handle:
-        return handle.read().replace("\r\n", "\n")
+        return without_menu_icons(handle.read().replace("\r\n", "\n"))
 
 
 def block(text, header):
@@ -123,7 +128,15 @@ class NothingAnswers(unittest.TestCase):
 
     REACHED = ["on ^*:TEXT:*:#:", "alias dccore.chat.feed", "alias dccore.chat.channels",
                "alias dccore.chat.listens", "alias dccore.chat.show", "alias dccore.chat.window",
-               "alias dccore.chat.sys", "alias dccore.chat.title"]
+               "alias dccore.chat.sys", "alias dccore.chat.title",
+               # The history and the unread count (#1393), reached from the
+               # feed, the window and the window's events.
+               "alias dccore.chat.hist.floor {", "alias dccore.chat.hist.add {",
+               "alias dccore.chat.hist.mkdir {", "alias dccore.chat.hist.trim {",
+               "alias dccore.chat.hist.replay {", "alias dccore.chat.hist.when {",
+               "alias dccore.chat.unread.add {", "alias dccore.chat.unread.clear {",
+               "alias dccore.chat.cut {", "alias dccore.chat.hist.clock {", "alias dccore.chat.hist.buf {",
+               "on *:ACTIVE:*:", "on *:APPACTIVE:", "on *:CLOSE:@DCCore-Chat:"]
 
     def test_no_send_anywhere_it_reaches(self):
         text = script()
@@ -271,7 +284,7 @@ class ItSaysItIsPublic(unittest.TestCase):
         title = statements(block(text, "alias dccore.chat.title"))
         self.assertTrue(any("DCCore Chat $dccore.dot public" in s for s in title))
         self.assertIn("dccore.chat.sys Public: everyone in the channel reads what is typed here", text)
-        self.assertIn('box "DCCore Chat (public)", 600,', text)
+        self.assertIn('box "DCCore Chat (public)", ', text)
 
     def test_an_arriving_line_does_not_take_the_focus(self):
         body = statements(block(script(), "alias dccore.chat.window"))
@@ -337,12 +350,13 @@ class TheWindowIsTheInterface(unittest.TestCase):
         self.assertIn("dccore.set chat.to $1", body)
         self.assertTrue(any("$addtok($dccore.opt(chat.listen),$1,32)" in s for s in body))
 
-    def test_the_options_dialog_keeps_both_boxes(self):
+    def test_the_settings_window_keeps_both_switches(self):
         text = script()
-        init = block(text, "on *:dialog:dccore.opt:init:0:")
-        ok = block(text, "on *:dialog:dccore.opt:sclick:1:")
-        self.assertIn("if ($dccore.opt(chat.all)) { did -c dccore.opt 601 }", init)
-        self.assertIn("hadd dccore chat.popup $did(dccore.opt,602).state", ok)
+        data = text.split("alias dccore.sw.data {", 1)[1].split("\n}", 1)[0]
+        for option in ("chat.all", "chat.popup"):
+            self.assertIn("\n  hadd dccore.swm lo.%s " % option, data)
+        self.assertIn("if (%state != $dccore.opt(%o)) { hadd dccore %o %state | inc %n }",
+                      block(text, "alias dccore.sw.savelocal"))
 
     def test_no_flood_table_of_its_own(self):
         """The bot limits what arrives; a second limit here would only hide

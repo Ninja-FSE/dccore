@@ -24,12 +24,13 @@ import dcc_fetch  # noqa: E402
 import defaults as config  # noqa: E402
 import webserver  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, without_menu_icons  # noqa: E402
 
 
 def read(*parts):
     with io.open(os.path.join(REPO_ROOT, *parts), encoding="utf-8", newline="") as handle:
-        return handle.read().replace("\r\n", "\n")
+        text = handle.read().replace("\r\n", "\n")
+    return without_menu_icons(text) if parts[-1].endswith(".mrc") else text
 
 
 def row(state, bot="SomeBot", name="a.flac", at=1.0, **more):
@@ -421,7 +422,7 @@ class TheScript(unittest.TestCase):
 
     def test_the_options_dialog_keeps_the_finished_rows(self):
         self.assertIn("hadd dccore dlfinished", self.text)
-        self.assertIn("did -ra dccore.opt 310 $dccore.dl.rows", self.text)
+        self.assertIn("did -ra dccore.set 1675 $dccore.dl.rows", self.text)
 
     def test_the_fetch_feed_goes_to_the_downloads_window_and_no_longer_to_the_main_one(self):
         handler = self.text[self.text.index("if (%type == FETCH) {"):]

@@ -211,7 +211,8 @@ class TheRightClickNick(unittest.TestCase):
         panel = panel[panel.index("alias dccore.panel"):panel.index("alias dccore.selq")]
         self.assertGreaterEqual(panel.count("$dccore.rfit(%i,2) $dccore.fit($gettok(%l,1,32),9)"), 2,
                                 "both the frozen and the ordinary queue row")
-        self.assertIn("aline -l $dccore.opt(col.sends) $dccore.win > $dccore.fit($gettok(%l,1,32),9)", panel)
+        # dccore.lcol: the saved colour, legible on a dark background (#1368)
+        self.assertIn("aline -l $dccore.lcol(sends) $dccore.win > $dccore.fit($gettok(%l,1,32),9)", panel)
 
     def test_the_menu_still_offers_both(self):
         text = script()

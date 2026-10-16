@@ -26,6 +26,7 @@ if REPO_ROOT not in sys.path:
 import adminchat  # noqa: E402
 import commands  # noqa: E402
 import console_settings  # noqa: E402
+import web_settings  # noqa: E402
 import defaults as config  # noqa: E402
 import library  # noqa: E402
 import on_connect  # noqa: E402
@@ -226,7 +227,8 @@ class TheSettingsSnapshot(SettingsCase):
         import runtime
         import threading
         seen = []
-        real = webserver._settings_payload_unlocked
+        # web_settings since #1320: build_settings_payload() reads its own name.
+        real = web_settings._settings_payload_unlocked
 
         def held_by_someone():
             # RLock.locked() is new in Python 3.14, and an RLock is free to
@@ -247,8 +249,8 @@ class TheSettingsSnapshot(SettingsCase):
         def spy(settings_module):
             seen.append(held_by_someone())
             return real(settings_module)
-        webserver._settings_payload_unlocked = spy
-        self.addCleanup(setattr, webserver, "_settings_payload_unlocked", real)
+        web_settings._settings_payload_unlocked = spy
+        self.addCleanup(setattr, web_settings, "_settings_payload_unlocked", real)
         self.snapshot()
         self.assertEqual(seen, [True])
 
@@ -718,7 +720,7 @@ class TheCapabilities(DCCoreTestCase):
 
     def test_consolecaps_names_every_part_with_its_version(self):
         reply = run(make_session(self), "consolecaps")
-        self.assertEqual(reply, ["DCCORE CAPS settings:1 preview:1 served:1 folders:1 onconnect:1 banlist:1 unlock:1"
+        self.assertEqual(reply, ["DCCORE CAPS settings:1 preview:1 served:1 folders:1 onconnect:1 banlist:1 unlock:1 library:1"
                                  " machine:" + console_settings.machine_name()])
 
     def test_the_machine_name_is_one_token_naming_this_computer(self):
@@ -786,7 +788,8 @@ class OnlyTheConsoleReachesThem(DCCoreTestCase):
                 reaching[name] = reaches(source("src", name), name)
         self.assertEqual({name: found for name, found in reaching.items() if found},
                          {"adminchat.py": {"handle_command", "console_settings"},
-                          "webserver.py": {"handle_command"}})
+                          # The dashboard's console, web_console.py since #1322.
+                          "web_console.py": {"handle_command"}})
 
     def test_the_channel_gate_dispatches_none_of_them(self):
         gate = source("src", "irc.py").split("ADMIN_CHANNEL_COMMANDS", 1)[1]

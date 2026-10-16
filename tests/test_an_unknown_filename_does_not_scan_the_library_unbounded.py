@@ -1,7 +1,7 @@
 """#580: one short line could cost a full-library scan, on its own thread, ten times over.
 
 A name that is not in the first folder's root makes the request handler stream
-every published list and then os.walk() every configured folder. Each request
+every published list (and, until #1376, then os.walk() every configured folder). Each request
 runs on its own daemon thread and the flood gate allows a nick ten requests per
 five seconds, with no penalty once a mute lapses - so a nick pasting a stale
 row (or an attacker inventing names) starts ten concurrent metadata scans of a
@@ -28,21 +28,38 @@ from tests.test_path_security import PathSecurityBase, quiet  # noqa: E402
 
 
 class LookupBase(PathSecurityBase):
+    """A bot whose published list names the tree's tracks. A scan is one
+    read of the published lists: since #1376 that is the whole lookup, and a
+    name no list places is not found (it used to be the os.walk() after it
+    that these counted, and that found the tracks)."""
 
     def setUp(self):
         super().setUp()
         dcc.forget_library_lookups()           # misses, hits and folders (#886)
         self.addCleanup(dcc.forget_library_lookups)
-        self.walks = []
-        real_walk = os.walk
+        self.published = os.path.join(self.tree.lists, "published-list.txt")
+        self.publish(os.path.basename(path) for path in self.tree.tracks)
+        paths = mock.patch.object(dcc.list_mod, "all_list_paths",
+                                  lambda name=None: [self.published])
+        paths.start()
+        self.addCleanup(paths.stop)
+        self.scans = []
+        real_lookup = dcc.path_from_published_lists
 
-        def counting_walk(top, *a, **k):
-            self.walks.append(top)
-            return real_walk(top, *a, **k)
+        def counting_lookup(list_paths, *a, **k):
+            self.scans.append(list(list_paths))
+            return real_lookup(list_paths, *a, **k)
 
-        patch = mock.patch.object(dcc.os, "walk", counting_walk)
+        patch = mock.patch.object(dcc, "path_from_published_lists", counting_lookup)
         patch.start()
         self.addCleanup(patch.stop)
+
+    def publish(self, names):
+        """The published list: the tree's album as its one folder, `names` in it."""
+        with open(self.published, "w", encoding="utf-8") as handle:
+            handle.write(dcc.list_mod.LIST_FOLDER_PREFIX + "Metallica\\Black Album (1991)\\\n")
+            for name in names:
+                handle.write(f"!{config.NICKNAME} {name}  ::INFO:: 4.00KB\n")
 
     def ask(self, name, user="dave"):
         with quiet():
@@ -58,25 +75,25 @@ class AMissIsRememberedForAMinute(LookupBase):
         for _ in range(10):
             self.ask("Stale Row - Nothing Here.flac")
 
-        self.assertEqual(len(self.walks), 1, self.walks)
+        self.assertEqual(len(self.scans), 1, self.scans)
         self.assertEqual(self.errors(), ["file_not_found"] * 10)
 
     def test_the_memory_is_shared_between_users_and_case(self):
         self.ask("Nothing Here.flac", user="dave")
         self.ask("NOTHING here.FLAC", user="erin")
-        self.assertEqual(len(self.walks), 1)
+        self.assertEqual(len(self.scans), 1)
 
     def test_a_different_missing_name_is_a_new_lookup(self):
         self.ask("One.flac")
         self.ask("Two.flac")
-        self.assertEqual(len(self.walks), 2)
+        self.assertEqual(len(self.scans), 2)
 
     def test_the_memory_expires(self):
         self.ask("Nothing Here.flac")
         for key in list(dcc._lookup_misses):
             dcc._lookup_misses[key] -= dcc.LOOKUP_MISS_TTL_SECONDS + 1
         self.ask("Nothing Here.flac")
-        self.assertEqual(len(self.walks), 2)
+        self.assertEqual(len(self.scans), 2)
 
     def test_the_memory_is_bounded(self):
         with mock.patch.object(dcc, "LOOKUP_MISS_MEMORY", 5):
@@ -91,16 +108,25 @@ class AMissIsRememberedForAMinute(LookupBase):
         self.assertEqual(dcc._lookup_misses, {})
         self.assertNotIn("file_not_found", self.errors())
 
-    def test_a_file_added_after_a_miss_is_found_once_the_memory_expires(self):
+    def test_a_file_added_after_a_miss_is_not_found_until_it_is_listed(self):
+        """Not found while the list does not name it, memory or not (#1376):
+        it is requestable after the next rebuild."""
         name = "Brand New Song.flac"
         self.ask(name)
         with open(os.path.join(self.tree.album, name), "wb") as handle:
             handle.write(b"\x00" * 1024)
-        for key in list(dcc._lookup_misses):
-            dcc._lookup_misses[key] -= dcc.LOOKUP_MISS_TTL_SECONDS + 1
-        self.errors_before = len(self.errors())
+
+        def forget_the_miss():
+            for key in list(dcc._lookup_misses):
+                dcc._lookup_misses[key] -= dcc.LOOKUP_MISS_TTL_SECONDS + 1
+        forget_the_miss()
         self.ask(name)
-        self.assertEqual(len(self.errors()), self.errors_before, "still answered not-found")
+        self.assertEqual(self.errors(), ["file_not_found"] * 2, "on disk, but in no list")
+
+        self.publish([os.path.basename(path) for path in self.tree.tracks] + [name])
+        forget_the_miss()
+        self.ask(name)
+        self.assertEqual(self.errors(), ["file_not_found"] * 2, "listed by the rebuild, then found")
 
 
 class OnlyAFewScansRunAtOnce(LookupBase):
@@ -129,7 +155,7 @@ class OnlyAFewScansRunAtOnce(LookupBase):
         self.hold_every_slot()
         self.ask("Something Else.flac")
         self.assertEqual(self.errors(), ["busy"])
-        self.assertEqual(self.walks, [])
+        self.assertEqual(self.scans, [])
 
     def test_being_busy_is_not_remembered_as_a_miss(self):
         self.hold_every_slot()
@@ -163,7 +189,7 @@ class OnlyAFewScansRunAtOnce(LookupBase):
         self.hold_every_slot()
         self.ask("Root Song.flac")
         self.assertNotIn("busy", self.errors())
-        self.assertEqual(self.walks, [])
+        self.assertEqual(self.scans, [])
 
 
 class Wiring(unittest.TestCase):

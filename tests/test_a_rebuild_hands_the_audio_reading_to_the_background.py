@@ -47,7 +47,7 @@ import settings_file  # noqa: E402
 import update_list  # noqa: E402
 import webserver  # noqa: E402
 
-from tests.support import DCCoreTestCase, parse_source  # noqa: E402
+from tests.support import DCCoreTestCase, parse_source, without_menu_icons  # noqa: E402
 # Modules, not classes: a TestCase imported by name runs again here.
 import tests.test_a_working_rebuild_is_not_hung as not_hung  # noqa: E402
 import tests.test_commands as commands_tests  # noqa: E402
@@ -583,7 +583,7 @@ class TheMircScript(unittest.TestCase):
     def setUp(self):
         with io.open(os.path.join(REPO_ROOT, "scripts", "mirc", "dccore.mrc"),
                      encoding="utf-8", newline="") as handle:
-            self.text = handle.read().replace("\r\n", "\n")
+            self.text = without_menu_icons(handle.read().replace("\r\n", "\n"))
 
     def test_library_has_read_audio_info(self):
         menu = self.text[self.text.index("menu @DCCore {"):]

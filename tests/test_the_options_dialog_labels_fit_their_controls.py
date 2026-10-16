@@ -59,12 +59,12 @@ def script():
 
 def dialog_table():
     source = script()
-    table = source[source.index("dialog dccore.opt {"):]
+    table = source[source.index("dialog dccore.set {"):]
     return table[:table.index("\n}\n")]
 
 
 CONTROL = re.compile(
-    r'^\s+(check|text|button|box|edit|combo) (?:"([^"]*)", )?(\d+), (\d+) (\d+) (\d+) (\d+)',
+    r'^\s+(check|text|button|box|edit|combo|list|radio|scroll) (?:"([^"]*)", )?(\d+), (\d+) (\d+) (\d+) (\d+)',
     re.M)
 
 
@@ -83,9 +83,12 @@ def labelled():
         if kind not in ("check", "text", "button"):
             continue
         texts = [label]
-        if cid == 403:
+        if cid == 1682:
             texts = [PAIRED_STATUS, NOT_PAIRED_STATUS]
-        available = w * PX_PER_DBU - (CHECK_BOX_PX if kind == "check" else 0)
+        # a text wraps over the lines its height holds (8 dbu a line);
+        # a check or a button does not
+        lines = max(1, _h // 8) if kind == "text" else 1
+        available = w * PX_PER_DBU * lines - (CHECK_BOX_PX if kind == "check" else 0)
         for text in texts:
             rows.append((cid, text, available))
     return rows
@@ -173,9 +176,10 @@ class TheLabelsFitInGdi(unittest.TestCase):
             px_per_dbu = base_unit / 4.0
             clipped = []
             for cid, text, _table_available in rows:
-                kind_is_check = any(k == "check" and i == cid for k, _l, i, *_ in controls())
-                width = next(w for _k, _l, i, _x, _y, w, _h in controls() if i == cid)
-                available = width * px_per_dbu - (CHECK_BOX_PX if kind_is_check else 0)
+                kind, width, height = next((k, w, h) for k, _l, i, _x, _y, w, h in controls() if i == cid)
+                # a text wraps over the lines its height holds, as labelled() counts them
+                lines = max(1, height // 8) if kind == "text" else 1
+                available = width * px_per_dbu * lines - (CHECK_BOX_PX if kind == "check" else 0)
                 if widths[text] > available:
                     clipped.append("%s: %d %r needs %dpx, has %.1f"
                                    % (font_name, cid, text, widths[text], available))
@@ -183,8 +187,9 @@ class TheLabelsFitInGdi(unittest.TestCase):
 
 
 class TheControlsStayInTheirBoxes(unittest.TestCase):
-    """Widening the dialog moved the whole right column; nothing may have
-    been left hanging out of its group box or the dialog."""
+    """Nothing may hang out of the dialog; the frames are checked by
+    tests/test_the_mirc_settings_window.py (a control is inside its frame
+    whole, or clear of it)."""
 
     def test_every_control_is_inside_the_dialog(self):
         width, height = map(int, re.search(r"size -1 -1 (\d+) (\d+)", dialog_table()).groups())
@@ -194,41 +199,10 @@ class TheControlsStayInTheirBoxes(unittest.TestCase):
             self.assertLessEqual(x + w, width, cid)
             self.assertLessEqual(y + h, height, cid)
 
-    def test_every_control_in_a_box_is_inside_it_horizontally(self):
-        boxes = [(x, y, w, h) for kind, _l, _i, x, y, w, h in controls() if kind == "box"]
-        # Show, Window, Connection - DCCore Chat since #371, and Open when
-        # mIRC starts since #1201.
-        self.assertEqual(len(boxes), 5)
-        checked = 0
-        for kind, _label, cid, x, y, w, _h in controls():
-            if kind == "box":
-                continue
-            for bx, by, bw, bh in boxes:
-                if by <= y <= by + bh:
-                    self.assertTrue(bx <= x and x + w <= bx + bw,
-                                    "%d runs out of the box at %d..%d" % (cid, bx, bx + bw))
-                    checked += 1
-        self.assertGreater(checked, 35)
-
-    def test_the_right_column_starts_after_the_left_checks_end(self):
-        left = [(x + w) for kind, _l, i, x, _y, w, _h in controls()
-                if kind == "check" and x == 10 and i < 400]
-        # The colour row under the checks (#1259, 220-225) spans the box
-        # instead: it is below the last check, not beside it.
-        right = [x for kind, _l, i, x, _y, _w, _h in controls()
-                 if kind in ("combo", "check", "text") and 100 < i < 400 and x > 10
-                 and not 220 <= i <= 225]
-        self.assertEqual(len(left), 11)
-        self.assertLess(max(left), min(right))
-
     def test_the_size_edit_sits_after_its_label(self):
-        font = next(c for c in controls() if c[2] == 305)
-        edit = next(c for c in controls() if c[2] == 306)
-        self.assertLessEqual(font[3] + font[5], edit[3])
-        status = next(c for c in controls() if c[2] == 215)
-        unit = next(c for c in controls() if c[2] == 216)
-        self.assertLessEqual(status[3] + status[5], unit[3])
+        font = next(c for c in controls() if c[2] == 1670)
+        edit = next(c for c in controls() if c[2] == 1671)
+        self.assertEqual(font[1], "Fixed-width font, size")
+        self.assertGreaterEqual(edit[3], font[3] + font[5])
 
 
-if __name__ == "__main__":
-    unittest.main()

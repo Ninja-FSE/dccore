@@ -4,6 +4,7 @@ import io
 import re
 import sys
 import shutil
+import stat
 import sqlite3
 import datetime
 import subprocess
@@ -87,9 +88,13 @@ def _extension_set(setting_name):
     return tuple(dict.fromkeys(cleaned))
 
 
-def ignored_extensions():
-    """Extensions left out of every list."""
-    return _extension_set("LIST_IGNORED_EXTENSIONS")
+def ignored_extensions(list_name=None):
+    """Extensions left out of a list: LIST_IGNORED_EXTENSIONS, which applies
+    to every list, then the list's own exclusions (#1295) - the list called
+    `list_name`, or the primary without one."""
+    import library
+    every = _extension_set("LIST_IGNORED_EXTENSIONS")
+    return tuple(dict.fromkeys(every + library.list_exclusions(list_name)))
 
 
 def video_extensions():
@@ -1254,11 +1259,14 @@ def write_progress(phase, folder="", folder_index=0, folder_count=0,
 # and the rewrite of its rows (#1182) - "reading" and "rewriting". Anything
 # else - "packing" and "publishing", which cover building the archive and the
 # swap, or no phase at all - is a moment searches and file requests wait out.
-PHASES_BEFORE_THE_SWAP = ("scanning", "writing", "reading", "rewriting")
+# What a rebuild reports first (#1361), before it touches a single folder.
+STARTING_PHASE = "starting"
 
 # The phase of the background audio reading (#1182), after the list is
 # published. The daemon hands a rebuild over to it on seeing this.
 READING_PHASE = "reading"
+
+PHASES_BEFORE_THE_SWAP = (STARTING_PHASE, "scanning", "writing", READING_PHASE, "rewriting")
 
 
 def read_progress():
@@ -1303,6 +1311,55 @@ def stop_requested():
 def clear_stop_request():
     try:
         os.remove(platform_compat.long_path(stop_request_path()))
+    except OSError:
+        pass
+
+
+# THE BOT STOPS ITS OWN RUNS, AND ONLY THEM (#1365). The stop file above asks
+# whatever reading runs to stop, and a rebuild that read it could be one a
+# terminal started, or could have it cleared under it by the lock it was
+# waiting for. This file names the runs to stop instead, by the token the bot
+# gave each one (RUN_TOKEN_ENV), one a line: a run started by hand has none, so
+# nothing here stops it, and a request for a run that has ended matches no
+# later one, so it never has to be cleared before a run can start.
+RUN_STOP_TOKENS_KEPT = 32
+
+
+def run_stop_path():
+    return progress_path() + ".stop-runs"
+
+
+def _run_stop_tokens():
+    try:
+        with io.open(platform_compat.long_path(run_stop_path()), encoding="utf-8") as handle:
+            return [line.strip() for line in handle if line.strip()]
+    except OSError:
+        return []
+
+
+def request_run_stop(tokens):
+    """Ask the runs given `tokens` to stop. True when the request was written.
+    Tokens asked for earlier are kept, so an orphan asked at startup is still
+    asked when the bot stops."""
+    wanted = [token for token in _run_stop_tokens() if token not in tokens]
+    wanted += [token for token in tokens if token]
+    try:
+        with io.open(platform_compat.long_path(run_stop_path()), "w", encoding="utf-8") as handle:
+            handle.write("".join(token + "\n" for token in wanted[-RUN_STOP_TOKENS_KEPT:]))
+        return True
+    except OSError:
+        return False
+
+
+def run_stop_requested(token=None):
+    """Has the bot asked this run (or the run given `token`) to stop?"""
+    token = run_token() if token is None else token
+    return bool(token) and token in _run_stop_tokens()
+
+
+def clear_run_stop_request():
+    try:
+        os.remove(platform_compat.long_path(run_stop_path()))
     except OSError:
         pass
 
@@ -1608,8 +1665,42 @@ def _neutralise_banner(text, log=print):
     return "\n".join(safe).rstrip("\n")
 
 
-def generate_master_list(list_name=None, reading_jobs=None):
+def _write_library_summary(list_name, *row_sets, started):
+    """The list's folder count, when it was published and how long the run
+    took (#1359), for the console's LIBRARY line - the rest of what the
+    control panel's start page shows is in the size files and the list.
+
+    A folder is a heading the list has, music and film together, as a user
+    browsing it sees them. Written after the swap like the size files, and
+    never a reason to fail a list that is already published: a start page
+    without the figure is all that is lost."""
+    import db
+    import list as list_mod
+    try:
+        folders = set()
+        for rows in row_sets:
+            folders.update(row[0] for row in rows)
+        finished = time.time()
+        db._atomic_write(list_mod.library_summary_path(list_name), json.dumps({
+            "folders": len(folders),
+            "finished_at": int(finished),
+            "seconds": max(0, int(round(finished - started))),
+        }))
+    except Exception as err:
+        print(f"[LIST-GEN] Could not write {list_mod.LIBRARY_SUMMARY_FILE} ({err}); the "
+              f"console's start page will not show this list's folders or rebuild time.")
+
+
+def _never_stop(force=False):
+    return None
+
+
+def generate_master_list(list_name=None, reading_jobs=None, stop=None):
     """Scan one list's folders, clear its old files first, and build its lists.
+
+    `stop` (#1356, #1365) is asked whether the run must stop - as
+    rebuild_stop_reason() answers, with `force` - while it scans and once more
+    before it publishes. Without one nothing stops it.
 
     `reading_jobs`, a list, collects what is left for the background audio
     reading once this list is published (#1182): an AudioReadingJob when
@@ -1625,6 +1716,7 @@ def generate_master_list(list_name=None, reading_jobs=None):
     subdirectory. See list.list_dir() for why the list is in the path and not
     in the filename.
     """
+    stop = stop or _never_stop
     import os
     import sys
     import time
@@ -1724,15 +1816,40 @@ def generate_master_list(list_name=None, reading_jobs=None):
     # published over the previous good one. Collected here and checked
     # once the walk finishes, so one bad subtree costs the whole run
     # (keeping the previous index) rather than a silent partial one.
+    # Two kinds of error are not that and are skipped instead - a folder
+    # denied to us that is still there, and one renamed or removed while
+    # the scan ran (#1383) - see _on_walk_error().
     walk_errors = []
     denied_dirs = []
+    # The errors themselves rather than their paths, so that a folder whose
+    # configured root turns out to be gone can hand them to walk_errors
+    # unchanged - see the check after each folder's walk.
+    vanished_dirs = []
     # Folders left out because their own name cannot survive the list format
     # (#464) - see has_backslash_component() at the point it is used.
     unlistable_dirs = []
 
+    # The configured folder being walked right now, and which directory it
+    # was when its walk began (#1383). Set per folder in the loop below and
+    # read by _on_walk_error(), which walk_with_sizes() calls on this thread.
+    walking = {"root": None, "identity": None}
+
+    def _directory_identity(path):
+        """(st_dev, st_ino) of the directory at `path`, or None if there is
+        no directory there now."""
+        try:
+            found = os.stat(path)
+        except (OSError, ValueError):
+            return None
+        return (found.st_dev, found.st_ino) if stat.S_ISDIR(found.st_mode) else None
+
+    def _walking_root_is_unchanged():
+        identity = walking["identity"]
+        return identity is not None and _directory_identity(walking["root"]) == identity
+
     def _on_walk_error(err):
-        # TWO DIFFERENT FAILURES, AND ONLY ONE OF THEM IS WORTH ABORTING FOR
-        # (#441).
+        # THREE DIFFERENT FAILURES, AND ONLY ONE OF THEM IS WORTH ABORTING FOR
+        # (#441, #1383).
         #
         # A directory that is PERMANENTLY unreadable - a Windows volume root's
         # System Volume Information, a POSIX lost+found, anything whose ACL
@@ -1740,15 +1857,36 @@ def generate_master_list(list_name=None, reading_jobs=None):
         # future scan. Treating it as "keep the previous index" meant the list
         # could never be rebuilt again on that install: every !update ran the
         # whole scan and then threw the result away, for ever, and the log line
-        # said only that part of the library could not be read.
+        # said only that part of the library could not be read. The test is
+        # whether the path is still there: permission denied on a directory
+        # that exists is a fact about the ACL, not about the scan. Skipped.
         #
-        # A directory that has VANISHED mid-scan is the opposite: it means the
-        # library changed underneath us, the scan we just did is of a state
-        # that no longer exists, and publishing it would be publishing a
-        # snapshot known to be wrong. That one still aborts.
+        # A folder RENAMED OR REMOVED under a configured folder that is still
+        # there (#1383) - an operator replacing a release, a sorter moving
+        # one - is skipped too. #441 aborted on it, reasoning that the scan
+        # described a state that no longer exists. But what it kept instead
+        # is the previous list, which is older and wrong in more ways: it
+        # names that same folder, and it lacks everything added since. On a
+        # network share a scan takes minutes, so one rename cost a day's list.
+        # Only a FileNotFoundError for a path that is really gone counts, and
+        # on Windows only WinError 2 and 3: 53 and 67 (network path or share
+        # not found) are the same Python class but say the share is in
+        # trouble, not the folder.
         #
-        # The test is whether the path is still there. Permission denied on a
-        # directory that exists is a fact about the ACL, not about the scan.
+        # The CONFIGURED FOLDER ITSELF going away is what #441 still guards
+        # against: the share drops mid-walk, its whole subtree goes
+        # unreadable, and publishing would truncate the list. So a vanished
+        # folder is skipped only while the folder being walked is still the
+        # same directory it was when its walk began - same device and inode,
+        # because a mount point left behind by an unmounted share is still a
+        # directory, just an empty one. Checked here and once more when that
+        # folder's walk ends; gone either time, it aborts and keeps the
+        # previous index. So does every other error: EIO, a stale handle,
+        # permission denied on a path that is gone.
+        #
+        # A known, accepted gap: a drive mounted INSIDE a configured folder
+        # and unmounted mid-walk looks like a rename, since the configured
+        # folder is unchanged (Windows does not descend mount points at all).
         denied = isinstance(err, PermissionError)
         if denied:
             try:
@@ -1763,13 +1901,34 @@ def generate_master_list(list_name=None, reading_jobs=None):
                   f"failing the whole rebuild.")
             return
 
+        vanished = (isinstance(err, FileNotFoundError)
+                    and getattr(err, "winerror", None) in (None, 2, 3)
+                    and bool(err.filename))
+        # Root first, then the path: a share that drops and comes back
+        # between the two checks then reads as "path still there" and aborts,
+        # never as a present subtree skipped.
+        if vanished:
+            vanished = _walking_root_is_unchanged()
+        if vanished:
+            try:
+                vanished = not os.path.lexists(platform_compat.long_path(err.filename))
+            except Exception:
+                vanished = False
+
+        if vanished:
+            vanished_dirs.append(err)
+            print(f"[LIST-GEN] Skipping {err.filename!r}: it was moved or removed "
+                  f"during the scan - left out of this list; the next rebuild "
+                  f"lists whatever replaced it.")
+            return
+
         walk_errors.append(err)
         print(f"[LIST-GEN ERROR] Could not read {err.filename!r} during the scan: {err}")
 
     # Once, here - see is_listed_file()'s note. Resolving these inside the
     # walk asked the question per file rather than per scan, and a 719k-file
     # library would have rebuilt each tuple 719,000 times.
-    ignored = ignored_extensions()
+    ignored = ignored_extensions(list_name)
     video_exts = video_extensions()
     companion_exts = video_companion_extensions()
     packable_exts = rar_extensions()
@@ -1813,6 +1972,8 @@ def generate_master_list(list_name=None, reading_jobs=None):
                        folder_count=len(scan_folders),
                        files=len(all_files_data) + len(video_files_data),
                        force=True)
+        if stop(force=True):
+            break
 
         # A folder that is not there RIGHT NOW is skipped, not fatal: an
         # unplugged drive or an unmounted share should cost its own contents,
@@ -1820,7 +1981,9 @@ def generate_master_list(list_name=None, reading_jobs=None):
         # different from walk_errors below, which is a subtree going unreadable
         # DURING a walk of a folder that was present: that is a systemic
         # failure of a library we are meant to be reading, and it keeps the
-        # previous index rather than publishing a truncated one.
+        # previous index rather than publishing a truncated one. (A subfolder
+        # renamed or removed while this folder stays put is neither - it is
+        # skipped, see _on_walk_error() and #1383.)
         #
         # Every folder missing is still caught, further down: the zero-files
         # guard refuses to publish an empty list.
@@ -1833,147 +1996,192 @@ def generate_master_list(list_name=None, reading_jobs=None):
         # long_path()-wrapped, and the SAME wrapped value is relpath()'s base
         # below - see the note above scan_root's original single-folder form.
         scan_root = platform_compat.long_path(scan_folder.path)
+        walking["root"] = scan_root
+        walking["identity"] = _directory_identity(scan_root)
+        vanished_before = len(vanished_dirs)
 
         # walk_with_sizes(), not os.walk: the size comes back with the name
         # rather than being asked for again per file. See its docstring for
         # the measurement. Traversal ORDER differs from os.walk's and cannot
         # matter - all_files_data is sorted by (folder, filename) below before
         # anything is written.
-        for root, files in walk_with_sizes(scan_root, onerror=_on_walk_error):
-            # Throttled inside write_progress(), so this costs a clock read
-            # per directory rather than a file write.
-            write_progress("scanning", folder=scan_folder.name,
-                           folder_index=folder_number,
-                           folder_count=len(scan_folders),
-                           files=len(all_files_data) + len(video_files_data))
+        walk = walk_with_sizes(scan_root, onerror=_on_walk_error)
+        try:
+            for root, files in walk:
+                # Throttled inside write_progress(), so this costs a clock read
+                # per directory rather than a file write.
+                write_progress("scanning", folder=scan_folder.name,
+                               folder_index=folder_number,
+                               folder_count=len(scan_folders),
+                               files=len(all_files_data) + len(video_files_data))
+                # Throttled too: a clock read per directory, the stop file at
+                # most once a second (#1356).
+                if stop():
+                    break
 
-            # ONCE PER DIRECTORY, NOT ONCE PER FILE (#463).
-            #
-            # rel_dir is a property of the directory - it was computed inside
-            # the per-file loop below, so a folder of 20 tracks paid 20
-            # relpath() calls and 20 join() calls for the same answer, and
-            # stored 20 separate equal strings in all_files_data. Hoisted, the
-            # rows share one object: 149.9 B/file against 206.9 B/file
-            # measured, about 0.29 GiB at 5.4M files, and the calls go from
-            # one per file to one per directory.
-            #
-            # The folder's LABEL leads every path (#164). Two folders can hold
-            # the same relative path - the same album in flac and in mp3 is
-            # the ordinary case, not a corner one - and without the label
-            # their headings would be identical text that resolution could not
-            # tell apart.
-            #
-            # Written for a single folder too. Labelling only at two or more
-            # would mean an operator who adds a second folder after weeks of
-            # serving changes every path anyone already saved; doing it once,
-            # at the upgrade, is one break instead of two.
-            #
-            # relative_folder() rather than os.path.relpath(): the same
-            # answer, sliced off the string when it safely can be (#1138).
-            rel_dir = relative_folder(root, scan_root)
-            if rel_dir == ".":
-                rel_dir = ""
-            rel_dir = (os.path.join(scan_folder.name, rel_dir)
-                       if rel_dir else scan_folder.name)
+                # ONCE PER DIRECTORY, NOT ONCE PER FILE (#463).
+                #
+                # rel_dir is a property of the directory - it was computed inside
+                # the per-file loop below, so a folder of 20 tracks paid 20
+                # relpath() calls and 20 join() calls for the same answer, and
+                # stored 20 separate equal strings in all_files_data. Hoisted, the
+                # rows share one object: 149.9 B/file against 206.9 B/file
+                # measured, about 0.29 GiB at 5.4M files, and the calls go from
+                # one per file to one per directory.
+                #
+                # The folder's LABEL leads every path (#164). Two folders can hold
+                # the same relative path - the same album in flac and in mp3 is
+                # the ordinary case, not a corner one - and without the label
+                # their headings would be identical text that resolution could not
+                # tell apart.
+                #
+                # Written for a single folder too. Labelling only at two or more
+                # would mean an operator who adds a second folder after weeks of
+                # serving changes every path anyone already saved; doing it once,
+                # at the upgrade, is one break instead of two.
+                #
+                # relative_folder() rather than os.path.relpath(): the same
+                # answer, sliced off the string when it safely can be (#1138).
+                rel_dir = relative_folder(root, scan_root)
+                if rel_dir == ".":
+                    rel_dir = ""
+                rel_dir = (os.path.join(scan_folder.name, rel_dir)
+                           if rel_dir else scan_folder.name)
 
-            # A LITERAL BACKSLASH IN A FOLDER NAME IS NOT A SEPARATOR (#464).
-            #
-            # On the Linux box this daemon runs on, a backslash is an ordinary
-            # filename character, and unzipping a Windows-made archive
-            # produces one routinely. The list writes its headings with
-            # backslashes as separators, and list.list_heading_parts() reads
-            # them back by splitting on both separators - so a directory named
-            # "Rock\Metal" is written as ...\music\Rock\Metal\ and read back as
-            # ["music", "Rock", "Metal"]. If music/Rock/Metal exists, every
-            # file under it - and its !rar row - resolves into that unrelated
-            # folder and the requester silently gets the wrong album. If it
-            # does not, nothing under the real folder can ever be served.
-            #
-            # Excluded rather than escaped. The list format is read by other
-            # bots and by AutoQ, so an escape convention would have to be
-            # understood by readers that already exist and never will be.
-            # library.problems() already refuses a backslash in a folder LABEL
-            # for exactly this reason ("the label travels further than the
-            # machine that made it"); this is the same rule applied to the
-            # components below it. A folder that cannot be named in the list
-            # cannot be served from it, so listing it would advertise
-            # something unreachable.
-            if has_backslash_component(rel_dir):
-                # No dedup needed: the walk visits each directory once, so
-                # rel_dir is new every time it gets here.
-                unlistable_dirs.append(rel_dir)
-                continue
+                # A LITERAL BACKSLASH IN A FOLDER NAME IS NOT A SEPARATOR (#464).
+                #
+                # On the Linux box this daemon runs on, a backslash is an ordinary
+                # filename character, and unzipping a Windows-made archive
+                # produces one routinely. The list writes its headings with
+                # backslashes as separators, and list.list_heading_parts() reads
+                # them back by splitting on both separators - so a directory named
+                # "Rock\Metal" is written as ...\music\Rock\Metal\ and read back as
+                # ["music", "Rock", "Metal"]. If music/Rock/Metal exists, every
+                # file under it - and its !rar row - resolves into that unrelated
+                # folder and the requester silently gets the wrong album. If it
+                # does not, nothing under the real folder can ever be served.
+                #
+                # Excluded rather than escaped. The list format is read by other
+                # bots and by AutoQ, so an escape convention would have to be
+                # understood by readers that already exist and never will be.
+                # library.problems() already refuses a backslash in a folder LABEL
+                # for exactly this reason ("the label travels further than the
+                # machine that made it"); this is the same rule applied to the
+                # components below it. A folder that cannot be named in the list
+                # cannot be served from it, so listing it would advertise
+                # something unreachable.
+                if has_backslash_component(rel_dir):
+                    # No dedup needed: the walk visits each directory once, so
+                    # rel_dir is new every time it gets here.
+                    unlistable_dirs.append(rel_dir)
+                    continue
 
-            # Decided once per folder, before the per-file loop: a companion
-            # file's list depends on whether a video sits beside it (#411),
-            # and that must not depend on which file the walk handed over
-            # first. is_listed_file() is not consulted here on purpose - a
-            # video the operator has ignored still says what kind of folder
-            # this is.
-            #
-            # EACH NAME IS LOWER-CASED ONCE (#1138). is_listed_file(),
-            # is_packable_file(), belongs_in_video_list() and
-            # audio_info.is_audio() each lower-cased the name again - up to
-            # five times a file - and rebuilt a tuple of the extensions each
-            # time. The checks below are those helpers' own, made on `low`
-            # against the tuples resolved once per scan; an empty tuple
-            # matches nothing, as it did there. The helpers stay, for every
-            # other caller. A folder's packable flag is likewise added once,
-            # after its files, instead of once per packable file.
-            folder_has_video = split_video and any(
-                str(name).lower().endswith(video_exts) for name, _bytes in files)
-            packable_here = False
+                # Decided once per folder, before the per-file loop: a companion
+                # file's list depends on whether a video sits beside it (#411),
+                # and that must not depend on which file the walk handed over
+                # first. is_listed_file() is not consulted here on purpose - a
+                # video the operator has ignored still says what kind of folder
+                # this is.
+                #
+                # EACH NAME IS LOWER-CASED ONCE (#1138). is_listed_file(),
+                # is_packable_file(), belongs_in_video_list() and
+                # audio_info.is_audio() each lower-cased the name again - up to
+                # five times a file - and rebuilt a tuple of the extensions each
+                # time. The checks below are those helpers' own, made on `low`
+                # against the tuples resolved once per scan; an empty tuple
+                # matches nothing, as it did there. The helpers stay, for every
+                # other caller. A folder's packable flag is likewise added once,
+                # after its files, instead of once per packable file.
+                folder_has_video = split_video and any(
+                    str(name).lower().endswith(video_exts) for name, _bytes in files)
+                packable_here = False
 
-            # Keep every track under its exact, complete path on disk
-            for file, file_bytes in files:
-                low = str(file).lower()
-                if not low.endswith(ignored):
-                    if file_bytes is None:
-                        full_file_path = os.path.join(root, file)
-                        # #228: a bare `except: pass` left file_bytes at 0 and
-                        # the entry was published anyway - permission denied, a
-                        # dangling symlink, or a file removed mid-scan all read
-                        # as a legitimate 0-byte track. The list is the thing
-                        # the bot HANDS OUT: publishing it meant offering a
-                        # download that can only ever fail once someone
-                        # actually requests it, with the library's reported
-                        # total size quietly short and no log line saying why.
-                        # Excluded and logged instead - one bad file costs
-                        # itself, not the whole scan (walk_errors above is for
-                        # a whole SUBTREE going unreadable, a more systemic
-                        # failure than one file).
-                        print(f"[LIST-GEN ERROR] Skipping {full_file_path!r}, "
-                              f"its size could not be read.")
-                        continue
-                    total_bytes += file_bytes
+                # Keep every track under its exact, complete path on disk
+                for file, file_bytes in files:
+                    low = str(file).lower()
+                    if not low.endswith(ignored):
+                        if file_bytes is None:
+                            full_file_path = os.path.join(root, file)
+                            # #228: a bare `except: pass` left file_bytes at 0 and
+                            # the entry was published anyway - permission denied, a
+                            # dangling symlink, or a file removed mid-scan all read
+                            # as a legitimate 0-byte track. The list is the thing
+                            # the bot HANDS OUT: publishing it meant offering a
+                            # download that can only ever fail once someone
+                            # actually requests it, with the library's reported
+                            # total size quietly short and no log line saying why.
+                            # Excluded and logged instead - one bad file costs
+                            # itself, not the whole scan (walk_errors above is for
+                            # a whole SUBTREE going unreadable, a more systemic
+                            # failure than one file).
+                            print(f"[LIST-GEN ERROR] Skipping {full_file_path!r}, "
+                                  f"its size could not be read.")
+                            continue
+                        total_bytes += file_bytes
 
-                    # WHICH folder may be packed, decided per FILE and
-                    # remembered per folder. A folder earns its !rar row from
-                    # holding something worth packing, not from holding
-                    # anything at all - see RAR_EXTENSIONS.
-                    if low.endswith(packable_exts):
-                        packable_here = True
+                        # WHICH folder may be packed, decided per FILE and
+                        # remembered per folder. A folder earns its !rar row from
+                        # holding something worth packing, not from holding
+                        # anything at all - see RAR_EXTENSIONS.
+                        if low.endswith(packable_exts):
+                            packable_here = True
 
-                    # WHICH list the row goes in. With the split off, video
-                    # lands in the same list as everything else, which is the
-                    # behaviour this had before the setting existed.
-                    if split_video and (low.endswith(video_exts) or (
-                            folder_has_video and low.endswith(companion_exts))):
-                        video_files_data.append((rel_dir, file, file_bytes))
-                    else:
-                        all_files_data.append((rel_dir, file, file_bytes))
-                        if audio is not None and low.endswith(audio_info.AUDIO_EXTENSIONS):
-                            # No request here: an unchanged file is answered
-                            # from the cache by its size, the rest are read
-                            # after the walk, many at once (#914). The path
-                            # goes as (root, name), joined only for a file
-                            # that is read - on an unchanged library that is
-                            # almost none of them (#1138).
-                            audio.note(audio_info.row_key(rel_dir, file),
-                                       (root, file), file_bytes)
-            if packable_here:
-                packable_folders.add(rel_dir)
+                        # WHICH list the row goes in. With the split off, video
+                        # lands in the same list as everything else, which is the
+                        # behaviour this had before the setting existed.
+                        if split_video and (low.endswith(video_exts) or (
+                                folder_has_video and low.endswith(companion_exts))):
+                            video_files_data.append((rel_dir, file, file_bytes))
+                        else:
+                            all_files_data.append((rel_dir, file, file_bytes))
+                            if audio is not None and low.endswith(audio_info.AUDIO_EXTENSIONS):
+                                # No request here: an unchanged file is answered
+                                # from the cache by its size, the rest are read
+                                # after the walk, many at once (#914). The path
+                                # goes as (root, name), joined only for a file
+                                # that is read - on an unchanged library that is
+                                # almost none of them (#1138).
+                                audio.note(audio_info.row_key(rel_dir, file),
+                                           (root, file), file_bytes)
+                if packable_here:
+                    packable_folders.add(rel_dir)
+        finally:
+            # Closed here rather than whenever it is collected, and whichever
+            # way the walk ends (#1365): an early stop or an exception in a
+            # folder leaves it mid-walk, and closing it shuts its scan threads
+            # down before the next list is built. The next folder's question,
+            # or the one after the loop, sees a stop that arrived meanwhile.
+            walk.close()
 
+        # Something under this folder vanished and was skipped: ask once more,
+        # now its walk is over, whether the folder itself is still there
+        # (#1383). Folders vanishing one after another because the share
+        # under them dropped look exactly like renames until the root goes
+        # too - and if it has, they were the share, and they abort the
+        # rebuild like any other walk error, keeping the previous index.
+        if len(vanished_dirs) > vanished_before and not _walking_root_is_unchanged():
+            lost = vanished_dirs[vanished_before:]
+            del vanished_dirs[vanished_before:]
+            walk_errors.extend(lost)
+            print(f"[LIST-GEN ERROR] {scan_folder.path} itself went away during "
+                  f"the scan, so the {len(lost)} folder(s) that vanished under "
+                  f"it are treated as lost with it, not as renames - the "
+                  f"library could not be read.")
+
+    # Asked once more with the walk over, before anything is written (#1356).
+    stopped = stop(force=True)
+    if stopped:
+        print(f"[LIST-GEN] Stopped before publishing: {stopped}. The previous "
+              "list was left untouched and is still in use.")
+        if audio is not None:
+            audio.close()
+        return False
+
+    # walk_errors holds what the scan could not read and could not explain
+    # (#441): EIO, a stale handle, a configured folder that went away during
+    # its own walk. Not in it: a folder denied to us that is still there
+    # (denied_dirs) and one renamed or removed under a configured folder that
+    # stayed (vanished_dirs, #1383) - both skipped, reported below.
     if walk_errors:
         print(f"[LIST-GEN ERROR] {len(walk_errors)} part(s) of the library could not be "
               "read - keeping the previous index rather than publishing a truncated one.")
@@ -1998,6 +2206,15 @@ def generate_master_list(list_name=None, reading_jobs=None):
               f"will not be in the next one until their permissions change: "
               f"{', '.join(repr(p) for p in denied_dirs[:5])}"
               f"{' ...' if len(denied_dirs) > 5 else ''}")
+
+    if vanished_dirs:
+        # An event rather than a standing condition, unlike denied_dirs: the
+        # next rebuild lists whatever took their place.
+        print(f"[LIST-GEN] {len(vanished_dirs)} folder(s) changed during the "
+              f"scan and were left out of this list; the next rebuild lists "
+              f"whatever replaced them: "
+              f"{', '.join(repr(err.filename) for err in vanished_dirs[:5])}"
+              f"{' ...' if len(vanished_dirs) > 5 else ''}")
 
     if unlistable_dirs:
         # Same shape and same reasoning as denied_dirs above: a standing
@@ -2440,6 +2657,12 @@ def generate_master_list(list_name=None, reading_jobs=None):
         # the swap and the prune of what it replaced - the daemon refuses new
         # searches and file requests, since on Windows a file somebody is
         # reading cannot be renamed or removed.
+        #
+        # The last moment a stop is honoured (#1356): the swap below is the
+        # point of no return.
+        stopped = stop(force=True)
+        if stopped:
+            raise RebuildStopped(stopped)
         write_progress("publishing", force=True)
         _publish_artifacts(swaps)
 
@@ -2462,6 +2685,7 @@ def generate_master_list(list_name=None, reading_jobs=None):
         # caller the file count and the list date as well as the size.
         db._atomic_write(SIZE_FILE_PATH, formatted_size)
         db._atomic_write(RAWBYTES_FILE_PATH, str(total_bytes))
+        _write_library_summary(list_name, all_files_data, video_files_data, started=scan_start)
         # #213: the artifacts just published are named after the CURRENT
         # LIST_BASE_NAME, so this is the moment that fact becomes true. Written
         # here rather than only in the migration, so a rename between two
@@ -2568,6 +2792,12 @@ def generate_master_list(list_name=None, reading_jobs=None):
                   f"{f', {len(audio.pending):,} new or changed to read in the background' if audio.pending else ''}.")
         return True
             
+    except RebuildStopped as stopped:
+        # Asked to stop, not failed (#1365): said as the scan's own stop is.
+        print(f"[LIST-GEN] Stopped before publishing: {stopped}. The previous "
+              "list was left untouched and is still in use.")
+        _discard_temp_lists(*tmp_all_paths)
+        return False
     except Exception as e:
         print(f"[LIST-GEN ERROR] Failed to generate the lists: {e}")
         if published:
@@ -2686,9 +2916,22 @@ def list_lock_path():
     return progress_path() + ".lock"
 
 
-def list_lock_holder():
-    """(pid, "rebuild" or "reading") of the run holding the list lock, or None
-    when no run does. Asked by the bot before it starts a reading."""
+def _lock_note(kind):
+    """What the list lock says about its holder: the kind, then the run's
+    token when the bot started it (#1365)."""
+    return f"{kind} {run_token()}".strip()
+
+
+def _owner(note):
+    """(pid, kind, token) from file_lock_note()'s (pid, note)."""
+    pid, text = note
+    kind, _sep, token = (text or "").partition(" ")
+    return pid, kind, token.strip()
+
+
+def list_lock_owner():
+    """(pid, "rebuild" or "reading", token) of the run holding the list lock,
+    or None when no run does. The token is "" for a run started by hand."""
     path = list_lock_path()
     if not os.path.exists(platform_compat.long_path(path)):
         return None
@@ -2698,7 +2941,14 @@ def list_lock_holder():
         return None
     if not held:
         return None
-    return platform_compat.file_lock_note(platform_compat.long_path(path))
+    return _owner(platform_compat.file_lock_note(platform_compat.long_path(path)))
+
+
+def list_lock_holder():
+    """(pid, "rebuild" or "reading") of the run holding the list lock, or None
+    when no run does. Asked by the bot before it starts a reading."""
+    owner = list_lock_owner()
+    return owner[:2] if owner else None
 
 
 def take_list_lock(kind, log=print, wait=None, clock=time.monotonic, sleep=time.sleep):
@@ -2709,36 +2959,40 @@ def take_list_lock(kind, log=print, wait=None, clock=time.monotonic, sleep=time.
     AUDIO_STOP_WAIT for it to let go: what the reading read is saved."""
     path = platform_compat.long_path(list_lock_path())
     try:
-        _list_lock[0] = platform_compat.take_file_lock(path, kind)
-        # Nobody else holds the list, so a stop request lying about was meant
-        # for a run that has ended: it must not stop this one at its start.
-        clear_stop_request()
-        return None
+        _list_lock[0] = platform_compat.take_file_lock(path, _lock_note(kind))
     except platform_compat.AlreadyRunning:
-        holder = platform_compat.file_lock_note(path)
-    if kind != "rebuild" or holder[1] != "reading":
-        return holder
-    log(f"[LIST-GEN] An audio reading (pid {holder[0]}) holds the list; asking it to stop. "
-        f"What it read is kept.")
-    request_stop()
-    deadline = clock() + (AUDIO_STOP_WAIT if wait is None else wait)
-    try:
-        while clock() < deadline:
-            sleep(0.5)
-            try:
-                _list_lock[0] = platform_compat.take_file_lock(path, kind)
-                return None
-            except platform_compat.AlreadyRunning:
-                continue
-        return platform_compat.file_lock_note(path)
-    finally:
-        clear_stop_request()
+        holder = _owner(platform_compat.file_lock_note(path))[:2]
+        if kind != "rebuild" or holder[1] != "reading":
+            return holder
+        log(f"[LIST-GEN] An audio reading (pid {holder[0]}) holds the list; asking it to stop. "
+            f"What it read is kept.")
+        request_stop()
+        deadline = clock() + (AUDIO_STOP_WAIT if wait is None else wait)
+        try:
+            while _list_lock[0] is None:
+                if clock() >= deadline:
+                    return _owner(platform_compat.file_lock_note(path))[:2]
+                sleep(0.5)
+                try:
+                    _list_lock[0] = platform_compat.take_file_lock(path, _lock_note(kind))
+                except platform_compat.AlreadyRunning:
+                    continue
+        finally:
+            clear_stop_request()
+    # Taken, whichever way (#1365: the way that waited out a reading kept an
+    # earlier run's answer). Nobody else holds the list, so a stop request
+    # lying about was meant for a run that has ended: it must not stop this
+    # one at its start. A request for THIS run is in run_stop_path(), which
+    # stays.
+    clear_stop_request()
+    reset_rebuild_stop()
+    return None
 
 
 def mark_list_lock(kind):
     """Say, in the held lock, what this run is doing now."""
     if _list_lock[0] is not None:
-        platform_compat.set_file_lock_note(_list_lock[0], kind)
+        platform_compat.set_file_lock_note(_list_lock[0], _lock_note(kind))
 
 
 def release_list_lock():
@@ -2746,13 +3000,82 @@ def release_list_lock():
     _list_lock[0] = None
 
 
-def reading_should_stop(clock=time.monotonic, _state={"checked": 0.0, "gone": False}):
-    """The reading's stop question: a stop was asked, or the bot that started
-    it is no longer running (#1182 audit) - a bot that crashed or whose window
-    was closed ran no shutdown to ask. The bot's liveness is checked every
-    DAEMON_CHECK_SECONDS, not on every read."""
-    if stop_requested():
+# A REBUILD STOPS WITH THE BOT THAT STARTED IT (#1356), before it publishes.
+# It ran on after the bot had stopped - Tools > Stop, Ctrl-C, a closed window -
+# scanning for half an hour with nobody to report to, and held the list lock
+# the whole time: the restarted bot's Update list was refused with "Another
+# list rebuild is already running". The same two signals the reading uses: the
+# stop file, which the bot writes when it stops, and the bot's pid, for a bot
+# that ended without its shutdown. Asked at most once a second during the scan,
+# and once more before the lists are written and before they are published;
+# never after, since from the swap on the new list is the one in use.
+#
+# ONLY THE RUN THAT IS ASKED (#1365): rebuild_main() hands rebuild_stop_reason()
+# down as generate_all_lists()'s `stop`; a caller building a list some other
+# way passes nothing and is never stopped. And the bot asks by the run's token
+# (request_run_stop()), never through the reading's stop file, so a terminal's
+# rebuild goes through whatever the bot does.
+REBUILD_STOP_CHECK_SECONDS = 1.0
+_rebuild_stop = {"at": None, "reason": None}
+
+
+# update_list.py's exit code for a rebuild that was asked to stop (#1365).
+REBUILD_STOPPED_EXIT = 3
+
+
+class RebuildStopped(Exception):
+    """Raised inside generate_master_list()'s try, so the temporary lists are
+    discarded and the previous list is said to be still in use."""
+
+
+def reset_rebuild_stop():
+    _rebuild_stop.update(at=None, reason=None)
+
+
+def rebuild_stop_reason(clock=time.monotonic, force=False, should_stop=None):
+    """Why this rebuild must stop now, or None. Once it has an answer it keeps
+    it, so a multi-list run does not start the next list. `should_stop` stands
+    in for daemon_gone() in the tests."""
+    if _rebuild_stop["reason"]:
+        return _rebuild_stop["reason"]
+    now = clock()
+    if (not force and _rebuild_stop["at"] is not None
+            and now - _rebuild_stop["at"] < REBUILD_STOP_CHECK_SECONDS):
+        return None
+    _rebuild_stop["at"] = now
+    if run_stop_requested():
+        reason = "the bot is stopping and asked it to stop"
+    elif (should_stop or daemon_gone)():
+        reason = "the bot that started it is no longer running"
+    else:
+        return None
+    _rebuild_stop["reason"] = reason
+    return reason
+
+
+def stopped_reason():
+    """The answer rebuild_stop_reason() kept, or None: was this run stopped?"""
+    return _rebuild_stop["reason"]
+
+
+_daemon_state = {"checked": 0.0, "gone": False}
+
+
+def reading_should_stop(clock=time.monotonic, _state=None):
+    """The reading's stop question: a stop was asked - of any reading, or of
+    this run by its token (#1365: the reading a stopped rebuild had just
+    started) - or the bot that started it is no longer running (#1182 audit),
+    since a bot that crashed or whose window was closed ran no shutdown to
+    ask."""
+    if stop_requested() or run_stop_requested():
         return True
+    return daemon_gone(clock, _state)
+
+
+def daemon_gone(clock=time.monotonic, _state=None):
+    """The bot that started this run is no longer running. Its liveness is
+    checked every DAEMON_CHECK_SECONDS, not on every read."""
+    _state = _daemon_state if _state is None else _state
     daemon = os.environ.get(DAEMON_PID_ENV, "")
     if not daemon:
         return False
@@ -3202,11 +3525,12 @@ def read_audio_info_main(log=print):
         release_list_lock()
 
 
-def generate_all_lists(log=print, reading_jobs=None):
+def generate_all_lists(log=print, reading_jobs=None, stop=None):
     """Build every configured list. True only if every one of them succeeded.
 
     `reading_jobs` collects each published list's audio files left to read
-    (#1182); see generate_master_list().
+    (#1182), and `stop` is asked whether to stop (#1356); see
+    generate_master_list().
 
     On a single-list install this is one call to generate_master_list() with no
     name - byte for byte what running this script has always done. The loop is
@@ -3230,23 +3554,33 @@ def generate_all_lists(log=print, reading_jobs=None):
     # from a finished run reads as a rebuild still in progress, and the
     # dashboard would show a bar that never moves.
     try:
-        return _generate_all_lists(log, reading_jobs)
+        return _generate_all_lists(log, reading_jobs, stop or _never_stop)
     finally:
         clear_progress()
 
 
-def _generate_all_lists(log, reading_jobs=None):
+def _generate_all_lists(log, reading_jobs=None, stop=_never_stop):
     import library
 
     every = library.lists()
     # The jobs are passed only when asked for, so a caller that builds lists
     # without the background reading calls generate_master_list() as before.
     extra = {} if reading_jobs is None else {"reading_jobs": reading_jobs}
+    if stop is not _never_stop:
+        extra["stop"] = stop
     if len(every) == 1:
         return generate_master_list(**extra)
 
     failed = []
     for entry in every:
+        # A stopped run builds no further list (#1356); the ones not reached
+        # go on serving what they last built, like a failed one. Forced: the
+        # last list's walk may have asked within the second (#1365).
+        stopped = stop(force=True)
+        if stopped:
+            log(f"[LIST-GEN] Stopped: {stopped}. Not building {entry.name!r}.")
+            failed.append(entry.name)
+            continue
         log(f"[LIST-GEN] Building {entry.name!r} ({len(entry.folders)} folder(s))...")
         try:
             if not generate_master_list(entry.name, **extra):
@@ -3260,8 +3594,13 @@ def _generate_all_lists(log, reading_jobs=None):
             failed.append(entry.name)
 
     if failed:
-        log("[LIST-GEN ERROR] These lists were not rebuilt and are still serving "
-            "what they last built: " + ", ".join(repr(n) for n in failed))
+        names = ", ".join(repr(n) for n in failed)
+        if stop():
+            log(f"[LIST-GEN] Stopped: these lists were not rebuilt and are still serving "
+                f"what they last built: {names}")
+        else:
+            log("[LIST-GEN ERROR] These lists were not rebuilt and are still serving "
+                "what they last built: " + names)
         return False
     log(f"[LIST-GEN] All {len(every)} lists rebuilt.")
     return True
@@ -3271,30 +3610,18 @@ def rebuild_main(log=print):
     """`update_list.py` with no argument: rebuild every list, then - started
     by the bot - read the audio lengths left. Returns the exit code."""
     log("--- Starting the scheduled weekly file-list update ---")
-    # FILE_DIRECTORY is not in settings_file.REQUIRED (see its own comment) -
-    # a blank value is a supported "not chosen yet" state the daemon itself
-    # boots fine with, so os.path.exists(None) here (a TypeError, not a
-    # clean failure) must be guarded against explicitly rather than assuming
-    # a real string ever reaches this point.
-    # Across EVERY list, not just the primary. The two guards below ask
-    # "is there anything to build at all", and with several lists the
-    # answer is yes if any one of them has somewhere to look - a single
-    # list pointed at an unplugged drive is generate_all_lists()'s
-    # problem to report, not a reason to refuse the whole run.
+    # NOTHING CONFIGURED is refused before the lock (#1366): it looks at no
+    # folder, so it cannot block, and taking the lock first would stop a
+    # running audio reading and wait for it only to refuse. Across EVERY
+    # list, not just the primary: with several lists there is something to
+    # build if any one of them has somewhere to look. No report to clear -
+    # none is written before the lock, and one there is another run's.
     configured = [folder for entry in library.lists() for folder in entry.folders]
     if not configured:
-        log("[CRITICAL] No music directory configured yet - set FILE_DIRECTORY "
-            "from the web dashboard's Settings page, settings.conf, or "
-            "admin_config.py before running this.")
+        log("[CRITICAL] No music folder configured yet - add one under Your list "
+            "on the web dashboard's Settings page, or set FILE_DIRECTORY in "
+            "settings.conf, before running this.")
         return 1
-    # Every one missing, not any one: a single unavailable folder is skipped
-    # during the scan with a warning, and only a library with nothing readable
-    # in it at all is worth refusing to run for.
-    if not any(os.path.isdir(platform_compat.long_path(f.path)) for f in configured):
-        log("[CRITICAL] None of the configured music folders exist: "
-            + ", ".join(f.path for f in configured))
-        return 1
-
     # ONE AT A TIME (#1182 audit): a reading holding the list - the bot's, a
     # terminal's, or one whose bot died - is asked to stop and waited for; a
     # second rebuild is not started at all. Two of them wrote the same
@@ -3312,6 +3639,27 @@ def rebuild_main(log=print):
     # generate_all_lists() clears the progress file in its own finally, so a
     # crash inside it still leaves nothing behind for the dashboard to read.
     try:
+        # THE FIRST REPORT, before any folder is looked at (#1361). The check
+        # below stats every configured folder, and a mount that stopped
+        # answering blocks right there: with nothing reported the bot could
+        # not tell a stall from a slow start and never ended it, and with no
+        # phase to read it paused every search and file request meanwhile. A
+        # report makes the stall rule apply from the start, and "starting"
+        # is a phase that pauses nothing. After the lock, so it never writes
+        # over the report of a rebuild that holds it.
+        write_progress(STARTING_PHASE, force=True)
+        # Every one missing, not any one: a single unavailable folder is skipped
+        # during the scan with a warning, and only a library with nothing readable
+        # in it at all is worth refusing to run for. After the lock and the
+        # first report, unlike the check above, because it stats the folders;
+        # a bot's rebuild has stopped its own reading before it starts the
+        # child anyway (#1366).
+        if not any(os.path.isdir(platform_compat.long_path(f.path)) for f in configured):
+            log("[CRITICAL] None of the configured music folders exist: "
+                + ", ".join(f.path for f in configured))
+            clear_progress()
+            return 1
+
         return _rebuild_holding_the_lock(log)
     finally:
         release_list_lock()
@@ -3319,7 +3667,7 @@ def rebuild_main(log=print):
 
 def _rebuild_holding_the_lock(log):
     reading_jobs = []
-    success = generate_all_lists(log=log, reading_jobs=reading_jobs)
+    success = generate_all_lists(log=log, reading_jobs=reading_jobs, stop=rebuild_stop_reason)
     if success:
         log("--- The list was updated successfully. ---")
         # Every list is published; what is left to read is read now, in this
@@ -3338,9 +3686,14 @@ def _rebuild_holding_the_lock(log):
                 f"in its console, Library > Read audio info in dccore.mrc - or run "
                 f"`update_list.py --read-audio-info`, which reads them here.")
         return 0
-    else:
-        log("--- ERROR: could not generate the list. ---")
-        return 1
+    stopped = stopped_reason()
+    if stopped:
+        # Asked to, not failed (#1365): the bot that is stopping reads this
+        # exit code and does not report a failed rebuild.
+        log(f"--- Stopped: {stopped}. The published list stays as it is. ---")
+        return REBUILD_STOPPED_EXIT
+    log("--- ERROR: could not generate the list. ---")
+    return 1
 
 
 if __name__ == "__main__":

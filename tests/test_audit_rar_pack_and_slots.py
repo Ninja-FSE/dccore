@@ -115,9 +115,15 @@ class ThePackRechecksItsSlotBeforeTakingOne(DCCoreTestCase):
     """
 
     def source(self):
+        """The packer first, then the wrapper that starts it: the packing has
+        been pack_folder_for_request() since #1300, and the interlocks it
+        hands back are still released in check_queue_and_send()'s
+        inline_rar_packer(). Section B's sweep, with its own slot check, has
+        been claim_next_in_line() since #1304."""
         import inspect
 
-        return inspect.getsource(dcc.check_queue_and_send)
+        return (inspect.getsource(dcc.pack_folder_for_request) + inspect.getsource(dcc.check_queue_and_send)
+                + inspect.getsource(dcc.claim_next_in_line))
 
     def test_the_append_is_guarded_by_a_capacity_test(self):
         source = self.source()

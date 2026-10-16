@@ -177,7 +177,8 @@ class TheOrderInTheFinally(unittest.TestCase):
 
     def test_the_row_is_settled_before_the_cleanup(self):
         import inspect
-        body = inspect.getsource(dcc.start_dcc_send)
+        # start_dcc_send()'s finally block is finish_send() since #1336.
+        body = inspect.getsource(dcc.finish_send)
         settle = body.index("row_retained = release_queue_entry(")
         cleanup = body.index("file_still_needed = bool(row_retained)")
 

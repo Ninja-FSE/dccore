@@ -79,7 +79,8 @@ class TheDefaults(unittest.TestCase):
 class StartOpensEachWindowBehindItsSetting(unittest.TestCase):
 
     def test_start_loads_the_settings_then_opens_the_windows(self):
-        self.assertEqual(code("on *:START: {"), ["dccore.init", "dccore.atstart"])
+        # then the theme's menu hook (#1368), which needs no window
+        self.assertEqual(code("on *:START: {"), ["dccore.init", "dccore.atstart", "dccore.theme.start"])
 
     def test_each_window_is_behind_its_own_setting(self):
         start = alias("dccore.atstart")
@@ -247,42 +248,35 @@ class DCCoreSaysWhatItIsWaitingFor(unittest.TestCase):
         ])
 
 
-class TheOptionsDialogHasTheThreeCheckboxes(unittest.TestCase):
+class TheSettingsWindowHasTheThreeSwitches(unittest.TestCase):
+    """On General Settings, as this mIRC's own switches (the window's
+    locals): ticked from dccore.ini when the window opens, saved by Apply.
+    They were the Options dialog's."""
 
-    SETTINGS = (("start.main", 701, "@DCCore"),
-                ("start.chat", 702, "@DCCore-Chat"),
-                ("start.downloads", 703, "@DCCore-Downloads"))
+    SETTINGS = (("start.main", "DCCore window"), ("start.chat", "Chat"), ("start.downloads", "Downloads"))
 
-    def test_the_checkboxes_are_in_their_own_box(self):
-        table = block("dialog dccore.opt {")
+    def data(self):
+        found = {}
+        for line in block("alias dccore.sw.data {").split("\n"):
+            parts = line.strip().split(" ", 3)
+            if parts[:2] == ["hadd", "dccore.swm"]:
+                found[parts[2]] = parts[3] if len(parts) > 3 else ""
+        return found
 
-        self.assertIn('box "Open when mIRC starts (minimised)", 700, 5 298 312 24', table)
-        for _setting, cid, label in self.SETTINGS:
-            self.assertRegex(table, r'\n  check "%s", %d, \d+ 308 \d+ 10\n' % (re.escape(label), cid))
+    def test_each_is_a_local_switch_with_its_label(self):
+        data = self.data()
+        table = block("dialog dccore.set {")
+        for setting, label in self.SETTINGS:
+            self.assertIn(setting, data["locals"].split())
+            self.assertIn('check "%s", %s, ' % (label, data["lo." + setting]), table)
 
-    def test_init_ticks_each_from_its_setting(self):
-        init = code("on *:dialog:dccore.opt:init:0: {")
-
-        for setting, cid, _label in self.SETTINGS:
-            self.assertIn("if ($dccore.opt(%s)) { did -c dccore.opt %d }" % (setting, cid), init)
-
-    def test_ok_saves_each_into_its_setting(self):
-        ok = code("on *:dialog:dccore.opt:sclick:1: {")
-        saved = ok.index("dccore.save")
-
-        for setting, cid, _label in self.SETTINGS:
-            line = "hadd dccore %s $did(dccore.opt,%d).state" % (setting, cid)
-            self.assertIn(line, ok)
-            self.assertLess(ok.index(line), saved, line)
-
-    def test_the_buttons_moved_below_the_new_box(self):
-        table = block("dialog dccore.opt {")
-
-        # 24 dbu lower again since #1259 put a row of colours in the Show box
-        self.assertIn("size -1 -1 322 340", table)
-        self.assertIn('button "OK", 1, 232 326 40 12, ok default', table)
-
-
+    def test_init_ticks_each_from_its_setting_and_apply_saves_it(self):
+        init = block("alias dccore.sw.init {")
+        self.assertIn("if ($dccore.opt($gettok(%all,%i,32))) { did -c dccore.set $dccore.sw.m(lo. $+ $gettok(%all,%i,32)) }",
+                      init)
+        save = block("alias dccore.sw.savelocal {")
+        self.assertIn("if (%state != $dccore.opt(%o)) { hadd dccore %o %state | inc %n }", save)
+        self.assertIn("if (%n) { dccore.save }", save)
 class TheScriptVersionMovedOn(unittest.TestCase):
 
     def test_the_version_is_at_least_1_13(self):

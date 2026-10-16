@@ -25,13 +25,14 @@ import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "mirc", "dccore.mrc")
-for path in (os.path.join(REPO_ROOT, "src"), os.path.join(REPO_ROOT, "tests"),
+for path in (REPO_ROOT, os.path.join(REPO_ROOT, "src"), os.path.join(REPO_ROOT, "tests"),
              os.path.join(REPO_ROOT, "scripts", "mirc")):
     if path not in sys.path:
         sys.path.insert(0, path)
 
 import adminchat  # noqa: E402
 import console_settings  # noqa: E402
+from tests.support import without_menu_icons  # noqa: E402
 from test_the_options_dialog_labels_fit_their_controls import CHAR_PX, CHECK_BOX_PX, PX_PER_DBU  # noqa: E402
 
 BEGIN = "; ==== BEGIN GENERATED settings window"
@@ -40,7 +41,7 @@ END = "; ==== END GENERATED settings window"
 
 def raw():
     with io.open(SCRIPT, encoding="ascii", newline="") as handle:
-        return handle.read().replace("\r\n", "\n")
+        return without_menu_icons(handle.read().replace("\r\n", "\n"))
 
 
 def code(text=None):
@@ -98,7 +99,7 @@ def untext(text):
 
 
 CONTROL = re.compile(
-    r'^\s+(check|text|button|box|edit|combo|list|tab|radio) (?:"([^"]*)", )?(\d+)(?:, (\d+) (\d+) (\d+) (\d+))?(?:, (.*))?$',
+    r'^\s+(check|text|button|box|edit|combo|list|tab|radio|scroll) (?:"([^"]*)", )?(\d+)(?:, (\d+) (\d+) (\d+) (\d+))?(?:, (.*))?$',
     re.M)
 
 
@@ -129,7 +130,7 @@ def slot_ids():
     return set(range(1020, 1020 + int(generated_data()["slots"])))
 
 
-GLOBAL_IDS = set(range(1001, 1007)) | {1012, 1013, 1014, 1015, 1016, 1017, 1018} | slot_ids()
+GLOBAL_IDS = set(range(1001, 1008)) | {1012, 1013, 1014, 1015, 1016, 1017, 1018} | slot_ids()
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +408,14 @@ class ApplyIsOneTransaction(unittest.TestCase):
         ok_at = done.index("if ($1 == ok) {")
         error_at = done.index("if ($1 == error) {", ok_at)
         ok = done[ok_at:error_at]
-        self.assertIn("if ($dccore.sw.s(close)) { dccore.sys Settings: %said | dialog -x dccore.set | return }", ok)
+        # through maybeclose: the lists or the on-connect commands may still
+        # be saving (Apply sends them too, as transactions of their own)
+        self.assertIn("if ($dccore.sw.s(close)) { dccore.sys Settings: %said | dccore.sw.maybeclose | return }", ok)
+        self.assertEqual(statements(alias("dccore.sw.maybeclose")),
+                         ["if (!$dccore.sw.s(close)) { return }",
+                          "if ($dccore.sw.s(saving.srv)) || ($dccore.sw.s(saving.oc)) || "
+                          "($istok(apply confirm aborting,$dccore.sw.s(phase),32)) { return }",
+                          "dialog -x dccore.set"])
         error = done[error_at:]
         self.assertNotIn("dialog -x", error)
         self.assertIn("hdel dccore.sws close", error)
@@ -417,7 +425,7 @@ class ApplyIsOneTransaction(unittest.TestCase):
     def test_the_confirm_question_is_asked_from_a_timer_and_answered(self):
         self.assertIn(".timerdccoreSwAsk -m 1 0 dccore.sw.confirm", alias("dccore.sw.done"))
         confirm = alias("dccore.sw.confirm")
-        self.assertIn("if ($input(%q,yq,DCCore - Settings)) {", confirm)
+        self.assertIn("if ($input(%q,yq,DCCore - Control Panel)) {", confirm)
         self.assertIn("dccore.send setcommit confirm", confirm)
         self.assertIn("dccore.send setabort", confirm)
 
@@ -523,21 +531,23 @@ class TheDialog(unittest.TestCase):
         the init handler writes in (t.<id>) in place of their empty strings."""
         rows = []
         for kind, label, cid, _x, _y, w, h, _s in self.controls:
-            if kind not in ("check", "text", "button", "tab"):
+            if kind not in ("check", "text", "button", "tab", "box"):
                 continue
             if "t.%d" % cid in self.data:
                 label = untext(self.data["t.%d" % cid]).replace("&&", "&")
             rows.append((kind, label, cid, w, h))
         return rows
 
-    def test_the_size_is_about_the_mockups(self):
-        self.assertLessEqual(self.size[0], 420)
-        self.assertLessEqual(self.size[1], 300)
+    def test_the_size_is_the_mockups(self):
+        # 488 x 364 dialog units: the mockup's proportions at a size that
+        # fits a 1080p screen, with room for the frames, the labels above
+        # their fields and the page's name under the tabs (#1288, phase 3)
+        self.assertEqual(self.size, (488, 364))
 
     def test_ids_are_unique_and_clear_of_the_other_dialogs(self):
         ids = [c[2] for c in self.controls]
         self.assertEqual(len(ids), len(set(ids)))
-        others = {c[2] for c in dialog("dccore.opt")} | {c[2] for c in dialog("dccore.dq")}
+        others = {c[2] for c in dialog("dccore.dq")}
         self.assertEqual(set(ids) & others, set())
         self.assertGreater(min(ids), 1000)
 
@@ -565,9 +575,9 @@ class TheDialog(unittest.TestCase):
             if kind == "check":
                 if text_px(text) + CHECK_BOX_PX > available:
                     clipped.append("%d %r (check)" % (cid, text))
-            elif kind == "button":
+            elif kind in ("button", "box"):
                 if text_px(text) + 8 > available:
-                    clipped.append("%d %r (button)" % (cid, text))
+                    clipped.append("%d %r (%s)" % (cid, text, kind))
             elif wrapped_lines(text, w) * 8 > h:
                 clipped.append("%d %r needs %d lines in %d dbu" % (cid, text, wrapped_lines(text, w), h))
         self.assertEqual(clipped, [])
@@ -600,14 +610,33 @@ class TheDialog(unittest.TestCase):
                 for b in ids[n + 1:]:
                     A, B = box(a), box(b)
                     overlap = A[0] < B[2] and B[0] < A[2] and A[1] < B[3] and B[1] < A[3]
+                    frames = [c for c in (a, b) if where[c][0] == "box"]
+                    if len(frames) == 1:
+                        # a frame holds its section's controls: each is inside
+                        # it whole, or clear of it - never across its edge
+                        F, C = (A, B) if frames[0] == a else (B, A)
+                        inside = F[0] <= C[0] and C[2] <= F[2] and F[1] <= C[1] and C[3] <= F[3]
+                        self.assertTrue(inside or not overlap, "page %d: %d straddles the frame %d"
+                                        % (page, b if frames[0] == a else a, frames[0]))
+                        continue
                     self.assertFalse(overlap, "page %d: %d and %d overlap" % (page, a, b))
 
-    def test_the_tabs_are_a_strip_above_the_pages(self):
+    def test_the_tab_control_frames_the_body(self):
+        """Its page border runs under every tab and round the body: a strip
+        of tabs only had Windows draw that border cut off (#1288)."""
+        import build_settings_window as generator
         tabs = [c for c in self.controls if c[0] == "tab"]
         self.assertEqual([t[1] for t in tabs], ["General", "Sharing", "Downloads", "Security",
-                                                "Dashboard & Console", "Advanced"])
-        top = min(c[4] for c in self.controls if c[0] != "tab")
-        self.assertLessEqual(tabs[0][4] + tabs[0][6], top)
+                                                "Dashboard & Console", "Advanced", "mIRC"])
+        _kind, _label, _cid, tx, ty, tw, th, _style = tabs[0]
+        body = [c for c in self.controls if c[0] not in ("tab", "button") and c[2] not in (1013, 1018)]
+        self.assertGreaterEqual(min(c[4] for c in body), ty + generator.TAB_HEADER_H)
+        self.assertLessEqual(max(c[4] + (12 if c[0] == "combo" else c[6]) for c in body), ty + th)
+        self.assertGreater(min(c[3] for c in body), tx)
+        self.assertLess(max(c[3] + c[5] for c in body), tx + tw)
+        # the connection and status lines and the buttons sit under it
+        self.assertGreater(min(c[4] for c in self.controls if c[0] == "button" and c[2] in (1014, 1015, 1016, 1017)),
+                           ty + th)
 
     def test_the_footer_has_apply_ok_and_cancel(self):
         buttons = {c[2]: c[1] for c in self.controls if c[0] == "button"}
@@ -623,7 +652,7 @@ class TheDialog(unittest.TestCase):
         table = {c[2] for c in self.controls}
         used = set(int(i) for i in re.findall(r"\bdccore\.set (1[0-9]{3})\b", handwritten()))
         used |= set(int(i) for i in re.findall(r"%id == (1[0-9]{3})\b", handwritten()))
-        self.assertGreater(len(used), 30)
+        self.assertGreater(len(used), 20)
         self.assertEqual(used - table, set())
 
 
@@ -641,33 +670,41 @@ class TheWindowsBehaviour(unittest.TestCase):
         for match in re.finditer(r"\$input\(([^%][^)]*)\)", handwritten()):
             self.assertEqual(match.group(1).count(","), 2, match.group(0))
 
-    def test_this_mirc_window_page_opens_the_old_options(self):
-        self.assertIn("if (%id == 1616) { dccore.options | return }", alias("dccore.sw.click"))
-        self.assertIn('"@DCCore window options..."', block("dialog dccore.set {"))
-        # /dccore options is still the old dialog
+    def test_dccore_options_opens_the_window_on_its_mirc_side(self):
+        # /dccore options: the same window, on this mIRC's own settings
+        self.assertEqual(statements(alias("dccore.options")), ["dccore.settings mirc"])
         self.assertIn("if (%cmd == options) { dccore.options | return }", alias("dccore"))
         self.assertIn("if (%cmd == settings) { dccore.settings | return }", alias("dccore"))
+        settings = alias("dccore.settings")
+        self.assertIn("hadd dccore.live sw.open $iif($1 == mirc,mirc,start)", settings)
+        # a window already open goes there: the mIRC side with DCX, the mIRC
+        # tab (the last group) in the native form
+        self.assertIn("if ($1 == mirc) { dccore.sw.go $iif($dccore.sw.s(dcx),side 2,tab $dccore.sw.m(groups)) }", settings)
+        self.assertIn("if ($dccore.sw.s(dcx)) { dccore.sw.side $iif($hget(dccore.live,sw.open) == mirc,2,0) }",
+                      alias("dccore.sw.init"))
+        self.assertNotIn("dialog dccore.opt {", code())
 
     def test_the_local_switches_are_this_mircs(self):
         data = generated_data()
-        self.assertEqual(data["locals"].split(), ["start.main", "start.chat", "start.downloads", "auto"])
+        self.assertEqual(data["locals"].split(), ["start.main", "start.chat", "start.downloads", "auto", "panel",
+                                          "titlebar", "separate", "beep", "nodcx", "chat.all", "chat.popup"])
         save = alias("dccore.sw.savelocal")
         self.assertIn("if (%state != $dccore.opt(%o)) { hadd dccore %o %state | inc %n }", save)
         self.assertIn("if (%n) { dccore.save }", save)
 
     def test_every_menu_with_options_has_settings_next_to_it(self):
         text = code()
+        # one entry, the control panel, where the two settings entries were:
+        # the window holds both sides now
         menus = re.findall(r"\nmenu [^\n]+ \{\n(.*?)\n\}", text, re.S)
-        with_options = 0
+        with_panel = 0
         for menu in menus:
-            lines = [line.strip() for line in menu.split("\n")]
-            for n, line in enumerate(lines):
-                if line.lstrip(".").startswith("Options...:"):
-                    with_options += 1
-                    dots = line[:len(line) - len(line.lstrip("."))]
-                    self.assertEqual(lines[n + 1], dots + "Settings...:dccore.settings")
-        self.assertEqual(with_options, 3)
-        self.assertIn("\n  Bot Settings:dccore.settings\n", block("menu @DCCore {"))
+            lines = [line.strip().lstrip(".") for line in menu.split("\n")]
+            with_panel += lines.count("Control Panel...:dccore.settings")
+        self.assertEqual(with_panel, 3)
+        self.assertIn("\n  Control Panel:dccore.settings\n", block("menu @DCCore {"))
+        self.assertNotIn("Script Settings", text)
+        self.assertNotIn("Bot Settings", text)
 
     def test_the_preview_window_draws_the_decoded_lines(self):
         body = alias("dccore.sw.line")
@@ -756,8 +793,8 @@ class TheExamplesAreInvented(unittest.TestCase):
 
 class TheVersion(unittest.TestCase):
 
-    def test_the_script_is_1_19_4(self):
-        self.assertIn("\nalias dccore.ver { return 1.19.4 }\n", code())
+    def test_the_script_is_1_20_0(self):
+        self.assertIn("\nalias dccore.ver { return 1.20.0 }\n", code())
 
 
 class TheReviewOfTheFirstVersion(unittest.TestCase):
@@ -780,7 +817,7 @@ class TheReviewOfTheFirstVersion(unittest.TestCase):
         self.assertIn("hdel dccore.sws srv.dirty", lines["unchanged"])
         self.assertNotIn("srv.dirty", lines["error"])
         self.assertIn("Your changes are still here", lines["error"])
-        self.assertIn("if ($dccore.sw.s(srv.dirty)) { return Lists & channels }", alias("dccore.sw.unsaved"))
+        self.assertIn("if ($dccore.sw.s(srv.dirty)) { return Lists and Channel bindings }", alias("dccore.sw.unsaved"))
 
     # 2. The operator's data is compared case-sensitively.
     def test_a_case_only_rename_is_a_change(self):
@@ -809,7 +846,7 @@ class TheReviewOfTheFirstVersion(unittest.TestCase):
     # 3. The confirm question's wait starts once it is answered.
     def test_the_confirm_wait_starts_after_the_answer(self):
         body = alias("dccore.sw.confirm")
-        asked = body.index("$input(%q,yq,DCCore - Settings)")
+        asked = body.index("$input(%q,yq,DCCore - Control Panel)")
         self.assertEqual(body.count("dccore.sw.wait settings"), 2)
         self.assertGreater(body.index("dccore.sw.wait settings"), asked)
         for send in ("dccore.send setcommit confirm", "dccore.send setabort"):
@@ -845,18 +882,19 @@ class TheReviewOfTheFirstVersion(unittest.TestCase):
         self.assertNotIn("$dccore.sw.enc(", save)
 
     def test_what_the_operator_types_is_encoded_straight_from_the_control(self):
-        """Every name or path typed into Lists & channels is stored as
-        enc() or tok() of $did(...).text - never via a /var or a command's
-        parameters first."""
+        """Every name, label or path typed into the list window is stored
+        as enc() or tok() of $did(...).text - never via a /var or a
+        command's parameters first."""
         stored = 0
-        for name in ("dccore.sw.srv.addlist", "dccore.sw.srv.newfolder", "dccore.sw.srv.change"):
+        for name in ("dccore.sw.srv.lok", "dccore.sw.srv.lclick"):
             for line in statements(alias(name)):
-                if ("hadd dccore.sws srv." in line or "dccore.sw.srv.addfolder " in line) and "$did(" in line:
+                if (("hadd dccore.sws srv." in line or "hadd dccore.swl f." in line or "dccore.sw.srv.lfolder " in line)
+                        and "$did(" in line):
                     stored += 1
-                    for use in re.findall(r"(\$\w[\w.]*)\(\$did\(dccore\.set,15(?:42|49)\)\.text\)", line):
+                    for use in re.findall(r"(\$\w[\w.]*)\(\$did\(dccore\.setl,(?:2|7|9)\)\.text\)", line):
                         self.assertIn(use, ("$dccore.sw.enc", "$dccore.sw.tok"), line)
-                    self.assertNotRegex(line, r"(?<!\()\$did\(dccore\.set,15(?:42|49)\)\.text(?!\))", line)
-        self.assertGreaterEqual(stored, 4)
+                    self.assertNotRegex(line, r"(?<!\()\$did\(dccore\.setl,(?:2|7|9)\)\.text(?!\))", line)
+        self.assertGreaterEqual(stored, 3)
 
     def test_an_untouched_on_connect_line_goes_back_byte_for_byte(self):
         fill = alias("dccore.sw.oc.fill")
@@ -901,9 +939,11 @@ class TheReviewOfTheFirstVersion(unittest.TestCase):
     def test_an_edit_is_sent_encoded_from_the_control(self):
         wire = statements(alias("dccore.sw.wire"))
         self.assertEqual(wire[-1], "return $dccore.sw.enc($did(dccore.set,%id).text)")
-        self.assertIn("if (%kind == choice) && (!$did(dccore.set,%id).sel) { return $mid($dccore.sw.s(v. $+ $1),2) }",
+        # the line selected through dccore.sw.cb.sel: a menu is filled when
+        # its page is first shown, its selection kept till then (#1382)
+        self.assertIn("if (%kind == choice) && (!$dccore.sw.cb.sel(%id)) { return $mid($dccore.sw.s(v. $+ $1),2) }",
                       wire)
-        self.assertIn("if (%kind == colour) && ($did(dccore.set,%id).sel == 18) { return $mid($dccore.sw.s(v. $+ $1),2) }",
+        self.assertIn("if (%kind == colour) && ($dccore.sw.cb.sel(%id) == 18) { return $mid($dccore.sw.s(v. $+ $1),2) }",
                       wire)
         for name in ("dccore.sw.apply", "dccore.sw.preview"):
             body = alias(name)
@@ -926,7 +966,7 @@ class TheReviewOfTheFirstVersion(unittest.TestCase):
     def test_every_question_is_asked_from_a_timer(self):
         section = handwritten()
         asking = sorted(name for name in re.findall(r"\nalias (\S+) \{", section) if "$input(" in alias(name))
-        self.assertEqual(asking, ["dccore.sw.confirm", "dccore.sw.riskyask", "dccore.sw.unlockask"])
+        self.assertEqual(asking, ["dccore.sw.confirm", "dccore.sw.leaveask", "dccore.sw.riskyask", "dccore.sw.unlockask"])
         for name in asking:
             timers = re.findall(r"\.timerdccoreSw(?:Ask|Unlock) -m 1 0 %s\b" % re.escape(name), section)
             self.assertTrue(timers, name)
@@ -945,7 +985,15 @@ class TheReviewOfTheFirstVersion(unittest.TestCase):
                           "return $iif(%name != $null,$dccore.sw.untext(%name),$1)"])
 
     def test_an_as_set_colour_shows_all_of_itself(self):
-        self.assertIn("did -a dccore.set $1 As set: $2-", alias("dccore.sw.colourfill"))
+        # the whole value on the 18th line - added now, or when the menu is
+        # filled if its page was not shown yet (#1382)
+        fill = statements(alias("dccore.sw.colourfill"))
+        self.assertIn("%x = As set: $2-", fill)
+        self.assertIn("dccore.sw.cb.extra $1 %x", fill)
+        self.assertIn("if ($2- != $null) { did -a dccore.set $1 $2- }", alias("dccore.sw.cb.extra"))
+        self.assertIn("if ($dccore.sw.cb.waits($1)) { dccore.sw.keep cbx. $+ $1 $2- | return }",
+                      alias("dccore.sw.cb.extra"))
+        self.assertIn("if (%x != $null) { did -a dccore.set $1 %x }", alias("dccore.sw.cb.fill"))
 
     def test_a_new_start_forgets_the_old_waits(self):
         start = alias("dccore.sw.start")
@@ -973,7 +1021,7 @@ class ThePageButtons(unittest.TestCase):
 
     def test_there_is_no_page_list_any_more(self):
         self.assertNotIn("1010", code())
-        self.assertFalse([c for c in self.controls if c[0] == "list" and c[3] < 94])
+        self.assertFalse([c for c in self.controls if c[0] == "list" and c[3] < 106])
 
     def test_one_button_per_slot_enough_for_the_busiest_tab(self):
         import settings_window_layout as layout
@@ -982,13 +1030,18 @@ class ThePageButtons(unittest.TestCase):
         self.assertEqual([c[2] for c in buttons], sorted(slot_ids()))
         self.assertEqual([c[7] for c in buttons], ["push group"] + ["push"] * (self.slots - 1))
         for kind, _label, cid, x, y, w, h, _style in buttons:
-            self.assertEqual((x, w), (4, 84), cid)
+            self.assertEqual((x, w), (10, 88), cid)
             self.assertGreaterEqual(h, 14, cid)
         tops = [c[4] for c in buttons]
         self.assertTrue(all(b - a >= buttons[0][6] for a, b in zip(tops, tops[1:])), tops)
+        # air between the column and the page: the title beside the column's
+        # edge looked squeezed against it
+        import build_settings_window as generator
+        self.assertGreaterEqual(generator.CONTENT_X - (generator.PAGE_SLOT_X + generator.PAGE_SLOT_W), 12)
+        self.assertGreater(generator.DCX_TITLE[1], generator.DCX_PAGES[1])
 
     def test_every_page_name_fits_its_button(self):
-        width = 84 * PX_PER_DBU
+        width = 88 * PX_PER_DBU
         for page in range(1, int(self.data["pages"]) + 1):
             name = untext(self.data["p.%d" % page])
             self.assertLessEqual(text_px(name) + 8, width, name)
@@ -1006,7 +1059,7 @@ class ThePageButtons(unittest.TestCase):
         self.assertIn("if (%id >= 1020) && (%id < $calc(1020 + $dccore.sw.m(slots))) {", click)
         self.assertIn("var %p = $gettok($dccore.sw.m(g. $+ $dccore.sw.s(tab) $+ .pages),$calc(%id - 1019),32)",
                       click)
-        self.assertIn("if (%p) { dccore.sw.page %p }", click)
+        self.assertIn("if (%p) { dccore.sw.go page %p }", click)
 
     def test_a_tab_names_its_buttons_and_hides_the_spare_ones(self):
         body = statements(alias("dccore.sw.tab"))
@@ -1014,7 +1067,8 @@ class ThePageButtons(unittest.TestCase):
         self.assertIn("if (%i <= $numtok(%pages,32)) {", body)
         self.assertIn("did -ra dccore.set $calc(1019 + %i) $replace($dccore.sw.untext($dccore.sw.m(p. $+ "
                       "$gettok(%pages,%i,32))),&,&&)", body)
-        self.assertIn("did -v dccore.set $calc(1019 + %i)", body)
+        # shown again only in the built-in window - with DCX the tree replaces them (#1288)
+        self.assertIn("if (!$dccore.sw.s(dcx)) { did -v dccore.set $calc(1019 + %i) }", body)
         self.assertIn("else { did -h dccore.set $calc(1019 + %i) }", body)
 
     def test_the_page_shown_has_its_button_pressed_and_only_it(self):
@@ -1273,12 +1327,10 @@ class TheAuditOfBothHalves(unittest.TestCase):
         self.assertIn("hdel dccore.sws keep", alias("dccore.sw.reload"))
         self.assertNotIn("keep", alias("dccore.sw.start"))
 
-    # 5. The public changelog names one version for dccore.mrc.
+    # 5. The public changelog names one version for dccore.mrc, and it is
+    #    the version the script says it is.
 
     def test_the_public_changelog_names_one_script_version(self):
-        # Checks the topmost section - "## Unreleased" while it says that,
-        # the just-rolled version heading right after a release - so this
-        # keeps working across a roll instead of only until the next one.
         # The public changelog is docs/UPDATES-PUBLIC.md here and
         # docs/UPDATES.md once extraction has renamed it onto that path
         # (docs/PUBLIC-REPO-WORKFLOW.md, step 3) - try both, in that order.
@@ -1287,12 +1339,61 @@ class TheAuditOfBothHalves(unittest.TestCase):
             public_changelog = os.path.join(REPO_ROOT, "docs", "UPDATES.md")
         with io.open(public_changelog, encoding="utf-8") as handle:
             text = handle.read()
-        start = text.index("\n## ") + 1
-        unreleased = text[start:]
-        unreleased = unreleased[:unreleased.index("\n## ", 1)]
-        versions = set(re.findall(r"`dccore\.mrc` to (\d+\.\d+\.\d+)", unreleased))
-        self.assertEqual(versions, {"1.19.4"})
+        top, newest = script_versions_named(with_pending_public_entries(text))
+        self.assertLessEqual(len(top), 1, "the top section asks for more than one dccore.mrc: %s" % sorted(top))
+        self.assertEqual(newest, script_version(),
+                         "the newest dccore.mrc the changelog asks for is not the one the script says it is")
 
+    def test_a_new_section_without_a_script_bullet_still_passes(self):
+        # Right after a release the next change opens "## Unreleased" above
+        # the rolled version, usually without touching the script. The check
+        # must still find the newest version below it, not demand one there.
+        text = ("# Changelog\n\n## Unreleased\n\n- **Fixed: something else.**\n\n"
+                "## v9.9.9 - Old\n\n- **New.** Update `dccore.mrc` to 1.2.3 and reload it.\n\n"
+                "## v9.9.8 - Older\n\n- **New.** Update `dccore.mrc` to 1.2.2.\n")
+        self.assertEqual(script_versions_named(text), (set(), "1.2.3"))
+
+    def test_two_versions_in_one_section_are_both_seen(self):
+        text = ("# Changelog\n\n## Unreleased\n\n- Update `dccore.mrc` to 1.2.4.\n"
+                "- Update `dccore.mrc` to 1.2.5.\n\n## v9.9.9 - Old\n\n- Update `dccore.mrc` to 1.2.3.\n")
+        self.assertEqual(script_versions_named(text), ({"1.2.4", "1.2.5"}, "1.2.4"))
+
+
+SCRIPT_VERSION_NAMED = re.compile(r"`dccore\.mrc` to (\d+(?:\.\d+)+)")
+
+
+def script_versions_named(text):
+    """(versions the topmost "## " section asks for, newest one asked for
+    anywhere). The topmost section is "## Unreleased" between releases and
+    the just-rolled version right after one."""
+    start = text.index("\n## ") + 1
+    following = text.find("\n## ", start)
+    top = text[start:following if following >= 0 else len(text)]
+    named = SCRIPT_VERSION_NAMED.search(text, start)
+    return set(SCRIPT_VERSION_NAMED.findall(top)), named.group(1) if named else None
+
+
+def with_pending_public_entries(text):
+    """The public changelog as the next release will read: the public
+    fragments still waiting in docs/changes/ (#1307) as a section above the
+    top one, in the order scripts/roll_changelog.py rolls them. The public
+    tree has no docs/changes/, so there it is the file as it is."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+    try:
+        import roll_changelog
+    finally:
+        sys.path.remove(os.path.join(REPO_ROOT, "scripts"))
+    fragments, _problems = roll_changelog.load(REPO_ROOT)
+    public = sorted((f for f in fragments if f.public), key=lambda f: f.order, reverse=True)
+    if not public:
+        return text
+    return roll_changelog.insert_release(text, "## Unreleased", "\n".join(f.text for f in public))
+
+
+def script_version():
+    with io.open(SCRIPT, encoding="utf-8") as handle:
+        found = re.search(r"^alias dccore\.ver \{ return (\S+) \}$", handle.read(), re.M)
+    return found.group(1) if found else None
 
 if __name__ == "__main__":
     unittest.main()

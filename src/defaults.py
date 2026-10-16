@@ -21,13 +21,15 @@ import runtime
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
-SCRIPT_VERSION: str = "DCCore v1.16.2"
+SCRIPT_VERSION: str = "DCCore v1.17.0"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
 # no project URL anywhere in the tree, so anyone who received a list had no way
-# to find out what produced it.
-PROJECT_URL: str = "https://github.com/Ninja-FSE/dccore"
+# to find out what produced it. The project page since #1407; the update check
+# below reads the repository out of it (version_check.repository()), so a
+# github.com/<owner>/<name> address works here too.
+PROJECT_URL: str = "https://ninja-fse.github.io/dccore/"
 # Tell the operator when a newer DCCore is out (#572). Once a day the bot asks
 # the latest release of the repository PROJECT_URL names - one request to
 # GitHub, carrying nothing about this bot - and says so on the dashboard, in the
@@ -500,6 +502,16 @@ PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS: int = 86400
 # moves on. Nobody is owed an explanation of why they did not get one.
 PRIVATE_MESSAGE_DECLINE_BURST: int = 20
 PRIVATE_MESSAGE_DECLINE_BURST_SECONDS: int = 600   # The window the burst ceiling above is counted over
+# HOW LONG DCCORE CHAT'S HISTORY IS KEPT (#1401). dccore.mrc writes what its
+# chat window shows to a file per channel - and per private conversation - per
+# month, in mIRC's log folder on the operator's PC, not on the bot's machine.
+# The limits are the bot's settings so the dashboard can set them: the bot
+# sends them to the script (DCCORE CHATHIST) after `hello` and whenever either
+# changes, and the script deletes whole months - every month that ended more
+# than this many days ago. 0 keeps everything. A script that has never been
+# sent the limits deletes nothing.
+CHAT_HISTORY_DAYS: int = 100   # Days DCCore Chat's history is kept in mIRC; 0 keeps everything
+CHAT_HISTORY_MAX_MB: int = 100  # MB DCCore Chat's history may take in mIRC; 0 is no limit
 # How many times to try rejoining a channel that has thrown us out, before
 # giving up on it.
 #
@@ -548,6 +560,14 @@ ANNOUNCE_INTERVAL: int = 300     # Time between each channel advert, in seconds 
 # 5. LIMITS, SLOTS AND QUEUE CONTROL
 # ---------------------------------------------------------------------
 MAX_DCC_SLOTS: int      = 3      # Maximum simultaneous live downloads
+# A send that crawls while others wait (#1388): the rate is what the receiver
+# acknowledged over about the last minute, judged from a minute after it
+# connected, and a stop counts against MAX_SEND_FAILS like a stall. Only the
+# slowest send, and only while another one moves at least this much - proof
+# the bot's side can deliver - so with one slot it never fires. Not while
+# MAX_UPLOAD_KB is what holds the sends back. See dcc._SlowSendWatch.
+SLOW_SEND_MIN_KB: int   = 0      # In KB/s, 0 = off
+LARGE_FILE_MB: int      = 0      # A file of at least this many MB is large, and only one large file is sent at a time (0 = off)
 MAX_USER_QUEUE: int     = 100    # Most files a single user may queue
 MAX_GLOBAL_QUEUE: int   = 1000   # Most files across every queue combined
 SEARCH_ENABLED: bool = True  # Answer @find and @locator; off ignores them and the advert says Search: OFF
@@ -778,6 +798,13 @@ DCC_BLOCK_SIZE: int = 65536      # 64 KB - one of 4096/8192/16384/32768/65536/13
 # there 0 sets 4 MB. It is here to be experimented with on a link the operator
 # knows, not to be set hopefully.
 DCC_SEND_BUFFER: int = 0         # 0 = per-platform default (4MB on Windows, OS auto-tuning on Linux)
+
+# Speed caps (#1352), in KB/s, 0 = no limit: one pace per direction, shared by
+# every transfer that way - see speed_cap.py. Waiting on the download cap moves
+# a fetch's FETCH_TRANSFER_TIMEOUT along by as long as it waited.
+MAX_UPLOAD_KB: int = 0
+MAX_DOWNLOAD_KB: int = 0
+
 DCC_PORT_START: int = 55000      # First port the bot listens on for outgoing DCC sends; forward this range if you are behind NAT
 DCC_PORT_END: int   = 55010      # Last port of that range; sends, passive fetches and a listen-mode admin console share it, so keep at least MAX_DCC_SLOTS + MAX_FETCH_SLOTS + 1
 
@@ -858,6 +885,14 @@ MULTI_CHANNEL_LIST_STABLE_SECONDS: int = 3600
 REHASH_TRANSFER_WAIT: int   = 120
 FETCH_HISTORY_DAYS: int     = 30       # Days a finished fetch stays in the history
 FETCH_HISTORY_MAX_ROWS: int = 500      # Hard cap on finished rows, whatever their age
+# A short tag after your list requests (#1293), the way AutoQ sends
+# "@<nick>  ::AutoQ::", so a channel can see what is fetching. Sent ONLY to
+# bots known to be DCCore, which always accept it; every other bot gets the
+# bare "@<nick>", since many server scripts answer only that exact line.
+# Plain text, at most 32 characters, no colour codes. Never added to a file
+# or folder request. Empty sends no tag.
+#   LIST_REQUEST_TAG = ::DCCore::
+LIST_REQUEST_TAG: str = ""
 # Interacts with flood protection: a bot's DCC SEND offers are metered like any
 # other command, so this must stay well below MAX_REQUESTS (per REQUEST_WINDOW)
 # or a bot answering your own fetch requests can trip the flood gate and be muted.
@@ -989,6 +1024,19 @@ MUTE_TIME: int      = 30       # Mute in seconds on the first flood violation
 # midnight accidentally did - repeat offenders are a hard-ban case (!ban).
 FLOOD_BAN_SECONDS: int = 3600  # Ban in seconds when someone floods while muted
 MAX_SEND_FAILS: int = 3        # Attempts per queued file before it is dropped (see dcc.release_queue_entry)
+# A NICK WHOSE SENDS KEEP FAILING (#1389). MAX_SEND_FAILS is per queued file,
+# so a nick with twenty files queued whose client never accepts an offer can
+# cost sixty failed attempts, each holding a slot for the accept or stall
+# timeout. With this above 0, a nick whose sends failed this many times since
+# local midnight is paused until midnight: its queued files are removed and
+# its new requests are refused, each with a notice saying why. Counted: the
+# receiver never connected, stalled, let a write time out, or closed the
+# connection before it had the whole file. Not counted: a pack cancelled by
+# the operator or withdrawn by the user, a send the bot stops itself, or a
+# failure on the bot's side (the file vanished). Admins (ADMIN_NICK) are never
+# paused. Kept in memory: a restart forgives. The console's `status` shows who
+# is paused, and `unpause <nick>` lifts it.
+DAILY_SEND_FAILS_LIMIT: int = 0  # Failed sends in a day that pause a nick until midnight; 0 is off
 # HOW LONG AN OFFER STANDS. After the DCC SEND handshake the bot listens for
 # the receiver to connect; when nobody has by this deadline the offer is
 # withdrawn and counted as one failed attempt against MAX_SEND_FAILS. This
@@ -1112,7 +1160,7 @@ C_ITALIC       = "\x1D"     # Italic
 # Mutate them in place. Never rebind them: `config.dcc_queue = {}` detaches
 # this name from the object runtime.py still holds, and the two silently drift
 # apart. tests/test_runtime_state.py fails the build if anything does.
-failed_transfers  = runtime.failed_transfers   # Failed-transfer counter, per user
+failed_transfers  = runtime.failed_transfers   # Failed sends per nick today (#1389)
 channel_users     = runtime.channel_users      # Users currently seen in the channels
 banned_users      = runtime.banned_users       # Currently banned users, in memory
 user_requests     = runtime.user_requests      # Command timestamps per user, anti-flood
@@ -1215,6 +1263,8 @@ recent_departures = runtime.recent_departures
 recent_departure_bases = runtime.recent_departure_bases
 # #926: who else asked which bot for its list - list_grab.py.
 list_grab_others_asked = runtime.list_grab_others_asked
+# #1352: speed_cap.py's clocks, one per direction - see runtime.py.
+speed_cap_clocks = runtime.speed_cap_clocks
 nick_aliases = runtime.nick_aliases
 # #376 option B - see runtime.py.
 bot_idents = runtime.bot_idents

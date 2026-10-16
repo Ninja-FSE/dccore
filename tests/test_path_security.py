@@ -79,6 +79,10 @@ class PathSecurityBase(DCCoreTestCase):
         super().setUp()
         self.tree = self.make_tree()
         self.sock = RecordingSocket()
+        # Since #1376 a request is answered from the published lists - a
+        # name no list places is not found, with no walk of the folders - so
+        # the tree comes with its list, as a configured bot does.
+        self.publish_list(self.tree.tracks)
 
         no_disk_writes(db)
         self.debug = silence_debug(announce)
@@ -104,6 +108,24 @@ class PathSecurityBase(DCCoreTestCase):
         dcc.threading.Thread = InlineThread
 
         self.addCleanup(self._restore)
+
+    def publish_list(self, paths):
+        """The bot's published list, naming `paths` (files under the tree's
+        music folder) under their folders, in the shape update_list.py
+        writes. Replaces the one before."""
+        folders = {}
+        for path in paths:
+            folder = os.path.relpath(os.path.dirname(path), self.tree.music)
+            folders.setdefault(folder, []).append(os.path.basename(path))
+        lines = []
+        for folder, names in folders.items():
+            tail = "" if folder == "." else folder.replace(os.sep, "\\") + "\\"
+            lines.append(dcc.list_mod.LIST_FOLDER_PREFIX + tail + "\n")
+            lines += ["!%s %s  ::INFO:: 4.00KB\n" % (config.NICKNAME, name) for name in names]
+        listed = os.path.join(self.tree.lists, "%s-2026-01-01.txt" % config.LIST_BASE_NAME)
+        with io.open(listed, "w", encoding="utf-8") as handle:
+            handle.writelines(lines)
+        return listed
 
     def _restore(self):
         dcc.threading.Thread = self._real_thread

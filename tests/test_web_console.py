@@ -3,7 +3,7 @@ channel, for an operator who wants neither.
 
 Two halves, tested separately because they ARE separate at runtime:
 
-  * the LOG (webserver._console_debug_sink / build_console_log_payload) is
+  * the LOG (web_console._console_debug_sink / build_console_log_payload) is
     the ambient stream every announce.send_debug() call already produces,
     reached by registering as another consumer of the same fan-out
     adminchat.py's own DCC sessions use.
@@ -34,6 +34,7 @@ if REPO_ROOT not in sys.path:
 import adminchat  # noqa: E402
 import announce  # noqa: E402
 import defaults as config  # noqa: E402
+import web_console  # noqa: E402  (#1322: the console's own state lives here)
 import webserver  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
@@ -55,13 +56,13 @@ class ConsoleCase(DCCoreTestCase):
         self.addCleanup(lambda: (announce._debug_sinks.clear(),
                                  announce._debug_sinks.extend(self._sinks)))
 
-        webserver._console_log.clear()
-        self._next_id = webserver._console_next_id
-        self.addCleanup(setattr, webserver, "_console_next_id", self._next_id)
+        web_console._console_log.clear()
+        self._next_id = web_console._console_next_id
+        self.addCleanup(setattr, web_console, "_console_next_id", self._next_id)
 
-        self._registered = webserver._console_sink_registered
-        webserver._console_sink_registered = False
-        self.addCleanup(setattr, webserver, "_console_sink_registered",
+        self._registered = web_console._console_sink_registered
+        web_console._console_sink_registered = False
+        self.addCleanup(setattr, web_console, "_console_sink_registered",
                         self._registered)
 
         for name in ("DEBUG_TO_CHANNEL", "DEBUG_TO_CONSOLE"):
@@ -126,7 +127,7 @@ class TheSinkRegistersAtMostOnce(ConsoleCase):
         webserver._ensure_console_sink()
         webserver._ensure_console_sink()
 
-        self.assertEqual(announce._debug_sinks.count(webserver._console_debug_sink), 1)
+        self.assertEqual(announce._debug_sinks.count(web_console._console_debug_sink), 1)
 
     def test_a_line_is_not_logged_twice(self):
         self.set_config(DEBUG_TO_CHANNEL=False, DEBUG_TO_CONSOLE=True)
@@ -142,11 +143,11 @@ class TheSinkRegistersAtMostOnce(ConsoleCase):
         """build_console_log_payload() is what a freshly loaded page calls
         first - it must not depend on start() (never run in a test) having
         already registered anything."""
-        self.assertNotIn(webserver._console_debug_sink, announce._debug_sinks)
+        self.assertNotIn(web_console._console_debug_sink, announce._debug_sinks)
 
         webserver.build_console_log_payload(0)
 
-        self.assertIn(webserver._console_debug_sink, announce._debug_sinks)
+        self.assertIn(web_console._console_debug_sink, announce._debug_sinks)
 
 
 class TheLogIsPolledByCursorNotOffset(ConsoleCase):
@@ -206,10 +207,10 @@ class TheLogIsPolledByCursorNotOffset(ConsoleCase):
     def test_the_buffer_is_bounded(self):
         """A flood of debug lines must not grow the log without limit - the
         same shape as _debug_queue's own maxlen in announce.py."""
-        for i in range(webserver._console_log.maxlen + 50):
+        for i in range(web_console._console_log.maxlen + 50):
             announce.send_debug(f"line {i}", "INFO")
 
-        self.assertEqual(len(webserver._console_log), webserver._console_log.maxlen)
+        self.assertEqual(len(web_console._console_log), web_console._console_log.maxlen)
 
 
 class CommandDispatchReusesAdminchat(ConsoleCase):
@@ -274,14 +275,14 @@ class CommandDispatchReusesAdminchat(ConsoleCase):
         action should not read back as though an IRC nick did it."""
         captured = {}
 
-        class RecordingSession(webserver._WebConsoleSession):
+        class RecordingSession(web_console._WebConsoleSession):
             def send(self, text=""):
                 captured["nick"] = self.nick
                 super().send(text)
 
-        original = webserver._WebConsoleSession
-        webserver._WebConsoleSession = RecordingSession
-        self.addCleanup(setattr, webserver, "_WebConsoleSession", original)
+        original = web_console._WebConsoleSession
+        web_console._WebConsoleSession = RecordingSession
+        self.addCleanup(setattr, web_console, "_WebConsoleSession", original)
 
         webserver.build_console_command_result("uptime", remote_addr="203.0.113.9")
 
@@ -309,9 +310,9 @@ class TheQuitCommandIsInterceptedBeforeDispatch(ConsoleCase):
         caught by handle_command()'s own try/except and turned into a
         'Command failed: ...' line instead of the friendly message asserted
         here. Verified by reverting rather than assumed."""
-        original = webserver._CONSOLE_UNSUPPORTED_COMMANDS
-        webserver._CONSOLE_UNSUPPORTED_COMMANDS = frozenset()
-        self.addCleanup(setattr, webserver, "_CONSOLE_UNSUPPORTED_COMMANDS", original)
+        original = web_console._CONSOLE_UNSUPPORTED_COMMANDS
+        web_console._CONSOLE_UNSUPPORTED_COMMANDS = frozenset()
+        self.addCleanup(setattr, web_console, "_CONSOLE_UNSUPPORTED_COMMANDS", original)
 
         status, result = webserver.build_console_command_result("quit")
 

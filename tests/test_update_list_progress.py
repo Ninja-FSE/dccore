@@ -300,6 +300,19 @@ class ThePageRendersIt(unittest.TestCase):
     def test_the_writing_phase_is_indeterminate(self):
         self.assertIn("is-indeterminate", self.progress_body())
 
+    def test_the_starting_phase_has_its_own_words(self):
+        """#1366: a rebuild checking its folders before the scan read
+        "Scanning the library" - the branch for it must push its own key."""
+        import re
+        branch = re.search(
+            r'progress\.phase === "starting"\) \{(?:\s*//[^\n]*)*\s*'
+            r'parts\.push\(t\("tools\.checkingFolders"\)\);', self.progress_body())
+        self.assertIsNotNone(branch)
+        for lang in ("en", "es", "fr"):
+            with io.open(os.path.join(REPO_ROOT, "web", "lang", lang + ".json"),
+                         encoding="utf-8") as handle:
+                self.assertTrue(json.load(handle).get("tools.checkingFolders"), lang)
+
     def test_the_bar_markup_exists(self):
         with io.open(os.path.join(REPO_ROOT, "web", "index.html"),
                      encoding="utf-8") as handle:

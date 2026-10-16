@@ -98,9 +98,9 @@ class TheBlockIsUpToDate(unittest.TestCase):
         stale = os.path.join(folder, "dccore.mrc")
         with io.open(generator.SCRIPT, encoding="ascii", newline="") as handle:
             text = handle.read()
-        self.assertIn('  title "DCCore - Settings"', text)
+        self.assertIn('  title "DCCore - Control Panel"', text)
         with io.open(stale, "w", encoding="ascii", newline="") as handle:
-            handle.write(text.replace('  title "DCCore - Settings"', '  title "DCCore - Old"', 1))
+            handle.write(text.replace('  title "DCCore - Control Panel"', '  title "DCCore - Old"', 1))
         original = generator.SCRIPT
         generator.SCRIPT = stale
         self.addCleanup(setattr, generator, "SCRIPT", original)
@@ -153,23 +153,32 @@ class EverySettingHasAPlace(unittest.TestCase):
     def test_the_mockups_most_used_switches_are_on_general_settings(self):
         general = dict(dict(layout.GROUPS)["General"])["General Settings"]
         keys = placed_keys([("General", [("General Settings", general)])])
-        for key in ("SEARCH_ENABLED", "ANNOUNCE_TRANSFERS", "RAR_ENABLED", "PRIVATE_MESSAGES_ENABLED",
+        for key in ("SEARCH_ENABLED", "ANNOUNCE_TRANSFERS", "PRIVATE_MESSAGES_ENABLED",
                     "WEBUI_ENABLED", "CTCP_VERSION_REPLY", "CHECK_FOR_UPDATES"):
             self.assertIn(key, keys)
         search = dict(dict(layout.GROUPS)["Sharing"])["Search"]
         self.assertNotIn("SEARCH_ENABLED", placed_keys([("Sharing", [("Search", search)])]))
+        # the !rar switch sits with the !rar settings, where the operator looked for it
+        settings = dict(dict(layout.GROUPS)["Sharing"])["List settings"]
+        self.assertEqual(dict(settings)["!rar packing"][0], "RAR_ENABLED")
+        self.assertNotIn("RAR_ENABLED", keys)
 
     def test_the_tabs_and_pages_are_the_mockups(self):
         self.assertEqual([group for group, _pages in layout.GROUPS],
-                         ["General", "Sharing", "Downloads", "Security", "Dashboard & Console", "Advanced"])
+                         ["General", "Sharing", "Downloads", "Security", "Dashboard & Console", "Advanced",
+                          "mIRC"])
         pages = {group: [page for page, _sections in pages] for group, pages in layout.GROUPS}
         self.assertEqual(pages["General"], ["IRC Server", "General Settings", "Channels", "Operator",
                                             "Appearance", "Advertising"])
-        self.assertEqual(pages["Sharing"], ["Search", "Transfers", "Your list", "Lists & channels", "Rebuild"])
+        # what is shared, where, how the list is built, then transfers and search
+        self.assertEqual(pages["Sharing"], ["Lists", "Channel bindings", "List settings", "Rebuild", "Transfers",
+                                            "Search"])
         self.assertEqual(pages["Downloads"], ["List discovery", "Fetch tuning", "Queue"])
         self.assertEqual(pages["Security"], ["Anti-flood", "Bans & ignores", "Private messages",
                                              "Admin console"])
-        self.assertEqual(pages["Dashboard & Console"], ["Web dashboard", "Console feed", "This mIRC window"])
+        self.assertEqual(pages["Dashboard & Console"], ["Web dashboard", "Console feed"])
+        # this mIRC's own settings, the Options dialog that was, in the same form
+        self.assertEqual(pages["mIRC"], ["@DCCore window", "Window", "Connection", "Chat"])
         self.assertEqual(pages["Advanced"], ["Debug & logging", "File locations"])
 
 
@@ -200,10 +209,21 @@ class TheGeneratorRefusesABadLayout(unittest.TestCase):
             self.build(layout_copy(EXCLUDED={"SERVER": "a reason long enough to count as one"}))
 
     def test_a_check_too_long_for_its_column_is_refused(self):
+        # too long for the full width of a frame, so no form fits it: the
+        # error names the check, not the page
         def longer(groups):
-            groups[0][1][1][1][2][1].append({"local": "x", "label": "A check box label " * 6})
-        with self.assertRaisesRegex(generator.LayoutError, "does not fit"):
+            groups[0][1][1][1][2][1].append({"local": "x", "label": "A check box label " * 9})
+        with self.assertRaisesRegex(generator.LayoutError, "the check .* does not fit"):
             self.build(layout_copy(GROUPS=with_groups(longer)))
+
+    def test_a_check_too_long_for_one_column_sends_the_page_to_one_column(self):
+        # List settings is two roomy columns; a check that fits one column of
+        # the page's width but not half of it makes it one column instead
+        def wider(groups):
+            groups[1][1][2][1][1][1].append({"local": "x", "label": "A check box label " * 3})
+        builder = self.build(layout_copy(GROUPS=with_groups(wider)))
+        page = next(number for number, _group, name in builder.pages if name == "List settings")
+        self.assertEqual(builder.page_layout[page], "compact 1")
 
     def test_a_page_that_cannot_fit_is_refused(self):
         def crowd(groups):

@@ -160,10 +160,15 @@ class TheWakeInTheFinallyIsGuarded(unittest.TestCase):
             tree = parse_source(handle.read())
         func = next(node for node in ast.walk(tree)
                     if isinstance(node, ast.FunctionDef) and node.name == "start_dcc_send")
-        # The outermost try/finally of the function body is the settlement.
+        # The outermost try/finally of the function body is the settlement,
+        # which hands everything to finish_send() since #1336.
         tries = [node for node in func.body if isinstance(node, ast.Try) and node.finalbody]
         self.assertEqual(len(tries), 1, "start_dcc_send has one try/finally at its top level")
-        return tries[0].finalbody
+        self.assertEqual(len(self.calls_named(tries[0].finalbody, "finish_send")), 1,
+                         "start_dcc_send's finally calls finish_send()")
+        ending = next(node for node in ast.walk(tree)
+                      if isinstance(node, ast.FunctionDef) and node.name == "finish_send")
+        return ending.body
 
     @staticmethod
     def calls_named(nodes, name):

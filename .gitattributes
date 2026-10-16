@@ -42,6 +42,7 @@
 *.png   binary
 *.jpg   binary
 *.ico   binary
+*.dll   binary
 
 # =====================================================================
 # WHAT DOES NOT LEAVE THIS REPOSITORY
@@ -50,11 +51,23 @@
 # the only thing that makes "internal only" mean anything to it. Without a
 # rule here, a file is internal by intention and public in fact.
 #
+# docs/UPDATES.md is the full internal changelog: 50KB, written against
+# this repository's own PR and issue numbers and branch names, none of
+# which resolve anywhere outside it. docs/UPDATES-PUBLIC.md is the version
+# that ships. Before this rule the internal one was in the archive, and it
+# still named a real channel.
+
 # docs/PUBLIC-REPO-WORKFLOW.md documents this split itself: it names this
 # repository directly, by handle, and references internal issue and PR
 # numbers that resolve to nothing outside it. It exists to be read by the
 # two of us, not shipped.
 docs/PUBLIC-REPO-WORKFLOW.md    export-ignore
+
+# docs/changes/ holds the changelog entries waiting for a release (#1307).
+# The release roll joins them into the two changelogs and deletes them before
+# extraction; if a roll is ever forgotten, the internal entries - with this
+# repository's issue numbers in them - still do not ship.
+docs/changes/** export-ignore
 
 # The denylist, NOT the guard. tests/test_no_personal_identifiers_ship.py
 # still ships and still runs every structural check it has; only the list
@@ -64,3 +77,10 @@ docs/PUBLIC-REPO-WORKFLOW.md    export-ignore
 # so shipping them publishes exactly what they exist to hide. Two of this
 # operator's channels were recovered from the shipped list by hand.
 tests/forbidden_identifiers.py    export-ignore
+
+# The project page (#1309) is published from the orphan gh-pages branch of
+# the public repository, not from its main: a clone of dccore stays the bot
+# and its docs, with no website in it. site/ is its source, kept here and
+# copied to gh-pages by hand (docs/PUBLIC-REPO-WORKFLOW.md, step 5). The
+# directory itself, not site/**: that leaves an empty site/ in the archive.
+/site export-ignore

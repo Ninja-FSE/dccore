@@ -287,8 +287,8 @@ class TheHandlerActuallyCallsIt(unittest.TestCase):
 
         with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as f:
             body = f.read()
-        block = body.split('if is_user_event(line, "NICK"):', 1)[1]
-        return block.split("# Anchored", 1)[0]
+        # answer_nick_change() since #1330, step 4 of splitting irc_loop().
+        return body.split("def answer_nick_change(", 1)[1].split(chr(10) + "def ", 1)[0]
 
     def test_the_nick_branch_calls_the_helper(self):
         self.assertIn("note_nick_change(", self.handler())

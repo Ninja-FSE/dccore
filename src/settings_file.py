@@ -850,6 +850,23 @@ def unquote_path(text, posix=None):
     return text
 
 
+# LIST_REQUEST_TAG (#1293): what may follow "@<nick>  " on a list request.
+LIST_REQUEST_TAG_MAX = 32
+
+
+def request_tag_problem(value):
+    """Why `value` cannot be the list-request tag, or None. Plain text only:
+    a control character - a colour code above all - is what some channels
+    strip or kick for, and a CR or LF would end the IRC line early."""
+    text = str(value or "").strip()
+    if len(text) > LIST_REQUEST_TAG_MAX:
+        return f"it is {len(text)} characters long; the most is {LIST_REQUEST_TAG_MAX}"
+    for ch in text:
+        if ord(ch) < 32 or ord(ch) == 127:
+            return "it has a colour code or another control character in it; use plain text"
+    return None
+
+
 def folder_problem(path):
     """Why `path` cannot be a music folder, or None when it is an existing
     directory."""
@@ -873,6 +890,9 @@ def folder_problem(path):
 # without coerce(), from admin_config.py.
 MINIMUMS = {
     "ANNOUNCE_INTERVAL": 60,
+    # 0 is "no limit"; below it the script refuses the CHATHIST line (#1401).
+    "CHAT_HISTORY_DAYS": 0,
+    "CHAT_HISTORY_MAX_MB": 0,
 }
 
 
@@ -952,6 +972,13 @@ def coerce(name, raw, default, declared=None):
         problem = list_base_name_problem(text)
         if problem:
             raise ValueError(f"not a usable list name: {problem}")
+
+    if name == "LIST_REQUEST_TAG":
+        problem = request_tag_problem(text)
+        if problem:
+            raise ValueError(f"not a usable tag: {problem}")
+        # Trimmed: what is saved is exactly what follows "@<nick>  ".
+        return text
 
     if default is None and not text:
         # A setting whose default is None is "unset unless you say otherwise"

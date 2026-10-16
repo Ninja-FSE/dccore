@@ -22,13 +22,13 @@ import adminchat  # noqa: E402
 import dcc_fetch  # noqa: E402
 import defaults as config  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, without_menu_icons  # noqa: E402
 from tests.test_dccore_downloads_window import make_session, row  # noqa: E402
 
 
 def script():
     with io.open(os.path.join(REPO_ROOT, "scripts", "mirc", "dccore.mrc"), encoding="utf-8", newline="") as handle:
-        return handle.read().replace("\r\n", "\n")
+        return without_menu_icons(handle.read().replace("\r\n", "\n"))
 
 
 def dqrows(lines):

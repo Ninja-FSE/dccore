@@ -43,8 +43,14 @@ def without_comments(text):
 class APermanentlyDeniedFolderIsNotFatal(unittest.TestCase):
     """#441. The distinction is whether the path is still there: permission
     denied on a directory that exists is a fact about the ACL and will be true
-    on every future scan; a directory that vanished mid-scan means the library
-    changed underneath us and the snapshot is already wrong."""
+    on every future scan, so it is excluded; permission denied on one that is
+    gone is not explained by any ACL, so it aborts.
+
+    A directory that vanished mid-scan used to abort too. Since #1383 it is
+    left out of the list instead, as long as the configured folder being
+    walked is still the same directory - see
+    tests/test_a_folder_renamed_during_a_rebuild.py, which also covers what
+    still aborts: that folder itself going away, and every other error."""
 
     @staticmethod
     def classify(err):
@@ -71,8 +77,9 @@ class APermanentlyDeniedFolderIsNotFatal(unittest.TestCase):
             "excluded")
 
     def test_denied_and_gone_still_aborts(self):
-        """The library changed under the scan. Publishing that snapshot would
-        be publishing a state known not to exist."""
+        """Denied, and not there: no ACL explains that, so it is not excluded
+        as a denied folder. (#1383 skips only a FileNotFoundError for a path
+        that is gone; a PermissionError for one still aborts.)"""
         self.assertEqual(
             self.classify(self.error(PermissionError, os.path.join(
                 REPO_ROOT, "no-such-directory-anywhere"))),

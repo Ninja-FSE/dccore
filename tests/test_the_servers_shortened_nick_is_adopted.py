@@ -30,6 +30,7 @@ import defaults as config  # noqa: E402
 import irc  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
+from tests.test_the_welcome_on_its_own import WelcomeHarness  # noqa: E402
 
 WELCOME = ":irc.undernet.example 001 DCCore-Serve :Welcome to the Undernet IRC Network DCCore-Serve"
 
@@ -81,19 +82,31 @@ class TheRule(DCCoreTestCase):
         self.assertIn("Registered as DCCore-Serve, not DCCore-Server", text)
 
 
+class ItIsAdoptedWhereThe001Arrives(WelcomeHarness):
+    """answer_welcome(), the read loop's 001/376 branch since #1306, called -
+    it used to be read out of irc_loop()'s text."""
+
+    def test_a_001_names_the_bot_as_the_server_registered_it(self):
+        self.set_config(NICKNAME="DCCore-Server")
+        self.quietly(irc.answer_welcome, WELCOME, self.conn)
+
+        self.assertEqual(config.NICKNAME, "DCCore-Serve")
+        self.assertTrue(self.conn.joined)
+
+    def test_a_376_registers_without_renaming(self):
+        self.set_config(NICKNAME="DCCore-Server")
+        self.quietly(irc.answer_welcome, ":irc.undernet.example 376 DCCore-Serve :End of /MOTD", self.conn)
+
+        self.assertEqual(config.NICKNAME, "DCCore-Server")
+        self.assertTrue(self.conn.joined)
+
+
 class TheWiring(unittest.TestCase):
 
     def setUp(self):
         with open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
             self.source = handle.read()
         self.loop = self.source[self.source.index("def irc_loop():"):]
-
-    def test_it_is_read_where_001_actually_arrives(self):
-        start = self.loop.index('if not joined and (is_server_numeric(line, "001") or is_server_numeric(line, "376")):')
-        block = self.loop[start:start + 400]
-        self.assertIn('if is_server_numeric(line, "001"):', block)
-        self.assertIn("adopt_registered_nick(line)", block)
-        self.assertLess(block.index("adopt_registered_nick(line)"), block.index("joined = True"))
 
     def test_the_dead_copy_before_registration_is_gone(self):
         """001 cannot arrive before USER is sent; the block there never ran.

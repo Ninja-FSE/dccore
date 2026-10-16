@@ -119,8 +119,12 @@ class TheDashboardPassesItOn(unittest.TestCase):
     """webserver.py's half, which also already worked."""
 
     def test_both_payloads_carry_it(self):
-        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
-            code = re.sub(chr(35) + "[^" + chr(10) + "]*", "", handle.read())
+        # The own list's payload is web_library.py since #1318, the fetched
+        # list's web_lists.py since #1315. Both files, so the two are compared.
+        code = ""
+        for name in ("web_library.py", "web_lists.py"):
+            with io.open(os.path.join(REPO_ROOT, "src", name), encoding="utf-8") as handle:
+                code += re.sub(chr(35) + "[^" + chr(10) + "]*", "", handle.read())
 
         self.assertEqual(code.count('"row_capped": row_capped'), 2,
                          "this bot's own list and a fetched peer's list are "

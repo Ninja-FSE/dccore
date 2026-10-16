@@ -116,8 +116,11 @@ def keys_referenced_in_source():
     js = read("app.js")
     found.update(JS_KEY_SHAPED_STRING.findall(js))
 
-    with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
-        found.update(SETUP_KEY_STRING.findall(handle.read()))
+    # The setup page is rendered by web_setup_page.py since #1322; webserver.py
+    # is read too, for any key a route there still names.
+    for name in ("webserver.py", "web_setup_page.py"):
+        with io.open(os.path.join(REPO_ROOT, "src", name), encoding="utf-8") as handle:
+            found.update(SETUP_KEY_STRING.findall(handle.read()))
 
     return found
 

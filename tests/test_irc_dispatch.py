@@ -42,8 +42,9 @@ ALIAS_FRAGMENT = 'startswith(f"!{alias} ")'
 LIVE_NICK_FRAGMENT = 'is_list_request(msg, msg_lower)'
 
 
-def _elif_conditions(fragment=None):
-    """Return (line_index, condition_source) for every ``elif`` line in irc.py.
+def _elif_conditions(fragment=None, keywords=("elif",)):
+    """Return (line_index, condition_source) for every ``elif`` line in irc.py
+    - or every header starting with one of ``keywords``.
 
     Only single-line ``elif ...:`` headers are considered; the dispatch chain is
     written that way throughout.
@@ -51,17 +52,18 @@ def _elif_conditions(fragment=None):
     found = []
     for index, raw in enumerate(IRC_LINES):
         stripped = raw.strip()
-        if not stripped.startswith("elif ") or not stripped.endswith(":"):
+        keyword = next((k for k in keywords if stripped.startswith(k + " ")), None)
+        if keyword is None or not stripped.endswith(":"):
             continue
         if fragment is not None and fragment not in stripped:
             continue
-        found.append((index, stripped[len("elif "):-1].strip()))
+        found.append((index, stripped[len(keyword) + 1:-1].strip()))
     return found
 
 
-def _one_elif_condition(fragment):
-    """The single dispatch-chain ``elif`` carrying ``fragment``."""
-    matches = _elif_conditions(fragment)
+def _one_elif_condition(fragment, keywords=("elif",)):
+    """The single dispatch-chain header carrying ``fragment``."""
+    matches = _elif_conditions(fragment, keywords)
     if len(matches) != 1:
         raise AssertionError(
             "expected exactly one 'elif' in irc.py containing %r, found %d"
@@ -94,7 +96,9 @@ def _bracketed_expression(name):
 
 
 ALIAS_LINE, ALIAS_CONDITION = _one_elif_condition(ALIAS_FRAGMENT)
-LIVE_NICK_LINE, LIVE_NICK_CONDITION = _one_elif_condition(LIVE_NICK_FRAGMENT)
+# The head of the command chain since #1342, when the chain became
+# answer_command() and its first `elif` an `if`.
+LIVE_NICK_LINE, LIVE_NICK_CONDITION = _one_elif_condition(LIVE_NICK_FRAGMENT, keywords=("if", "elif"))
 FLOOD_GATE_SOURCE = _bracketed_expression("is_bot_command")
 FILE_REQUEST_SOURCE = _bracketed_expression("is_file_request")
 
@@ -329,7 +333,8 @@ class TriggerExpressionTests(DCCoreTestCase):
         reset_config(NICKNAME="DCCore_", ORIGINAL_NICK="DCCore")
         msg = "!DCCore Song.flac"
         shadowing = []
-        for index, condition in _elif_conditions():
+        # The chain's head is an `if` since #1342, so it is added by hand.
+        for index, condition in [(LIVE_NICK_LINE, LIVE_NICK_CONDITION)] + _elif_conditions():
             if not (LIVE_NICK_LINE <= index < ALIAS_LINE):
                 continue
             try:

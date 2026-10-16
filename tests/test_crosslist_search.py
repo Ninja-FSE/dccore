@@ -838,7 +838,8 @@ class ListsHeldFromBeforeTheIndexExisted(IndexCase):
             code = "\n".join(line.split("#", 1)[0]
                               for line in handle.read().splitlines())
 
-        self.assertIn("list_index.backfill_missing(config.fetched_bot_lists)", code,
+        # On a thread of its own since #1296, so the bot connects first.
+        self.assertIn("list_index.backfill_in_background(config.fetched_bot_lists)", code,
                       "nothing indexes lists held from before the index "
                       "existed, so the filter reports no matches for lists "
                       "that are full of them")

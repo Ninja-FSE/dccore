@@ -227,7 +227,8 @@ class ThePresenceTheSidebarShows(DCCoreTestCase):
         """This route is polled every few seconds and a busy channel has
         dozens of advertisers; asking per row would rescan every channel's
         membership per row, per poll."""
-        source = open(os.path.join(REPO_ROOT, "src", "webserver.py"),
+        # web_lists.py since #1315, step 2 of splitting webserver.py.
+        source = open(os.path.join(REPO_ROOT, "src", "web_lists.py"),
                       encoding="utf-8").read()
         body = source.split("def build_fetched_bot_list_summaries(", 1)[1]
         body = body.split("\ndef ", 1)[0]

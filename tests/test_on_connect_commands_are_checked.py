@@ -25,6 +25,7 @@ import defaults as config  # noqa: E402
 import on_connect  # noqa: E402
 import runtime  # noqa: E402
 import webserver  # noqa: E402
+from tests.test_the_welcome_on_its_own import WelcomeHarness  # noqa: E402
 
 REPO_ROOT = support.REPO_ROOT
 NICK = "SomeBot"
@@ -298,6 +299,33 @@ def read(path):
         return handle.read()
 
 
+class TheJoinCarriesItsOwnConnection(WelcomeHarness):
+    """delayed_join(), called (#1306). It was read out of irc.py while it was
+    a closure binding the epoch as a default argument."""
+
+    def test_the_check_starts_after_the_join_with_its_own_connection(self):
+        """The epoch is the connection's own: read later, a reconnect in its
+        five-second sleep would hand the new epoch to a thread holding the
+        old socket."""
+        import irc
+        self.quietly(irc.delayed_join, self.conn, ["#somechannel"])
+
+        self.assertEqual(self.started(on_connect.watch), [(self.sock, self.conn.epoch)])
+        joined_at = self.timeline.index(("sent", "JOIN #somechannel"))
+        self.assertLess(joined_at, self.timeline.index(("started", on_connect.watch)))
+
+    def test_the_resend_opens_once_the_commands_are_out(self):
+        """#1085: marked after the on-connect commands and before the JOIN - not
+        on joining, which a +r channel refuses without the login."""
+        import irc
+        self.patch(on_connect, "load", lambda: (["MODE %nick% +x"], 0.0))
+        self.quietly(irc.delayed_join, self.conn, ["#somechannel"])
+
+        events = [event for event in self.timeline if event[0] in ("sent", "marked")]
+        self.assertEqual(events, [("sent", "MODE alfa +x"), ("marked", self.conn.epoch),
+                                  ("sent", "JOIN #somechannel")])
+
+
 class TheReadLoopIsWired(unittest.TestCase):
     """Driving a real connect needs a server, so read out of irc.py."""
 
@@ -307,24 +335,6 @@ class TheReadLoopIsWired(unittest.TestCase):
         start = code.index("my_epoch = config.connection_epoch")
         self.assertIn("on_connect.reset_state()", code[start:start + 1500])
 
-    def test_the_check_starts_after_the_join_with_its_own_connection(self):
-        """The epoch is bound when delayed_join() is defined: read later, a
-        reconnect in its five-second sleep would hand the new epoch to a thread
-        holding the old socket."""
-        code = read("src/irc.py")
-        self.assertIn("def delayed_join(socket_conn, channels, epoch=my_epoch):", code)
-        body = code.split("def delayed_join(", 1)[1].split("threading.Thread(target=delayed_join", 1)[0]
-        self.assertLess(body.index("join_batches("), body.index("target=on_connect.watch"))
-        self.assertIn("args=(socket_conn, epoch),", body)
-
-    def test_the_resend_opens_once_the_commands_are_out(self):
-        """#1085: marked after the on-connect loop and before the JOIN - not on
-        joining, which a +r channel refuses without the login."""
-        code = read("src/irc.py")
-        body = code.split("def delayed_join(", 1)[1].split("threading.Thread(target=delayed_join", 1)[0]
-        mark = body.index("on_connect.mark_sent(epoch)")
-        self.assertLess(body.index("socket_conn.sendall(" + chr(10)), mark)
-        self.assertLess(mark, body.index("join_batches("))
 
 
 HARNESS = r"""

@@ -30,7 +30,7 @@ import runtime  # noqa: E402
 import version_check  # noqa: E402
 import webserver  # noqa: E402
 
-from tests.support import DCCoreTestCase, silence_debug  # noqa: E402
+from tests.support import DCCoreTestCase, silence_debug, without_menu_icons  # noqa: E402
 from tests.test_admin_console_commands import FakeSession  # noqa: E402
 
 
@@ -92,6 +92,33 @@ class ReadingVersions(VersionCase):
         self.assertEqual(version_check.repository("https://github.com/example/dccore/"), "example/dccore")
         self.assertIsNone(version_check.repository("https://example.org/dccore"))
 
+    def test_the_repository_comes_from_a_project_page_too(self):
+        """#1407: PROJECT_URL names the project page by default, and the
+        update check reads the repository back out of it."""
+        self.assertEqual(version_check.repository("https://example.github.io/dccore/"), "example/dccore")
+        self.assertEqual(version_check.repository("https://example.github.io/dccore"), "example/dccore")
+        self.assertEqual(version_check.repository("http://some-owner.github.io/a-fork/"), "some-owner/a-fork")
+
+    def test_a_page_that_names_no_repository_is_not_one(self):
+        for url in ("https://example.github.io/", "https://example.github.io",
+                    "https://example.github.io/dccore/commands.html",
+                    "https://github.io/dccore/", "https://.github.io/dccore/",
+                    "https://a.b.github.io/dccore/", "https://example.github.io.evil.example/dccore/"):
+            with self.subTest(url=url):
+                self.assertIsNone(version_check.repository(url))
+
+    def test_the_shipped_default_is_the_page_and_names_the_public_repository(self):
+        """The default PROJECT_URL, read from a fresh copy of defaults.py, is
+        the project page, and it still leads the update check to the public
+        repository (GitHub matches owner names without regard to case)."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "shipped_defaults_1407", os.path.join(REPO_ROOT, "src", "defaults.py"))
+        shipped = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(shipped)
+        self.assertEqual(shipped.PROJECT_URL, "https://ninja-fse.github.io/dccore/")
+        self.assertEqual(version_check.repository(shipped.PROJECT_URL).lower(), "ninja-fse/dccore")
+
 
 class AskingGitHub(VersionCase):
     def opener_returning(self, payload):
@@ -117,6 +144,14 @@ class AskingGitHub(VersionCase):
         self.assertEqual(request.get_method(), "GET")
         self.assertIsNone(request.data, "nothing about the bot is sent")
         self.assertEqual(timeout, version_check.REQUEST_TIMEOUT_SECONDS)
+
+    def test_a_project_page_asks_the_repository_behind_it(self):
+        """#1407: with PROJECT_URL on the project page, the one GET still goes
+        to that repository's latest release."""
+        self.set_config(PROJECT_URL="https://example.github.io/dccore/")
+        version_check.fetch_latest(self.opener_returning({"tag_name": "v1.14.0"}))
+        (request, _timeout), = self.requests
+        self.assertEqual(request.full_url, "https://api.github.com/repos/example/dccore/releases/latest")
 
     def test_every_failure_becomes_a_reason_the_operator_can_read(self):
         limited = urllib.error.HTTPError("u", 403, "Forbidden", {"X-RateLimit-Remaining": "0"}, None)
@@ -326,7 +361,7 @@ class TheConsole(VersionCase):
 
     def test_the_mirc_menu_offers_it(self):
         with io.open(os.path.join(REPO_ROOT, "scripts", "mirc", "dccore.mrc"), encoding="ascii", newline="") as handle:
-            self.assertIn("  .Check for a new version:dccore.send checkversion\r\n", handle.read())
+            self.assertIn("  .Check for a new version:dccore.send checkversion\r\n", without_menu_icons(handle.read()))
 
 
 class TheSetupPage(VersionCase):

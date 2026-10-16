@@ -81,15 +81,23 @@ class NoWriteOnTheThreadThatRecords(PmCase):
 
         announce.record_private_message("alfa", "hello")
         announce.record_private_message("bravo", "hello")
+
+        # Waits for what the test is about - both rows on disk - not for the
+        # first write (#1302): the timer can fire between the two records on
+        # a slow runner, write "alfa" alone, and leave "bravo" to a second
+        # timer still to come.
+        def saved():
+            rows, _state = db.load_private_messages()
+            return [row["nick"] for row in rows]
         deadline = time.monotonic() + 10
-        while not self.writes and time.monotonic() < deadline:
+        while saved() != ["alfa", "bravo"] and time.monotonic() < deadline:
             time.sleep(0.01)
 
-        self.assertEqual(len(self.writes), 1, "the timer never wrote")
-        self.assertIsNot(self.writes[0], threading.current_thread())
-        self.writes[0].join(5.0)   # it has written; let it finish before the leak check
-        rows, _state = db.load_private_messages()
-        self.assertEqual([row["nick"] for row in rows], ["alfa", "bravo"])
+        self.assertEqual(saved(), ["alfa", "bravo"], "the timer never wrote both")
+        self.assertTrue(self.writes)
+        for writer in list(self.writes):
+            self.assertIsNot(writer, threading.current_thread())
+            writer.join(5.0)   # it has written; let it finish before the leak check
         self.assertFalse(runtime.private_messages_save_pending)
 
 

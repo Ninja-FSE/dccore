@@ -74,7 +74,7 @@ class TheWiring(unittest.TestCase):
     def test_the_send_passes_the_size(self):
         with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             source = handle.read()
-        self.assertIn("speed_is_measurable(acute_duration, file_size)", source)
+        self.assertIn("speed_is_measurable(acute_duration, sent.file_size)", source)
 
     def test_the_record_call_is_unchanged(self):
         with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:

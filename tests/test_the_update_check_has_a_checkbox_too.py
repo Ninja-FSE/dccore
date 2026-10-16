@@ -186,65 +186,50 @@ class TheDialogHasTheCheckbox(unittest.TestCase):
     test_the_options_dialog_labels_fit_their_controls.py does: the dialog
     table and the handlers, as source."""
 
-    def dialog_table(self):
+    @staticmethod
+    def alias(name):
         text = script()
-        return text.split("dialog dccore.opt {", 1)[1].split("\n}", 1)[0]
+        start = text.index("alias %s {" % name)
+        depth = 0
+        for j in range(text.index("{", start), len(text)):
+            depth += text[j] == "{"
+            depth -= text[j] == "}"
+            if depth == 0:
+                return text[start:j + 1]
+        raise AssertionError(name)
 
-    def test_the_checkbox_is_in_the_connection_box(self):
-        table = self.dialog_table()
-        self.assertIn('check "Check GitHub for a new DCCore version", 406,', table)
+    @staticmethod
+    def table():
+        text = script()
+        return text.split("dialog dccore.set {", 1)[1].split("\n}", 1)[0]
 
-    def test_the_control_id_is_not_reused(self):
-        """406 must not collide with an existing control in the table."""
-        ids = []
-        for line in self.dialog_table().splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith(("box ", "title ", "size ", "option ")):
-                continue
-            parts = stripped.split(",")
-            if len(parts) >= 2 and parts[1].strip().isdigit():
-                ids.append(int(parts[1].strip()))
-        self.assertEqual(len(ids), len(set(ids)), "a control id is reused")
-        self.assertIn(406, ids)
+    @staticmethod
+    def data():
+        """The settings window's generated lookup data, {item: value}."""
+        found = {}
+        for line in script().split("alias dccore.sw.data {", 1)[1].split("\n}", 1)[0].splitlines():
+            parts = line.strip().split(" ", 3)
+            if parts[:2] == ["hadd", "dccore.swm"]:
+                found[parts[2]] = parts[3] if len(parts) > 3 else ""
+        return found
 
-    def test_init_reads_the_live_state_not_a_saved_one(self):
-        """Not dccore.opt (dccore.ini, a local pref) - dccore.st
-        (dccore.live), the bot's own state, refreshed every HELLO."""
-        init = script().split("on *:dialog:dccore.opt:init:0: {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("$dccore.st(checkupdates)", init)
-        self.assertIn("did -c dccore.opt 406", init)
+    def test_the_checkbox_is_the_bots_own_setting_on_general_settings(self):
+        """CHECK_FOR_UPDATES, as the dashboard has it: the window edits the
+        setting itself now, so nothing mirrors it by hand any more."""
+        data = self.data()
+        cid, kind, _factor, _label = data["k.CHECK_FOR_UPDATES"].split()
+        self.assertEqual(kind, "bool")
+        self.assertEqual(data["p." + data["pg.CHECK_FOR_UPDATES"]], "General Settings")
+        self.assertRegex(self.table(), r'(?m)^  check "[^"]+", %s, ' % cid)
 
-    def test_ok_sends_only_when_the_checkbox_disagrees_with_the_bot(self):
-        ok_handler = script().split("on *:dialog:dccore.opt:sclick:1: {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("did(dccore.opt,406).state", ok_handler)
-        self.assertIn("dccore.st(checkupdates)", ok_handler)
-        # Guarded, not unconditional, and on the SAME line: a plain
-        # unconditional dccore.send here would rehash the bot every time OK
-        # is clicked, whether or not the checkbox actually changed.
-        send_lines = [line for line in ok_handler.splitlines() if "dccore.send checkupdates" in line]
-        self.assertEqual(len(send_lines), 1, ok_handler)
-        self.assertTrue(send_lines[0].strip().startswith("if ("), send_lines[0])
-        self.assertIn("checkupdates", send_lines[0].split("dccore.send", 1)[0])
-
-    def test_ok_sends_nothing_before_the_bot_has_said_the_state(self):
-        """Before the first CHECKUPDATES line the state is empty and the box
-        unticked - and empty is not "off", so OK in that moment used to send
-        `checkupdates off`. The send's own condition must require a state."""
-        ok_handler = script().split("on *:dialog:dccore.opt:sclick:1: {", 1)[1].split("\n}", 1)[0]
-        send_line = [line for line in ok_handler.splitlines() if "dccore.send checkupdates" in line][0]
-        condition = send_line.split("{", 1)[0]
-        self.assertIn("$dccore.st(checkupdates) != $null", condition)
-
-    def test_the_checkbox_is_never_saved_locally(self):
-        """checkupdates must not appear in the `hadd dccore ...` lines
-        sclick:1 writes into the persisted dccore.ini hash - only in the
-        dccore.live one, which is never saved (see the UNLOAD handler)."""
-        ok_handler = script().split("on *:dialog:dccore.opt:sclick:1: {", 1)[1].split("\n}", 1)[0]
-        for line in ok_handler.splitlines():
-            if line.strip().startswith("hadd dccore "):
-                self.assertNotIn("checkupdates", line)
-
-
+    def test_it_is_sent_only_when_it_changed_and_never_saved_locally(self):
+        self.assertNotIn("CHECK_FOR_UPDATES", self.data()["locals"].split())
+        self.assertNotIn("checkupdates", self.alias("dccore.sw.opt.save"))
+        # Apply sends the settings that changed and only those: the dirty
+        # check against the value the bot sent (dccore.sw.dirty)
+        apply = self.alias("dccore.sw.apply")
+        self.assertIn("var %keys = $iif($dccore.sw.s(loaded),$dccore.sw.changed)", apply)
+        self.assertIn("dccore.send set $gettok(%keys,%i,32) $dccore.sw.wire($gettok(%keys,%i,32))", apply)
 class TheStructuredDispatcherKnowsTheType(unittest.TestCase):
 
     def dispatcher(self):

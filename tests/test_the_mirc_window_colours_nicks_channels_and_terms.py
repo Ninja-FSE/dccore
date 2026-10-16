@@ -8,9 +8,10 @@ so on a busy window one person or one channel was hard to follow. /dccore
 options now has three more colours - Search text, Nicks, Channels - and Nicks
 can be "per nick": a colour of its own for each nick, from a hash of it.
 
-Nothing may change for somebody who does not touch them. Nicks and Channels
-default to "same as the line", which adds no colour codes at all; Search
-text defaults to "same as File names", the colour the term already had.
+#1348: each of the three has a colour of its own by default - with Nicks and
+Channels "same as the line" and the term in navy, a busy window was nearly all
+black. A script that ran before saved the old defaults with everything else,
+so they move to the new ones once; a colour somebody picked stays.
 
 mIRC cannot run here, so the script is read as source. Comment lines are
 dropped first: every statement asserted on below has to be code, not a
@@ -117,26 +118,97 @@ def per_nick_colour(nick, background):
     return palette[(number % len(palette) + 1) - 1]
 
 
-class TheDefaultsChangeNothing(unittest.TestCase):
+# The defaults since #1348, and the ones every script before 1.20.0 saved.
+NEW_DEFAULTS = {"col.term": "12", "col.nick": "6", "col.chan": "10"}
+OLD_DEFAULTS = {"col.term": "name", "col.nick": "-1", "col.chan": "-1"}
+YELLOW = 8
+
+
+def what_init_leaves(saved):
+    """The three keys after dccore.init, from `saved` - what dccore.ini held.
+    dccore.inlinecolours and dccore.default are read from the script and run
+    here in the order dccore.init calls them, so a changed value, a lost line
+    or a swapped order changes the answer."""
+    table = dict(saved)
+    for line in statements(alias("dccore.init")):
+        if line == "dccore.inlinecolours":
+            move_once(table)
+        found = re.match(r"dccore\.default (col\.(?:term|nick|chan)) (\S+)$", line)
+        if found and found.group(1) not in table:
+            table[found.group(1)] = found.group(2)
+    return {key: table.get(key) for key in NEW_DEFAULTS}
+
+
+def move_once(table):
+    body = statements(alias("dccore.inlinecolours"))
+    mark = re.match(r"if \(\$hget\(dccore,(\w+)\) != \$null\) \{ return \}$", body[0])
+    assert mark, body[0]
+    if mark.group(1) in table:
+        return
+    for line in body[1:]:
+        moved = re.match(r"if \(\$hget\(dccore,(col\.\w+)\) == (\S+)\) \{ hadd dccore \1 (\S+) \}$", line)
+        if moved and table.get(moved.group(1)) == moved.group(2):
+            table[moved.group(1)] = moved.group(3)
+        added = re.match(r"hadd dccore (\w+) 1$", line)
+        if added:
+            table[added.group(1)] = "1"
+
+
+class TheDefaults(unittest.TestCase):
 
     def init(self):
         return statements(alias("dccore.init"))
 
-    def test_nicks_and_channels_default_to_same_as_the_line(self):
-        self.assertIn("dccore.default col.nick -1", self.init())
-        self.assertIn("dccore.default col.chan -1", self.init())
+    def test_each_has_a_colour_of_its_own(self):
+        for key, colour in NEW_DEFAULTS.items():
+            self.assertIn("dccore.default %s %s" % (key, colour), self.init())
 
-    def test_the_search_text_defaults_to_the_file_names_colour(self):
-        """What it had before: the term went through dccore.name."""
-        self.assertIn("dccore.default col.term name", self.init())
+    def test_none_of_them_is_yellow(self):
+        """Hard to read on mIRC's white background."""
+        for key, colour in NEW_DEFAULTS.items():
+            self.assertNotEqual(int(colour), YELLOW, key)
+
+    def test_a_new_install_gets_the_colours(self):
+        self.assertEqual(what_init_leaves({}), NEW_DEFAULTS)
+
+    def test_an_older_scripts_saved_defaults_move_to_the_colours(self):
+        self.assertEqual(what_init_leaves(OLD_DEFAULTS), NEW_DEFAULTS)
+
+    def test_a_colour_somebody_picked_stays(self):
+        picked = {"col.term": "4", "col.nick": "per", "col.chan": "3"}
+        self.assertEqual(what_init_leaves(picked), picked)
+        self.assertEqual(what_init_leaves(dict(OLD_DEFAULTS, **{"col.nick": "per"})),
+                         dict(NEW_DEFAULTS, **{"col.nick": "per"}))
+
+    def test_same_as_the_line_picked_after_the_move_stays(self):
+        """The mark is in the table, so a later -1 is somebody's choice."""
+        again = dict(OLD_DEFAULTS, inlinecolours="1")
+        self.assertEqual(what_init_leaves(again), OLD_DEFAULTS)
+
+    def test_the_move_is_saved_with_its_mark(self):
+        body = statements(alias("dccore.inlinecolours"))
+        self.assertIn("hadd dccore inlinecolours 1", body)
+        self.assertEqual(body[-1], "if ($isfile($dccore.ini)) { dccore.save }")
+        self.assertLess(body.index("hadd dccore inlinecolours 1"), len(body) - 1)
+
+    def test_the_move_runs_after_the_saved_table_is_loaded(self):
+        init = self.init()
+        self.assertLess(init.index("if ($isfile($dccore.ini)) { hload dccore $dccore.ini }"),
+                        init.index("dccore.inlinecolours"))
+
+    def test_the_search_text_can_still_take_the_file_names_colour(self):
         self.assertIn("if ($dccore.opt(col.term) == name) { return $dccore.name($1-) }",
                       statements(alias("dccore.term")))
 
-    def test_a_saved_choice_is_never_overwritten(self):
-        """Through dccore.default, which sets a key only when nothing is saved."""
+    def test_a_saved_choice_is_never_overwritten_by_a_default(self):
+        """dccore.init itself sets them only through dccore.default, which sets
+        a key only when nothing is saved."""
         for key in ("col.term", "col.nick", "col.chan"):
             self.assertNotRegex(alias("dccore.init"), r"hadd dccore %s " % re.escape(key))
         self.assertIn("if ($hget(dccore,$1) == $null) { hadd dccore $1 $2- }", alias("dccore.default"))
+
+
+class SameAsTheLine(unittest.TestCase):
 
     def test_same_as_the_line_adds_no_codes_at_all(self):
         """Not even a colour reset: a stray ^O would end a span the line has."""
@@ -149,14 +221,17 @@ class TheHelpers(unittest.TestCase):
 
     def test_a_colour_is_always_two_digits(self):
         """^C3 then "3bot" reads as colour 33: the number is padded to two."""
+        # the colour made legible on a dark background first (#1368): still
+        # a number 0-15, still padded
         self.assertEqual(statements(alias("dccore.paint"))[1],
-                         "return $+($chr(3),$base($1,10,10,2),$2,$chr(15))")
+                         "return $+($chr(3),$base($dccore.theme.legible($1,win),10,10,2),$2,$chr(15))")
 
     def test_every_colour_code_in_the_new_helpers_is_padded(self):
         for name in ("dccore.paint", "dccore.nick", "dccore.chan", "dccore.term", "dccore.pernick"):
             body = alias(name)
             for match in re.finditer(r"\$chr\(3\),", body):
-                self.assertRegex(body[match.end():], r"^(\$base\(\$1,10,10,2\)|\$dccore\.col\()", name)
+                self.assertRegex(body[match.end():],
+                                 r"^(\$base\((\$1|\$dccore\.theme\.legible\(\$1,win\)),10,10,2\)|\$dccore\.col\()", name)
 
     def test_the_palette_is_written_in_two_digits(self):
         for entry in nick_palettes():
@@ -253,57 +328,61 @@ class PerNick(unittest.TestCase):
             self.assertNotIn("01", entry)
 
     def test_the_background_is_the_windows_or_mircs_own(self):
-        self.assertEqual(statements(alias("dccore.nickpal"))[:3], [
+        # mIRC's own dark mode draws on black whatever $color says (#1368)
+        self.assertEqual(statements(alias("dccore.nickpal"))[:4], [
             "var %bg = $dccore.opt(bg)",
+            "if (%bg !isnum 0-15) && ($dccore.theme.mircdark) { %bg = 1 }",
             "if (%bg !isnum 0-15) { %bg = $color(background) }",
             "if (%bg !isnum 0-15) { %bg = 0 }",
         ])
 
 
-class TheOptionsDialog(unittest.TestCase):
+class TheThreeMenusOnTheScriptTab(unittest.TestCase):
+    """The colour inside a line - the search text, nicks, channels - as
+    menus beside their labels in the Colours frame of the settings window's
+    Script tab, filled by dccore.sw.opt.fill and read back by
+    dccore.sw.opt.save (they were the Options dialog's)."""
 
-    COMBOS = (("col.term", 220, "Search text", 221, "name -1"),
-              ("col.nick", 222, "Nicks", 223, "-1 per"),
-              ("col.chan", 224, "Channels", 225, "-1"))
+    COMBOS = (("col.term", 1663, "Search text", 1643, "name -1"),
+              ("col.nick", 1664, "Nicks", 1644, "-1 per"),
+              ("col.chan", 1665, "Channels", 1645, "-1"))
 
     def table(self):
-        return block("dialog dccore.opt {")
+        return block("dialog dccore.set {")
 
     def geometry(self, pattern):
         return tuple(int(n) for n in re.search(pattern, self.table()).groups())
 
-    def test_the_three_combos_are_in_the_show_box_under_the_checks(self):
-        bx, by, bw, bh = self.geometry(r'box "Show in @DCCore", 100, (\d+) (\d+) (\d+) (\d+)')
-        _x, last_check_y, _w, last_check_h = self.geometry(r'check "Other log lines", 108, (\d+) (\d+) (\d+) (\d+)')
+    def test_the_three_menus_are_in_the_colours_frame_each_beside_its_label(self):
+        bx, by, bw, bh = self.geometry(r'box "Colours", \d+, (\d+) (\d+) (\d+) (\d+)')
         for _key, text_id, label, combo_id, _own in self.COMBOS:
             tx, ty, tw, th = self.geometry(r'text "%s", %d, (\d+) (\d+) (\d+) (\d+)' % (label, text_id))
             cx, cy, cw = self.geometry(r"combo %d, (\d+) (\d+) (\d+) \d+, drop" % combo_id)
             for x, y, w in ((tx, ty, tw), (cx, cy, cw)):
                 self.assertTrue(bx <= x and x + w <= bx + bw, label)
                 self.assertTrue(by <= y and y + 12 <= by + bh, label)
-                self.assertGreaterEqual(y, last_check_y + last_check_h, label)
-            # the label above its combo, in the same column
-            self.assertEqual(tx, cx, label)
-            self.assertLessEqual(ty + th, cy, "the label runs into its combo: " + label)
+            # the label on the same row, to the left of its menu
+            self.assertLess(tx + tw, cx, label)
+            self.assertEqual(ty, cy + 2, label)
 
-    def test_the_columns_do_not_overlap(self):
-        spans = sorted(self.geometry(r"combo %d, (\d+) \d+ (\d+) \d+, drop" % combo_id)
-                       for _key, _text_id, _label, combo_id, _own in self.COMBOS)
-        for (x, w), (next_x, _w) in zip(spans, spans[1:]):
-            self.assertLess(x + w, next_x)
+    def test_the_rows_do_not_overlap(self):
+        tops = sorted(self.geometry(r"combo %d, \d+ (\d+) \d+ \d+, drop" % combo_id)[0]
+                      for _key, _text_id, _label, combo_id, _own in self.COMBOS)
+        for y, next_y in zip(tops, tops[1:]):
+            self.assertGreaterEqual(next_y - y, 12)
 
-    def test_init_fills_each_from_its_setting(self):
-        init = statements(block("on *:dialog:dccore.opt:init:0: {"))
+    def test_the_fill_fills_each_from_its_setting(self):
+        fill = statements(alias("dccore.sw.opt.fill"))
         for key, _text_id, _label, combo_id, own in self.COMBOS:
-            self.assertIn("dccore.fillspan %d $dccore.opt(%s) %s" % (combo_id, key, own), init)
+            self.assertIn("dccore.fillspan %d $dccore.opt(%s) %s" % (combo_id, key, own), fill)
 
-    def test_ok_saves_each_with_the_same_lines_it_was_filled_with(self):
-        ok = statements(block("on *:dialog:dccore.opt:sclick:1: {"))
-        saved = ok.index("dccore.save")
+    def test_apply_saves_each_with_the_same_lines_it_was_filled_with(self):
+        save = statements(alias("dccore.sw.opt.save"))
+        saved = save.index("dccore.save")
         for key, _text_id, _label, combo_id, own in self.COMBOS:
             line = "hadd dccore %s $dccore.spanval(%d,%s)" % (key, combo_id, own)
-            self.assertIn(line, ok)
-            self.assertLess(ok.index(line), saved, line)
+            self.assertIn(line, save)
+            self.assertLess(save.index(line), saved, line)
 
     def test_the_fill_and_the_read_back_are_one_mapping(self):
         """N lines of its own, then colour C on line C + N + 1; read back the
@@ -312,7 +391,10 @@ class TheOptionsDialog(unittest.TestCase):
         back = statements(alias("dccore.spanval"))
         self.assertIn("var %at = $findtok(%own,$2,1,32)", fill)
         self.assertIn("if (!%at) { %at = $iif($2 isnum 0-15,$calc($2 + %n + 1),1) }", fill)
-        self.assertIn("did -c dccore.opt $1 %at", fill)
+        # selected, and read back, through the helpers of the menus filled
+        # when their page is first shown (#1382)
+        self.assertIn("dccore.sw.cb.select $1 %at", fill)
+        self.assertEqual(back[0], "var %sel = $dccore.sw.cb.sel($1), %n = $numtok($2,32)")
         self.assertIn("if (%sel <= %n) { return $gettok($2,$iif(%sel < 1,1,%sel),32) }", back)
         self.assertIn("return $calc(%sel - %n - 1)", back)
 

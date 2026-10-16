@@ -25,6 +25,7 @@ import io
 import os
 import sys
 import time
+import re
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -216,53 +217,55 @@ class TheDialogHasTheCheckbox(unittest.TestCase):
     test_the_options_dialog_labels_fit_their_controls.py does: the dialog
     table and the handlers, as source."""
 
-    def dialog_table(self):
+    @staticmethod
+    def alias(name):
         text = script()
-        return text.split("dialog dccore.opt {", 1)[1].split("\n}", 1)[0]
+        start = text.index("alias %s {" % name)
+        depth = 0
+        for j in range(text.index("{", start), len(text)):
+            depth += text[j] == "{"
+            depth -= text[j] == "}"
+            if depth == 0:
+                return text[start:j + 1]
+        raise AssertionError(name)
 
-    def test_the_checkbox_is_in_the_connection_box(self):
-        table = self.dialog_table()
-        self.assertIn('check "Console feed on (also requests and sends - not just status)", 405,', table)
+    @staticmethod
+    def table():
+        text = script()
+        return text.split("dialog dccore.set {", 1)[1].split("\n}", 1)[0]
+
+    def test_the_checkbox_is_on_the_script_tabs_connection_page(self):
+        self.assertIn('check "Console feed on (also requests and sends - not just status)", 1685,', self.table())
 
     def test_the_control_id_is_not_reused(self):
-        ids = []
-        for line in self.dialog_table().splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith(("box ", "title ", "size ", "option ")):
-                continue
-            parts = stripped.split(",")
-            if len(parts) >= 2 and parts[1].strip().isdigit():
-                ids.append(int(parts[1].strip()))
+        ids = [int(n) for n in re.findall(r'^\s+\w+ (?:"[^"]*", )?(\d+), ', self.table(), re.M)]
         self.assertEqual(len(ids), len(set(ids)), "a control id is reused")
-        self.assertIn(405, ids)
+        self.assertIn(1685, ids)
 
     def test_init_reads_the_live_state_not_a_saved_one(self):
-        init = script().split("on *:dialog:dccore.opt:init:0: {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("$dccore.st(consolefeed)", init)
-        self.assertIn("did -c dccore.opt 405", init)
+        fill = self.alias("dccore.sw.opt.fill")
+        self.assertIn("$dccore.st(consolefeed)", fill)
+        self.assertIn("did -c dccore.set 1685", fill)
 
-    def test_ok_sends_only_when_the_checkbox_disagrees_with_the_bot(self):
-        ok_handler = script().split("on *:dialog:dccore.opt:sclick:1: {", 1)[1].split("\n}", 1)[0]
-        self.assertIn("did(dccore.opt,405).state", ok_handler)
-        self.assertIn("dccore.st(consolefeed)", ok_handler)
-        send_lines = [line for line in ok_handler.splitlines() if "dccore.send consolefeed" in line]
-        self.assertEqual(len(send_lines), 1, ok_handler)
+    def test_apply_sends_only_when_the_checkbox_disagrees_with_the_bot(self):
+        save = self.alias("dccore.sw.opt.save")
+        self.assertIn("did(dccore.set,1685).state", save)
+        self.assertIn("dccore.st(consolefeed)", save)
+        send_lines = [line for line in save.splitlines() if "dccore.send consolefeed" in line]
+        self.assertEqual(len(send_lines), 1, save)
         self.assertTrue(send_lines[0].strip().startswith("if ("), send_lines[0])
         self.assertIn("consolefeed", send_lines[0].split("dccore.send", 1)[0])
 
-    def test_ok_sends_nothing_before_the_bot_has_said_the_state(self):
-        ok_handler = script().split("on *:dialog:dccore.opt:sclick:1: {", 1)[1].split("\n}", 1)[0]
-        send_line = [line for line in ok_handler.splitlines() if "dccore.send consolefeed" in line][0]
+    def test_apply_sends_nothing_before_the_bot_has_said_the_state(self):
+        save = self.alias("dccore.sw.opt.save")
+        send_line = [line for line in save.splitlines() if "dccore.send consolefeed" in line][0]
         condition = send_line.split("{", 1)[0]
         self.assertIn("$dccore.st(consolefeed) != $null", condition)
 
     def test_the_checkbox_is_never_saved_locally(self):
-        ok_handler = script().split("on *:dialog:dccore.opt:sclick:1: {", 1)[1].split("\n}", 1)[0]
-        for line in ok_handler.splitlines():
+        for line in self.alias("dccore.sw.opt.save").splitlines():
             if line.strip().startswith("hadd dccore "):
                 self.assertNotIn("consolefeed", line)
-
-
 class TheStructuredDispatcherKnowsTheType(unittest.TestCase):
 
     def dispatcher(self):

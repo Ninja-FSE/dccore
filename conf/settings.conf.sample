@@ -38,8 +38,10 @@
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
 # no project URL anywhere in the tree, so anyone who received a list had no way
-# to find out what produced it.
-#PROJECT_URL = https://github.com/Ninja-FSE/dccore
+# to find out what produced it. The project page since #1407; the update check
+# below reads the repository out of it (version_check.repository()), so a
+# github.com/<owner>/<name> address works here too.
+#PROJECT_URL = https://ninja-fse.github.io/dccore/
 
 # Once a day, ask GitHub whether a newer DCCore has been released, and say so
 # on the dashboard, in the console and in the mIRC window. Only the version
@@ -192,9 +194,9 @@
 # Pause searching and sharing for the whole rebuild, not only the swap
 #PAUSE_FOR_WHOLE_UPDATE = false
 
-# The folder with the files you share. Used only if you have not added folders
-# on the Library page - if you have, those are used instead and this is
-# ignored.
+# The folder the setup chose for the files you share. On the Settings page it
+# is the first of the folders under Your list; once you save those, this is no
+# longer used.
 #
 # None, not a real path - a shipped literal path would let a copy-paste
 # install silently inherit somebody else's actual music folder path. Unlike
@@ -732,6 +734,28 @@
 # The window the burst ceiling above is counted over
 #PRIVATE_MESSAGE_DECLINE_BURST_SECONDS = 600
 
+# How many days dccore.mrc keeps DCCore Chat's history on your PC: whole
+# months are deleted once they ended more than this many days ago. 0 keeps
+# everything. The bot sends this to the script; a script that never had it
+# deletes nothing.
+#
+# HOW LONG DCCORE CHAT'S HISTORY IS KEPT (#1401). dccore.mrc writes what its
+# chat window shows to a file per channel - and per private conversation - per
+# month, in mIRC's log folder on the operator's PC, not on the bot's machine.
+# The limits are the bot's settings so the dashboard can set them: the bot
+# sends them to the script (DCCORE CHATHIST) after `hello` and whenever either
+# changes, and the script deletes whole months - every month that ended more
+# than this many days ago. 0 keeps everything. A script that has never been
+# sent the limits deletes nothing.
+# Days DCCore Chat's history is kept in mIRC; 0 keeps everything
+#CHAT_HISTORY_DAYS = 100
+
+# How big DCCore Chat's history folder on your PC may grow, in MB: past it,
+# the oldest months are deleted first, never the month running. 0 is no limit.
+#
+# MB DCCore Chat's history may take in mIRC; 0 is no limit
+#CHAT_HISTORY_MAX_MB = 100
+
 # How many times the bot tries to get back into a channel after being kicked
 # before giving up on it. It waits until the next advert is due before each
 # try, so it never looks like it is fighting the kick. 0 means never rejoin.
@@ -802,6 +826,29 @@
 #
 # Maximum simultaneous live downloads
 #MAX_DCC_SLOTS = 3
+
+# Only while every slot is taken and someone is waiting. 0 means off. The
+# slowest send, under this many KB/s over its last minute while another send
+# manages it, is stopped for the next in line. A queued file stays queued to
+# resume; one sent without waiting is dropped. Never with one slot.
+#
+# A send that crawls while others wait (#1388): the rate is what the receiver
+# acknowledged over about the last minute, judged from a minute after it
+# connected, and a stop counts against MAX_SEND_FAILS like a stall. Only the
+# slowest send, and only while another one moves at least this much - proof
+# the bot's side can deliver - so with one slot it never fires. Not while
+# MAX_UPLOAD_KB is what holds the sends back. See dcc._SlowSendWatch.
+# In KB/s, 0 = off
+#SLOW_SEND_MIN_KB = 0
+
+# Files of at least this many MB count as large, and only one is sent at a
+# time, so a few huge downloads cannot hold every slot for hours. Someone
+# whose next file is large keeps their place and waits; the slot goes to the
+# next in line. The bot's list and !rar folder packs are never held back. 0
+# means off.
+#
+# A file of at least this many MB is large, and only one large file is sent at a time (0 = off)
+#LARGE_FILE_MB = 0
 
 # The most files one person can have waiting in their queue at once.
 #
@@ -1169,6 +1216,23 @@
 # 0 = per-platform default (4MB on Windows, OS auto-tuning on Linux)
 #DCC_SEND_BUFFER = 0
 
+# The most all your sends together may use, in KB/s, so sharing leaves room on
+# your line. Shared: three sends under 600 get about 200 each, and the others
+# speed up when one ends. A change applies at once, to sends already running
+# too. 0 is no limit.
+#
+# Speed caps (#1352), in KB/s, 0 = no limit: one pace per direction, shared by
+# every transfer that way - see speed_cap.py. Waiting on the download cap moves
+# a fetch's FETCH_TRANSFER_TIMEOUT along by as long as it waited.
+#MAX_UPLOAD_KB = 0
+
+# The most everything the bot fetches may use together, in KB/s: list fetches,
+# automatic grabs, files and folders from other bots. Waiting on this limit
+# does not count toward the fetch timeouts, so a big list is not cut off for
+# being slow. Very low values, a few KB/s, can make the other bot give up. 0
+# is no limit.
+#MAX_DOWNLOAD_KB = 0
+
 # The first port the bot listens on when sending a file. If you are behind a
 # router, forward this whole range (start to end) to the machine running the
 # bot, or nobody can download from you.
@@ -1321,6 +1385,21 @@
 #
 # Hard cap on finished rows, whatever their age
 #FETCH_HISTORY_MAX_ROWS = 500
+
+# A short tag added after your list requests, the way AutoQ adds ::AutoQ::, so
+# a channel can see what is fetching. It is sent only to other DCCore bots,
+# which always accept it; other bots get the plain request, because many
+# answer only that exact line. Plain text, up to 32 characters. Leave it empty
+# to send no tag.
+#
+# A short tag after your list requests (#1293), the way AutoQ sends
+# "@<nick>  ::AutoQ::", so a channel can see what is fetching. Sent ONLY to
+# bots known to be DCCore, which always accept it; every other bot gets the
+# bare "@<nick>", since many server scripts answer only that exact line.
+# Plain text, at most 32 characters, no colour codes. Never added to a file
+# or folder request. Empty sends no tag.
+# LIST_REQUEST_TAG = ::DCCore::
+#LIST_REQUEST_TAG = 
 
 # The biggest single file you will accept from another bot, in bytes. Anything
 # larger is refused before the download starts. 0 means no limit - except that
@@ -1554,6 +1633,27 @@
 #
 # Attempts per queued file before it is dropped (see dcc.release_queue_entry)
 #MAX_SEND_FAILS = 3
+
+# 0 means off. Otherwise, someone whose downloads failed this many times today
+# (never accepted, stalled, or closed before the end - their own cancel
+# included) is paused until midnight: their queue is removed and new requests
+# are refused, each with a notice saying why. Admins are never paused. A
+# restart forgives.
+#
+# A NICK WHOSE SENDS KEEP FAILING (#1389). MAX_SEND_FAILS is per queued file,
+# so a nick with twenty files queued whose client never accepts an offer can
+# cost sixty failed attempts, each holding a slot for the accept or stall
+# timeout. With this above 0, a nick whose sends failed this many times since
+# local midnight is paused until midnight: its queued files are removed and
+# its new requests are refused, each with a notice saying why. Counted: the
+# receiver never connected, stalled, let a write time out, or closed the
+# connection before it had the whole file. Not counted: a pack cancelled by
+# the operator or withdrawn by the user, a send the bot stops itself, or a
+# failure on the bot's side (the file vanished). Admins (ADMIN_NICK) are never
+# paused. Kept in memory: a restart forgives. The console's `status` shows who
+# is paused, and `unpause <nick>` lifts it.
+# Failed sends in a day that pause a nick until midnight; 0 is off
+#DAILY_SEND_FAILS_LIMIT = 0
 
 # How many seconds the bot waits for someone to accept a file it has offered
 # before withdrawing the offer and counting one failed attempt. A person who

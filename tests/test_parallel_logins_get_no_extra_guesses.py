@@ -27,6 +27,7 @@ if REPO_ROOT not in sys.path:
 
 import adminchat  # noqa: E402
 import runtime  # noqa: E402
+import web_login  # noqa: E402
 import webserver  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
@@ -194,9 +195,10 @@ class ABurstOfLoginPosts(RouteCase):
         real_slots = runtime.web_password_checks
         runtime.web_password_checks = threading.BoundedSemaphore(1)
         self.addCleanup(setattr, runtime, "web_password_checks", real_slots)
-        real_wait = webserver.WEB_PASSWORD_CHECK_WAIT_SECONDS
-        webserver.WEB_PASSWORD_CHECK_WAIT_SECONDS = 0.01
-        self.addCleanup(setattr, webserver, "WEB_PASSWORD_CHECK_WAIT_SECONDS", real_wait)
+        # web_login since #1322: the password check reads its own name.
+        real_wait = web_login.WEB_PASSWORD_CHECK_WAIT_SECONDS
+        web_login.WEB_PASSWORD_CHECK_WAIT_SECONDS = 0.01
+        self.addCleanup(setattr, web_login, "WEB_PASSWORD_CHECK_WAIT_SECONDS", real_wait)
         self.assertTrue(runtime.web_password_checks.acquire(blocking=False))
         try:
             resp = self.client.post("/login", data={"password": PASSWORD})

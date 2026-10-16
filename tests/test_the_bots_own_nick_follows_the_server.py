@@ -169,8 +169,11 @@ class TheSendersNoLongerAssign(unittest.TestCase):
             return handle.read()
 
     def test_only_the_registration_paths_assign_in_the_read_loop(self):
-        loop = self.source("irc.py").split("def irc_loop():", 1)[1]
-        assigning = [line.strip() for line in loop.splitlines()
+        # The read loop and the nick-refusal handler it calls (#1287).
+        code = self.source("irc.py")
+        loop = code.split("def irc_loop():", 1)[1]
+        handler = code.split("def answer_nick_refusal(", 1)[1].split("\ndef ", 1)[0]
+        assigning = [line.strip() for line in (loop + handler).splitlines()
                      if line.strip().startswith("config.NICKNAME = ")]
 
         self.assertEqual(assigning, [

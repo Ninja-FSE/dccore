@@ -33,7 +33,8 @@ import list as list_mod  # noqa: E402
 import runtime  # noqa: E402
 import update_list  # noqa: E402
 
-from tests.support import DCCoreTestCase, RecordingSocket  # noqa: E402
+from tests.exported_tree import _this_is_an_export  # noqa: E402
+from tests.support import DCCoreTestCase, RecordingSocket, temp_dir  # noqa: E402
 
 
 class HumanReadableSizes(unittest.TestCase):
@@ -811,6 +812,356 @@ class TheRehashHandlerIsEntered(DCCoreTestCase):
         commands.handle_rehash_request("stranger", "#chan")
 
         self.assertEqual(self.calls, [])
+
+
+# ---------------------------------------------------------------------------
+# scripts/function_coverage.py itself (#1379)
+#
+# The measure everything above is paid against. It failed in preflight with no
+# reason given: a decorated function never matched what the profiler recorded,
+# and the report that would have said so went into a StringIO a test had left
+# in sys.stdout. These drive the script's own functions on small temp modules.
+# ---------------------------------------------------------------------------
+
+def load_function_coverage():
+    """A private copy of scripts/function_coverage.py. Never put in
+    sys.modules, so patching its REPO_ROOT, SRC, ALLOWLIST or run_suite below
+    changes nothing for anything else in the run."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "function_coverage_under_test",
+        os.path.join(REPO_ROOT, "scripts", "function_coverage.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_from(path, name):
+    """The module at `path`, executed for real, as Python itself compiles it."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def write(path, text):
+    with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+    return path
+
+
+def line_of(text, fragment):
+    """1-based number of the first line of `text` that starts with `fragment`."""
+    for number, line in enumerate(text.splitlines(), 1):
+        if line.lstrip().startswith(fragment):
+            return number
+    raise AssertionError(f"{fragment!r} is not in the sample")
+
+
+class CoverageScriptCase(unittest.TestCase):
+    """run_suite() installs its own profiler, on sys and on threading, and
+    puts back whatever profiler was there before - function_coverage.py's
+    own, when this file runs inside its pass. Each test here still starts
+    with none and puts back whatever it found, so a run_suite() that fails
+    to restore cannot end the outer pass's recording; and it puts the
+    streams back, so one that fails to restore those cannot swallow the rest
+    of this process's output."""
+
+    def setUp(self):
+        import threading
+
+        # scripts/function_coverage.py is dev-only tooling, stripped at
+        # extraction (docs/PUBLIC-REPO-WORKFLOW.md, step 2): there is nothing
+        # to test in the public tree (#1409).
+        if _this_is_an_export(self):
+            self.skipTest("scripts/function_coverage.py is stripped from an extracted "
+                          "public tree; it is tested in the development repository")
+        self.fc = load_function_coverage()
+        self.root = temp_dir(self, prefix="dccore-coverage-")
+        self.addCleanup(setattr, sys, "stderr", sys.stderr)
+        self.addCleanup(setattr, sys, "stdout", sys.stdout)
+        self.addCleanup(threading.setprofile, threading.getprofile())
+        self.addCleanup(sys.setprofile, sys.getprofile())
+        sys.setprofile(None)
+        threading.setprofile(None)
+
+    def assert_no_profiler_left(self):
+        import threading
+
+        self.assertIsNone(sys.getprofile(), "run_suite() left its profiler on")
+        self.assertIsNone(threading.getprofile(),
+                          "run_suite() left its profiler set for new threads")
+
+
+# Written into temp directories at run time: names being CREATED, so they are
+# named here once rather than as literals in the path calls, where
+# tests/test_referenced_files_exist.py would look for them in the tree.
+KEYS_MODULE = "probe_keys.py"
+ENTRY_MODULE = "probe_entry.py"
+
+
+# Lines matter here: each function's key is checked against the first line
+# Python itself gives it. `several` has its first decorator three lines above
+# its last; `parenthesised` uses the relaxed decorator grammar (3.9+), whose
+# expression starts a line below its `@`.
+KEYING_SAMPLE = '''\
+def _same(function):
+    return function
+
+
+def _tag(*_labels):
+    return _same
+
+
+def plain():
+    return "plain"
+
+
+@_same
+def single():
+    return "single"
+
+
+@_tag(
+    "first")
+@_tag("second")
+@_same
+def several():
+    return "several"
+
+
+@_same
+async def later():
+    return "later"
+
+
+@(
+    _same)
+def parenthesised():
+    return "parenthesised"
+'''
+
+
+class TheCoverageKeyIsTheLineTheProfilerRecords(CoverageScriptCase):
+    """public_functions() against co_firstlineno, which is what Recorder
+    stores for every call. For a decorated function that is the line of its
+    first decorator, not its def line - and keyed on the def line,
+    list.py::list_dirs_held read as never entered although tests call it."""
+
+    def keys_and_truth(self):
+        src = os.path.join(self.root, "src")
+        os.mkdir(src)
+        path = write(os.path.join(src, KEYS_MODULE), KEYING_SAMPLE)
+        self.fc.REPO_ROOT = self.root   # holds no .py file of its own
+        self.fc.SRC = src
+
+        self.compiled = load_from(path, "probe_keys_under_test")
+        truth = {(KEYS_MODULE, name): getattr(self.compiled, name).__code__.co_firstlineno
+                 for name in ("plain", "single", "several", "later", "parenthesised")}
+        return self.fc.public_functions(), truth
+
+    def test_every_key_is_what_python_gives_the_function(self):
+        keys, truth = self.keys_and_truth()
+
+        self.assertEqual(keys, truth)
+
+    def test_the_sample_tells_def_lines_from_first_lines(self):
+        """The test above means something only if the def line and the first
+        line differ for the decorated ones - and for `several`, if its first
+        and last decorators do."""
+        import inspect
+
+        keys, truth = self.keys_and_truth()
+
+        self.assertEqual(truth[(KEYS_MODULE, "plain")],
+                         line_of(KEYING_SAMPLE, "def plain"))
+        for name in ("single", "several", "later", "parenthesised"):
+            with self.subTest(name=name):
+                def_line = line_of(KEYING_SAMPLE, ("def " + name, "async def " + name))
+                self.assertLess(truth[(KEYS_MODULE, name)], def_line)
+                self.assertEqual(keys[(KEYS_MODULE, name)],
+                                 truth[(KEYS_MODULE, name)])
+        self.assertEqual(keys[(KEYS_MODULE, "several")],
+                         line_of(KEYING_SAMPLE, "@_tag("))
+        self.assertTrue(inspect.iscoroutinefunction(self.compiled.later))
+
+
+ENTRY_SAMPLE = '''\
+def _same(function):
+    return function
+
+
+@_same
+def entered_through_a_decorator():
+    return "called"
+
+
+@_same
+@_same
+def never_called():
+    return "not called"
+'''
+
+
+class ADecoratedFunctionCalledByATestCountsAsEntered(CoverageScriptCase):
+    """main() end to end: public_functions() over a temp tree, the real
+    run_suite() over a one-test suite that calls a decorated function, and
+    main()'s own matching on (basename, name, line). main() discovers tests/
+    itself, so its run_suite is pointed at that suite instead.
+
+    The allowlist names the function nothing calls. main() exits 0 only if
+    the called one matched what the profiler recorded AND the uncalled one
+    did not - otherwise it reports a new uncovered function, or an allowed
+    one that is now covered."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(os.chdir, os.getcwd())   # main() moves to REPO_ROOT
+        saved_path = list(sys.path)               # ...and puts it on sys.path
+        self.addCleanup(lambda: sys.path.__setitem__(slice(None), saved_path))
+
+        os.mkdir(os.path.join(self.root, "src"))
+        path = write(os.path.join(self.root, ENTRY_MODULE), ENTRY_SAMPLE)
+        self.fc.REPO_ROOT = self.root
+        self.fc.SRC = os.path.join(self.root, "src")
+        self.fc.ALLOWLIST = write(os.path.join(self.root, "allowed.txt"),
+                                  f"{ENTRY_MODULE}::never_called  # on purpose\n")
+
+        probe = load_from(path, "probe_entry_under_test")
+        suite = unittest.TestSuite(
+            [unittest.FunctionTestCase(probe.entered_through_a_decorator)])
+        real_run_suite = self.fc.run_suite
+        self.fc.run_suite = lambda: real_run_suite(suite=suite)
+
+    def test_main_finds_it_entered(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.fc.main()
+
+        report = out.getvalue()
+        self.assertIn("Public daemon functions: 2", report)
+        self.assertIn("Never entered by any test: 1", report)
+        self.assertIn("No public daemon function is uncovered outside the allowlist.",
+                      report)
+        self.assertEqual(code, 0, report)
+
+
+class TheCoverageRunPutsTheStreamsBack(CoverageScriptCase):
+    """run_suite() prints nothing itself; main() prints the report after it.
+    A test that leaves sys.stdout replaced used to take that report with it."""
+
+    def run_one(self, function):
+        return self.fc.run_suite(suite=unittest.TestSuite(
+            [unittest.FunctionTestCase(function)]))
+
+    def test_a_test_that_keeps_stdout_does_not_keep_it_past_the_run(self):
+        before = sys.stdout
+
+        def keeps_stdout():
+            sys.stdout = io.StringIO()
+
+        _seen, result = self.run_one(keeps_stdout)
+
+        self.assertEqual((result.testsRun, result.wasSuccessful()), (1, True))
+        self.assertIs(sys.stdout, before)
+        self.assert_no_profiler_left()
+
+    def test_a_test_that_keeps_stderr_does_not_keep_it_past_the_run(self):
+        before = sys.stderr
+
+        def keeps_stderr():
+            sys.stderr = io.StringIO()
+
+        _seen, result = self.run_one(keeps_stderr)
+
+        self.assertEqual((result.testsRun, result.wasSuccessful()), (1, True))
+        self.assertIs(sys.stderr, before)
+        self.assert_no_profiler_left()
+
+    def test_a_run_that_raises_still_puts_both_back_and_the_profiler_off(self):
+        before = (sys.stdout, sys.stderr)
+
+        class Explodes:
+            """A suite whose run takes both streams and then raises."""
+
+            def __call__(self, result):
+                sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+                raise RuntimeError("the suite itself broke (test)")
+
+            def countTestCases(self):
+                return 1
+
+        with self.assertRaises(RuntimeError):
+            self.fc.run_suite(suite=Explodes())
+
+        self.assertIs(sys.stdout, before[0])
+        self.assertIs(sys.stderr, before[1])
+        self.assert_no_profiler_left()
+
+    def test_the_profiler_saw_the_suite(self):
+        """The streams are put back without taking the recording with them."""
+        calls = []
+
+        def a_function_the_suite_calls():
+            calls.append(True)
+
+        seen, _result = self.run_one(a_function_the_suite_calls)
+
+        code = a_function_the_suite_calls.__code__
+        self.assertEqual(calls, [True])
+        self.assertIn((code.co_filename, code.co_name, code.co_firstlineno), seen)
+
+
+class TheCoverageRunPutsAnOuterProfilerBack(CoverageScriptCase):
+    """run_suite() is itself called by tests that run while
+    function_coverage.py profiles the suite. Its Recorder used to stop with
+    setprofile(None), which ended that outer recording for the rest of the
+    pass: everything after the test read as never entered."""
+
+    def install_outer_profiler(self):
+        import threading
+
+        def outer(frame, event, arg):
+            pass
+
+        sys.setprofile(outer)
+        threading.setprofile(outer)
+        return outer
+
+    def assert_outer_profiler_back(self, outer):
+        import threading
+
+        self.assertIs(sys.getprofile(), outer,
+                      "run_suite() did not put back the profiler it found")
+        self.assertIs(threading.getprofile(), outer,
+                      "run_suite() did not put back the profiler for new threads")
+
+    def test_a_run_puts_back_the_profiler_it_found(self):
+        outer = self.install_outer_profiler()
+
+        _seen, result = self.fc.run_suite(suite=unittest.TestSuite(
+            [unittest.FunctionTestCase(lambda: None)]))
+
+        self.assertEqual((result.testsRun, result.wasSuccessful()), (1, True))
+        self.assert_outer_profiler_back(outer)
+
+    def test_a_run_that_raises_puts_it_back_too(self):
+        outer = self.install_outer_profiler()
+
+        class Explodes:
+            def __call__(self, result):
+                raise RuntimeError("the suite itself broke (test)")
+
+            def countTestCases(self):
+                return 1
+
+        with self.assertRaises(RuntimeError):
+            self.fc.run_suite(suite=Explodes())
+
+        self.assert_outer_profiler_back(outer)
 
 
 if __name__ == "__main__":

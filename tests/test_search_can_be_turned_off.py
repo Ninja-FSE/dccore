@@ -158,7 +158,8 @@ class TheAdvert(DCCoreTestCase):
 class TheSetting(unittest.TestCase):
 
     def test_it_is_on_the_settings_page_beside_the_search_cap(self):
-        with open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
+        # The Settings page's categories and labels are web_settings.py since #1320.
+        with open(os.path.join(REPO_ROOT, "src", "web_settings.py"), encoding="utf-8") as handle:
             source = handle.read()
         self.assertIn('"SEARCH_ENABLED", "MAX_SEARCH_RESULTS"', source)
         self.assertIn('"SEARCH_ENABLED": "Answer @find searches"', source)

@@ -305,8 +305,11 @@ class AChannelRequestIsUnchanged(APrivateRequest):
         self.request(target=OTHER)
 
         (row,) = self.rows()
-        self.assertEqual(sorted(row), ["channel", "file", "is_temporary_zip", "path", "queued_at", "user_raw"])
+        # queued_size: the file's size, recorded when it is queued (#1387).
+        self.assertEqual(sorted(row), ["channel", "file", "is_temporary_zip", "path", "queued_at",
+                                       dcc.QUEUED_SIZE_KEY, "user_raw"])
         self.assertEqual(row["channel"], OTHER)
+        self.assertEqual(row[dcc.QUEUED_SIZE_KEY], 4096)
 
     def test_its_send_at_once_is_as_it_was(self):
         self.request(target=OTHER)

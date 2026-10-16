@@ -289,7 +289,8 @@ class TheWiring(unittest.TestCase):
         self.assertIn("note_join_seen(joined_user)", code[at:at + 200])
 
     def test_the_summary_applies_it(self):
-        code = self.read("webserver.py")
+        # The List Browser's summaries are web_lists.py since #1315.
+        code = self.read("web_lists.py")
         self.assertIn("merges = _ident_merges(known, present)", code)
         self.assertEqual(code.count('"nick": _display_nick(bot, present, merges),'), 2)
 

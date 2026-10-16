@@ -185,7 +185,8 @@ class TheGlobalScanSeparatesTheTwoQuestions(unittest.TestCase):
         user in ANY channel we are in.
         """
         source = self.source()
-        scan = source[source.index("# B) Global queue handling"):]
+        # Section B's sweep, claim_next_in_line() since #1304.
+        scan = source[source.index("def claim_next_in_line("):source.index("\ndef check_queue_and_send(")]
 
         self.assertIn("user_is_globally_active = user_is_present_in_ram(queue_key)", scan,
                       "the global-queue scan no longer asks every channel "
