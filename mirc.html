@@ -77,7 +77,7 @@
         </div>
       </div>
     </div>
-    <p class="caption"><span class="soon">Next release</span> The control panel opens on a start page. Bot leads to the bot's own settings, the same ones the dashboard has. mIRC leads to the script's.</p>
+    <p class="caption">The control panel opens on a start page. Bot leads to the bot's own settings, the same ones the dashboard has. mIRC leads to the script's.</p>
   </div>
 
   <div class="block">
@@ -86,10 +86,10 @@
       <li><b>A live window</b><span>Every event on its own line with a coloured tag. The window's button lights up on activity and turns red on a failed send.</span></li>
       <li><b>A side panel</b><span>Each running transfer with size, percentage and speed, who is waiting, and today's totals.</span></li>
       <li><b>Menus for everything</b><span>Right-click a user in the panel or in any channel's nick list to see their queue, clear it or ignore them for a while.</span></li>
-      <li><b>A control panel <span class="soon">Next release</span></b><span>Every bot setting in one window, saved with Apply. Your own mIRC's colours and switches beside them.</span></li>
+      <li><b>A control panel</b><span>Every bot setting in one window, saved with Apply. Your own mIRC's colours and switches beside them.</span></li>
       <li><b>Downloads window</b><span>What the bot is fetching from other bots, with its queue.</span></li>
-      <li><b>DCCore Chat</b><span>Talk to other DCCore operators in the channels your bot shares with theirs. It is public: everyone in the channel sees it.</span></li>
-      <li><b>Dark theme and icons <span class="soon">Next release</span></b><span>Dark, light, or following mIRC's own dark mode.</span></li>
+      <li><b>DCCore Chat</b><span>Talk to other DCCore operators in the channels your bot shares with theirs. It is public: everyone in the channel sees it. A history is kept on your PC, a file per channel per month, for as long and as large as you set.</span></li>
+      <li><b>Dark theme and icons</b><span>Dark, light, or following mIRC's own dark mode.</span></li>
       <li><b>Logs in by itself</b><span>You type the password once when you pair. After that it reconnects on its own, and the password never touches the disk.</span></li>
     </ul>
   </div>
@@ -99,7 +99,7 @@
     <ol class="steps">
       <li><div>
         <b>Copy the script and its folders.</b>
-        <p class="note">Put <code>dccore.mrc</code> from the release's <code>scripts/mirc/</code> anywhere, your mIRC folder is fine. Copy any folders beside it too. It needs mIRC 6.10 or later.</p>
+        <p class="note">Put <code>dccore.mrc</code> anywhere, your mIRC folder is fine, with the <code>dcx</code> and <code>dll</code> folders from the release's <code>scripts/mirc/</code> beside it. It needs mIRC 6.10 or later; the control panel, mIRC 6.17.</p>
       </div></li>
       <li><div>
         <b>Load it and pair it with your bot.</b>
@@ -108,8 +108,8 @@
         <p class="note">Use your bot's nick. The @DCCore window opens and the bot asks for its admin password. Type it in the window, once.</p>
       </div></li>
       <li><div>
-        <b>Choose what you see.</b>
-        <p class="note">Type <code>/dccore options</code> for the colours, the side panel and the title bar. Right-click in the window for everything else.</p>
+        <b>Open the control panel.</b>
+        <p class="note">Right-click in the window and choose <b>Control Panel</b>, or type <code>/dccore settings</code>. Its <b>mIRC</b> side holds the window's own colours and switches.</p>
       </div></li>
     </ol>
   </div>
@@ -120,11 +120,11 @@
       <tbody>
         <tr><th scope="row">/dccore connect</th><td>Open the window and connect, logging in by itself.</td></tr>
         <tr><th scope="row">/dccore disconnect</th><td>Close the connection and stop reconnecting.</td></tr>
-        <tr><th scope="row">/dccore options</th><td>What the window shows, its colours, the side panel and the title bar.</td></tr>
-        <tr><th scope="row">/dccore settings</th><td><span class="soon">Next release</span> The control panel, on the bot's side.</td></tr>
+        <tr><th scope="row">/dccore settings</th><td>The control panel, on the bot's side.</td></tr>
+        <tr><th scope="row">/dccore options</th><td>The control panel, on this mIRC's side: what the window shows, its colours, the side panel.</td></tr>
         <tr><th scope="row">/dccore chat [text]</th><td>Open DCCore Chat, or say something in it.</td></tr>
         <tr><th scope="row">/dccore downloads</th><td>What the bot is fetching from other bots.</td></tr>
-        <tr><th scope="row">/dccore theme dark</th><td><span class="soon">Next release</span> The script's windows dark. <code>light</code> and <code>auto</code> work too.</td></tr>
+        <tr><th scope="row">/dccore theme dark</th><td>The script's windows dark. <code>light</code> and <code>auto</code> work too.</td></tr>
         <tr><th scope="row">/dccore raw &lt;command&gt;</th><td>Send any admin console command.</td></tr>
       </tbody>
     </table>
