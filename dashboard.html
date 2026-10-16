@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Web dashboard · DCCore</title>
+<meta name="description" content="DCCore's optional web dashboard: live transfers, queues, lists, searches, settings and statistics in a browser.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top gutter">
+  <div class="top-in col">
+    <a class="brand" href="index.html">DC<span>Core</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="index.html">Overview</a>
+      <a href="commands.html">Commands</a>
+      <a href="dashboard.html" aria-current="page">Web dashboard</a>
+      <a href="mirc.html">mIRC script</a>
+      <a href="start.html">Get started</a>
+    </nav>
+    <a class="dl" href="https://github.com/Ninja-FSE/dccore/releases/latest">Download</a>
+  </div>
+</header>
+
+<main class="gutter">
+<section class="pg col" id="dashboard" aria-label="Web dashboard">
+  <div class="head">
+    <span class="eyebrow">Web dashboard</span>
+    <h1>Run the bot from a browser</h1>
+    <p class="lede">An optional web page for the operator. Watch transfers live, move people in the queue, search other bots, browse their lists and change any setting, without touching a config file.</p>
+  </div>
+
+  <div class="twofig">
+    <div class="shot" role="img" aria-label="The dashboard's Live Transfers page">
+      <div class="db">
+        <div class="db-side">
+          <div class="db-logo">DC<span>Core</span></div>
+          <div class="db-nav"><em>&#9906;</em>Search</div>
+          <div class="db-nav"><em>&#8595;</em>Downloads</div>
+          <div class="db-nav"><em>&#9776;</em>List Browser</div>
+          <div class="db-nav"><em>&#9881;</em>Tools</div>
+          <div class="db-nav on"><em>&#9654;</em>Live Transfers</div>
+          <div class="db-nav"><em>&#9673;</em>Stats</div>
+          <div class="db-nav"><em>&#9993;</em>Messages<span class="cnt">2</span></div>
+          <div class="db-nav"><em>&#9998;</em>Settings</div>
+          <div class="db-nav"><em>&#10095;</em>Console</div>
+          <div class="db-stat">
+            <div>Status <b class="db-ok">&#9679; connected</b></div>
+            <div>Slots <b>2 / 3</b></div>
+            <div>Queued <b>5</b></div>
+          </div>
+        </div>
+        <div class="db-main">
+          <div class="db-h">Live Transfers</div>
+          <div class="db-tiles">
+            <div class="db-tile"><small>Speed now</small><b>1.4 MB/s</b></div>
+            <div class="db-tile"><small>Record</small><b>2.1 MB/s</b></div>
+            <div class="db-tile"><small>Sending</small><b>2 / 3</b></div>
+            <div class="db-tile"><small>Next free slot</small><b>~4 min</b></div>
+          </div>
+          <div class="db-card">
+            <h4>Sending</h4>
+            <table class="db-t"><tbody>
+              <tr><td>someone</td><td class="f">Some Band - Live At The Roxy - 03 - Opening Song.flac</td><td><div class="bar"><i style="width:64%"></i></div></td><td class="r">64%</td><td class="r">812 KB/s</td><td><span class="pill send">sending</span></td></tr>
+              <tr><td>helen</td><td class="f">Another Artist - First Album.rar</td><td><div class="bar"><i style="width:21%"></i></div></td><td class="r">21%</td><td class="r">640 KB/s</td><td><span class="pill send">sending</span></td></tr>
+            </tbody></table>
+          </div>
+          <div class="db-card">
+            <h4>Queue</h4>
+            <table class="db-t"><tbody>
+              <tr><td>ivan</td><td class="f">Old Radio Show - 1958-03-02.mp3</td><td class="r">2 files</td><td><span class="pill q">queued</span></td></tr>
+              <tr><td>marta</td><td class="f">Some Band - Live At The Roxy.rar</td><td class="r">1 file</td><td><span class="pill q">queued</span></td></tr>
+              <tr><td>oskar</td><td class="f">Field Recordings - Rain.flac</td><td class="r">2 files</td><td><span class="pill fz">frozen 3:41</span></td></tr>
+            </tbody></table>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="caption">The Live Transfers page, in the dashboard's dark theme. It has a light one too, and comes in English, French and Spanish.</p>
+  </div>
+
+  <div class="block">
+    <h2>Its pages</h2>
+    <div class="pages">
+      <div><b>Search</b><span>Search your own list, or ask every bot in a channel at once and download from the replies.</span></div>
+      <div><b>Downloads</b><span>What the bot is fetching from other bots: waiting, running, finished and failed.</span></div>
+      <div><b>List Browser</b><span>Every other bot's list you hold, searchable as you type. Fetch a fresh one by nick.</span></div>
+      <div><b>Tools</b><span>Rebuild or verify the list, read track lengths, find duplicate files, stop the bot.</span></div>
+      <div><b>Live Transfers</b><span>What is being sent right now, and who is waiting, with buttons to move or clear them.</span></div>
+      <div><b>Stats</b><span>Files and bytes sent, speed records, the most requested files. Kept across restarts.</span></div>
+      <div><b>Messages</b><span>People who messaged the bot privately. Also kicks, bans and rebuilds that need a look.</span></div>
+      <div><b>Settings</b><span>Every setting, grouped, with help beside each. Saved without a restart.</span></div>
+      <div><b>Console</b><span>The bot's log as it happens, and the admin console's commands.</span></div>
+    </div>
+  </div>
+
+  <div class="block">
+    <h2>Turning it on</h2>
+    <p>The dashboard is off until you turn it on. It needs Flask, installed with the same Python that runs the bot. The setup asks about both.</p>
+<pre class="cmd">python3 -m pip install -r requirements-web.txt     (Linux, macOS)
+py -3 -m pip install -r requirements-web.txt       (Windows)</pre>
+    <p class="note">It listens only on the computer the bot runs on, at <code>http://127.0.0.1:8420/</code>, behind a password. Other devices on your network can reach it only if you allow it.</p>
+  </div>
+</section>
+</main>
+
+<footer class="gutter">
+  <div class="foot col">
+    <p>DCCore is free software under the <a href="https://github.com/Ninja-FSE/dccore/blob/main/LICENSE">GNU General Public License, version 3</a>.</p>
+    <p><a href="https://github.com/Ninja-FSE/dccore">Source</a> · <a href="https://github.com/Ninja-FSE/dccore/releases">Releases</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/UPDATES.md">What's new</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/SECURITY.md">Reporting a security problem</a></p>
+  </div>
+</footer>
+</body>
+</html>

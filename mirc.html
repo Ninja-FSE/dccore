@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>mIRC script · DCCore</title>
+<meta name="description" content="dccore.mrc turns a DCCore bot into a window in mIRC, with a live side panel, menus and DCCore Chat.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top gutter">
+  <div class="top-in col">
+    <a class="brand" href="index.html">DC<span>Core</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="index.html">Overview</a>
+      <a href="commands.html">Commands</a>
+      <a href="dashboard.html">Web dashboard</a>
+      <a href="mirc.html" aria-current="page">mIRC script</a>
+      <a href="start.html">Get started</a>
+    </nav>
+    <a class="dl" href="https://github.com/Ninja-FSE/dccore/releases/latest">Download</a>
+  </div>
+</header>
+
+<main class="gutter">
+<section class="pg col" id="mirc" aria-label="mIRC script">
+  <div class="head">
+    <span class="eyebrow">mIRC script</span>
+    <h1>The bot as a window in mIRC</h1>
+    <p class="lede"><code>dccore.mrc</code> connects your mIRC to your bot's admin console. You see every request, send and search as it happens, with the transfers live in a side panel, and you run the bot from menus and a control panel.</p>
+  </div>
+
+  <div class="twofig">
+    <div class="shot" role="img" aria-label="The @DCCore window in mIRC">
+      <div class="mirc">
+        <div class="m-title"><span>@DCCore - alfa on SomeNet · slots 2/3 · queue 5 · today 38 files / 12.4GB · 1.4MB/s</span><span>_ □ x</span></div>
+        <div class="m-body">
+<pre class="m-log">[21:05] <b class="m-srch">[SEARCH]</b> someone searched for <span class="m-srch">live at the roxy</span>: 3 found
+[21:06] <b class="m-req">[REQUEST]</b> someone asked for <span class="m-file">Opening Song.flac</span>
+[21:06] <b class="m-send">[SENDING]</b> <span class="m-file">Opening Song.flac</span> to someone (48.2MB)
+[21:07] <b class="m-q">[QUEUED]</b> <span class="m-file">Live At The Roxy.rar</span> for marta, #1
+[21:09] <b class="m-sent">[SENT]</b> <span class="m-file">Rain.flac</span> to oskar, 1.1MB/s
+[21:11] <b class="m-fail">[FAILED]</b> <span class="m-file">Side B.flac</span> to ivan: timed out
+[21:12] <b class="m-send">[SENDING]</b> <span class="m-file">First Album.rar</span> to helen</pre>
+<pre class="m-side"><b>Sending 2/3</b>
+> someone  48M  64%  812K/s
+> helen   310M  21%  640K/s
+
+<b>Queue 5</b>
+  ivan     2 files
+  marta    1 file
+  oskar    2 files  frozen 3:41
+
+<b>Today</b>
+  38 files  12.4GB
+  record 2.1MB/s</pre>
+        </div>
+        <div class="m-edit">queue ivan</div>
+      </div>
+    </div>
+    <p class="caption">The @DCCore window. What you type at the bottom goes to the bot's console, and right-click opens the menus.</p>
+  </div>
+
+  <div class="twofig">
+    <div class="shot" role="img" aria-label="The control panel's start page">
+      <div class="cp">
+        <div class="m-title"><span>DCCore - Control Panel</span><span>x</span></div>
+        <div class="cp-body">
+          <div class="cp-pills"><span class="on">Bot</span><span>mIRC</span></div>
+          <div class="cp-grid">
+            <div class="cp-frame"><h5>Bot</h5><dl><dt>Nick</dt><dd>alfa</dd><dt>Network</dt><dd>SomeNet</dd><dt>Running since</dt><dd>Tue 13 Oct 18:02 (3d 3h)</dd><dt>Connection</dt><dd class="cp-on">&#9679; connected (structured console)</dd></dl></div>
+            <div class="cp-frame"><h5>Today</h5><dl><dt>Sent</dt><dd>38 files, 12.4GB</dd><dt>Speed</dt><dd>1.4MB/s</dd><dt>Record</dt><dd>2.1MB/s</dd></dl></div>
+            <div class="cp-frame"><h5>Sending 2/3</h5><dl><dt>someone</dt><dd>48M 64% 812K/s</dd><dt>helen</dt><dd>310M 21% 640K/s</dd></dl></div>
+            <div class="cp-frame"><h5>Library</h5><dl><dt>Files</dt><dd>12,450</dd><dt>Size</dt><dd>412.6GB</dd><dt>Rebuilt</dt><dd>Sun 11 Oct 04:00</dd></dl></div>
+          </div>
+          <div class="cp-btns"><span>OK</span><span>Cancel</span><span>Apply</span></div>
+        </div>
+      </div>
+    </div>
+    <p class="caption"><span class="soon">Next release</span> The control panel opens on a start page. Bot leads to the bot's own settings, the same ones the dashboard has. mIRC leads to the script's.</p>
+  </div>
+
+  <div class="block">
+    <h2>What it gives you</h2>
+    <ul class="facts">
+      <li><b>A live window</b><span>Every event on its own line with a coloured tag. The window's button lights up on activity and turns red on a failed send.</span></li>
+      <li><b>A side panel</b><span>Each running transfer with size, percentage and speed, who is waiting, and today's totals.</span></li>
+      <li><b>Menus for everything</b><span>Right-click a user in the panel or in any channel's nick list to see their queue, clear it or ignore them for a while.</span></li>
+      <li><b>A control panel <span class="soon">Next release</span></b><span>Every bot setting in one window, saved with Apply. Your own mIRC's colours and switches beside them.</span></li>
+      <li><b>Downloads window</b><span>What the bot is fetching from other bots, with its queue.</span></li>
+      <li><b>DCCore Chat</b><span>Talk to other DCCore operators in the channels your bot shares with theirs. It is public: everyone in the channel sees it.</span></li>
+      <li><b>Dark theme and icons <span class="soon">Next release</span></b><span>Dark, light, or following mIRC's own dark mode.</span></li>
+      <li><b>Logs in by itself</b><span>You type the password once when you pair. After that it reconnects on its own, and the password never touches the disk.</span></li>
+    </ul>
+  </div>
+
+  <div class="block">
+    <h2>Install it</h2>
+    <ol class="steps">
+      <li><div>
+        <b>Copy the script and its folders.</b>
+        <p class="note">Put <code>dccore.mrc</code> from the release's <code>scripts/mirc/</code> anywhere, your mIRC folder is fine. Copy any folders beside it too. It needs mIRC 6.10 or later.</p>
+      </div></li>
+      <li><div>
+        <b>Load it and pair it with your bot.</b>
+<pre class="cmd">/load -rs dccore.mrc
+/dccore pair alfa</pre>
+        <p class="note">Use your bot's nick. The @DCCore window opens and the bot asks for its admin password. Type it in the window, once.</p>
+      </div></li>
+      <li><div>
+        <b>Choose what you see.</b>
+        <p class="note">Type <code>/dccore options</code> for the colours, the side panel and the title bar. Right-click in the window for everything else.</p>
+      </div></li>
+    </ol>
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <caption>Its commands</caption>
+      <tbody>
+        <tr><th scope="row">/dccore connect</th><td>Open the window and connect, logging in by itself.</td></tr>
+        <tr><th scope="row">/dccore disconnect</th><td>Close the connection and stop reconnecting.</td></tr>
+        <tr><th scope="row">/dccore options</th><td>What the window shows, its colours, the side panel and the title bar.</td></tr>
+        <tr><th scope="row">/dccore settings</th><td><span class="soon">Next release</span> The control panel, on the bot's side.</td></tr>
+        <tr><th scope="row">/dccore chat [text]</th><td>Open DCCore Chat, or say something in it.</td></tr>
+        <tr><th scope="row">/dccore downloads</th><td>What the bot is fetching from other bots.</td></tr>
+        <tr><th scope="row">/dccore theme dark</th><td><span class="soon">Next release</span> The script's windows dark. <code>light</code> and <code>auto</code> work too.</td></tr>
+        <tr><th scope="row">/dccore raw &lt;command&gt;</th><td>Send any admin console command.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">Everything about the script: <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/ADMIN-CONSOLE.md#the-window-in-mirc">the window in mIRC</a>.</p>
+</section>
+</main>
+
+<footer class="gutter">
+  <div class="foot col">
+    <p>DCCore is free software under the <a href="https://github.com/Ninja-FSE/dccore/blob/main/LICENSE">GNU General Public License, version 3</a>.</p>
+    <p><a href="https://github.com/Ninja-FSE/dccore">Source</a> · <a href="https://github.com/Ninja-FSE/dccore/releases">Releases</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/UPDATES.md">What's new</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/SECURITY.md">Reporting a security problem</a></p>
+  </div>
+</footer>
+</body>
+</html>

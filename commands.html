@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Commands · DCCore</title>
+<meta name="description" content="The commands people type in the channel to get files from a DCCore bot, and the operator's admin console.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top gutter">
+  <div class="top-in col">
+    <a class="brand" href="index.html">DC<span>Core</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="index.html">Overview</a>
+      <a href="commands.html" aria-current="page">Commands</a>
+      <a href="dashboard.html">Web dashboard</a>
+      <a href="mirc.html">mIRC script</a>
+      <a href="start.html">Get started</a>
+    </nav>
+    <a class="dl" href="https://github.com/Ninja-FSE/dccore/releases/latest">Download</a>
+  </div>
+</header>
+
+<main class="gutter">
+<section class="pg col" id="commands" aria-label="Commands">
+  <div class="head">
+    <span class="eyebrow">Commands</span>
+    <h1>Everything is typed in the channel</h1>
+    <p class="lede">The commands are the ones OmenServe and iroffer users already know. The bot answers with a notice, so only the person who asked sees the reply. Here the bot is called <code>alfa</code>: use your bot's own nick.</p>
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <caption>Getting files</caption>
+      <tbody>
+        <tr><th scope="row">@alfa</th><td>Sends you the bot's list. The list goes ahead of queued files, so you never wait behind somebody's albums just to see what is there.</td></tr>
+        <tr><th scope="row">@find &lt;words&gt;</th><td>Searches every bot in the channel at once. Each bot answers with its own matches.</td></tr>
+        <tr><th scope="row">@find "metal church" 1986</th><td>Words in quotes must appear together, in that order.</td></tr>
+        <tr><th scope="row">!alfa &lt;file&gt;</th><td>Asks for one file. Paste the line from the list or from a search reply. It also works as a private message to the bot, if you are in one of its channels.</td></tr>
+        <tr><th scope="row">!alfa !rar &lt;folder&gt;</th><td>Asks for a whole folder, packed as one archive when your turn comes.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <caption>Your queue</caption>
+      <tbody>
+        <tr><th scope="row">@alfa-que</th><td>Shows what you are waiting for and where you are in line.</td></tr>
+        <tr><th scope="row">@alfa-remove</th><td>Cancels everything you have queued.</td></tr>
+        <tr><th scope="row">@alfa-remove &lt;file&gt;</th><td>Cancels just that one file.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <caption>About the bot</caption>
+      <tbody>
+        <tr><th scope="row">@alfa-help</th><td>How to use this bot, in a few short lines.</td></tr>
+        <tr><th scope="row">@alfa-stats</th><td>What the bot has and what it has sent.</td></tr>
+        <tr><th scope="row">@alfa-top</th><td>The files and albums people ask for most.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="block">
+    <h2>For the operator: the admin console</h2>
+    <p>The operator talks to the bot over a password-protected DCC CHAT. Type <code>help</code> there for the full list. These are the ones used most.</p>
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <tbody>
+          <tr><th scope="row">status</th><td>Slots, queue, speed and what is being sent right now.</td></tr>
+          <tr><th scope="row">queue [nick]</th><td>Everyone waiting, in order, or one person's files.</td></tr>
+          <tr><th scope="row">queuemove &lt;nick&gt; up|down</th><td>Moves somebody one place earlier or later in line.</td></tr>
+          <tr><th scope="row">clearqueue &lt;nick&gt;</th><td>Clears somebody's queue.</td></tr>
+          <tr><th scope="row">ignore &lt;nick&gt; &lt;minutes&gt;</th><td>Drops one person's requests for a while. It ends by itself.</td></tr>
+          <tr><th scope="row">ban &lt;pattern&gt;</th><td>A permanent ban, such as <code>*!*@10.0.0.?</code>. <code>unban</code> removes it.</td></tr>
+          <tr><th scope="row">update</th><td>Rebuilds the list from your folders.</td></tr>
+          <tr><th scope="row">lists</th><td>The other bots' lists you hold, and which of them have changed.</td></tr>
+          <tr><th scope="row">fetch [bot]</th><td>Fetches the lists that changed, or one bot's list.</td></tr>
+          <tr><th scope="row">rehash</th><td>Reloads code and settings without dropping anybody's queue.</td></tr>
+          <tr><th scope="row">shutdown now</th><td>Stops the bot.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The whole console, every command and how to log in: <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/ADMIN-CONSOLE.md">the admin console guide</a>.</p>
+  </div>
+</section>
+</main>
+
+<footer class="gutter">
+  <div class="foot col">
+    <p>DCCore is free software under the <a href="https://github.com/Ninja-FSE/dccore/blob/main/LICENSE">GNU General Public License, version 3</a>.</p>
+    <p><a href="https://github.com/Ninja-FSE/dccore">Source</a> · <a href="https://github.com/Ninja-FSE/dccore/releases">Releases</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/UPDATES.md">What's new</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/SECURITY.md">Reporting a security problem</a></p>
+  </div>
+</footer>
+</body>
+</html>

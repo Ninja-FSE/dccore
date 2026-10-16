@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DCCore</title>
+<meta name="description" content="DCCore is an IRC DCC file server: it advertises a list in your channel, sends files and whole albums over DCC, and fetches from other bots. Pure Python, free software.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top gutter">
+  <div class="top-in col">
+    <a class="brand" href="index.html">DC<span>Core</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="commands.html">Commands</a>
+      <a href="dashboard.html">Web dashboard</a>
+      <a href="mirc.html">mIRC script</a>
+      <a href="start.html">Get started</a>
+    </nav>
+    <a class="dl" href="https://github.com/Ninja-FSE/dccore/releases/latest">Download</a>
+  </div>
+</header>
+
+<main class="gutter">
+<section class="pg col" id="home" aria-label="Overview">
+  <div class="head">
+    <h1>A file server for your IRC channel</h1>
+    <p class="lede">DCCore sits in your channel, advertises a list of what you share, and sends files and whole albums over DCC to whoever asks. It works the way OmenServe always has, so nobody in the channel has anything new to learn. It can fetch from other bots too.</p>
+    <p class="links">
+      <a href="https://github.com/Ninja-FSE/dccore/releases/latest">Download the latest release</a>
+      <a href="https://github.com/Ninja-FSE/dccore">Source on GitHub</a>
+    </p>
+  </div>
+
+  <div class="block">
+    <figure class="window" aria-label="An IRC channel with a DCCore bot in it">
+      <div class="window-bar"><span>#somechannel</span><span>alfa is a DCCore bot</span></div>
+<pre class="log"><span class="t">[21:04]</span> <span class="bot">&lt;alfa&gt;</span>   Type: @alfa For My List Of: 12450 Files (412.6GB)    Slots: 2/3    Queued: 5    Speed: 1.4MB/s    Total Sent: 8.2TB    Search: ON
+<span class="t">[21:05]</span> <span class="you">&lt;someone&gt;</span> @find live at the roxy
+<span class="t">[21:05]</span> <span class="bot">*alfa*</span>  Found: 3 Match(es) For live at the roxy   Sending: 3   Slots: 1/3 Free   Queued: 5
+<span class="t">[21:06]</span> <span class="you">&lt;someone&gt;</span> !alfa Some Band - Live At The Roxy - 03 - Opening Song.flac
+<span class="t">[21:06]</span> <span class="ntc">-alfa-</span> Sending: Some Band - Live At The Roxy - 03 - Opening Song.flac   Status: Active Transfer Started
+<span class="t">[21:07]</span> <span class="you">&lt;someone&gt;</span> !alfa !rar Some Band - Live At The Roxy
+<span class="t">[21:07]</span> <span class="ntc">-alfa-</span> Added Some Band - Live At The Roxy.rar to your personal queue at position #1 of 100.</pre>
+    </figure>
+    <p class="caption">What a channel sees. Lines between asterisks are private messages and dashes are notices: only the person who asked sees those.</p>
+  </div>
+
+  <div class="block">
+    <h2>Three ways to use it</h2>
+    <div class="ways">
+      <a class="way" href="commands.html"><b>In the channel</b><span>Everyone types the same commands they already know: the list, a search, a file, an album.</span><i>The commands</i></a>
+      <a class="way" href="dashboard.html"><b>In a browser</b><span>The operator runs the bot from a web page: transfers, queues, lists, settings and statistics.</span><i>The web dashboard</i></a>
+      <a class="way" href="mirc.html"><b>In mIRC</b><span>A script turns the bot into a window in mIRC, with a live side panel and a control panel.</span><i>The mIRC script</i></a>
+    </div>
+  </div>
+
+  <div class="block">
+    <h2>What it does</h2>
+    <ul class="facts">
+      <li><b>Serves files over DCC</b><span>Per-user and global queues, the slots you choose, and DCC RESUME, so a broken download continues instead of starting over.</span></li>
+      <li><b>Packs an album on request</b><span>A whole folder goes out as one archive, packed when somebody asks for it.</span></li>
+      <li><b>Keeps a searchable list</b><span>In .txt, .zip and .rar. A scan that fails never replaces a good list, and searches keep working while it rebuilds.</span></li>
+      <li><b>Several lists, several channels</b><span>Bind a list to each channel, with its own folders, its own advert and its own file types left out.</span></li>
+      <li><b>Fetches from other bots</b><span>Ask for a file, a list or a packed folder, or send one search and collect every bot's reply.</span></li>
+      <li><b>Remembers people</b><span>Someone who disconnects keeps their place in the queue for five minutes and carries on when they rejoin.</span></li>
+      <li><b>Defends itself</b><span>Rolling flood limits, escalating mutes, hostmask bans, and every other bot treated as untrusted.</span></li>
+      <li><b>Runs anywhere</b><span>Linux, Windows and macOS, pure Python with nothing else to install. Thousands of tests run on all three on every change.</span></li>
+    </ul>
+  </div>
+
+  <div class="block">
+    <h2>Responsible use</h2>
+    <p>DCCore is for sharing files you have the right to share: your own recordings and creations, public-domain and Creative Commons works, and anything else whose licence allows it. It comes with no content and points to none. You decide what goes into your shared folders, and you are responsible for it.</p>
+  </div>
+</section>
+</main>
+
+<footer class="gutter">
+  <div class="foot col">
+    <p>DCCore is free software under the <a href="https://github.com/Ninja-FSE/dccore/blob/main/LICENSE">GNU General Public License, version 3</a>.</p>
+    <p><a href="https://github.com/Ninja-FSE/dccore">Source</a> · <a href="https://github.com/Ninja-FSE/dccore/releases">Releases</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/UPDATES.md">What's new</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/SECURITY.md">Reporting a security problem</a></p>
+  </div>
+</footer>
+</body>
+</html>

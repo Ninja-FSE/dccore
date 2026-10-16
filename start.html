@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Get started · DCCore</title>
+<meta name="description" content="Install DCCore on Windows, Linux or macOS: download, run the launcher, answer the setup questions.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top gutter">
+  <div class="top-in col">
+    <a class="brand" href="index.html">DC<span>Core</span></a>
+    <nav class="nav" aria-label="Pages">
+      <a href="index.html">Overview</a>
+      <a href="commands.html">Commands</a>
+      <a href="dashboard.html">Web dashboard</a>
+      <a href="mirc.html">mIRC script</a>
+      <a href="start.html" aria-current="page">Get started</a>
+    </nav>
+    <a class="dl" href="https://github.com/Ninja-FSE/dccore/releases/latest">Download</a>
+  </div>
+</header>
+
+<main class="gutter">
+<section class="pg col" id="start" aria-label="Get started">
+  <div class="head">
+    <span class="eyebrow">Get started</span>
+    <h1>Running in a few minutes</h1>
+    <p class="lede">You need Python 3.10 or newer and a folder of files you want to share. Nothing else has to be installed.</p>
+  </div>
+
+  <ol class="steps">
+    <li><div>
+      <b>Download the latest release and extract it.</b>
+      <p class="note">Any folder will do. Your settings are kept in <code>conf/</code> and your data in <code>data/</code>, and an upgrade never changes either.</p>
+    </div></li>
+    <li><div>
+      <b>Run the launcher for your system.</b>
+<pre class="cmd">scripts\windows\start-dccore.bat        (Windows: double-click it)
+scripts/linux/start-dccore.sh           (Linux)
+scripts/macos/start-dccore.command      (macOS)</pre>
+      <p class="note">On Windows, if Python is missing, the launcher offers to install it for you.</p>
+    </div></li>
+    <li><div>
+      <b>Answer the setup questions.</b>
+      <p class="note">The first run asks for the bot's name, the server, its channels, your own nick as its admin and the folder you share. It can ask in the terminal or on a setup page in your browser.</p>
+    </div></li>
+    <li><div>
+      <b>Build the first list.</b>
+<pre class="cmd">python3 update_list.py        (Windows: py update_list.py)</pre>
+      <p class="note">On a large library this takes a while. The bot keeps answering while it runs.</p>
+    </div></li>
+  </ol>
+
+  <div class="block">
+    <h2>Before you open it to the world</h2>
+    <ul class="facts">
+      <li><b>Check first</b><span><code>start-dccore check</code> tests your settings without going online.</span></li>
+      <li><b>Open the DCC ports</b><span>Files go out on a small range of ports. Allow it in your firewall and forward it in your router. The check prints your range.</span></li>
+      <li><b>Start with the system</b><span>One script installs it: a user service on Linux, a launch agent on macOS, a task at logon on Windows.</span></li>
+      <li><b>Hear about updates</b><span>Once a day the bot asks GitHub whether a new release is out, and says so in the dashboard, the console and the mIRC window.</span></li>
+      <li><b>Upgrading</b><span>Stop the bot, back up <code>data/</code> and <code>conf/</code>, and extract the new release. An upgrade never changes your settings or statistics.</span></li>
+    </ul>
+    <p class="note">The full guides: <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/INSTALL.md">installing and configuring</a> and <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/WINDOWS.md">Windows</a>.</p>
+  </div>
+</section>
+</main>
+
+<footer class="gutter">
+  <div class="foot col">
+    <p>DCCore is free software under the <a href="https://github.com/Ninja-FSE/dccore/blob/main/LICENSE">GNU General Public License, version 3</a>.</p>
+    <p><a href="https://github.com/Ninja-FSE/dccore">Source</a> · <a href="https://github.com/Ninja-FSE/dccore/releases">Releases</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/UPDATES.md">What's new</a> · <a href="https://github.com/Ninja-FSE/dccore/blob/main/docs/SECURITY.md">Reporting a security problem</a></p>
+  </div>
+</footer>
+</body>
+</html>
