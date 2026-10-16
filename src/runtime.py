@@ -54,6 +54,8 @@ change nothing except to make it look as though it had. Their behaviour across
 a rehash is unchanged.
 """
 
+import collections
+import re
 import threading
 import time
 
@@ -120,7 +122,22 @@ dcc_address_detected = ""
 dcc_address_found_at = None
 
 # Per-user bookkeeping -------------------------------------------------------
-failed_transfers = {}    # Failed-transfer counter, per user
+# Failed sends per nick today (#1389, DAILY_SEND_FAILS_LIMIT), keyed like
+# dcc_queue: {nick_key: {"day": date, "fails": n, "paused": bool}}. Only
+# dcc.py's send-fail functions touch it, under failed_transfers_lock.
+failed_transfers = {}    # Failed sends per nick today (#1389)
+failed_transfers_lock = threading.Lock()
+# The DAILY_SEND_FAILS_LIMIT circuit breaker (#1389), all under
+# send_connected_lock: whether any DCC send has connected since start-up; the
+# never-connected sends in a row since the last one that did, and the nicks
+# they were for (dcc.never_connected_counts()); and whether this streak's
+# "not counted" line has been logged. dcc.note_send_connected() resets the
+# streak. Here so a !rehash keeps them.
+send_connected_lock = threading.Lock()
+send_connected_since_start = False
+never_connected_streak = 0
+never_connected_streak_nicks = set()
+never_connected_streak_logged = False
 channel_users    = {}    # Users currently seen in the channels
 banned_users     = {}    # Currently banned users, in memory
 user_requests    = {}    # Command timestamps per user, for anti-flood
@@ -226,6 +243,11 @@ library_scan_turns = threading.Condition()  # dcc.py: one library scan per nick 
 # this one is held BY the rehash.
 config_reload_lock = threading.RLock()
 
+# When irc.reclaim_main_nick() last asked the server for the main nick, so
+# the asks are spaced however often its holder leaves. A plain value, not a
+# container: kept here so a !rehash of irc.py does not forget it.
+nick_reclaim_asked_at = None
+
 # Only one rehash at a time.
 #
 # handle_rehash_request() reloads modules AND then compares the channel list it
@@ -271,10 +293,30 @@ list_index_lock = threading.Lock()
 # reader opening one would wait on each other for ever.
 list_index_read_lock = threading.Lock()
 
+# Set while no startup backfill of the index is running (#1296). The
+# backfill runs on a thread of its own so the bot connects without waiting
+# for it, and the dashboard's readers wait on this before they answer: an
+# index still being filled would report every list it has not reached yet as
+# holding no match. Set from the start, so a process that never runs one
+# never waits.
+list_index_backfill_done = threading.Event()
+list_index_backfill_done.set()
+
+# list_index's count of the backfills running now (#1367), changed under
+# this; read without it.
+list_index_backfills_lock = threading.Lock()
+
 # transfer_log.py's database (#1068). One writer at a time, so two transfers
 # ending together never meet a locked file; here, not in that module, for the
 # reason every other lock in this file is.
 transfer_log_lock = threading.Lock()
+
+# speed_cap.py's clocks (#1352): per direction, the cap the clock runs at and
+# the moment the line is next free. One clock for every transfer that way, so
+# here: a second one after a reload would let the old transfers and the new
+# ones each take the whole cap.
+speed_cap_lock = threading.Lock()
+speed_cap_clocks = {}
 
 # db.py's download counters database (#1133). One writer at a time - the
 # sends, the startup migrations and an import of the old JSON - so two
@@ -331,6 +373,13 @@ audio_reading_last = None
 # True while commands.retry_audio_rewrite_when_free() waits for the list
 # downloads to finish, so one wait at a time (#1182 audit).
 audio_retry_waiting = False
+# The tokens this bot gave the update_list.py runs it started (#1365), newest
+# last, at most RUN_TOKENS_KEPT: the shutdown asks those runs, and only those,
+# to stop. Here so a !rehash does not forget a rebuild that is still going. A
+# tuple, rebound as a whole by commands.audio_run_env(): nothing else keeps a
+# reference to it, so it is not one of the containers defaults.py shares.
+run_tokens = ()
+RUN_TOKENS_KEPT = 16
 
 # Automatic list grabbing (#926 item 5), list_grab.py. Here for the same
 # reasons: a start guard a rehash cannot reset, and a wait in progress that a
@@ -760,8 +809,91 @@ class OutboundPacer:
                     self._abandoned.add(ticket)
                     self._cond.notify_all()
 
+    def hold_for(self, seconds):
+        """Push the next free slot to at least `seconds` from now (#1386).
+
+        The later of that and the slot already booked, so a hold never
+        brings a send forward. Every lane waits on this one clock, so the
+        hold stops them all; the waiters are woken to see the new time
+        rather than send at the one they were sleeping towards.
+        """
+        with self._cond:
+            self._next_allowed = max(self._next_allowed,
+                                     time.monotonic() + seconds)
+            self._cond.notify_all()
+
 
 outbound_pacer = OutboundPacer()
+
+
+# Target change too fast (#1386) ---------------------------------------------
+#
+# ircu limits how fast a client may start messaging new targets, and answers
+# a line over the limit with 439 (707 on hybrid, ratbox and charybdis): the
+# line was DROPPED. irc.py holds the pacer above when one arrives, and puts
+# the refused line back at the front of the lane it came from, once. For
+# that it has to know which line went to that target and from which lane,
+# and that is what the paced senders record here, as each line goes out.
+#
+# Bounded both ways: the last PACED_LINES_KEPT lines, and only lines sent
+# within PACED_LINE_WINDOW seconds count. A refusal arrives within a second
+# or two of the line it refuses, so anything older is not what it means.
+PACED_LINES_KEPT = 30
+PACED_LINE_WINDOW = 60.0
+recent_paced_lines = collections.deque(maxlen=PACED_LINES_KEPT)
+recent_paced_lock = threading.Lock()
+
+_PACED_LINE_TARGET = re.compile(r"^(?:PRIVMSG|NOTICE)\s+(\S+)\s", re.IGNORECASE)
+
+
+class ResentLine(str):
+    """A refused line on its way out a second time (#1386). The lanes hold
+    plain strings; this is one that carries the mark, so the record it makes
+    when it is sent says so, and a second refusal does not put it back."""
+
+
+def _paced_line_target(line):
+    """The target of a PRIVMSG or NOTICE line, or None for any other line."""
+    match = _PACED_LINE_TARGET.match(str(line or ""))
+    return match.group(1) if match else None
+
+
+def note_paced_line(line, lane, owner=None):
+    """Record a paced line that has just been sent (#1386): its target, the
+    lane it came from and, for the standard lane, whose queue it was in.
+
+    `lane` is "fetch", "vip", "standard", "debug", or None for a line that
+    no lane can take back - a DCC ACCEPT, and the unpaced DCC SEND handshake,
+    send error NOTICEs and admin DCC CHAT offer: such a line is recorded,
+    so that a refusal for it is not taken for an older line to the same
+    target. A line that is not a PRIVMSG or NOTICE is not recorded.
+    """
+    target = _paced_line_target(line)
+    if target is None:
+        return
+    entry = {"at": time.monotonic(), "target": target, "line": line,
+             "lane": lane, "owner": owner,
+             "resent": isinstance(line, ResentLine)}
+    with recent_paced_lock:
+        recent_paced_lines.append(entry)
+
+
+def take_paced_line(target, fold=str.lower):
+    """The record of the most recent paced line sent to `target` within
+    PACED_LINE_WINDOW seconds, removed so that it is answered once; None when
+    there is none. `fold` is the server's case folding (irc.irc_lower())."""
+    wanted = fold(target)
+    cutoff = time.monotonic() - PACED_LINE_WINDOW
+    with recent_paced_lock:
+        for index in range(len(recent_paced_lines) - 1, -1, -1):
+            entry = recent_paced_lines[index]
+            if entry["at"] < cutoff:
+                # Appended in time order: everything before it is older still.
+                return None
+            if fold(entry["target"]) == wanted:
+                del recent_paced_lines[index]
+                return entry
+    return None
 
 
 def channel_users_lock():

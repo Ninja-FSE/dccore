@@ -259,15 +259,20 @@ class TheClockStopsWhenTheBytesDo(DCCoreTestCase):
         with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
             code = handle.read()
         body = code[code.index("def start_dcc_send("):]
+        # The stamp is used in finish_send(), start_dcc_send()'s finally
+        # block since #1336: between them are the rest of start_dcc_send() up
+        # to the call, and finish_send() up to the use.
+        ending = code[code.index("def finish_send("):code.index("def start_dcc_send(")]
 
         stamped = body.index("transfer_finished_at = final_ack_at if transfer_completed else time.time()")
-        used = body.index("_ended = (transfer_finished_at", stamped)
-        between = body[stamped:used]
+        handed_over = body.index("finish_send(SentFile(", stamped)
+        used = ending.index("_ended = (sent.transfer_finished_at")
+        between = body[stamped:handed_over] + ending[:used]
 
         self.assertNotIn("time.sleep(", between,
                          "a pause between stopping the clock and reading it is "
                          "harmless to the figure but holds a DCC slot for nothing")
-        self.assertNotIn("time.sleep(1.5)", body,
+        self.assertNotIn("time.sleep(1.5)", body + ending,
                          "the settling sleep is back; the final ack already says "
                          "the receiver has closed its file")
 

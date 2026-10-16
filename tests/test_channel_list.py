@@ -34,6 +34,7 @@ if os.path.join(REPO_ROOT, "tests") not in sys.path:
 import irc  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
+from tests.test_the_welcome_on_its_own import WelcomeHarness  # noqa: E402
 
 
 def join_argument():
@@ -150,24 +151,20 @@ class TheOrdinaryCasesStillWork(DCCoreTestCase):
                 self.assertEqual(join_argument(), "")
 
 
-class TheJoinUsesIt(unittest.TestCase):
-    """The fix is only a fix if the JOIN actually calls it. Read out of the
-    source rather than retyped: a helper that exists and is not used would
-    satisfy every test above."""
+class TheJoinUsesIt(WelcomeHarness):
+    """The fix is only a fix if the JOIN actually calls it: a helper that
+    exists and is not used would satisfy every test above. Read out of the
+    source until #1306 made the welcome callable on its own."""
 
     def test_the_join_thread_is_handed_the_normalised_list(self):
-        import io
+        # The debug channel too: channels_we_should_be_in() adds it, which
+        # the raw setting, however well split, does not.
+        self.set_config(CHANNEL="#alpha, #beta", DEBUG_CHANNEL="#thedebug")
+        self.quietly(irc.answer_welcome, ":irc.example.net 001 alfa :Welcome", self.conn)
 
-        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
-            source = handle.read()
-
-        self.assertIn("args=(s, channels_we_should_be_in())",
-                      source.replace("\n", " ").replace("  ", " "),
-                      "the JOIN thread is not being handed "
-                      "channels_we_should_be_in() - if it takes config.CHANNEL "
-                      "directly, the space bug is back")
-        self.assertNotIn("args=(s, config.CHANNEL)", source,
-                         "the JOIN is passing the raw setting again")
+        self.assertEqual(self.started(irc.delayed_join), [(self.conn, ["#alpha", "#beta", "#thedebug"])],
+                         "the JOIN thread is not being handed channels_we_should_be_in() - "
+                         "if it takes config.CHANNEL directly, the space bug is back")
 
 
 if __name__ == "__main__":

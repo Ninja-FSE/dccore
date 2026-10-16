@@ -134,20 +134,23 @@ class ThePalette(unittest.TestCase):
 
 
 class TheDialogAndTheSave(unittest.TestCase):
+    """The menu is on the settings window's Script tab, Window page (it
+    was the Options dialog's); dccore.sw.opt.fill fills it and
+    dccore.sw.opt.save, which Apply runs, reads it back."""
 
-    def test_the_combo_is_inside_the_window_box_and_collides_with_nothing(self):
+    def table(self):
         source = script()
-        dialog = source[source.index("dialog dccore.opt {"):]
-        dialog = dialog[:dialog.index("\n}\n")]
-        ids = [int(n) for n in re.findall(
-            r'^\s+(?:check|edit|text|box|button) "[^"]*", (\d+)', dialog, re.M)]
-        ids += [int(n) for n in re.findall(r"^\s+combo (\d+),", dialog, re.M)]
-        self.assertGreater(len(ids), 30, "the dialog scan found almost nothing")
-        self.assertEqual(len(ids), len(set(ids)), "a dialog id is used twice")
+        dialog = source[source.index("dialog dccore.set {"):]
+        return dialog[:dialog.index("\n}\n")]
 
-        window_box = re.search(r'box "Window", 300, (\d+) (\d+) (\d+) (\d+)', dialog)
+    def test_the_menu_is_inside_the_window_frame_and_collides_with_nothing(self):
+        dialog = self.table()
+        ids = [int(n) for n in re.findall(r'^\s+\w+ (?:"[^"]*", )?(\d+), ', dialog, re.M)]
+        self.assertGreater(len(ids), 300, "the dialog scan found almost nothing")
+        self.assertEqual(len(ids), len(set(ids)), "a dialog id is used twice")
+        window_box = re.search(r'box "Window", \d+, (\d+) (\d+) (\d+) (\d+)', dialog)
         bx, by, bw, bh = map(int, window_box.groups())
-        for pattern in (r"combo 308, (\d+) (\d+) (\d+) \d+", r'text "Background", 307, (\d+) (\d+) (\d+) \d+'):
+        for pattern in (r"combo 1673, (\d+) (\d+) (\d+) \d+", r'text "Background", 1672, (\d+) (\d+) (\d+) \d+'):
             x, y, w = map(int, re.search(pattern, dialog).groups())
             self.assertTrue(bx <= x and x + w <= bx + bw, pattern)
             self.assertTrue(by <= y + 10 <= by + bh, pattern)
@@ -155,32 +158,32 @@ class TheDialogAndTheSave(unittest.TestCase):
     def test_the_selected_line_and_the_saved_colour_are_the_same_mapping(self):
         """Line 1 is "none" = -1, line 2 is colour 0 ... line 17 is 15: the
         fill selects colour + 2 and the save stores line - 2, so a round trip
-        through the dialog cannot move the colour."""
+        through the window cannot move the colour."""
         source = script()
-        self.assertIn("did -c dccore.opt 308 $calc($dccore.opt(bg) + 2)", source)
-        self.assertIn("hadd dccore bg $calc($did(dccore.opt,308).sel - 2)", source)
-        self.assertIn("did -a dccore.opt 308 none", source)
+        # through the helpers of a menu filled when its page is first shown
+        # (#1382): its recipe "bg", "none" then the colours
+        self.assertIn("dccore.sw.cb.select $1 $calc($dccore.opt(bg) + 2)", alias_body(source, "dccore.fillbg"))
+        self.assertIn("dccore.sw.cb.lazy $1 bg", alias_body(source, "dccore.fillbg"))
+        self.assertIn("dccore.fillbg 1673", alias_body(source, "dccore.sw.opt.fill"))
+        self.assertIn("hadd dccore bg $calc($dccore.sw.cb.sel(1673) - 2)", source)
+        self.assertIn("did -a dccore.set $1 none (mIRC's)", alias_body(source, "dccore.sw.cb.fill"))
 
     def test_it_defaults_to_no_picture(self):
         self.assertIn("dccore.default bg -1", script())
 
-    def test_it_is_applied_when_the_window_opens_and_when_options_are_saved(self):
+    def test_it_is_applied_when_the_window_opens_and_when_the_settings_are_saved(self):
         source = script()
         self.assertIn("dccore.background", alias_body(source, "dccore.window"))
-        save = source[source.index("on *:dialog:dccore.opt:sclick:1:"):]
-        save = save[:save.index("on *:dialog:dccore.opt:sclick:501:")]
-        self.assertIn("dccore.background", save)
+        self.assertIn("dccore.background", alias_body(source, "dccore.sw.opt.save"))
 
-    def test_saving_the_options_repaints_the_picture_only_if_the_colour_changed(self):
-        """Re-applying a picture repaints the whole window; an options save
-        that changed the font size or a checkbox has no business doing that."""
-        source = script()
-        save = source[source.index("on *:dialog:dccore.opt:sclick:1:"):]
-        save = save[:save.index("on *:dialog:dccore.opt:sclick:501:")]
-        self.assertIn("var %bg = $dccore.opt(bg)", save)
+    def test_saving_repaints_the_picture_only_if_the_colour_changed(self):
+        """Re-applying a picture repaints the whole window; a save that
+        changed the font size or a checkbox has no business doing that."""
+        save = alias_body(script(), "dccore.sw.opt.save")
+        self.assertIn("%bg = $dccore.opt(bg)", save)
         self.assertIn("if (%bg != $dccore.opt(bg)) { dccore.background }", save)
-        # remembered before the dialog's values are read into the table
-        self.assertLess(save.index("var %bg = $dccore.opt(bg)"), save.index("hadd dccore bg "))
+        # remembered before the window's values are read into the table
+        self.assertLess(save.index("%bg = $dccore.opt(bg)"), save.index("hadd dccore bg "))
         self.assertLess(save.index("hadd dccore bg "), save.index("if (%bg != $dccore.opt(bg))"))
 
 
@@ -205,39 +208,33 @@ class TheAlias(unittest.TestCase):
 class ThePanelHeadingColour(unittest.TestCase):
     """The side panel's headings (Sending, Queue, Today, Since) are drawn in
     col.head, which defaulted to navy and had no control: on a black window
-    they could not be read and could not be changed. Same combo, fill and
-    save as the other colours."""
+    they could not be read and could not be changed. Same menu, fill and
+    save as the other colours, on the Script tab."""
 
     def test_the_headings_are_drawn_in_the_saved_colour(self):
         panel = alias_body(script(), "dccore.panel")
-        self.assertIn("var %head = $dccore.opt(col.head)", panel)
+        # the saved colour, made legible on a dark background first (#1368)
+        self.assertIn("var %head = $dccore.lcol(head)", panel)
+        self.assertIn("alias dccore.lcol { return $dccore.theme.legible($dccore.opt(col. $+ $1),list) }", script())
         self.assertGreaterEqual(panel.count("aline -l %head"), 4)
 
-    def test_the_combo_is_filled_and_saved_like_the_others(self):
+    def test_the_menu_is_filled_and_saved_like_the_others(self):
         source = script()
-        self.assertIn("dccore.fillcombo 218 $dccore.opt(col.head)", source)
-        self.assertIn("hadd dccore col.head $calc($did(dccore.opt,218).sel - 1)", source)
+        self.assertIn("dccore.fillcombo 1642 $dccore.opt(col.head)", source)
+        self.assertIn("hadd dccore col.head $calc($dccore.sw.cb.sel(1642) - 1)", source)
 
-    def test_it_sits_in_the_show_box_and_collides_with_nothing(self):
+    def test_it_sits_in_the_colours_frame_beside_its_label(self):
         source = script()
-        dialog = source[source.index("dialog dccore.opt {"):]
+        dialog = source[source.index("dialog dccore.set {"):]
         dialog = dialog[:dialog.index("\n}\n")]
-        box = re.search(r'box "Show in @DCCore", 100, (\d+) (\d+) (\d+) (\d+)', dialog)
+        box = re.search(r'box "Colours", \d+, (\d+) (\d+) (\d+) (\d+)', dialog)
         bx, by, bw, bh = map(int, box.groups())
-        combo = re.search(r"combo 218, (\d+) (\d+) (\d+) \d+", dialog)
-        label = re.search(r'text "Panel headings", 217, (\d+) (\d+) (\d+) \d+', dialog)
+        combo = re.search(r"combo 1642, (\d+) (\d+) (\d+) \d+", dialog)
+        label = re.search(r'text "Panel headings", 1662, (\d+) (\d+) (\d+) \d+', dialog)
         for x, y, w in (map(int, combo.groups()), map(int, label.groups())):
             self.assertTrue(bx <= x and x + w <= bx + bw)
-            self.assertTrue(by <= y + 10 <= by + bh, "runs out of the box")
-        # not over the status-line controls above it (edit 215 ends at y 80)
-        self.assertGreater(int(label.group(2)), 69 + 11)
+            self.assertTrue(by <= y + 10 <= by + bh, "runs out of the frame")
+        self.assertLess(int(label.group(1)) + int(label.group(3)), int(combo.group(1)))
 
-    def test_the_panel_is_redrawn_when_the_options_are_saved(self):
-        source = script()
-        save = source[source.index("on *:dialog:dccore.opt:sclick:1:"):]
-        save = save[:save.index("on *:dialog:dccore.opt:sclick:501:")]
-        self.assertIn("dccore.panel", save)
-
-
-if __name__ == "__main__":
-    unittest.main()
+    def test_the_panel_is_redrawn_when_the_settings_are_saved(self):
+        self.assertIn("dccore.panel", alias_body(script(), "dccore.sw.opt.save"))

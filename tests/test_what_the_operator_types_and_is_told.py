@@ -15,9 +15,9 @@
 
 import io
 import os
-import re
 import sys
 import tempfile
+import tokenize
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -42,8 +42,30 @@ def code_only(name):
     """
     with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8") as handle:
         text = handle.read()
-    text = re.sub(chr(35) + "[^" + chr(10) + "]*", "", text)
-    return re.sub(r'"""..*?"""', "", text, flags=re.S)
+    # By token (#1340). A regex pairing triple quotes in order went wrong
+    # wherever a comment-stripping pass had already eaten a closing one -
+    # a docstring ending in "(#962).", say - and from there on it took code
+    # for docstrings: a docstring added above the abort message hid it.
+    starts = [0]
+    for line in text.splitlines(keepends=True):
+        starts.append(starts[-1] + len(line))
+    cuts = []
+    tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    statement_starts = (tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT)
+    previous = None
+    for index, token in enumerate(tokens):
+        span = (starts[token.start[0] - 1] + token.start[1], starts[token.end[0] - 1] + token.end[1])
+        if token.type == tokenize.COMMENT:
+            cuts.append(span)
+        elif (token.type == tokenize.STRING
+              and (previous is None or previous.type in statement_starts)
+              and tokens[index + 1].type == tokenize.NEWLINE):
+            cuts.append(span)
+        if token.type not in (tokenize.COMMENT, tokenize.NL):
+            previous = token
+    for begin, end in reversed(cuts):
+        text = text[:begin] + text[end:]
+    return text
 
 
 class TheLeadingSlashComesOff(unittest.TestCase):

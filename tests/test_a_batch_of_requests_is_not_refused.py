@@ -44,11 +44,11 @@ class Remembering(LookupBase):
 
     def test_the_same_file_asked_for_twice_is_scanned_once(self):
         self.ask(self.a_track())
-        scans_after_first = len(self.walks)
+        scans_after_first = len(self.scans)
         self.assertEqual(scans_after_first, 1, "the first request should have scanned")
         self.ask(self.a_track())
 
-        self.assertEqual(len(self.walks), scans_after_first,
+        self.assertEqual(len(self.scans), scans_after_first,
                          "the second request paid for the scan again")
         self.assertEqual(self.errors(), [])
 
@@ -58,11 +58,11 @@ class Remembering(LookupBase):
         self.assertNotEqual(first, second)
 
         self.ask(first)
-        scans_after_first = len(self.walks)
+        scans_after_first = len(self.scans)
         self.assertEqual(scans_after_first, 1, "the first request should have scanned")
         self.ask(second)
 
-        self.assertEqual(len(self.walks), scans_after_first, self.walks)
+        self.assertEqual(len(self.scans), scans_after_first, self.scans)
         self.assertEqual(self.errors(), [])
 
     def test_a_whole_pasted_batch_is_served(self):
@@ -73,7 +73,7 @@ class Remembering(LookupBase):
             self.ask(name)
 
         self.assertEqual(self.errors(), [], "a row in the batch was refused")
-        self.assertEqual(len(self.walks), 1,
+        self.assertEqual(len(self.scans), 1,
                          "one scan for the whole batch, not one per row")
 
     def test_a_file_that_has_gone_is_not_served_from_memory(self):
@@ -88,14 +88,14 @@ class Remembering(LookupBase):
     def test_the_memory_expires(self):
         name = self.a_track()
         self.ask(name)
-        scans_after_first = len(self.walks)
+        scans_after_first = len(self.scans)
         self.assertEqual(scans_after_first, 1, "the first request should have scanned")
         with mock.patch.object(dcc, "LOOKUP_HIT_TTL_SECONDS", -1), \
                 mock.patch.object(dcc, "LOOKUP_FOLDER_MEMORY", 0):
             dcc._lookup_folders.clear()
             self.ask(name)
 
-        self.assertGreater(len(self.walks), scans_after_first)
+        self.assertGreater(len(self.scans), scans_after_first)
 
     def test_the_memories_are_bounded(self):
         with mock.patch.object(dcc, "LOOKUP_HIT_MEMORY", 5), \
@@ -114,7 +114,7 @@ class Remembering(LookupBase):
             self.ask("Nothing Here At All.flac")
 
         self.assertEqual(self.errors(), ["file_not_found"] * 4)
-        self.assertEqual(len(self.walks), 1)
+        self.assertEqual(len(self.scans), 1)
 
 
 class WaitingForASlot(LookupBase):
@@ -159,7 +159,7 @@ class WaitingForASlot(LookupBase):
             self.ask("Something Else Entirely.flac")
 
         self.assertEqual(self.errors(), ["busy"])
-        self.assertEqual(self.walks, [])
+        self.assertEqual(self.scans, [])
 
 
 class TheMemoryIsAHintNotAnAuthority(unittest.TestCase):

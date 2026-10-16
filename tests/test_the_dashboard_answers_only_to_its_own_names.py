@@ -24,6 +24,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import adminchat  # noqa: E402
+import web_login  # noqa: E402
 import webserver  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
@@ -38,9 +39,10 @@ class TheNamesItAnswersTo(DCCoreTestCase):
 
     def setUp(self):
         super().setUp()
-        self.real_machine_names = webserver._machine_names
-        webserver._machine_names = lambda: frozenset({OWN_NAME, OWN_NAME + ".local"})
-        self.addCleanup(setattr, webserver, "_machine_names", self.real_machine_names)
+        # web_login since #1322: the host check reads its own name.
+        self.real_machine_names = web_login._machine_names
+        web_login._machine_names = lambda: frozenset({OWN_NAME, OWN_NAME + ".local"})
+        self.addCleanup(setattr, web_login, "_machine_names", self.real_machine_names)
 
     def ok(self, host, bound="127.0.0.1"):
         return webserver._dashboard_host_ok(host, bound=bound)

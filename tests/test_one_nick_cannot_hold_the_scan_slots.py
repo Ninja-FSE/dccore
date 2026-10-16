@@ -49,16 +49,16 @@ class AFewMissesAMinute(NickCase):
         allowed = dcc.LOOKUP_NICK_MISSES
         for name in self.made_up(allowed + 3):
             self.ask(name, user="dave")
-        self.assertEqual(len(self.walks), allowed)
+        self.assertEqual(len(self.scans), allowed)
         self.assertEqual(self.errors(), ["file_not_found"] * allowed + ["busy"] * 3)
 
     def test_everyone_else_is_still_served(self):
         for name in self.made_up(dcc.LOOKUP_NICK_MISSES + 1):
             self.ask(name, user="dave")
-        walks = len(self.walks)
+        walks = len(self.scans)
         self.notices.clear()
         self.ask(self.a_track(), user="erin")
-        self.assertEqual(len(self.walks), walks + 1, "erin's lookup ran")
+        self.assertEqual(len(self.scans), walks + 1, "erin's lookup ran")
         self.assertEqual(self.errors(), [])
 
     def test_the_window_moves_on(self):
@@ -67,9 +67,9 @@ class AFewMissesAMinute(NickCase):
         for nick in list(dcc._nick_misses):
             dcc._nick_misses[nick] = [when - dcc.LOOKUP_NICK_MISS_WINDOW_SECONDS - 1
                                       for when in dcc._nick_misses[nick]]
-        walks = len(self.walks)
+        walks = len(self.scans)
         self.ask("Something New.flac", user="dave")
-        self.assertEqual(len(self.walks), walks + 1)
+        self.assertEqual(len(self.scans), walks + 1)
 
     def test_finding_files_is_never_held_back(self):
         with mock.patch.object(dcc, "LOOKUP_NICK_MISSES", 1):
@@ -79,7 +79,7 @@ class AFewMissesAMinute(NickCase):
                 dcc._lookup_folders.clear()
                 self.ask(self.a_track(), user="dave")
         self.assertEqual(self.errors(), [])
-        self.assertEqual(len(self.walks), 3, "each one scanned, and each one found it")
+        self.assertEqual(len(self.scans), 3, "each one scanned, and each one found it")
 
 
 class OneScanAtATime(NickCase):
@@ -88,9 +88,9 @@ class OneScanAtATime(NickCase):
         self.addCleanup(dcc._end_scan_turn, "dave")
         with mock.patch.object(dcc, "LOOKUP_SCAN_WAIT_SECONDS", 0.05):
             self.ask("Something Else.flac", user="dave")
-            self.assertEqual((self.walks, self.errors()), ([], ["busy"]))
+            self.assertEqual((self.scans, self.errors()), ([], ["busy"]))
             self.ask("Something Else.flac", user="erin")
-        self.assertEqual(len(self.walks), 1, "another nick is not in dave's queue")
+        self.assertEqual(len(self.scans), 1, "another nick is not in dave's queue")
 
     def test_the_turn_is_given_back(self):
         self.ask("Nothing Here.flac", user="dave")
@@ -112,7 +112,7 @@ class OneScanAtATime(NickCase):
 
         with mock.patch.object(dcc, "_take_a_scan_turn", turn):
             self.ask(self.a_track(1), user="dave")
-        self.assertEqual(len(self.walks), 1, "only the first lookup scanned")
+        self.assertEqual(len(self.scans), 1, "only the first lookup scanned")
         self.assertEqual(self.errors(), [])
 
     def test_a_miss_the_last_lookup_found_is_not_scanned_again(self):
@@ -126,7 +126,7 @@ class OneScanAtATime(NickCase):
 
         with mock.patch.object(dcc, "_take_a_scan_turn", turn):
             self.ask("Same Stale Row.flac", user="dave")
-        self.assertEqual(len(self.walks), 1)
+        self.assertEqual(len(self.scans), 1)
         self.assertEqual(self.errors(), ["file_not_found"] * 2)
 
 

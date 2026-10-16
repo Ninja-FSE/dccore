@@ -365,9 +365,9 @@ class TheSettingIsResolvedOncePerScan(MasterListCase):
         real = update_list.ignored_extensions
         calls = []
 
-        def counting():
+        def counting(*args):
             calls.append(1)
-            return real()
+            return real(*args)
 
         update_list.ignored_extensions = counting
         self.addCleanup(setattr, update_list, "ignored_extensions", real)
@@ -1545,7 +1545,9 @@ class TheHelperIsTheOnlyPredicate(unittest.TestCase):
             code = "\n".join(line.split("#", 1)[0]
                               for line in handle.read().splitlines())
 
-        self.assertIn("update_list.is_listed_file(f)", code)
+        # The set resolved once and handed to the predicate (#1295).
+        self.assertIn("ignored = update_list.ignored_extensions()", code)
+        self.assertIn("update_list.is_listed_file(f, ignored)", code)
         self.assertNotIn('(".mp3", ".flac")', code,
                          "setup_check still carries its own copy of the pair")
 

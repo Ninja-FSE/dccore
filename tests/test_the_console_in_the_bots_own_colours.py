@@ -146,7 +146,8 @@ class TheConsoleLine(DCCoreTestCase):
 
     def test_the_dashboard_sink_still_strips(self):
         """The note that was wrong for the chat is right for the browser."""
-        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
+        # web_console.py since #1322, step 6 of splitting webserver.py.
+        with io.open(os.path.join(REPO_ROOT, "src", "web_console.py"), encoding="utf-8") as handle:
             source = handle.read()
         body = source[source.index("def _console_debug_sink("):]
         body = body[:body.index("\ndef ", 10)]

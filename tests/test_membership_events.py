@@ -17,6 +17,8 @@ give: a test that only searches source text agrees with itself, not with the
 daemon. It cannot see an ``or`` become an ``and``, or two guards get swapped.
 """
 
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -226,7 +228,7 @@ class GuardsAreWiredToTheRightHandlers(unittest.TestCase):
     # --- the three membership handlers -----------------------------------
 
     def test_the_quit_handler_is_gated_on_quit(self):
-        condition = _guard_condition_for("q_user = quit_match.group(1).lower()")
+        condition = _guard_condition_for("    answer_quit(line)")
         self.assertTrue(_evaluate(condition, GENUINE["QUIT"]), condition)
         self.assertFalse(
             _evaluate(condition, ":dave!u@h PRIVMSG #dccore-test :@find QUIT PLAYING GAMES"),
@@ -234,18 +236,18 @@ class GuardsAreWiredToTheRightHandlers(unittest.TestCase):
 
     def test_the_quit_handler_does_not_fire_on_a_part(self):
         """Catches the QUIT and PART guards being swapped."""
-        condition = _guard_condition_for("q_user = quit_match.group(1).lower()")
+        condition = _guard_condition_for("    answer_quit(line)")
         self.assertFalse(_evaluate(condition, GENUINE["PART"]), condition)
 
     def test_the_part_handler_is_gated_on_part(self):
-        condition = _guard_condition_for("p_user = part_match[0].lower()")
+        condition = _guard_condition_for("    answer_part(line)")
         self.assertTrue(_evaluate(condition, GENUINE["PART"]), condition)
         self.assertFalse(_evaluate(condition, GENUINE["QUIT"]), condition)
         self.assertFalse(
             _evaluate(condition, ":attacker!u@h PRIVMSG #c :should i PART #c ?"), condition)
 
     def test_the_join_handler_is_gated_on_join(self):
-        condition = _guard_condition_for("joined_user = join_match[0]")
+        condition = _guard_condition_for("    answer_join(line, s)")
         self.assertTrue(_evaluate(condition, GENUINE["JOIN"]), condition)
         self.assertTrue(_evaluate(condition, GENUINE["JOIN_COLON"]), condition)
         self.assertFalse(_evaluate(condition, GENUINE["PART"]), condition)
@@ -255,7 +257,7 @@ class GuardsAreWiredToTheRightHandlers(unittest.TestCase):
     def test_the_join_handler_still_ignores_the_bots_own_join(self):
         """Losing that half would make the bot thaw queues off its own JOIN."""
         import defaults as config
-        condition = _guard_condition_for("joined_user = join_match[0]")
+        condition = _guard_condition_for("    answer_join(line, s)")
         own = f":{config.NICKNAME}!bot@host JOIN #dccore-test"
         self.assertFalse(_evaluate(condition, own), condition)
 
@@ -266,45 +268,73 @@ class GuardsAreWiredToTheRightHandlers(unittest.TestCase):
         # checks is unchanged, and so is what this asserts about it. Anchored
         # on the CALL rather than on the function name, which also appears at
         # the definition and would match two lines.
-        condition = _guard_condition_for("note_nick_change(nick_match.group(1)")
+        condition = _guard_condition_for("    answer_nick_change(line)")
         self.assertTrue(_evaluate(condition, GENUINE["NICK"]), condition)
         self.assertTrue(_evaluate(condition, GENUINE["NICK_BARE"]), condition)
         self.assertFalse(
             _evaluate(condition, ":attacker!u@h PRIVMSG #c :hey NICK :victim"), condition)
 
-    def test_nick_recovery_accepts_quit_and_part_independently(self):
+    def test_nick_recovery_accepts_quit_and_nick_independently(self):
         """Catches an or/and slip, which would disable recovery entirely."""
-        condition = _guard_condition_for("main nick {main_nick} logged out",
+        condition = _guard_condition_for("reclaim_main_nick(line, s)",
                                          helper=("is_user_event",))
-        for key in ("QUIT", "PART"):
+        for key in ("QUIT", "NICK", "NICK_BARE"):
             with self.subTest(event=key):
                 self.assertTrue(_evaluate(condition, GENUINE[key]), condition)
 
+    def test_nick_recovery_ignores_a_part(self):
+        """A PART frees no nick: every ask it caused was refused, and each was
+        an unpaced NICK the holder could draw once per shared channel."""
+        condition = _guard_condition_for("reclaim_main_nick(line, s)",
+                                         helper=("is_user_event",))
+        for key in ("PART", "PART_REASON"):
+            with self.subTest(event=key):
+                self.assertFalse(_evaluate(condition, GENUINE[key]), condition)
+
     def test_nick_recovery_ignores_channel_chatter(self):
-        condition = _guard_condition_for("main nick {main_nick} logged out",
+        condition = _guard_condition_for("reclaim_main_nick(line, s)",
                                          helper=("is_user_event",))
         self.assertFalse(
             _evaluate(condition, ":attacker!u@h PRIVMSG #c :i will QUIT now"), condition)
 
     def test_nick_recovery_identifies_the_quitter_by_prefix(self):
-        """The inner guard: a QUIT reason must not be able to name the bot."""
-        condition = _guard_condition_for("main nick {main_nick} logged out",
-                                         helper=("event_source_nick",))
-        real = ":DCCore!bot@host QUIT :Quit: leaving"
-        self.assertTrue(_evaluate(condition, real, main_nick="DCCore"), condition)
-        forged = ":attacker!u@h QUIT :bye :DCCore!x@y"
-        self.assertFalse(_evaluate(condition, forged, main_nick="DCCore"), condition)
+        """A QUIT reason must not be able to name the bot. Read from the text
+        until #1291; reclaim_main_nick() is called for real now."""
+        import defaults as config
+
+        class Recorder:
+            sent = []
+
+            def sendall(self, payload):
+                self.sent.append(payload)
+
+        self.addCleanup(setattr, config, "NICKNAME", config.NICKNAME)
+        if hasattr(config, "ORIGINAL_NICK"):
+            self.addCleanup(setattr, config, "ORIGINAL_NICK", config.ORIGINAL_NICK)
+        else:
+            self.addCleanup(delattr, config, "ORIGINAL_NICK")
+        config.ORIGINAL_NICK, config.NICKNAME = "DCCore", "DCCore_"
+        # Not a DCCoreTestCase, so another test's ask may still be inside the
+        # reclaim gap.
+        import runtime
+        self.addCleanup(setattr, runtime, "nick_reclaim_asked_at", runtime.nick_reclaim_asked_at)
+        runtime.nick_reclaim_asked_at = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            forged = irc.reclaim_main_nick(":attacker!u@h QUIT :bye :DCCore!x@y", Recorder())
+            real = irc.reclaim_main_nick(":DCCore!bot@host QUIT :Quit: leaving", Recorder())
+        self.assertEqual((forged, real), (False, True))
+        self.assertEqual(Recorder.sent, [b"NICK DCCore\r\n"])
 
     def test_the_433_handler_accepts_433_and_432_independently(self):
         """432 is ERR_ERRONEUSNICKNAME - previously matched by English wording."""
-        condition = _guard_condition_for("[LIVE NICK COLLISION]")
+        condition = _guard_condition_for("= answer_nick_refusal(line, s, conn.joined, nick_refusals)")
         for key in ("433", "432"):
             with self.subTest(numeric=key):
                 self.assertTrue(_evaluate(condition, GENUINE[key]), condition)
 
     def test_the_433_handler_refuses_a_forged_part_reason(self):
         """The old PRIVMSG/NOTICE exclusion did not cover PART or QUIT reasons."""
-        condition = _guard_condition_for("[LIVE NICK COLLISION]")
+        condition = _guard_condition_for("= answer_nick_refusal(line, s, conn.joined, nick_refusals)")
         for forged in (":attacker!u@h PART #dccore-test :bye 433 all",
                        ":attacker!u@h QUIT :erroneous nickname lol",
                        ":attacker!u@h TOPIC #dccore-test :read 433 rules"):
@@ -313,7 +343,7 @@ class GuardsAreWiredToTheRightHandlers(unittest.TestCase):
 
     def test_a_genuine_433_mentioning_privmsg_is_still_accepted(self):
         """The dropped exclusion was not merely dead - it could reject a real one."""
-        condition = _guard_condition_for("[LIVE NICK COLLISION]")
+        condition = _guard_condition_for("= answer_nick_refusal(line, s, conn.joined, nick_refusals)")
         line = ":irc.undernet.org 433 * DCCore :Nickname PRIVMSG is already in use"
         self.assertTrue(_evaluate(condition, line), condition)
 
@@ -328,7 +358,7 @@ class ListTriggerIsCaseInsensitive(unittest.TestCase):
     """
 
     def test_the_list_trigger_accepts_any_casing(self):
-        condition = _guard_condition_for("list.send_list_trigger_info(s, user)",
+        condition = _guard_condition_for("list.send_list_trigger_info(sock, user)",
                                          helper=("msg_lower", "msg =="))
         for typed in ("!list", "!LIST", "!List"):
             with self.subTest(typed=typed):
@@ -337,7 +367,7 @@ class ListTriggerIsCaseInsensitive(unittest.TestCase):
 
     def test_the_dispatch_compares_the_lowercased_message(self):
         """The gate itself is already asserted by tests/test_irc_dispatch.py."""
-        condition = _guard_condition_for("list.send_list_trigger_info(s, user)",
+        condition = _guard_condition_for("list.send_list_trigger_info(sock, user)",
                                          helper=("msg_lower", "msg =="))
         self.assertNotIn("msg ==", condition,
                          "!list must compare msg_lower, like !ping and !debugnames")

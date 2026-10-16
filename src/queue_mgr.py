@@ -46,6 +46,24 @@ def next_standard_line(send_queue, last_served):
             send_queue.pop(user, None)
         return None
 
+
+def _resent_line_first(lines, msg):
+    """The line to send now: `msg`, or a refused line put back at the front
+    of `lines` while `msg` waited for its slot (#1386).
+
+    Every lane pops its line BEFORE wait_for_slot(), so a refusal arriving
+    during that wait puts line 1 back "at the front" while the worker already
+    holds line 2 - and line 2 went first, then line 1, out of order. Swapped
+    here, after the wait: the line put back goes now and `msg` takes its
+    place at the front. Under send_queue_lock, which irc.py's put-back takes
+    too, so the two cannot interleave.
+    """
+    with runtime.send_queue_lock:
+        if lines and isinstance(lines[0], runtime.ResentLine):
+            msg, lines[0] = lines[0], msg
+    return msg
+
+
 def queue_worker():
     """Flood-protection worker, with a separate express lane for searches and adverts."""
     print("[QUEUE] Isolate-Priority flood protection worker started.")
@@ -151,9 +169,14 @@ def queue_worker():
             if config.fetch_request_queue:
                 msg = config.fetch_request_queue.pop(0)
                 runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)
+                # No _resent_line_first() here (#1386): each request is its
+                # row's only line, so a refused one put back has no line of
+                # its own behind it to overtake.
                 try:
                     if current_sock:
                         current_sock.sendall(msg.encode("utf-8", errors="ignore"))
+                        # Its target and lane, for a refusal (#1386).
+                        runtime.note_paced_line(msg, "fetch")
                         if getattr(config, 'DEBUG_MODE', False):
                             print(f"[RAW OUT FETCH] {msg.strip()}")
                 except socket.error as net_err:
@@ -171,9 +194,12 @@ def queue_worker():
                 # fails to send still costs its slot rather than letting a broken
                 # pipe retry in a tight loop.
                 runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)
+                # A refused line put back during the wait goes first (#1386).
+                msg = _resent_line_first(config.vip_queue, msg)
                 try:
                     if current_sock:
                         current_sock.sendall(msg.encode("utf-8", errors="ignore"))
+                        runtime.note_paced_line(msg, "vip")
                         if getattr(config, 'DEBUG_MODE', False):
                             print(f"[RAW OUT VIP] {msg.strip()}")
                 except socket.error as net_err:
@@ -216,9 +242,14 @@ def queue_worker():
                 last_served = user
                 # See the VIP lane above: same shared clock.
                 runtime.outbound_pacer.wait_for_slot(config.MSG_DELAY)
+                # A refused line put back during the wait goes first (#1386).
+                # The list is looked up again: it may have been created by
+                # the put-back, or emptied and dropped meanwhile.
+                msg = _resent_line_first(config.send_queue.get(user), msg)
                 try:
                     if current_sock:
                         current_sock.sendall(msg.encode("utf-8", errors="ignore"))
+                        runtime.note_paced_line(msg, "standard", owner=user)
                         if getattr(config, 'DEBUG_MODE', False):
                             print(f"[RAW OUT] {msg.strip()}")
                 except socket.error as net_err:

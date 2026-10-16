@@ -249,6 +249,7 @@ class ADeepLibraryFileIsNotReportedMissing(PathSecurityBase):
         os.makedirs(platform_compat.long_path(deep_dir), exist_ok=True)
         with open(platform_compat.long_path(self.deep_track), "wb") as handle:
             handle.write(b"\x00" * 6543)
+        self.publish_list(self.tree.tracks + [self.deep_track])
         self.assertGreater(len(self.deep_track), 260,
                            "fixture must exceed MAX_PATH")
         if MAX_PATH_ENFORCED:

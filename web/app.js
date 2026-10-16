@@ -1315,6 +1315,8 @@
   var STATUS_LABELS = {
     sending: "queue.status.sending", frozen: "queue.status.frozen",
     packing: "queue.status.packing",
+    // Next file large while another large file is sent (#1387, LARGE_FILE_MB).
+    "large-wait": "queue.status.largeWait",
     queued: "sidebar.queued", empty: "queue.status.empty"
   };
 
@@ -4190,6 +4192,10 @@
     var parts = [];
     if (progress.phase === "writing") {
       parts.push(t("tools.writingList"));
+    } else if (progress.phase === "starting") {
+      // Its own words (#1366): a rebuild checking its folders before the
+      // scan, which on a mount that stopped answering is where it waits.
+      parts.push(t("tools.checkingFolders"));
     } else if (progress.folder_count) {
       parts.push(t("tools.scanningFolder")
         .replace("{index}", progress.folder_index).replace("{total}", progress.folder_count));
@@ -4906,6 +4912,8 @@
     CHANNEL: "settings.field.CHANNEL",
     DEBUG_CHANNEL: "settings.field.DEBUG_CHANNEL",
     MAX_DCC_SLOTS: "settings.field.MAX_DCC_SLOTS",
+    SLOW_SEND_MIN_KB: "settings.field.SLOW_SEND_MIN_KB",
+    LARGE_FILE_MB: "settings.field.LARGE_FILE_MB",
     MAX_USER_QUEUE: "settings.field.MAX_USER_QUEUE",
     MAX_GLOBAL_QUEUE: "settings.field.MAX_GLOBAL_QUEUE",
     SEARCH_ENABLED: "settings.field.SEARCH_ENABLED",
@@ -4919,10 +4927,13 @@
     MAX_FETCH_SLOTS: "settings.field.MAX_FETCH_SLOTS",
     FETCH_HISTORY_DAYS: "settings.field.FETCH_HISTORY_DAYS",
     FETCH_HISTORY_MAX_ROWS: "settings.field.FETCH_HISTORY_MAX_ROWS",
+    LIST_REQUEST_TAG: "settings.field.LIST_REQUEST_TAG",
     MAX_FETCH_FILE_SIZE: "settings.field.MAX_FETCH_FILE_SIZE",
     MAX_LIST_TEXT_SIZE: "settings.field.MAX_LIST_TEXT_SIZE",
     DCC_BLOCK_SIZE: "settings.field.DCC_BLOCK_SIZE",
     DCC_SEND_BUFFER: "settings.field.DCC_SEND_BUFFER",
+    MAX_UPLOAD_KB: "settings.field.MAX_UPLOAD_KB",
+    MAX_DOWNLOAD_KB: "settings.field.MAX_DOWNLOAD_KB",
     REHASH_TRANSFER_WAIT: "settings.field.REHASH_TRANSFER_WAIT",
     AUTO_REFETCH_LISTS: "settings.field.AUTO_REFETCH_LISTS",
     AUTO_REFETCH_INTERVAL_HOURS: "settings.field.AUTO_REFETCH_INTERVAL_HOURS",
@@ -4947,7 +4958,6 @@
     LIST_BASE_NAME: "settings.field.LIST_BASE_NAME",
     PAUSE_ON_UPDATE: "settings.field.PAUSE_ON_UPDATE",
     PAUSE_FOR_WHOLE_UPDATE: "settings.field.PAUSE_FOR_WHOLE_UPDATE",
-    FILE_DIRECTORY: "settings.field.FILE_DIRECTORY",
     LIST_FORMAT: "settings.field.LIST_FORMAT",
     LIST_IGNORED_EXTENSIONS: "settings.field.LIST_IGNORED_EXTENSIONS",
     SEPARATE_VIDEO_LIST: "settings.field.SEPARATE_VIDEO_LIST",
@@ -4983,6 +4993,8 @@
     PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS: "settings.field.PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS",
     PRIVATE_MESSAGE_DECLINE_BURST: "settings.field.PRIVATE_MESSAGE_DECLINE_BURST",
     PRIVATE_MESSAGE_DECLINE_BURST_SECONDS: "settings.field.PRIVATE_MESSAGE_DECLINE_BURST_SECONDS",
+    CHAT_HISTORY_DAYS: "settings.field.CHAT_HISTORY_DAYS",
+    CHAT_HISTORY_MAX_MB: "settings.field.CHAT_HISTORY_MAX_MB",
     LIST_SIZE_FILE: "settings.field.LIST_SIZE_FILE",
     LIST_PROGRESS_FILE: "settings.field.LIST_PROGRESS_FILE",
     LIST_RAWBYTES_FILE: "settings.field.LIST_RAWBYTES_FILE",
@@ -5012,6 +5024,7 @@
     FLOOD_BAN_SECONDS: "settings.field.FLOOD_BAN_SECONDS",
     DCC_ACCEPT_TIMEOUT: "settings.field.DCC_ACCEPT_TIMEOUT",
     MAX_SEND_FAILS: "settings.field.MAX_SEND_FAILS",
+    DAILY_SEND_FAILS_LIMIT: "settings.field.DAILY_SEND_FAILS_LIMIT",
     CHECK_FOR_UPDATES: "settings.field.CHECK_FOR_UPDATES",
     RAR_TIMEOUT: "settings.field.RAR_TIMEOUT",
     LIST_UPDATE_TIMEOUT: "settings.field.LIST_UPDATE_TIMEOUT",
@@ -5286,11 +5299,91 @@
       refreshThemePreview();
     }
     var count = Object.keys(state.settingsDirty).length;
-    el.settingsSaveBtn.disabled = count === 0;
-    el.settingsSavebarText.classList.toggle("is-dirty", count > 0);
-    el.settingsSavebarText.textContent = count === 0
-      ? t("settings.allChangesSaved")
+    // #1354: an unsaved folder or list editor is named here too, rather than
+    // "All changes saved" over it. The button saves it (#1357).
+    var editor = servedDraftUnsaved();
+    var editorText = editor === "lists" ? t("settings.savebarListsNotSaved")
+      : editor === "folders" ? t("settings.savebarFoldersNotSaved") : "";
+    el.settingsSaveBtn.disabled = count === 0 && editorText === "";
+    el.settingsSavebarText.classList.toggle("is-dirty", count > 0 || editorText !== "");
+    var text = count === 0
+      ? (editorText || t("settings.allChangesSaved"))
       : t(count === 1 ? "settings.oneUnsavedChange" : "settings.manyUnsavedChanges").replace("{count}", count);
+    if (count > 0 && editorText) { text += " \u00b7 " + editorText; }
+    el.settingsSavebarText.textContent = text;
+  }
+
+  // #1354: AN EDITED FOLDER OR LIST EDITOR IS NOT A SAVED ONE. Removing a row
+  // only edits the draft; Save folders / Save lists is what writes it, and
+  // the page's own Save & rehash never does. The summary above the rows used
+  // to count the draft and the save bar watched only the settings, so an
+  // operator who removed twenty folders read "Serving 0 folders" and "All
+  // changes saved" - and the next rebuild scanned all twenty.
+  //
+  // Compared as what the save would send, so a blank row added and not yet
+  // filled is not an edit.
+  function draftFolderShape(rows) {
+    return JSON.stringify((rows || []).filter(function (f) {
+      return String(f.path || "").trim() !== "";
+    }).map(function (f) {
+      return [String(f.name || "").trim(), String(f.path || "").trim()];
+    }));
+  }
+
+  function draftListShape(lists) {
+    return JSON.stringify((lists || []).map(function (entry) {
+      var channels = (entry.channels || []).map(function (c) {
+        return String(c).toLowerCase();
+      }).sort();
+      var modes = {};
+      Object.keys(entry.modes || {}).forEach(function (name) {
+        var mode = entry.modes[name];
+        if (mode && mode !== "normal" && channels.indexOf(name.toLowerCase()) >= 0) {
+          modes[name.toLowerCase()] = mode;
+        }
+      });
+      var exclude = entry.exclude || [];
+      if (typeof exclude === "string") { exclude = exclude.split(/[\s,]+/); }
+      return {
+        name: String(entry.name || "").trim(),
+        primary: !!entry.primary,
+        channels: channels,
+        modes: Object.keys(modes).sort().map(function (k) { return [k, modes[k]]; }),
+        exclude: exclude.map(function (x) { return String(x).trim().toLowerCase(); })
+          .filter(function (x) { return x !== ""; }),
+        folders: JSON.parse(draftFolderShape(entry.folders))
+      };
+    }));
+  }
+
+  // "lists", "folders" or "" - which editor on Your list holds unsaved edits.
+  function servedDraftUnsaved() {
+    if (state.listsSource === "file") {
+      return state.listsDraft && draftListShape(state.listsDraft) !== draftListShape(state.lists)
+        ? "lists" : "";
+    }
+    return state.foldersDraft && draftFolderShape(state.foldersDraft) !== draftFolderShape(state.folders)
+      ? "folders" : "";
+  }
+
+  function servedDraftNoteText() {
+    var unsaved = servedDraftUnsaved();
+    if (unsaved === "lists") { return t("settings.listsNotSaved"); }
+    if (unsaved !== "folders") { return ""; }
+    return t((state.folders || []).length === 1 ? "settings.foldersNotSavedOne" : "settings.foldersNotSavedMany")
+      .replace("{count}", (state.folders || []).length);
+  }
+
+  // Called on every edit as well as every render: typing does not re-render
+  // (it would take the caret), so the note is updated in place.
+  function refreshServedDraftNote() {
+    var note = el.settingsFields.querySelector(".served-draft-unsaved");
+    if (note) {
+      var text = servedDraftNoteText();
+      note.textContent = text;
+      note.hidden = text === "";
+    }
+    updateSettingsSaveBar();
   }
 
   // The served-folder editor. Markup only - NO VALUES - for the reason the
@@ -5452,6 +5545,13 @@
         servedListChannelsHtml(entry, index) +
         '<div class="served-list-folders">' + folderRows + "</div>" +
         '<button type="button" class="btn btn-small list-folder-add">' + t("settings.addFolder") + '</button>' +
+        // #1295: this list's own file types to leave out, on top of
+        // LIST_IGNORED_EXTENSIONS. The value goes in as a property in
+        // attachListRows(), never into the markup.
+        '<label class="served-list-exclude-label">' + t("settings.listExclude") +
+          '<input type="text" class="served-list-exclude" placeholder=".db, .ini">' +
+        "</label>" +
+        '<p class="served-list-exclude-hint">' + t("settings.listExcludeHint") + "</p>" +
         "</div>";
     }).join("");
 
@@ -5470,8 +5570,7 @@
       blocks +
       '<div class="served-folder-actions">' +
         '<button type="button" class="btn served-list-add">' + t("settings.addList") + '</button>' +
-        '<button type="button" class="btn btn-accent served-list-save">' + t("settings.saveLists") + '</button>' +
-      "</div>" + note + "</div>";
+      "</div>" + '<p class="served-folder-note is-error served-draft-unsaved" hidden></p>' + note + "</div>";
   }
 
   // PICK FROM THE CHANNELS ALREADY CONFIGURED, rather than typing them a
@@ -5621,7 +5720,18 @@
 
       nameInput.addEventListener("input", function () {
         draft[index].name = nameInput.value;
+        refreshServedDraftNote();
       });
+
+      // Sent as typed; the server spells it (#1295).
+      var excludeInput = block.querySelector(".served-list-exclude");
+      if (excludeInput) {
+        excludeInput.value = entry.exclude || "";
+        excludeInput.addEventListener("input", function () {
+          draft[index].exclude = excludeInput.value;
+          refreshServedDraftNote();
+        });
+      }
 
       // The channel NAME is assigned as a property, never written into the
       // markup - see channelBoxHtml(). The label text goes in as textContent
@@ -5637,12 +5747,14 @@
           modeSelect.value = ((entry.modes || {})[name.toLowerCase()]) || "normal";
           modeSelect.addEventListener("change", function () {
             draft[index].modes = channelModes(block);
+            refreshServedDraftNote();
           });
         }
         box.addEventListener("change", function () {
           draft[index].channels = tickedChannels(block);
           if (modeSelect) { modeSelect.disabled = !box.checked; }
           draft[index].modes = channelModes(block);
+          refreshServedDraftNote();
         });
       });
       primaryInput.addEventListener("change", function () {
@@ -5651,6 +5763,7 @@
         draft.forEach(function (other, otherIndex) {
           other.primary = otherIndex === index;
         });
+        refreshServedDraftNote();
       });
     });
 
@@ -5667,9 +5780,11 @@
       pathInput.value = folder.path || "";
       nameInput.addEventListener("input", function () {
         folder.name = nameInput.value;
+        refreshServedDraftNote();
       });
       pathInput.addEventListener("input", function () {
         folder.path = pathInput.value;
+        refreshServedDraftNote();
       });
     });
   }
@@ -5698,13 +5813,8 @@
       return;
     }
 
-    if (button.classList.contains("served-list-save")) {
-      saveLists();
-      return;
-    }
-
     if (button.classList.contains("served-list-add")) {
-      draft.push({ name: "", primary: draft.length === 0, channels: [], folders: [] });
+      draft.push({ name: "", primary: draft.length === 0, channels: [], folders: [], exclude: "" });
     } else if (button.classList.contains("served-list-remove")) {
       var block = button.closest(".served-list-block");
       var removeIndex = parseInt(block.dataset.listIndex, 10);
@@ -5746,6 +5856,8 @@
               primary: !!entry.primary,
               channels: (entry.channels || []).slice(),
               modes: Object.assign({}, entry.modes || {}),
+              // Held as the text the field shows; the save sends it as is.
+              exclude: (entry.exclude || []).join(", "),
               folders: (entry.folders || []).map(function (f) {
                 return { name: f.name, path: f.path };
               })
@@ -5774,7 +5886,7 @@
           // trimmed would otherwise stay untrimmed on screen.
           state.listsDraft = null;
           state.lists = res.data.lists || [];
-          return loadLists();
+          return loadLists().then(function () { return true; });
         }
         // The server returns every fault at once, newline separated, so an
         // operator fixing three things is told about three things.
@@ -5786,6 +5898,7 @@
           problems: parts.length > 1 ? parts : []
         };
         renderSettingsCategory();
+        return false;
       });
   }
 
@@ -5814,11 +5927,14 @@
     }
 
     var summary;
-    if (state.foldersSource === "file") {
-      summary = t(draft.length === 1 ? "settings.servingOneFolder" : "settings.servingManyFolders")
-        .replace("{count}", draft.length);
-    } else if (state.foldersSource === "file_directory") {
-      summary = t("settings.noFolderListYet");
+    // What is SERVED (#1354): the rows below are the draft, and until Save
+    // the bot serves what was saved. A bot that never saved a folder list
+    // serves the Music directory, and the server reports it as the one
+    // folder served - the first row here, not a field of its own (#1357).
+    var served = (state.folders || []).length;
+    if (state.foldersSource === "file" || state.foldersSource === "file_directory") {
+      summary = t(served === 1 ? "settings.servingOneFolder" : "settings.servingManyFolders")
+        .replace("{count}", served);
     } else {
       summary = t("settings.nothingServedYet");
     }
@@ -5876,8 +5992,7 @@
       browsePanel +
       '<div class="served-folder-actions">' +
         '<button type="button" class="btn served-folder-add">' + t("settings.addFolder") + '</button>' +
-        '<button type="button" class="btn btn-accent served-folder-save">' + t("settings.saveFolders") + '</button>' +
-      "</div>" + note + "</div>";
+      "</div>" + '<p class="served-folder-note is-error served-draft-unsaved" hidden></p>' + note + "</div>";
   }
 
   // Assigns every row's values as properties and keeps the draft in step with
@@ -5894,9 +6009,11 @@
       pathInput.value = entry.path || "";
       nameInput.addEventListener("input", function () {
         draft[index].name = nameInput.value;
+        refreshServedDraftNote();
       });
       pathInput.addEventListener("input", function () {
         draft[index].path = pathInput.value;
+        refreshServedDraftNote();
       });
     });
   }
@@ -5959,7 +6076,7 @@
     var rows = (state.foldersDraft || []).filter(function (entry) {
       return String(entry.path || "").trim() !== "";
     });
-    postJson("/api/folders", { folders: rows }).then(function (res) {
+    return postJson("/api/folders", { folders: rows }).then(function (res) {
       if (res.ok) {
         state.folders = res.data.folders || [];
         state.foldersSource = res.data.source || "";
@@ -5968,10 +6085,8 @@
         });
         state.foldersNote = {
           ok: true,
-          text: res.data.written
-            ? t(res.data.written === 1 ? "settings.savedOneFolder" : "settings.savedManyFolders")
-                .replace("{count}", res.data.written)
-            : t("settings.folderListCleared")
+          text: t(res.data.written === 1 ? "settings.savedOneFolder" : "settings.savedManyFolders")
+            .replace("{count}", res.data.written)
         };
       } else {
         state.foldersNote = {
@@ -5981,6 +6096,7 @@
         };
       }
       renderSettingsCategory();
+      return res.ok;
     });
   }
 
@@ -6091,6 +6207,7 @@
     applySettingsFlash();
     if (category.id === SERVED_FOLDERS_CATEGORY) {
       if (state.listsSource === "file") { attachListRows(); } else { attachFolderRows(); }
+      refreshServedDraftNote();
     }
     if (category.id === ON_CONNECT_CATEGORY) {
       attachOnConnectRows();
@@ -6285,22 +6402,19 @@
     }
 
     var listButton = evt.target.closest(
-      ".served-list-add, .served-list-save, .served-list-remove, " +
+      ".served-list-add, .served-list-remove, " +
       ".list-folder-add, .list-folder-remove, .served-list-start");
     if (listButton) {
       handleListButton(listButton);
       return;
     }
 
-    var button = evt.target.closest(".served-folder-add, .served-folder-save, .served-folder-remove, .served-folder-up, .served-folder-down");
+    var button = evt.target.closest(".served-folder-add, .served-folder-remove, .served-folder-up, .served-folder-down");
     if (!button) { return; }
     var draft = state.foldersDraft || (state.foldersDraft = []);
 
     if (button.classList.contains("served-folder-add")) {
       draft.push({ name: "", path: "" });
-    } else if (button.classList.contains("served-folder-save")) {
-      saveFolders();
-      return;
     } else {
       var row = button.closest(".served-folder-row");
       var index = parseInt(row.dataset.servedFolderIndex, 10);
@@ -6368,9 +6482,16 @@
     });
   });
 
-  el.settingsSaveBtn.addEventListener("click", function () {
+  // ONE SAVE FOR THE PAGE (#1357). The folder and list editors had buttons
+  // of their own and this one saved only the settings, so an operator who
+  // removed folders and pressed it saved nothing of what they had changed -
+  // and after Save folders, this one sat disabled with nothing to do. The
+  // editor goes first: a refused folder list says why beside the rows, and
+  // the settings wait until it is put right.
+  function saveSettingsPage() {
     var dirty = state.settingsDirty;
-    if (!Object.keys(dirty).length) { return; }
+    var editor = servedDraftUnsaved();
+    if (!Object.keys(dirty).length && !editor) { return; }
 
     // #1008 follow-up: the bot otherwise only ever leaves a cleared debug
     // channel on the next reconnect - see sync_channels()'s own reasoning
@@ -6389,6 +6510,26 @@
       return;
     }
 
+    el.settingsSaveBtn.disabled = true;
+    el.settingsSaveStatus.style.display = "none";
+    el.settingsSavebarText.textContent = t("settings.saving");
+    var saveEditor = editor === "folders" ? saveFolders : editor === "lists" ? saveLists : null;
+    Promise.resolve(saveEditor ? saveEditor() : true).then(function (saved) {
+      if (!saved) { updateSettingsSaveBar(); return; }
+      if (!Object.keys(dirty).length) {
+        var note = editor === "lists" ? state.listsNote : state.foldersNote;
+        if (note) { showSettingsStatus(el.settingsSaveStatus, note.text, false); }
+        updateSettingsSaveBar();
+        return;
+      }
+      saveTheSettings(dirty, clearingDebugChannel);
+    }, function () {
+      showSettingsStatus(el.settingsSaveStatus, t("settings.couldNotReachDashboard"), true);
+      updateSettingsSaveBar();
+    });
+  }
+
+  function saveTheSettings(dirty, clearingDebugChannel) {
     var payload = {};
     for (var dirtyKey in dirty) {
       if (Object.prototype.hasOwnProperty.call(dirty, dirtyKey)) { payload[dirtyKey] = dirty[dirtyKey]; }
@@ -6423,7 +6564,9 @@
         showSettingsStatus(el.settingsSaveStatus, t("settings.couldNotReachDashboard"), true);
         updateSettingsSaveBar();
       });
-  });
+  }
+
+  el.settingsSaveBtn.addEventListener("click", saveSettingsPage);
 
   // ------------------------------------------------------------------ Init
 

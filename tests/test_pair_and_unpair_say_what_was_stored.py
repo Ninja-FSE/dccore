@@ -121,6 +121,23 @@ class AFailedWriteIsSaid(TokenStoreCase):
 
 
 class PairAndUnpairDoNotOverlap(TokenStoreCase):
+    """These run commands on two threads at once, so the console's chatter
+    goes to self.out for the whole test, put in place here on the main thread.
+    run_command() used to wrap each command in contextlib.redirect_stdout(),
+    which swaps the process-wide sys.stdout and puts back what it found: the
+    lock makes session B leave before session A, so A put back the StringIO
+    it had found there, and every later print in the process vanished - the
+    report of scripts/function_coverage.py among them (#1379, the #1146
+    pattern)."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, sys, "stdout", sys.stdout)
+        sys.stdout = self.out
+
+    def run_command(self, session, line):
+        adminchat.handle_command(session, line)
+        return list(session._outbox)
 
     def test_a_pair_in_flight_does_not_bring_a_revoked_token_back(self):
         """The audit's race: session B's `pair` has loaded the store and not

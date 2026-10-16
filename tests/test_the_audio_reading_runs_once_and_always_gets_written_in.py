@@ -46,6 +46,7 @@ import update_list  # noqa: E402
 
 # Modules, not classes: a TestCase imported by name runs again here.
 import tests.test_the_list_publishes_first_and_reads_audio_afterwards as first  # noqa: E402
+from tests.support import without_menu_icons  # noqa: E402
 
 BOT_RUN = {update_list.RUN_TOKEN_ENV: "a-run-of-the-bot"}
 
@@ -515,7 +516,7 @@ class FindingIsNotWriting(first.Library):
     def test_the_title_and_the_dashboard(self):
         with io.open(os.path.join(REPO_ROOT, "scripts", "mirc", "dccore.mrc"),
                      encoding="utf-8", newline="") as handle:
-            mrc = handle.read().replace("\r\n", "\n")
+            mrc = without_menu_icons(handle.read().replace("\r\n", "\n"))
         short = mrc[mrc.index("alias dccore.rebuild.short {"):]
         self.assertIn("if ($gettok(%l,1,32) == finding) { return audio info: finding what to read }",
                       short[:short.index("\n}")])

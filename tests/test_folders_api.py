@@ -213,27 +213,27 @@ class RefusingASetThatCannotBeServed(FoldersTestCase):
         self.assertIn("At most", result["error"])
 
 
-class ClearingTheListGoesBackToTheSingleDirectory(FoldersTestCase):
+class AnEmptyListIsRefused(FoldersTestCase):
+    """#1357: the folder rows are the one place a bot's folders are set, so
+    saving none of them is refused, and the saved list is left as it was."""
 
-    def test_an_empty_list_removes_the_file(self):
-        """Rather than writing []. library.load_folders() already returns None
-        for an empty list and falls back, so a written [] would be a file on
-        disk that does nothing and the next reader would have to work that
-        out."""
+    def test_an_empty_list_keeps_the_saved_one(self):
         self.save([{"name": "Flac", "path": self.flac}])
-        self.assertTrue(os.path.exists(self.folders_file))
+        with open(self.folders_file, encoding="utf-8") as handle:
+            before = handle.read()
 
         status, result = self.save([])
 
-        self.assertEqual(status, 200)
-        self.assertFalse(os.path.exists(self.folders_file))
-        self.assertEqual(result["source"], "file_directory")
+        self.assertEqual(status, 400)
+        self.assertIn("at least one folder", result["error"])
+        with open(self.folders_file, encoding="utf-8") as handle:
+            self.assertEqual(handle.read(), before)
 
-    def test_clearing_when_there_was_no_file(self):
-        """Must not raise on a file that was never there."""
+    def test_an_empty_list_with_no_file_writes_none(self):
         status, _result = self.save([])
 
-        self.assertEqual(status, 200)
+        self.assertEqual(status, 400)
+        self.assertFalse(os.path.exists(self.folders_file))
 
     def test_rows_with_no_path_are_ignored_not_refused(self):
         """The page adds an empty row when "Add folder" is pressed, and an

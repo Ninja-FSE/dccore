@@ -32,6 +32,7 @@ import defaults as config  # noqa: E402
 import db  # noqa: E402
 import list as list_mod  # noqa: E402
 import settings_file  # noqa: E402
+import web_search  # noqa: E402  (#1313: the broadcast's own window)
 import webserver  # noqa: E402
 
 from tests.support import (DCCoreTestCase, hold_threads_until_the_test_ends, queue_row,  # noqa: E402
@@ -510,18 +511,18 @@ class BroadcastSearchTests(DCCoreTestCase):
         self.assertEqual(sent_msg, "PRIVMSG #dccore-test :@find sandman\r\n")
 
     def test_it_never_blocks_the_caller_for_the_window_duration(self):
-        real_window = webserver.BROADCAST_SEARCH_WINDOW
-        webserver.BROADCAST_SEARCH_WINDOW = 0.2
-        self.addCleanup(lambda: setattr(webserver, "BROADCAST_SEARCH_WINDOW", real_window))
+        real_window = web_search.BROADCAST_SEARCH_WINDOW
+        web_search.BROADCAST_SEARCH_WINDOW = 0.2
+        self.addCleanup(lambda: setattr(web_search, "BROADCAST_SEARCH_WINDOW", real_window))
 
         started = time.time()
         webserver.start_broadcast_search("sandman")
         self.assertLess(time.time() - started, 0.1)
 
     def test_the_window_closes_itself_after_the_duration(self):
-        real_window = webserver.BROADCAST_SEARCH_WINDOW
-        webserver.BROADCAST_SEARCH_WINDOW = 0.15
-        self.addCleanup(lambda: setattr(webserver, "BROADCAST_SEARCH_WINDOW", real_window))
+        real_window = web_search.BROADCAST_SEARCH_WINDOW
+        web_search.BROADCAST_SEARCH_WINDOW = 0.15
+        self.addCleanup(lambda: setattr(web_search, "BROADCAST_SEARCH_WINDOW", real_window))
 
         webserver.start_broadcast_search("sandman")
         self.assertTrue(config.broadcast_search_inprogress)
@@ -3135,6 +3136,7 @@ class SettingsPayloadTests(DCCoreTestCase):
         types = settings_file.declared_types(vars(config))
         expected = {name for name in types
                     if name != "ADMIN_PASSWORD_HASH"
+                    and name not in webserver.EDITED_ELSEWHERE   # #1357: an editor of its own
                     and settings_file.is_overridable(name, getattr(config, name, None))}
 
         payload = webserver.build_settings_payload()

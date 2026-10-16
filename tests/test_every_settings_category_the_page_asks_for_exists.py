@@ -137,18 +137,17 @@ class TheThreeEditorsHaveSomewhereToBe(unittest.TestCase):
                 self.assertIn(attached, after)
                 self.assertIn(drawn, after)
 
-    def test_the_folder_editor_sits_with_the_directory_it_overrides(self):
-        """Music directory is labelled "used only when no folders are set", so
-        the thing that sets them belongs in the same category - otherwise the
-        label points at a screen the operator has to go and find."""
+    def test_the_folder_editor_is_where_the_music_directory_went(self):
+        """#1357: the Music directory is the folder rows' first row, not a
+        field of its own, so it is on no category and the rows' category is
+        Your list, where an operator looks for what they share."""
         text = code_only()
         chosen = re.search(r'var SERVED_FOLDERS_CATEGORY = "([^"]+)"', text).group(1)
 
-        for cid, _label, names in webserver.SETTINGS_CATEGORIES:
-            if cid == chosen:
-                self.assertIn("FILE_DIRECTORY", names)
-                return
-        self.fail("SERVED_FOLDERS_CATEGORY names no category at all")
+        self.assertIn("FILE_DIRECTORY", webserver.EDITED_ELSEWHERE)
+        self.assertNotIn("FILE_DIRECTORY", [n for _c, _l, names in webserver.SETTINGS_CATEGORIES
+                                            for n in names])
+        self.assertIn(chosen, [cid for cid, _label, _names in webserver.SETTINGS_CATEGORIES])
 
     def test_the_on_connect_editor_sits_with_the_server_it_talks_to(self):
         """These commands run after registration and before the JOIN, so they
@@ -181,7 +180,7 @@ class NoSettingFallsOffThePageEither(unittest.TestCase):
         # Neither is something an operator types into a box: the password has
         # its own route (see apply_settings_changes, which refuses it), and
         # the version is what the daemon reports, not what it is told.
-        missing = declared - shown - {"ADMIN_PASSWORD_HASH", "SCRIPT_VERSION"}
+        missing = declared - shown - {"ADMIN_PASSWORD_HASH", "SCRIPT_VERSION"} - set(webserver.EDITED_ELSEWHERE)
 
         self.assertEqual(sorted(missing), [],
                          "declared but on no category, so unreachable from "

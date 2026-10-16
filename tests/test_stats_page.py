@@ -258,6 +258,19 @@ class TheLiveCountersComeFromTheLiveContainers(StatsCase):
         self.assertEqual(webserver.build_stats_payload()["transfer"]["slots"], 9)
 
 
+def dashboard_source():
+    """webserver.py and every module split out of it (web_*.py, #1311 on):
+    the Stats and Library builders live in web_stats.py and web_library.py
+    since #1318, and the rule below holds for every one of these files."""
+    folder = os.path.join(REPO_ROOT, "src")
+    names = ["webserver.py"] + sorted(n for n in os.listdir(folder) if n.startswith("web_") and n.endswith(".py"))
+    texts = []
+    for name in names:
+        with io.open(os.path.join(folder, name), encoding="utf-8") as handle:
+            texts.append(handle.read())
+    return "\n".join(texts)
+
+
 class ItStillDoesNotImportTheDaemon(unittest.TestCase):
     """tests/test_import_graph.py pins this for webserver.py as a whole. This
     is the same rule aimed at the one function most likely to break it: the
@@ -265,8 +278,7 @@ class ItStillDoesNotImportTheDaemon(unittest.TestCase):
     test as things importing webserver must not pull in."""
 
     def test_the_daemon_imports_are_inside_the_function(self):
-        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
-            lines = handle.read().splitlines()
+        lines = dashboard_source().splitlines()
 
         top_level = [line for line in lines
                      if line.startswith("import ") or line.startswith("from ")]
@@ -278,12 +290,12 @@ class ItStillDoesNotImportTheDaemon(unittest.TestCase):
                                  "breaks testing the routes without a daemon" % module)
 
     def test_the_payload_builder_imports_them_itself(self):
-        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
-            source = handle.read()
+        source = dashboard_source()
 
         def body_of(name):
             body = source[source.index("def %s(" % name):]
-            return body[:body.index("\ndef ", 1)]
+            end = body.find("\ndef ", 1)
+            return body if end < 0 else body[:end]
 
         # `list` moved with the Library block (#952): that block asks every
         # served list, so it lives in build_library_payload(), which imports

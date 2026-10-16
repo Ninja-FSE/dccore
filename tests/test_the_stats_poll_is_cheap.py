@@ -26,6 +26,7 @@ from unittest import mock
 from tests import support  # noqa: F401  (path setup)
 
 import db  # noqa: E402
+import web_stats  # noqa: E402  (#1318: build_stats_payload() reads its own name)
 import webserver  # noqa: E402
 
 REPO_ROOT = support.REPO_ROOT
@@ -171,7 +172,7 @@ class ThePayloadInParts(support.DCCoreTestCase):
 
     def test_transfer_alone_reads_no_file(self):
         with mock.patch.object(db, "top_downloads", side_effect=AssertionError("ranked")), \
-                mock.patch.object(webserver, "build_library_payload", side_effect=AssertionError("counted")), \
+                mock.patch.object(web_stats, "build_library_payload", side_effect=AssertionError("counted")), \
                 mock.patch.object(db, "load_advanced_stats_rolled", side_effect=AssertionError("read stats.txt")):
             payload = webserver.build_stats_payload(["transfer"])
         self.assertEqual(sorted(payload), ["transfer", "version"])

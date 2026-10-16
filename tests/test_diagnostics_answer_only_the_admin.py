@@ -92,13 +92,14 @@ class TheDispatchGatesBothBeforeDoingAnything(unittest.TestCase):
         body = self.branch('elif msg.lower() == "!ping":')
         gate = body.index("commands.diagnostics_are_for_the_admin(user, user_host)")
         self.assertLess(gate, body.index("handle_ping_request"))
-        self.assertIn("continue", body[gate:body.index("handle_ping_request")])
+        # `return` since #1334 (answer_privmsg()): the line is done either way.
+        self.assertIn("return", body[gate:body.index("handle_ping_request")])
 
     def test_debugnames_checks_first(self):
         body = self.branch('elif msg.lower() == "!debugnames":')
         gate = body.index("commands.diagnostics_are_for_the_admin(user, user_host)")
         self.assertLess(gate, body.index("channel_users_lock()"))
-        self.assertIn("continue", body[gate:body.index("channel_users_lock()")])
+        self.assertIn("return", body[gate:body.index("channel_users_lock()")])
 
     def test_list_stays_public(self):
         body = self.branch('elif msg_lower == "!list":')

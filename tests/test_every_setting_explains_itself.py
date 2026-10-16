@@ -189,7 +189,11 @@ class ItIsWrittenForTheOperator(unittest.TestCase):
         self.assertEqual(missing, [], "write a PLAIN_HELP entry in settings_help.py for: " + ", ".join(missing))
 
     def test_no_plain_explanation_is_for_a_setting_that_does_not_exist(self):
-        stray = sorted(set(settings_help.PLAIN_HELP) - set(self.page_settings()))
+        # A setting an editor replaces on the page (#1357) keeps its plain
+        # text: settings.conf.sample still prints it.
+        import webserver
+        stray = sorted(set(settings_help.PLAIN_HELP) - set(self.page_settings())
+                       - set(webserver.EDITED_ELSEWHERE))
         self.assertEqual(stray, [], "PLAIN_HELP entries for settings the page does not show: " + ", ".join(stray))
 
     def test_the_plain_text_wins_over_the_developer_block(self):
@@ -229,12 +233,16 @@ class ItIsWrittenForTheOperator(unittest.TestCase):
 
     def test_french_and_spanish_carry_a_translation_of_every_one(self):
         """The tooltip follows the language picker: fieldHelp() looks up
-        settings.field.<NAME>.help before falling back to this English."""
+        settings.field.<NAME>.help before falling back to this English. A
+        setting an editor replaces on the page (#1357) has no tooltip."""
+        import webserver
         for lang in ("fr", "es"):
             with io.open(os.path.join(REPO_ROOT, "web", "lang", lang + ".json"),
                          encoding="utf-8") as handle:
                 d = json.load(handle)
             for name, english in settings_help.PLAIN_HELP.items():
+                if name in webserver.EDITED_ELSEWHERE:
+                    continue
                 key = "settings.field." + name + ".help"
                 with self.subTest(lang=lang, setting=name):
                     self.assertIn(key, d)

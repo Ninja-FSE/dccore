@@ -13,6 +13,7 @@ headed - with nothing more than a Python install.
 import ast
 import gc
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -51,6 +52,17 @@ _PRISTINE = [
     (dcc, "start_dcc_send", dcc.start_dcc_send),
     (dcc, "check_queue_and_send", dcc.check_queue_and_send),
 ]
+
+
+# dccore.mrc's menus (#1368): with the icons on, an item's text starts with
+# `$dccore.mi(name) `, the mark the theme's menu hook turns into the icon
+# beside it - and nothing without the icons. The tests that read the menus
+# read them as they read without the marks.
+_MENU_ICON_MARK = re.compile(r"\$dccore\.mi\([a-z]+\) ")
+
+
+def without_menu_icons(text):
+    return _MENU_ICON_MARK.sub("", text)
 
 
 # Parsed source, shared by every source-reading test in the process (#1147).
@@ -123,6 +135,9 @@ RUNTIME_CONTAINERS = {
     # #926: who else asked which bot for its list. A leftover is a bot the
     # next test's automatic grab leaves alone for no reason it can see.
     "list_grab_others_asked": dict,
+    # #1352: the speed caps' clocks. A leftover is a line still "busy" into
+    # the next test, whose first capped chunk would wait for no reason.
+    "speed_cap_clocks": dict,
     # Offers in flight. A leftover here is not inert: it is keyed by (nick,
     # port), the DCC port range is small and reused, and a stale entry would
     # hand the next test's send an offset agreed for a different file.
@@ -313,6 +328,8 @@ def reset_config(**overrides):
             del canonical[:]
         setattr(config, name, canonical)
     runtime.known_bots_pruned_at = 0.0
+    # A reclaim one test asked for must not space out the next test's.
+    runtime.nick_reclaim_asked_at = None
     for name, value in SETTINGS_DEFAULTS.items():
         setattr(config, name, value)
     for name, value in RUNTIME_FLAGS.items():
@@ -379,7 +396,18 @@ def reset_config(**overrides):
                         # #1182: one test's background audio reading, or
                         # its result, is not the next one's.
                         ("audio_reading", None), ("audio_reading_last", None),
-                        ("audio_retry_waiting", False)):
+                        ("audio_retry_waiting", False),
+                        # #1389: DAILY_SEND_FAILS_LIMIT's circuit breaker,
+                        # beside failed_transfers (reset with the containers
+                        # above). A connect one test made would let the next
+                        # test's never-connected send count, a streak left
+                        # behind would stop it counting, and a logged streak
+                        # would silence the next test's line. A fresh set
+                        # each time: this tuple is built per call.
+                        ("send_connected_since_start", False),
+                        ("never_connected_streak", 0),
+                        ("never_connected_streak_nicks", set()),
+                        ("never_connected_streak_logged", False)):
         setattr(runtime, name, value)
 
     # A FRESH OUTBOUND CLOCK PER TEST. runtime.outbound_pacer is a
@@ -389,6 +417,13 @@ def reset_config(**overrides):
     # state like any other, and it costs real wall-clock on every suite run.
     # test_a_shared_outbound_pace.py already did this by hand for itself.
     runtime.outbound_pacer = runtime.OutboundPacer()
+    # #1386: the record of paced lines sent, which a 439/707 refusal reads to
+    # find the line to put back. Process-wide like the pacer, and filled by
+    # every test that runs the real queue worker or debug drain: a line one
+    # test sent is not the next test's to resend. Cleared in place and under
+    # its lock, as the disconnect epilogue does, not rebound.
+    with runtime.recent_paced_lock:
+        runtime.recent_paced_lines.clear()
 
     config.debug_flood_lock = threading.Lock()
     config.fetch_queue_lock = threading.Lock()
@@ -1270,3 +1305,50 @@ class DCCoreTestCase(unittest.TestCase):
         self.set_config(FILE_DIRECTORY=tree.music, LOCAL_LIST_DIR=tree.lists,
                         TMP_ZIP_DIR=os.path.join(tree.root, "tmp_zips"))
         return tree
+
+
+def changelog_entry(test, number, public, opening=None):
+    """The changelog text issue `number` brought, wherever it is now (#1407's
+    release roll).
+
+    A PR writes its entry to docs/changes/<number>.md and, when users see the
+    change, <number>.public.md. A release roll (scripts/roll_changelog.py)
+    moves the text into docs/UPDATES.md and docs/UPDATES-PUBLIC.md and deletes
+    the files, so a test that read the file broke at every release. This reads
+    the file while it waits, and the rolled text after:
+
+      * internal (public=False): the "### ... (#<number>)" section of
+        docs/UPDATES.md, up to the next heading;
+      * public: the bullet of docs/UPDATES-PUBLIC.md that starts with
+        `opening`. A public bullet carries no issue number, so the caller
+        names its first words.
+
+    Raises AssertionError when the entry is in neither place. Skips `test`
+    in an extracted public tree (#1409): it has neither docs/changes/ nor
+    docs/UPDATES-PUBLIC.md, and its docs/UPDATES.md is the public changelog.
+    """
+    import io as _io
+    from tests.exported_tree import _this_is_an_export
+    if _this_is_an_export(test):
+        test.skipTest("an extracted public tree keeps no fragments and no internal "
+                      "changelog; the entry is checked in the development repository")
+    name = f"{number}.public.md" if public else f"{number}.md"
+    fragment = os.path.join(REPO_ROOT, "docs", "changes", name)
+    if os.path.exists(fragment):
+        with _io.open(fragment, encoding="utf-8") as handle:
+            return handle.read()
+    changelog = "UPDATES-PUBLIC.md" if public else "UPDATES.md"
+    with _io.open(os.path.join(REPO_ROOT, "docs", changelog), encoding="utf-8") as handle:
+        text = handle.read()
+    if public:
+        if not opening:
+            raise AssertionError(f"#{number}'s public entry has been rolled: name its opening words")
+        for line in text.splitlines():
+            if line.startswith(opening):
+                return line + "\n"
+        raise AssertionError(f"#{number}'s public entry is neither in docs/changes/ nor in {changelog}")
+    for match in re.finditer(r"^### .*\(#%d\b[^\n]*$" % number, text, re.M):
+        rest = text[match.end():]
+        following = re.search(r"^#{2,3} ", rest, re.M)
+        return text[match.start():match.end() + (following.start() if following else len(rest))]
+    raise AssertionError(f"#{number}'s entry is neither in docs/changes/ nor in {changelog}")

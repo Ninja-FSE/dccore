@@ -4,7 +4,8 @@ dcc.handle_download_request() resolves a bare filename in three steps:
 
   1. FILE_DIRECTORY/<name> - misses for any library that keeps files in folders
   2. the master list: find the name, take the folder heading above it
-  3. os.walk(FILE_DIRECTORY), first hit wins
+  3. os.walk(FILE_DIRECTORY), first hit wins - removed in #1376: a name no
+     list places is not found
 
 Step 2 is the only one that knows anything. The list is where the requester
 read the name from, so the folder the list puts it under is the copy they

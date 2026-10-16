@@ -131,11 +131,17 @@ class TheSendTimeout(unittest.TestCase):
         statement must sit between resolving the block and the loop that
         sends it."""
         with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
-            code = handle.read()
-        after_block = code.split("            block = dcc_block_size()\n", 1)[1]
-        before_loop = after_block.split("            while True:\n", 1)[0]
+            tree = parse_source(handle.read())
+        # The send loop is stream_the_file() since #1350: the statements of
+        # its `with open(...)` block, in order.
+        loop_fn = next(node for node in tree.body
+                       if isinstance(node, ast.FunctionDef) and node.name == "stream_the_file")
+        opened = next(node for node in loop_fn.body if isinstance(node, ast.With))
+        steps = [ast.unparse(node) for node in opened.body]
+        block_at = steps.index("block = dcc_block_size()")
+        loop_at = next(i for i, node in enumerate(opened.body) if isinstance(node, ast.While))
 
-        self.assertIn("            conn.settimeout(_send_timeout(block))\n", before_loop)
+        self.assertIn("conn.settimeout(_send_timeout(block))", steps[block_at + 1:loop_at])
 
 
 @unittest.skipUnless(loopback_is_usable(),

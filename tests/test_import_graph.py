@@ -45,8 +45,42 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #   adminchat              - verify_password() for the dashboard login (#131);
 #                            stdlib plus config and platform_compat only
 #   platform_compat        - stdlib wrappers, imported by adminchat
+#   web_common             - the dashboard's shared limits and helpers, split
+#                            out of webserver.py (#1311); stdlib only at import
+#   web_search             - the search broadcast, split out (#1313); stdlib,
+#                            config and web_common at import
+#   web_lists              - other bots' lists, split out (#1315); stdlib,
+#                            config, runtime and web_common at import
+#   web_fetch,             - the fetch queue and this bot's own list rebuild,
+#   web_list_update          split out (#1317); stdlib, config, runtime,
+#                            platform_compat, web_common and web_lists
+#   web_library, web_stats - the own library, the Stats page and the Queue
+#   web_queue                page, split out (#1318); stdlib, config,
+#                            adminchat (already allowed) and each other
+#   web_settings,          - the Settings page, served folders and lists,
+#   web_served,              on-connect commands and messages, split out
+#   web_on_connect,          (#1320); stdlib, config, runtime,
+#   web_messages             platform_compat, adminchat and web_common
+#   web_login, web_console - the login checks, the console and the setup
+#   web_setup_page                page, split out (#1322); stdlib, config,
+#                            runtime, adminchat and the modules above
 ALLOWED = {
     "webserver",
+    "web_common",
+    "web_search",
+    "web_lists",
+    "web_fetch",
+    "web_list_update",
+    "web_library",
+    "web_stats",
+    "web_queue",
+    "web_settings",
+    "web_served",
+    "web_on_connect",
+    "web_messages",
+    "web_login",
+    "web_console",
+    "web_setup_page",
     "defaults",
     "runtime",
     "settings_file",

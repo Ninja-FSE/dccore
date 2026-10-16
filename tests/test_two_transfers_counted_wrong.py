@@ -27,6 +27,7 @@ import defaults as config  # noqa: E402
 import irc  # noqa: E402
 
 from tests.support import DCCoreTestCase, install_fake_oserve  # noqa: E402
+from tests.test_a_finished_send_is_recorded_once import RecordsASend  # noqa: E402
 
 
 class ARowIsSettledWhereverItNowSits(DCCoreTestCase):
@@ -106,37 +107,30 @@ class AShortSendIsNotACompletedTransfer(unittest.TestCase):
         self.assertIn("if transfer_completed:", before,
                       "a truncated send still prints 'Sent the whole file'")
 
-    def test_the_statistics_are_not_written_for_a_short_send(self):
-        block = self.completion_block()
-        stats_at = block.index("update_stats_on_complete")
 
-        self.assertIn("if not transfer_completed:", block[:stats_at],
-                      "the lifetime totals and the speed record still count a "
-                      "send that ended early")
+class AShortSendCountsNothing(RecordsASend):
+    """#454's counting half, called (#1328): record_completed_send() took
+    over the block these read as text."""
+
+    def test_the_statistics_are_not_written_for_a_short_send(self):
+        self.record(transfer_completed=False, bytes_sent=1000)
+        self.assertEqual(self.stats, [], "the lifetime totals and the speed record still count a "
+                                         "send that ended early")
 
     def test_the_download_counter_is_behind_the_same_guard(self):
-        """It sits after the stats write in the same try, so the skip has to
-        carry past it rather than only guarding the first statement.
-
-        assertIn before assertLess: str.index raises ValueError when the
-        needle is gone, and "substring not found" tells whoever hits it
-        nothing about what broke."""
-        block = self.completion_block()
-
-        self.assertIn("raise _ShortSend()", block,
-                      "nothing skips the completion bookkeeping, so a short "
-                      "send is counted again")
-        self.assertIn("record_download", block)
-        self.assertLess(block.index("raise _ShortSend()"),
-                        block.index("record_download"))
+        """It comes after the stats write, so the skip has to carry past it
+        rather than only guarding the first statement."""
+        self.record(transfer_completed=False, bytes_sent=1000)
+        self.assertEqual(self.downloads, [], "nothing skips the counter, so a short send is counted")
+        self.assertEqual(self.records, [])
 
     def test_the_skip_is_not_reported_as_a_database_error(self):
-        """The block is wrapped in `except Exception` for the database writes.
-        A deliberate skip caught by that would print 'Could not increment the
-        sharing statistics' and send the next reader hunting a fault that
-        never happened."""
-        block = self.completion_block()
+        """The writes are wrapped in `except Exception`. A deliberate skip
+        caught by that would print 'Could not increment the sharing
+        statistics' and send the next reader hunting a fault that never
+        happened."""
+        said = self.record(transfer_completed=False, bytes_sent=1000)
+        self.assertNotIn("[DB ERROR]", said)
+        self.assertIn("Not counted", said)
 
-        self.assertIn("except _ShortSend:", block)
-        self.assertLess(block.index("except _ShortSend:"),
-                        block.index("except Exception as db_err:"))
+

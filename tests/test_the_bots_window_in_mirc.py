@@ -23,13 +23,14 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 import adminchat  # noqa: E402
+from tests.support import without_menu_icons  # noqa: E402
 
 SCRIPT = os.path.join(REPO_ROOT, "scripts", "mirc", "dccore.mrc")
 
 
 def script_text():
     with io.open(SCRIPT, encoding="ascii", newline="") as handle:
-        return handle.read()
+        return without_menu_icons(handle.read())
 
 
 def code_lines(text):

@@ -142,7 +142,8 @@ class TheHelperOnItsOwn(stats.ImportCase):
 
     def test_the_import_goes_through_it(self):
         import io
-        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"), encoding="utf-8") as handle:
+        # web_stats.py since #1318, step 4 of splitting webserver.py.
+        with io.open(os.path.join(REPO_ROOT, "src", "web_stats.py"), encoding="utf-8") as handle:
             body = handle.read()
         start = body.index("def apply_stats_import(")
         function = body[start:body.index("\ndef ", start + 1)]

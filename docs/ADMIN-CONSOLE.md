@@ -210,7 +210,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.16.2 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.17.0 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -229,11 +229,12 @@ prefix.
 
 | Command | Effect |
 |---|---|
-| `status` | everything at a glance — slots, queue, bans, list, uptime |
-| `queue [nick]` | queued files, all users (in the order they are served) or one nick's files, numbered |
+| `status` | everything at a glance — slots, queue, bans, list, uptime; with `DAILY_SEND_FAILS_LIMIT` on, a `Paused` line naming each nick paused until midnight for failed sends, with its count (#1389) |
+| `queue [nick]` | queued files, all users (in the order they are served) or one nick's files, numbered; a nick with nothing queued that is paused for failed sends says so |
 | `slots` | what is sending right now, and how far along |
 | `packing` | the folder pack that is running: for whom, which folder (its name, never its path), how long, and the archive's size so far against the folder's (#1202) |
 | `packcancel` | stop the folder pack that is running: `rar` is terminated, the partial archive is deleted, the user is told it was cancelled (no failure is counted against the request), and the next waiting pack starts. "Nothing is being packed." when none runs (#1202) |
+| `library` | each list's files, folders and size, and when its last rebuild finished and how long it took; then the search index of the lists held from other bots: its rows, how many lists, and whether it is still being filled (#1359). Until a list is rebuilt once after the update, it shows no folders or rebuild time; a list not built yet says so, and one whose figures cannot be read says that, with the reason in the log (#1367) |
 | `bans` | permanent and timed bans |
 | `uptime` | how long the daemon has been running |
 | `version` | build and platform |
@@ -252,6 +253,7 @@ prefix.
 | `ignore <nick> <minutes>` | drop one nick's requests for a while, 1 to 10080 minutes (#1206). It is a timed ban: kept across a restart, ends by itself, listed by `bans` with the time left. Its queued files stay; `clearqueue` removes them |
 | `clearandignore <nick> <minutes>` | `ignore`, then `clearqueue` the same nick - but only if the ignore actually took (the bot's own nick, and a nick outside the pattern `ignore` accepts, are refused and the queue is left alone). dccore.mrc's "Clear the queue of ... and ignore for..." sends this one command instead of the two separately (#1247) |
 | `unignore <nick>` | end a timed ignore - or a flood ban - now |
+| `unpause <nick>` | lift a pause for failed sends (`DAILY_SEND_FAILS_LIMIT`, #1389): the nick's failed sends today are forgotten and its next request is queued as usual. The files the pause removed are not put back; they ask again. Kept in memory only, like the count: a restart lifts every pause too |
 | `clearqueue <nick>` | force-clear another user's queue |
 | `rehash` | reload modules in place |
 | `update` | rebuild the MasterList |
@@ -272,7 +274,7 @@ prefix.
 | `setcommit [confirm]` | save everything buffered since `setbegin` in one go - or nothing, if any `set` in it was refused. A value equal to the current one is not written at all, so sending a page back untouched saves nothing |
 | `setabort` | drop the buffered changes |
 | `setpreview` | the sample advert and transfer notice drawn in the theme the open transaction would save (`THEME`, the `CUSTOM_THEME_*` colours, `SEARCH_ENABLED`), or in the saved one when none is open - the dashboard's preview, in colour |
-| `served` | the lists this bot serves: their names, which is primary, the channels each is bound to with the channel's mode (`normal`, `quiet`, `request_only`), and their folders. `served begin`, then `served list` / `served chan` / `served folder` rows and `served commit` replace the whole set, as the dashboard's lists page does (`served abort` drops it) |
+| `served` | the lists this bot serves: their names, which is primary, the channels each is bound to with the channel's mode (`normal`, `quiet`, `request_only`), their folders, and the file types each leaves out of its own list (#1295). `served begin`, then `served list` / `served chan` / `served folder` rows and `served commit` replace the whole set, as the dashboard's lists page does (`served abort` drops it). The rows carry no file types; a commit keeps each list's, by name, and only the dashboard edits them |
 | `folders` | the served folders of a bot with one list (the dashboard's folder rows on "Your list"); `folders begin`, `folders row` rows and `folders commit` replace them (`folders abort` drops it) |
 | `onconnect` | the commands sent to the server once registered, in full (an X login with its password included, as the dashboard shows it - never in the bot's log), and the seconds between them; `onconnect begin`, `onconnect delay`, `onconnect line` rows and `onconnect commit` replace them (`onconnect abort` drops it); `onconnect resend` sends the saved ones again now |
 | `banlist` | the permanent ban patterns and the timed bans and ignores with the seconds left, as rows for the settings window; `bans` is the same for a person |
@@ -280,7 +282,7 @@ prefix.
 | `unlock <password>` | let a session that logged in with a paired token change settings: the admin password, checked as the login checks it, once per session. A session that logged in with the password is unlocked already. Three wrong passwords close the session, as at the login; the line is never logged |
 | `help` | the command list |
 | `hello <client> <version>` | switch this session to the structured feed (below) |
-| `pair <client> <version>` | mint a login token for a script (below) |
+| `pair <client> <version> [readonly]` | mint a login token for a script (below); with `readonly`, one that can look and change nothing ("Read-only tokens" below) |
 | `unpair [<client>]` | list the paired scripts, or revoke one |
 | `shutdown now` | stop the bot, the way Ctrl-C in its window does: it leaves IRC and ends (`shutdown` alone says how) |
 | `quit` | close the session |
@@ -564,11 +566,14 @@ have been replaced with spaces.
 | `DCCORE DQBEGIN` / `DCCORE DQROW <id> <kind> <state> <bot> <note> <name>` / `DCCORE DQEND <count>` | the Download queues window's snapshot (#1217), sent when `dlqueue` is asked: one `DQROW` per request that has not started - `kind` is `f` (file), `r` (a `!rar` folder) or `l` (a list), `state` is `pending`, `offered` or `queued`, `note` one token (why it waits), the name last and may hold spaces. Whole or not sent. Only to a script that said 1.15 or later in `HELLO` | the Download queues window |
 | `DCCORE PACKING <nick> <done> <total> <elapsed> <folder>` | a folder is being packed into an archive (#1202): in the status burst and every 3 seconds between; `DCCORE PACKING end` once when it stops. `done` is the archive's size so far in bytes, `total` the folder's (0 until measured; rar compresses, so the two are a guide), the folder's name is last and may hold spaces. Sent only to a script that said it is 1.14 or later in `HELLO` | the user |
 | `DCCORE REBUILD <phase> <folder_index> <folder_count> <files> <elapsed>` | a master-list rebuild is running, however it was started (#1024): in the status burst and every 5 seconds between; `DCCORE REBUILD end` once when it stops. The phase is `starting`, `scanning`, `writing`, `packing` or `publishing`. Sent only to a script that said it is 1.9 or later in `HELLO`. The background audio reading (#1182), once the rebuild has published or when `audioinfo` started it alone, comes the same way to a script of 1.12 or later: `DCCORE REBUILD reading <read> <to_read> <files_a_second> <elapsed>`, `finding 0 0 0 <elapsed>` while a reading started alone reads the list to find what to read, then `rewriting 0 0 0 <elapsed>` while it writes the lengths into the list | the phase |
+| `DCCORE LIBRARY <files> <folders> <bytes> <rebuilt_at> <rebuild_secs> <primary>` | one per list served, in the operator's order (#1359): the request lines of the list and its film list and the byte total, as the advert counts them; the folders it lists, when its last rebuild published (epoch) and how many seconds that took - `0 0 0` for a list no rebuild has published since this bot was updated; `primary` is `1` for the primary list. A list whose figures cannot be read has no line, rather than zeros that read as an empty list (#1367). Sent in every status burst, and in one straight away, after the session sends `library` - never before, since an older script would print a line it has no handler for; a burst follows the end of every rebuild too, whether or not the script draws `REBUILD` lines (#1367). `consolecaps` names `library:1` on a bot that has it | the list's name |
+| `DCCORE SEARCHINDEX <rows> <lists> <state>` | after the LIBRARY lines: the dashboard's search index of the lists held from other bots - their rows, as each fetch counted them, and how many lists; `state` is `ok`, `filling` (a backfill is indexing held lists now - the one after a start, or the one a repair owes, which the dashboard's filter runs before it answers - so not every held list is searchable yet) or `none` (no list is held). No line when these cannot be read (#1367) | |
 | `DCCORE QUEUE <pos> <nick> <files> <frozen_secs_left>` | one per queued user, the first 20 in the order they are served: position, files waiting, seconds until a frozen queue is dropped (0 = not frozen) | |
 | `DCCORE TOKEN <name>` | the reply to `pair` | the token, shown once |
 | `DCCORE PING` | stands in for a status burst the bot could not compute in time; a client treats it as any other line and shows nothing | |
 | `DCCORE CHAT <id> <channel> <nick>` | a DCCore Chat line said in one of the bot's channels: an id (its time in milliseconds, only ever going up - a client draws each id once), the channel, who said it (the bot's own nick for a line sent with `chat`; `*` for the bot's own remark, such as somebody hidden for flooding) | the text, stripped of colours |
 | `DCCORE CHANNELS` | the channels the bot is in, which are the ones it chats in; sent after `HELLO`, in answer to `chat` alone, and again with a status burst whenever they have changed | the channels, space-separated |
+| `DCCORE CHATHIST <days> <max_mb>` | how long and how big the script may keep DCCore Chat's history (#1401): the bot's `CHAT_HISTORY_DAYS` and `CHAT_HISTORY_MAX_MB`, whole numbers, 0 = no limit; sent after `HELLO` to a script that said 1.20 or later, and again within a second whenever either setting changes (a Settings save, a `set`, a rehash) - never halfway through a rehash's reload | |
 
 After `HELLO` the bot also sends `CHANNELS` and then the last 50 `CHAT` lines it
 holds, so a window that reconnects shows what it missed. They are kept in memory
@@ -601,7 +606,8 @@ drawn from. It arrives:
   deadline; if they are not in by then (a queue lock or a stats database held
   for that long by some slow disk operation) the bot sends `DCCORE PING`
   instead, so a busy-but-alive bot is still heard from, and the feed keeps
-  flowing behind it. The burst follows once the figures can be read.
+  flowing behind it. The burst follows the moment its figures are in, within
+  half a second (#1367) - not with the next one.
 
 The timer fills silence only. A client that is behind is already receiving
 lines, and a burst on top of a backlog would only push more of them off the
@@ -675,7 +681,8 @@ bans, and drive the feed and the queue commands as before; changing a
 setting, the lists, the folders or the on-connect commands, reading or
 resending the on-connect commands (an X login among them holds a password),
 and pairing or revoking another script need the password, once per session:
-`unlock <password>` (see "Settings over the console"). A stolen token still
+`unlock <password>` (see "Settings over the console"). A token paired
+`readonly` does less still: see "Read-only tokens" below. A stolen token still
 costs you a console session, and one `unpair` ends it. For `dccore.mrc` the file that holds it is
 `dccore.ini` beside the script, and it is clear text: mIRC's hash-table save
 writes the token readable. The `.mrc` itself carries nothing. Keep `dccore.ini`
@@ -707,6 +714,48 @@ the password or with a token - to mint or revoke one. When the token file cannot
 be written, both say so (`NOT revoked: ...`, `Could not pair ...`) and nothing
 changes: an `unpair` that answers "Revoked" has really revoked the token. The file lives where
 **Settings → Advanced → Paired console scripts file** points.
+
+### Read-only tokens
+
+A token can be paired to look and change nothing (#1374): for a stats script,
+a status widget, or a client on a machine you trust less than your own.
+
+```
+pair widget 1.0 readonly
+```
+
+`readonly` may come anywhere after the name, in any case. A session that logs
+in with such a token may run `status`, `queue`, `slots`, `packing`, `library`,
+`bans`, `uptime`, `version`, `lists`, `dlqueue`, `downloads`, `hello`,
+`consolecaps`, `help` and `quit`. It may also run `consolefeed` and
+`checkupdates` with no argument, which report the setting, and `unpair` of
+its own name. It gets the feed like any other session. Everything else does
+not run: a ban, the queue commands, `fetch`, `chat`, `rehash`, `update`,
+`shutdown`, the settings window's commands. Each is answered
+`DCCORE LOCKED <command> <sentence>`, or the sentence on a plain session.
+That includes `unlock`, and the password given to it is never checked, so a
+read-only token never becomes more than that. To change something, log in with
+the password. The list is an allow-list: a command added to the console later
+is refused to a read-only session until it is decided that it only reads.
+`help` shows such a session only what it may run.
+
+The console is still one session, but a read-only login does not take it from
+a full one. While a session that logged in with the password or a full token
+holds the console, a read-only login is told "The console is in use" and
+closed; that is not counted as a wrong password. A full login replaces a
+read-only session as it replaces any other, and a read-only login replaces
+another read-only one. So a script that logs in now and then never closes your
+console: it gets in when the console is free. A full session whose client
+vanished without closing it holds the console until the bot notices it is gone.
+
+In `adminchat_tokens.json` a read-only token's hash is kept as `readonly_hash`
+instead of `hash`. A bot from before read-only tokens reads `hash` only, so if
+you ever go back to one, it refuses a read-only token rather than letting it in
+as a full one. `unpair` lists a read-only token with `, read-only` after it.
+Pairing the same name again without `readonly` replaces it with a full token.
+
+`dccore.mrc` pairs full tokens, as before; a read-only token is paired by
+typing `pair` at the console.
 
 ## Settings over the console
 
@@ -802,9 +851,9 @@ first field, and its last field is always a sentence to show.
 
 | line | when | fields |
 |---|---|---|
-| `DCCORE CAPS <name>:<version> ... machine:<name>` | `consolecaps` | today `settings:1 preview:1 served:1 folders:1 onconnect:1 banlist:1 unlock:1`, then `machine:` and this computer's name (spaces and colons as `-`), which a client compares with its own to know whether the bot is on the same machine - the console's address cannot tell, since a DCC chat to a bot on the same PC arrives from the public address. A bot without these commands answers `DCCORE OUT Unknown command: consolecaps. Type 'help'.` - say "update the bot" then. A version goes up when a field of that part moves; a part added later is a new name |
+| `DCCORE CAPS <name>:<version> ... machine:<name>` | `consolecaps` | today `settings:1 preview:1 served:1 folders:1 onconnect:1 banlist:1 unlock:1 library:1`, then `machine:` and this computer's name (spaces and colons as `-`), which a client compares with its own to know whether the bot is on the same machine - the console's address cannot tell, since a DCC chat to a bot on the same PC arrives from the public address. A bot without these commands answers `DCCORE OUT Unknown command: consolecaps. Type 'help'.` - say "update the bot" then. A version goes up when a field of that part moves; a part added later is a new name |
 | `DCCORE SETBEGIN <n>` / `DCCORE SETF <KEY> <type> <value>` / `DCCORE SETEND <n>` | `settings [<word>]` | one `SETF` per setting, in the Settings page's order; `type` is `str`, `int`, `float`, `bool` or `list`, the value last (empty: the line ends after the type - for `WEBUI_CONSOLE_ENABLED` that means "not set"). `ADMIN_PASSWORD_HASH` is never among them. Labels, help, units and choices are the dashboard's metadata, not sent here |
-| `DCCORE LOCKED <command> <sentence>` | any of the commands above that change something, on a session that logged in with a token and has not unlocked | `command` is what was refused, one or two words (`setcommit`, `set`, `served commit`, `folders commit`, `onconnect commit`, `onconnect resend`, `onconnect`, `pair`, `unpair`); the sentence says to unlock. Nothing was saved; an open transaction stays open |
+| `DCCORE LOCKED <command> <sentence>` | any of the commands above that change something, on a session that logged in with a token and has not unlocked; and any command at all that a read-only token may not run ("Read-only tokens" above) | `command` is what was refused, one or two words (`setcommit`, `set`, `served commit`, `folders commit`, `onconnect commit`, `onconnect resend`, `onconnect`, `pair`, `unpair`; on a read-only session, the command word, `unlock` included); the sentence says to unlock, or on a read-only session that only the password can do this. Nothing was saved or run; an open transaction stays open |
 | `DCCORE UNLOCKED` | `unlock <password>` | the session may change settings now (also the answer when it already could) |
 | `DCCORE UNLOCK error <message>` | `unlock` with a wrong password | still locked; the third wrong one closes the session instead |
 | `DCCORE SETOPEN <dropped>` | `setbegin` | `dropped`: changes buffered by a transaction that was still open, now gone (0 normally) |
@@ -815,13 +864,13 @@ first field, and its last field is always a sentence to show.
 | `DCCORE SETDONE aborted <n>` | `setabort` | `n` buffered changes dropped |
 | `DCCORE SETAPPLIED` | after `SETDONE ok` with something written | the save's rehash has finished, so the new values are in effect - reload the page now, not at `SETDONE`: the rehash first waits up to `REHASH_TRANSFER_WAIT` for transfers, and until it reloads, `settings` still shows the old values. Always after the `SETDONE ok` it belongs to; none for a save that wrote nothing or failed |
 | `DCCORE PVBEGIN 2` / `DCCORE PVLINE <advert\|notice> <line>` / `DCCORE PVEND 2` | `setpreview` | the sample advert and transfer notice, encoded like every other value - colour codes as `%03`, runs of spaces as `%20` - so a client decodes it and echoes it in colour. (mIRC collapses runs of spaces in a chat line, and a theme's frame is made of them.) |
-| `DCCORE SRVBEGIN <lists> <source> <max>` / `DCCORE SRVLIST <n> <primary> <name>` / `DCCORE SRVCHAN <n> <channel> <mode>` / `DCCORE SRVFOLDER <n> <label> <path>` / `DCCORE SRVEND <lists> <channels> <folders>` | `served` | per list, in order: its `SRVLIST` (`n` from 1, `primary` `1` or `0`, the name last), then a `SRVCHAN` per channel bound to it (`channel` a token, `mode` `normal`, `quiet` or `request_only`), then a `SRVFOLDER` per folder (`label` a token, the path last). `source` is `file` (`lists.json`) or `implied` (none: one list over the served folders - sending it back unchanged does not create the file). `max` is how many lists there may be |
+| `DCCORE SRVBEGIN <lists> <source> <max>` / `DCCORE SRVLIST <n> <primary> <name>` / `DCCORE SRVCHAN <n> <channel> <mode>` / `DCCORE SRVFOLDER <n> <label> <path>` / `DCCORE SRVEND <lists> <channels> <folders>` | `served` | per list, in order: its `SRVLIST` (`n` from 1, `primary` `1` or `0`, the name last), then a `SRVCHAN` per channel bound to it (`channel` a token, `mode` `normal`, `quiet` or `request_only`), then a `SRVFOLDER` per folder (`label` a token, the path last). `source` is `file` (`lists.json`) or `implied` (none: one list over the served folders - sending it back unchanged does not create the file). `max` is how many lists there may be. A list's own file types to leave out (#1295) are not in the snapshot; a `served` commit keeps them |
 | `DCCORE SRVOPEN <dropped>` | `served begin` | then `served list <n> <0\|1> <name>` (`n` the next number), `served chan <n> <channel> <mode>`, `served folder <n> <label> <path>`, and `served commit` or `served abort` |
 | `DCCORE SRVERR <message>` | a row refused, or one problem of a refused set | |
 | `DCCORE SRVDONE ok <lists> <message>` / `DCCORE SRVDONE unchanged <message>` / `DCCORE SRVDONE error <message>` / `DCCORE SRVDONE aborted <n>` | `served commit` / `served abort` | `ok`: written, and the lists need a rebuild to be published. An empty set (`served begin` then `served commit`) goes back to one list over the served folders |
 | `DCCORE FLDBEGIN <n> <source>` / `DCCORE FLDROW <n> <label> <path>` / `DCCORE FLDEND <n>` | `folders` | `source` is `file`, `file_directory` (the one `FILE_DIRECTORY`) or `none`; `label` a token, the path last |
 | `DCCORE FLDOPEN <dropped>` | `folders begin` | then `folders row <n> <label> <path>`, and `folders commit` or `folders abort` |
-| `DCCORE FLDERR <message>` / `DCCORE FLDDONE ok <n> <message>` / `DCCORE FLDDONE unchanged <message>` / `DCCORE FLDDONE error <message>` / `DCCORE FLDDONE aborted <n>` | | as for `served`. An empty set goes back to the single `FILE_DIRECTORY` |
+| `DCCORE FLDERR <message>` / `DCCORE FLDDONE ok <n> <message>` / `DCCORE FLDDONE unchanged <message>` / `DCCORE FLDDONE error <message>` / `DCCORE FLDDONE aborted <n>` | | as for `served`. An empty set is refused (`FLDDONE error`): a bot with no folders has nothing to share. With no folder list saved, `folders` sends the single `FILE_DIRECTORY` as row 1 (`source` `file_directory`) |
 | `DCCORE OCBEGIN <n> <delay> <max_commands> <max_delay>` / `DCCORE OCLINE <n> <command>` / `DCCORE OCEND <n>` | `onconnect` | the commands in the order they are sent, the seconds between them, and the two limits. A command is shown whole - it may be an X login with its password, which is why it is never logged |
 | `DCCORE OCOPEN <dropped>` | `onconnect begin` | then `onconnect delay <seconds>` (unsent: the saved delay is kept), `onconnect line <n> <command>`, and `onconnect commit` or `onconnect abort`. An empty set clears them |
 | `DCCORE OCERR <message>` / `DCCORE OCDONE ok <n> <message>` / `DCCORE OCDONE unchanged <message>` / `DCCORE OCDONE error <message>` / `DCCORE OCDONE aborted <n>` | | as for `served`; a problem names the command by its number, never by its text. Saved commands go out at the next connect, or now with `onconnect resend` |
@@ -842,7 +891,8 @@ it still works as a plain console, without the panel.
 
 ### First time
 
-Save the file anywhere (your mIRC folder is fine) and, in mIRC:
+Save the file anywhere (your mIRC folder is fine), with the `dcx` folder from
+`scripts/mirc/` beside it (see "DCX" below), and, in mIRC:
 
 ```
 /load -rs dccore.mrc
@@ -875,7 +925,7 @@ Chat request** to auto-accept so it never asks again.
 | the side panel | **Sending n/m**: each running transfer with its size, percentage and speed; **Queue n**: who is waiting, in order, with `frozen m:ss` on a queue that is counting down; **Today**: files and bytes sent, the speed record; and what this window has seen since it opened |
 | the title bar | `MusicBot on Undernet · slots 2/3 · queue 14 · today 38 files / 12.4GB · 1.5MB/s`, updated with every status burst |
 | the editbox | anything you type is a console command - `status`, `queue helen`, `clearqueue ivan`, `ban *!*@bad.host` - and the reply comes back as `[CONSOLE]` lines, or into a second `@DCCore-console` window if you prefer |
-| right-click | **Cancel the running pack** at the very top while one runs, the common commands, **Script Settings**, **Bot Settings** and **Console command** on top, then the groups **Info** (with **Download queues...**), **Lists**, **Library** (duplicate filenames, rebuild the list, **Read audio info**), **User control**, **Control** (update check, console feed, reload, **Stop the bot**), **Connection** and **Window** (DCCore Chat, Downloads window, panel, font); on a panel line, that user's queue, clearing it, ignoring them for a while, clearing and ignoring, or moving them earlier or later in line; in any channel's nick list, **DCCore → Queue of / Clear the queue of / Ignore for... / Clear the queue of and ignore for... / Stop ignoring** that nick |
+| right-click | **Cancel the running pack** at the very top while one runs, the common commands, **Control Panel** and **Console command** on top, then the groups **Info** (with **Download queues...**), **Lists**, **Library** (duplicate filenames, rebuild the list, **Read audio info**), **User control**, **Control** (update check, console feed, reload, **Stop the bot**), **Connection** and **Window** (DCCore Chat, Downloads window, panel, font); on a panel line, that user's queue, clearing it, ignoring them for a while, clearing and ignoring, or moving them earlier or later in line; in any channel's nick list, **DCCore → Queue of / Clear the queue of / Ignore for... / Clear the queue of and ignore for... / Stop ignoring** that nick |
 | the window's button | on the switchbar or treebar, like any channel's: the **message** colour when there is new activity - a request, a queue position, a send, a search - and the **highlight** colour (the one mIRC uses when somebody says your nick) on a failed transfer or dropped lines, so a failure stands out. The `[STATUS]` line, joins, parts and bans do not light it, as they would not in a channel. mIRC 7 or later |
 | a beep | on a failed transfer, if you leave that on |
 
@@ -900,33 +950,45 @@ the bot's network fills it in. Closing the window does not stop it opening next 
 **Open when mIRC starts** in the options does. DCCore Chat and the Downloads
 window can open the same way; both are off by default.
 
-### Options
+### This mIRC's own settings
 
-`/dccore options` (or right-click → Script Settings):
+`/dccore options` (or **mIRC** on the control panel's start page) opens the
+control panel on its **mIRC** side: this mIRC's own settings, in the same
+form as the bot's, saved by Apply or OK like everything else in the window.
+(They were a dialog of their own, "Options", until dccore.mrc 1.20.) Without
+DCX they are the window's **mIRC** tab.
 
-- a tickbox and a colour for each kind of event - requests, queue
-  positions, sends, failures, searches, joins/parts/quits, bans, other log
-  lines - plus the colour of file names, of console replies and of the side
-  panel's headings, and how
-  often the `[STATUS]` line is written when the side panel is off (0 = never);
-- under those, the colours inside a line (dccore.mrc 1.18 or later): **Search
-  text** (the searched term; *same as File names* until you choose), **Nicks** and
-  **Channels** (both *same as the line*, no colour of their own, until you choose).
-  **Nicks** can also be *per nick*: each nick gets a colour of its own from its
-  name, the same every time whatever its case, out of the colours that can be
-  read on the window's background. A new choice colours new lines; what is
-  already in the window stays as it was drawn;
-- the side panel, the title bar figures, console replies in a separate
-  window, the beep, the fixed-width font and its size (the Status window's
-  size until you set one - on a high-resolution screen you may want a
-  bigger number), and the window's background colour (one of mIRC's sixteen,
-  or "none" to leave the window as mIRC has it). mIRC has no per-window
-  colour setting, so the script writes a one-pixel picture of the colour
-  beside itself (`dccore-bg-<n>.bmp`) and tiles it behind the text;
-- the bot's nick, whether the script reconnects by itself, the pairing
-  state with **Pair again...** and **Forget token**.
-- **Open when mIRC starts (minimised)**: `@DCCore` (on by default),
-  `@DCCore-Chat` and `@DCCore-Downloads` (both off by default).
+- **@DCCore window**: a tickbox and a colour for each kind of event -
+  requests, queue positions, sends, failures, searches, joins/parts/quits,
+  bans, other log lines - and how often the `[STATUS]` line is written when
+  the side panel is off (0 = never); then the colours of file names, of
+  console replies and of the side panel's headings, and the colours inside a
+  line: **Search text** (the searched term), **Nicks** and **Channels**.
+  Since 1.20.0 they start blue, purple and teal; a script that ran before
+  moves them there once, unless you had picked a colour. Search text can
+  also be *same as File names*, and all three *same as the line*, no colour
+  of their own. **Nicks** can also be *per nick*: each nick
+  gets a colour of its own from its name, the same every time whatever its
+  case, out of the colours that can be read on the window's background. A
+  new choice colours new lines; what is already in the window stays as it
+  was drawn.
+- **Window**: the side panel, the title bar figures, console replies in a
+  separate window, the beep, the fixed-width font and its size (the Status
+  window's size until you set one - on a high-resolution screen you may
+  want a bigger number), the window's background colour (one of mIRC's
+  sixteen, or "none" to leave the window as mIRC has it; mIRC has no
+  per-window colour setting, so the script writes a one-pixel picture of the
+  colour beside itself, `dccore-bg-<n>.bmp`, and tiles it behind the text),
+  how many finished downloads the Downloads window shows, the theme (dark,
+  light, or following mIRC's own dark mode - see *Dark theme and icons*
+  below) with the icons in the menus and the control panel's page list, and
+  whether the settings window itself is drawn with DCX.
+- **Connection**: the bot's nick, the pairing state with **Pair again...**
+  and **Forget token**, and whether the console feed is on (the bot's own
+  state, never saved here). Reconnecting by itself is under **General →
+  General Settings**, with the windows to open when mIRC starts.
+- **Chat**: whether DCCore Chat listens on every channel, and opens when a
+  line arrives.
 
 These are the script's own filters, kept by mIRC in `dccore.ini`. The
 bot's **Settings → Console feed** tickboxes remain the ceiling on what is
@@ -934,13 +996,67 @@ sent at all: what is off there never reaches the script.
 
 ### The bot's settings
 
-`/dccore settings` (or right-click -> **Bot Settings**, or **Settings...** next to
-**Options...** in the other menus) opens the settings window (dccore.mrc 1.19 or
-later, mIRC 6.17 or later): the bot's own settings, as the dashboard's Settings
-page has them, over the console commands above. Six tabs - **General**,
+`/dccore settings` (or right-click -> **Control Panel**, the one entry in every
+menu) opens the control panel (dccore.mrc 1.19 or later, mIRC 6.17 or later).
+With DCX it opens on a start page with two choices, **Bot** and **mIRC**, and
+under them the bot's figures - nick, network, up since and the connection;
+the running sends; today's sent, queue, speed record, failed and searches;
+the lists, the rebuild and the pack running - from the same status the side
+panel draws, refreshed with it; and, from a bot that has `library:1` in its
+CAPS, the library's totals (#1359): each list's files, the files and folders
+and size of them all, the newest rebuild and how long it took, and the search
+index of the lists held from other bots. The window sends `library` once, and
+the `LIBRARY` and `SEARCHINDEX` lines then come in every burst. The connection row has a coloured dot
+(#1396): green and `connected (structured console)` when the console is logged in and its chat is open,
+amber and `connecting: <step>` while the script dials, red and `offline` otherwise. Offline, nothing
+the bot sent is shown as current: up since, today's figures and the library read `-`, the running sends
+`(bot offline)`; the nick and network stay. The page redraws when the link drops or comes up.
+A side has a back arrow at the top left and
+the side's name beside it, and the window opens on the start page every time. **Bot** is the bot's own settings,
+as the dashboard's Settings page has them, over the console commands above:
+six groups - **General**,
 **Sharing**, **Downloads**, **Security**, **Dashboard & Console**, **Advanced** -
-each with its pages as a column of buttons on the left, and **Apply**, **OK** and **Cancel**
-at the bottom.
+each with its pages, chosen on the left; every page its sections in titled
+frames, each label above its field; and **Apply**, **OK** and **Cancel** at the
+bottom.
+
+#### DCX (#1288)
+
+The settings window is being moved onto **DCX** (Dialog Control eXtensions,
+https://github.com/twig/dcxdll, BSD-3-Clause), which gives it a list of the chosen
+tab's pages, tables with columns for the bans, channels and lists, and every line
+of the window - the tab strip, the body frame, the sections' frames - drawn by the
+script in one colour, the system's shadow grey, where Windows draws its own in
+light greys that are hard to see. `dcx.dll` ships
+unmodified in `scripts/mirc/dcx/`, with Microsoft's `WebView2Loader.dll` (which
+DCX loads every time it starts, and warns about in the status window when it is
+missing), their licences, and a README naming both files and their SHA-256s; the
+script checks those hashes before it loads DCX.
+Whenever DCX cannot be used, the window drawn with mIRC's own controls opens,
+exactly as before:
+
+- the option *Use the built-in settings window, not DCX* is on (the **Script**
+  tab's **Window** page);
+- the mIRC version is below 7.45 (DCX 3.1 needs 7.45 or later), or it is the 64-bit build - the dll
+  is 32-bit;
+- `dcx\dcx.dll` is not beside the script, is not that release, or will not load.
+
+With DCX the window has the operator's navigation: a start page with two
+choices, **Bot** and **mIRC**, and on a side a back arrow at the top left
+with the side's name. The Bot side has the six groups as tabs, and the
+column of page buttons gives way to a **list of the chosen tab's pages** on
+the left, the page shown highlighted, with the page's name in bold between
+the tabs and the page; the mIRC side has its four pages in that list and no
+tab strip. Every table is a **listview with columns**: the
+channels; the lists (Name | Primary | Folders) on **Lists**; the timed bans
+(Nick | Time left) and the permanent patterns on **Bans & ignores**. Select a
+row and use the buttons under its table. (**Channel bindings** is a row per
+channel with its own menus, the same with or without DCX.) Without DCX the
+tabs, the page buttons and plain lists draw the same pages: the settings,
+Apply, OK and Cancel are the same window either way.
+
+`/dccore dcx` says which applies. `/dccore dcx check` opens a small window that
+tests DCX in this mIRC and writes what it found in `@DCCore`.
 
 - **The labels, units, choices and help are the dashboard's.** Point at a
   setting and its help shows under the page. Sizes show in KB or MB and go back
@@ -948,13 +1064,18 @@ at the bottom.
 - **General Settings** gathers the switches used most, including four of this
   mIRC's own: open @DCCore, Chat and Downloads when mIRC starts, and reconnect
   to the bot by itself. Those are saved here, in `dccore.ini`, by Apply or OK.
-- **Apply** sends what changed - only that - as one transaction (`setbegin`, a
-  `set` for each, `setcommit`), so the bot saves it in one go and rehashes once.
-  A value the bot refuses comes back with the dashboard's reason in the status
-  line, the window shows the page it is on, and nothing is saved; your edits
-  stay. Clearing the debug channel asks first, as the dashboard does. A change
-  on **File locations** asks before it is sent. **OK** is Apply, then closes once
-  the bot has saved; **Cancel** closes and sends nothing.
+- **Apply saves everything that changed**, and nothing else saves: the pages
+  have no Save buttons of their own. The settings go as one transaction
+  (`setbegin`, a `set` for each, `setcommit`), so the bot saves them in one go
+  and rehashes once; the on-connect commands and the lists with their bindings
+  go as transactions of their own; this mIRC's own switches go to `dccore.ini`
+  at once. A value the bot refuses comes back with the dashboard's reason in
+  the status line, the window shows the page it is on, and nothing is saved;
+  your edits stay. Clearing the debug channel asks first, as the dashboard
+  does. A change on **File locations** asks before it is sent. **OK** is Apply,
+  then closes once every reply has come back ok; **Cancel** closes and sends
+  nothing. **Leaving a page with changes not saved asks first**: Yes saves
+  them and goes on, No stays on the page.
 - **The admin password, once per connection.** The script logs in with its
   paired token, which may read the settings but not change them. The first
   time a save needs it, the window asks for the admin password (masked), sends
@@ -966,19 +1087,25 @@ at the bottom.
   reloaded (it may first wait for transfers to finish), then *Saved and
   applied*, and the page shows the bot's values. If the console reconnects
   while you have changes not saved, they are kept: **Reload** discards them.
-- **Structured pages** save with buttons of their own: the on-connect commands
-  on **IRC Server** (and **Resend now**), the served lists, their folders and
-  each channel's list and mode on **Lists & channels** (rows such as
-  `#music -> Main - Normal`; select one to edit it, then **Save lists**), and
-  **Bans & ignores** (lift a timed ban, ignore a nick for some minutes, add or
-  remove a permanent pattern). **Channels** edits `CHANNEL` as a list and is
+- **Structured pages**: the on-connect commands on **IRC Server** (**Resend
+  now** sends them again, **Unlock** shows them); **Lists**, a table with a row
+  per list, where **Add list** and **Edit** open a window for one list's name,
+  primary flag and folders (a label and a path each) and **Delete** takes a
+  list with its channels and folders; **Channel bindings**, a row per
+  channel with its own List and Mode menus - a change in a menu is kept at
+  once - and a **Remove**, a scrollbar beside the fifteen rows shown for the
+  channels beyond them, and a row to add one under them. Apply sends the
+  lot. **Bans & ignores** acts at once (lift a timed ban, ignore a nick for
+  some minutes, add or remove a permanent pattern): those are commands, not
+  settings. **Channels** edits `CHANNEL` as a list and is
   saved by Apply. A save the bot refuses keeps your edits there. A row or a
   command you did not touch goes back exactly as the bot sent it.
 - **Appearance**: the theme and the six custom colours as menus of mIRC's
   sixteen. **Preview** draws the sample advert and notice, with the colours as
   chosen and not saved, in `@DCCore-preview`.
-- **This mIRC window** opens the old **Options** dialog - `/dccore options` is
-  still that one.
+- **mIRC** - the window's other side, the **mIRC** tab without DCX - holds this
+  mIRC's own settings (see *This mIRC's own settings* above); `/dccore options`
+  opens the window there.
 - **Paths** are the bot's. The **...** buttons that browse for one work only when
   the bot runs on this PC - the console connection is 127.0.0.1, or the computer
   name the bot reports (`machine:` in its `CAPS` line) is this one's; otherwise
@@ -996,6 +1123,32 @@ setting added to the bot fails a test until it has a place in the window, or a
 reason not to; run the script after changing either, and `--check` says
 whether the block is up to date.
 
+### Dark theme and icons
+
+The script's windows can be dark: `/dccore theme dark`, or the **Theme** menu
+on the control panel's mIRC side (**Window** page). *Follow mIRC* (`auto`, the
+default) takes mIRC's own dark mode, which follows Windows' in mIRC 7.79 and
+later and is under Options → Display in mIRC 7.81 and later; *Dark* darkens the control panel, the list window and the
+download queues whatever mIRC does - the title bar, the background and the
+controls - through a small DLL of DCCore's own, `dll\dccore_ui.dll` beside
+the script (its source is `dll\src\dccore_ui.c`; the script checks its hash
+before loading it, as it does DCX's). In mIRC's own dark mode the DLL is not
+used: mIRC draws its dialogs dark already. Without the DLL (or on a 64-bit
+mIRC, which cannot load it) *Dark* leaves the dialogs light, the control
+panel's DCX parts included, so nothing is half dark. On a dark window
+background (black, navy, maroon or purple) the line colours meant for a white
+one - black, navy, green, maroon, purple and blue - are drawn as their light
+neighbours, so nothing disappears into it.
+
+`/dccore icons on` (or the tickbox under the theme) puts an icon beside each
+of the script's own menu items and each page in the control panel's page
+list, from `dll\dccore_icons.dll` - pictures only, nothing in it runs. Only
+the script's items get one; the rest of mIRC's menus are left as they are.
+
+Without the two files the script looks and works as before, and `/dccore
+theme` alone says what applies and why. The control panel takes a change of
+theme the next time it opens; the other windows change at once.
+
 ### Commands
 
 ```
@@ -1004,8 +1157,11 @@ whether the block is up to date.
 /dccore disconnect           close the chat and stop reconnecting
 /dccore unpair               forget the token here and revoke it on the bot
 /dccore trust                accept the bot's current host as the one to send the token to
-/dccore options              what to show, colours, panel, title bar, beep, windows at start
+/dccore options              this mIRC's own settings: the control panel's mIRC side
 /dccore settings             the bot's own settings, as its dashboard's Settings page has them
+/dccore dcx [check]          whether the settings window can draw with DCX, and why not; check tests it in this mIRC
+/dccore theme [auto|dark|light]  the script's windows dark, light, or following mIRC's own dark mode; alone, says what applies and why
+/dccore icons [on|off]       icons beside the script's menu items and the control panel's pages; alone, says how they stand
 /dccore window               open or focus @DCCore
 /dccore chat [text]          open DCCore Chat, or say something in it (public)
 /dccore downloads            open @DCCore-Downloads: what the bot is fetching from other bots (needs 1.10)
@@ -1054,6 +1210,39 @@ title and its first lines say so.
 - **Reconnecting:** the bot keeps the last 50 lines in memory, and a window
   that reconnects shows what it missed, each line once, with the time it
   was said. A bot restart forgets them.
+- **History (#1393):** the bot keeps nothing on disk, but the script does,
+  and it is **on by default** - also when you only update the script. Every
+  chat line the window shows, **private conversations included**, is written
+  as plain text to mIRC's *log* folder (`//echo -a $logdir` shows where; it
+  can be outside the mIRC folder), in `DCCore-Chat\`: a folder per channel
+  (`#channel\`), per private conversation (`@nick\`) and `every-channel\`
+  for your own lines said in several channels at once, each with a file per
+  month (`2026-10.log`), and `recent.txt`, the last few hundred lines of them
+  all. When the window opens it says where the history is kept, and shows
+  the last 200 lines again in grey, from the channels you listen on, your
+  private conversations and your own lines, so closing it or restarting
+  mIRC loses nothing. Untick right-click → *Keep a history file* to stop
+  writing and replaying; *Open the history folder* opens it. Anyone who can
+  read your log folder can read these files.
+- **How long and how much (#1401):** the bot's settings
+  `CHAT_HISTORY_DAYS` (**100** days out of the box) and
+  `CHAT_HISTORY_MAX_MB` (**100** MB for the whole history folder), on the
+  dashboard under **Settings → Private messages** and in the control
+  panel's **mIRC** side; 0 is no limit. The bot sends them to the script
+  (`DCCORE CHATHIST`), which keeps the last ones in `dccore.ini`. Whole
+  months go: every month that ended more than the days ago, then, while the
+  folder is over the size, the oldest months - never the month running.
+  This happens when the chat window opens (once a day at most) and when
+  the bot sends new limits, also to the files of a history you turned off.
+  A bot from before these settings sends no limits, and then nothing is
+  deleted.
+- **Unread:** a line from another bot that arrives while the window is not
+  the one you are looking at - or while mIRC is in the background - is
+  counted in the window's title (*3 unread*) until you are back in it. The
+  window's switchbar button lights up as for any new line (mIRC 7), and while mIRC is
+  in the background it flashes in the Windows taskbar. Untick right-click →
+  *Flash on a new line* to keep the count and the button without the
+  taskbar flashing.
 
 **Who is another DCCore bot:** every DCCore bot registers with a realname whose
 first word is `DCCore/sc` (then its nick). The bot asks `WHO` for each of its
@@ -1081,7 +1270,9 @@ channels, and:
   the queue's own messages. A line said in three channels counts three;
 - **strips colours, control codes and the characters that reverse the
   direction text is drawn in**, both ways;
-- **never writes a chat line to disk or to the debug channel.**
+- **never writes a chat line to disk or to the debug channel.** (The
+  mIRC script's history file, above, is on your own PC and is the
+  script's, not the bot's.)
 
 The tag proves nothing about the sender. Anyone can type it, and the nick
 shown is whoever the server says sent the line.
@@ -1094,7 +1285,10 @@ is lost.
 ### Updating the script
 
 A newer bot may send a line with a field the loaded script does not know
-about. Save the new `dccore.mrc` over the old one, then in mIRC:
+about. Save the new `dccore.mrc` over the old one, with the `dcx` and `dll`
+folders from `scripts/mirc/` beside it - the control panel draws with the
+first and the dark theme and icons come from the second; without them the
+script uses the plain settings window and light dialogs - then in mIRC:
 
 ```
 /reload -rs dccore.mrc

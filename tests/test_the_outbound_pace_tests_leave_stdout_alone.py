@@ -21,13 +21,18 @@ import io
 import sys
 import unittest
 
-from tests import support  # noqa: F401  (path setup)
+from tests import support  # path setup, and the harness's settings below
 from tests import test_a_shared_outbound_pace as pace  # noqa: E402
 
 RUNS = 6
 
 
 class TheOutboundPaceTestsPutStdoutBack(unittest.TestCase):
+
+    # The classes run below are DCCoreTestCases, so the settings their harness
+    # sets are set inside this test too - on purpose, and not this test's
+    # leak. Run first in a process, they move from the shipped values.
+    SETTINGS_THE_HARNESS_SETS = support.DCCoreTestCase.SETTINGS_THE_HARNESS_SETS
 
     def run_quietly(self, case_class):
         suite = unittest.defaultTestLoader.loadTestsFromTestCase(case_class)

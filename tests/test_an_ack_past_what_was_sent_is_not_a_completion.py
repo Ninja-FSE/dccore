@@ -125,7 +125,7 @@ class TheSendLoopKeepsTheTrackerTold(unittest.TestCase):
 
     def test_sent_is_updated_beside_bytes_sent(self):
         import inspect
-        body = inspect.getsource(dcc.start_dcc_send)
+        body = inspect.getsource(dcc.stream_the_file)   # the send loop since #1350
         loop = body.split("conn.sendall(chunk)", 1)[1][:200]
 
         self.assertIn("bytes_sent += len(chunk)", loop)

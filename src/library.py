@@ -72,9 +72,19 @@ _DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 # `modes` (#1204) is {channel: mode} for the channels that are NOT Normal;
 # a channel it does not name is Normal, so an old lists.json, and every
 # ServedList built without it, reads as Normal everywhere.
+#
+# `exclude` (#1295) is the file types this list leaves out on top of
+# LIST_IGNORED_EXTENSIONS, as normalise_extensions() spells them. Empty on an
+# old lists.json and on every ServedList built without it: built as before.
 ServedList = collections.namedtuple(
-    "ServedList", ("name", "primary", "channels", "folders", "modes"),
-    defaults=({},))
+    "ServedList", ("name", "primary", "channels", "folders", "modes", "exclude"),
+    defaults=({}, ()))
+
+# A list's own exclusions (#1295): how many, and how long one may be. Both
+# far beyond any real use - OmenServe's own example is two - and there so a
+# pasted paragraph is refused rather than stored.
+MAX_LIST_EXCLUSIONS = 50
+MAX_EXCLUSION_LENGTH = 32
 
 # What a channel a list serves is allowed to hear from the bot (#1204).
 #   normal        - advert, answers, notices: how it always was.
@@ -114,6 +124,65 @@ def _modes_from(raw, channels):
         if low in channels and mode in MODES and mode != NORMAL:
             kept[low] = mode
     return kept
+
+
+def _extension_entries(raw):
+    """The entries of an exclusion value as typed: a comma-separated string
+    or a list, each stripped, empties dropped."""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = raw.split(",")
+    if not isinstance(raw, (list, tuple)):
+        return [str(raw).strip()] if str(raw).strip() else []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def normalise_extensions(raw):
+    """A list's exclusions as the build compares them (#1295): lower-case,
+    each with its leading dot, in the order given, each once.
+
+    The same spelling LIST_IGNORED_EXTENSIONS takes (update_list's
+    _extension_set()): case does not matter and the dot is optional - but the
+    dot is always ADDED, because it is what stops "ts" matching the end of a
+    file called "credits". An entry extension_problems() would refuse is
+    dropped here, so a hand-edited lists.json loads with the usable rest."""
+    kept = []
+    for entry in _extension_entries(raw):
+        if _extension_problem(entry):
+            continue
+        low = entry.lower()
+        kept.append(low if low.startswith(".") else "." + low)
+    return tuple(dict.fromkeys(kept))
+
+
+def _extension_problem(entry):
+    if len(entry) > MAX_EXCLUSION_LENGTH:
+        return f"{entry[:MAX_EXCLUSION_LENGTH]}... is longer than {MAX_EXCLUSION_LENGTH} characters"
+    if entry.strip(".") == "":
+        return f"{entry!r} is not a file type"
+    for ch in entry:
+        if ch in "/\\" or ch.isspace() or ord(ch) < 32 or ord(ch) == 127:
+            return (f"{entry!r} is not a file type: no slashes, spaces or control "
+                    f"characters (write .db, not a folder or a name)")
+    return None
+
+
+def extension_problems(raw):
+    """Why a list's exclusions could not be saved as typed: [] when they can."""
+    entries = _extension_entries(raw)
+    found = [problem for problem in map(_extension_problem, entries) if problem]
+    if len(entries) > MAX_LIST_EXCLUSIONS:
+        found.append(f"{len(entries)} file types; the most is {MAX_LIST_EXCLUSIONS}")
+    return found
+
+
+def list_exclusions(name=None):
+    """The file types the list called `name` leaves out on its own, or the
+    primary's with no name. () for a list that names none, or a name no list
+    has - the global LIST_IGNORED_EXTENSIONS still applies either way."""
+    entry = list_by_name(name) if name else primary_list()
+    return tuple(getattr(entry, "exclude", None) or ()) if entry is not None else ()
 
 
 def load_lists(path=None):
@@ -158,7 +227,8 @@ def load_lists(path=None):
                     for c in (item.get("channels") or []) if str(c).strip()]
         entries.append(ServedList(name, bool(item.get("primary")),
                                   channels, folders_in,
-                                  _modes_from(item.get("modes"), channels)))
+                                  _modes_from(item.get("modes"), channels),
+                                  normalise_extensions(item.get("exclude"))))
 
     if not entries:
         return None
@@ -682,6 +752,9 @@ def list_problems(entries):
         found.extend(f"{name!r}: {line}"
                      for line in problems(getattr(entry, "folders", None) or []))
 
+        found.extend(f"{name!r}: file types to leave out: {line}"
+                     for line in extension_problems(getattr(entry, "exclude", None)))
+
     if entries and not any(getattr(e, "primary", False) for e in entries):
         # Not fatal on LOAD - load_lists() promotes the first - but on a SAVE
         # the operator is looking at the screen and can be told, because a
@@ -717,11 +790,13 @@ def save_lists(entries, path=None):
             folders_in,
             {str(c).strip().lower(): str(m or "").strip().lower()
              for c, m in (getattr(entry, "modes", None) or {}).items()
-             if str(m or "").strip().lower() not in (NORMAL, "")}))
+             if str(m or "").strip().lower() not in (NORMAL, "")},
+            getattr(entry, "exclude", None) or ()))
 
     found = list_problems(prepared)
     if found:
         raise ValueError("\n".join(found))
+    prepared = [entry._replace(exclude=normalise_extensions(entry.exclude)) for entry in prepared]
 
     target = lists_file() if path is None else path
     directory = os.path.dirname(os.path.abspath(target)) or "."
@@ -730,7 +805,8 @@ def save_lists(entries, path=None):
     payload = json.dumps(
         [dict({"name": e.name, "primary": e.primary, "channels": list(e.channels),
                "folders": [{"name": f.name, "path": f.path} for f in e.folders]},
-              **({"modes": dict(e.modes)} if e.modes else {}))
+              **({"modes": dict(e.modes)} if e.modes else {}),
+              **({"exclude": list(e.exclude)} if e.exclude else {}))
          for e in prepared],
         indent=2, ensure_ascii=False)
 

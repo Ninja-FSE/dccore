@@ -73,6 +73,7 @@ listen-mode work, and tests/test_adminchat.py drives it end to end.
 import binascii
 import codecs
 import collections
+import contextlib
 import hashlib
 import hmac
 import ipaddress
@@ -761,6 +762,70 @@ def script_reads_peers(version):
     return theirs is not None and theirs >= ours
 
 
+# The first script that reads a CHATHIST line (#1401). An older one has no
+# handler for it and would print it as text after every `hello`.
+CHATHIST_SCRIPT_VERSION = "1.20"
+
+
+def script_reads_chathist(version):
+    ours = _version_tuple(CHATHIST_SCRIPT_VERSION)
+    theirs = _version_tuple(version)
+    return theirs is not None and theirs >= ours
+
+
+def chathist_line():
+    """`DCCORE CHATHIST <days> <max_mb>`: how long and how big dccore.mrc may
+    keep DCCore Chat's history (#1401), or None while a rehash is reloading
+    the settings.
+
+    The script DELETES by these numbers, so a value read halfway through a
+    reload - a setting back at its shipped default for a moment (see
+    runtime.config_reload_lock) - must never go out: an operator who keeps
+    everything (0) would be sent 100 days and lose every older month. None
+    means "not now"; the writer asks again on its next pass. A value from
+    admin_config.py, which never went through coerce(), is held to 0 or
+    more and to a whole number, the two the script accepts."""
+    lock = runtime.config_reload_lock
+    if not lock.acquire(blocking=False):
+        return None
+    try:
+        # defaults.py declares both; 0 here only means a missing one keeps
+        # everything rather than deletes.
+        days = getattr(config, "CHAT_HISTORY_DAYS", 0)
+        max_mb = getattr(config, "CHAT_HISTORY_MAX_MB", 0)
+    finally:
+        lock.release()
+
+    def whole(value):
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+    return f"DCCORE CHATHIST {whole(days)} {whole(max_mb)}"
+
+
+def send_chat_history_limits(session):
+    """DCCORE CHATHIST to `session` (#1401): at `hello`, then again from the
+    writer's half-second pass whenever CHAT_HISTORY_DAYS or
+    CHAT_HISTORY_MAX_MB has changed - a Settings save, a `set`, a rehash - so
+    the script prunes by the new limits at once. Only to a script that reads
+    the line: reads_chathist is set by `hello` after its HELLO line is queued,
+    so this never goes out ahead of HELLO.
+
+    `hello` (the reader thread) and the writer both call this. Under the
+    session's _chathist_lock the read, the compare and the queueing are one
+    step, so a setting changed during a hello cannot queue the older line
+    behind the newer one - the script would prune once by the old limits."""
+    if not getattr(session, "reads_chathist", False):
+        return
+    with getattr(session, "_chathist_lock", None) or contextlib.nullcontext():
+        line = chathist_line()
+        if line is None or line == getattr(session, "_chathist_sent", None):
+            return
+        session._chathist_sent = line
+        session.send(line)
+
+
 def _download_name(row):
     if row.get("request_type") == "list":
         return f"{row.get('bot') or '?'}'s file list"
@@ -975,7 +1040,83 @@ def packing_lines(now=None):
             f"{_num(pack['total'])} {_num(pack['elapsed'])} {_clean(pack['name'])}"]
 
 
-def status_lines(now=None, fetching=False, rebuild=False, reading=False, packing=False):
+def library_figures():
+    """([(ServedList, files, bytes, size text, summary, built)], [ServedList],
+    (rows, lists, state)) (#1359): the figures of every list served whose
+    figures could be read, the lists whose figures could not, and the
+    search index.
+
+    A list not built yet is in the first, with nothing in it: that is what
+    it holds. One whose count failed is in the second, and the reason
+    logged (#1367): get_file_count_date_size_and_raw_bytes() answers a
+    failure as 'Error' and zeros, which would have read as an empty library.
+
+    Every list's directory is resolved once for the whole call
+    (list.list_dirs_held(), #1367): each figure asks for it, and each ask
+    read lists.json again."""
+    import library
+    import list as list_mod
+    import list_index
+    served, unreadable = [], []
+    with list_mod.list_dirs_held():
+        for entry in library.lists():
+            try:
+                files, date, size_text, raw = list_mod.get_file_count_date_size_and_raw_bytes(entry.name)
+                if date == "Error":
+                    raise ValueError("the list could not be counted")
+                served.append((entry, files, raw, size_text, list_mod.read_library_summary(entry.name),
+                               date != "No List"))
+            except Exception as err:
+                print(f"[ADMINCHAT] The figures of the list {entry.name!r} are unavailable: {err}")
+                unreadable.append(entry)
+    # Apart from the lists (#1367): the index failing costs its own line.
+    try:
+        index = list_index.held_totals(getattr(config, "fetched_bot_lists", None))
+    except Exception as err:
+        print(f"[ADMINCHAT] The search index's totals are unavailable: {err}")
+        index = None
+    return served, unreadable, index
+
+
+def library_lines():
+    """The library's totals (#1359), for the control panel's start page:
+
+        DCCORE LIBRARY <files> <folders> <bytes> <rebuilt_epoch> <rebuild_secs> <primary> <list>
+                                       one per list served, in the operator's order
+        DCCORE SEARCHINDEX <rows> <lists> <state>
+
+    <files> and <bytes> are the figures the advert uses: the request lines
+    of the list and its film list, and the byte total its last rebuild
+    wrote. <folders>, <rebuilt_epoch> and <rebuild_secs> are what that
+    rebuild recorded, 0 for a list no rebuild since has published. <primary>
+    is 1 for the primary list, 0 for the others; the list's name is last, so
+    it may hold spaces. SEARCHINDEX is the dashboard's index of the lists
+    held from other bots: their rows and how many lists, and `ok`, `filling`
+    (a backfill is indexing held lists now) or `none` (no list is held).
+
+    A list whose figures could not be read has no LIBRARY line (#1367), and
+    an index whose totals could not be read no SEARCHINDEX line: no figure
+    rather than a zero that reads as an empty library.
+
+    Sent only to a session that asked with `library`, once: an older script
+    would print a line it has no handler for in its window."""
+    try:
+        served, _unreadable, index = library_figures()
+    except Exception as err:
+        print(f"[ADMINCHAT] The library's totals are unavailable: {err}")
+        return []
+    lines = [f"DCCORE LIBRARY {_num(files)} {_num(summary['folders'])} {_num(raw)} "
+             f"{_num(summary['finished_at'])} {_num(summary['seconds'])} "
+             f"{1 if entry.primary else 0} {_clean(entry.name) or '?'}"
+             for entry, files, raw, _size, summary, _built in served]
+    if index is not None:
+        rows, held, state = index
+        lines.append(f"DCCORE SEARCHINDEX {_num(rows)} {_num(held)} {_clean(state, token=True)}")
+    return lines
+
+
+def status_lines(now=None, fetching=False, rebuild=False, reading=False, packing=False,
+                 library=False):
     """The STATUS burst (#550, step 3): what the client's title bar and side
     panel are drawn from, read from what the daemon already holds.
 
@@ -983,6 +1124,7 @@ def status_lines(now=None, fetching=False, rebuild=False, reading=False, packing
                       <started_epoch> <failed> <searches>      (the last three: since the bot started)
         DCCORE SLOT <nick> <sent> <total> <bps> <name>          one per active transfer
         DCCORE QUEUE <pos> <nick> <files> <frozen_secs_left>    one per queued user, first 20
+        DCCORE LIBRARY ... / DCCORE SEARCHINDEX ...              see library_lines(), when asked for
 
     Today's figures are the ROLLED ones (db.load_advanced_stats_rolled), for
     the reason announce.py gives: the daemon rotates the day only when a
@@ -1056,6 +1198,8 @@ def status_lines(now=None, fetching=False, rebuild=False, reading=False, packing
         lines.extend(rebuild_lines(now, reading=reading))
     if packing:
         lines.extend(packing_lines(now))
+    if library:
+        lines.extend(library_lines())
     return lines
 
 
@@ -1116,6 +1260,13 @@ class Session:
         self.draws_downloads = False  # ... and the Downloads window's rows (#1022)
         self.draws_dlqueue = False    # ... and the Download queues window's rows (#1217)
         self.reads_peers = False      # ... and PEERS and CONSOLEFEED lines (#1045)
+        self.reads_chathist = False   # ... and CHATHIST lines (#1401)
+        # The CHATHIST line this session was last sent (#1401), to send it
+        # again only when a setting changed; the lock makes the compare and
+        # the send one step for hello and the writer (send_chat_history_limits).
+        self._chathist_sent = None
+        self._chathist_lock = threading.Lock()
+        self.reads_library = False    # it sent `library`: LIBRARY lines in every burst (#1359)
         self.downloads_finished = 0   # > 0 while that window is open: how many finished rows it wants
         self._downloads_sent_at = 0.0
         self._downloads_last = None   # the last snapshot sent, to send only a change
@@ -1123,7 +1274,7 @@ class Session:
         self._reported_dropped = 0
         self._status_sent_at = 0.0
         self._status_due = False      # set by event_sink, acted on by the writer
-        self._status_job = None       # (thread, lines) while a burst is being computed
+        self._status_job = None       # (thread, lines, library) while a burst is being computed
         # The DCCORE CHANNELS line this session was last sent (#371): sent
         # again with a status burst when the bot's channels change, so a
         # chat window's channel list does not go stale (#958 review).
@@ -1148,6 +1299,9 @@ class Session:
         self.unlocked = False
         self.paired_as = None
         self.unlock_failures = 0
+        # Logged in with a read-only token (#1374): it runs what
+        # READ_ONLY_COMMANDS allows and nothing else, `unlock` included.
+        self.read_only = False
 
     # A DCC CHAT session keeps state between its lines, so it can hold a
     # transaction; the dashboard Console's per-request stand-in cannot.
@@ -1227,8 +1381,12 @@ class Session:
         point: a login every ~100 s while the bot itself was fine. If the
         figures are not in within STATUS_WAIT, `DCCORE PING` stands in for
         the burst - any line resets the script's timer - and the helper is
-        left to finish; while it is still running no second one is started,
-        and its lines go out on the pass that finds them ready in time.
+        left to finish; while it is still running no second one is started.
+        Its lines go out the moment it finishes (send_finished_status(), on
+        the writer's next half-second pass), not with the next timer burst
+        (#1367): the burst asked for at a rebuild's end is the slow one, the
+        first count of the list just published, and it is the one whose
+        totals the start page waits for.
         """
         if self.closed or not self.authenticated or not self.structured:
             return
@@ -1238,27 +1396,52 @@ class Session:
         job = self._status_job
         if job is None or not job[0].is_alive():
             lines = []
+            library = self.reads_library
 
             def compute():
                 try:
                     lines.extend(status_lines(fetching=self.draws_fetching,
                                               rebuild=self.draws_rebuild,
                                               reading=self.draws_audio,
-                                              packing=self.draws_packing))
+                                              packing=self.draws_packing,
+                                              library=library))
                 except Exception as err:
                     print(f"[ADMINCHAT] Status burst failed: {err}")
 
-            job = (threading.Thread(target=compute, daemon=True), lines)
+            job = (threading.Thread(target=compute, daemon=True), lines, library)
             self._status_job = job
             job[0].start()
         job[0].join(STATUS_WAIT)
         if job[0].is_alive():
             self.send("DCCORE PING")
             return
+        self._send_status_lines(job)
+
+    def send_finished_status(self):
+        """The lines of a burst that missed STATUS_WAIT, once its helper is
+        done (#1367). On the writer thread, every pass; nothing when no late
+        burst is waiting."""
+        job = self._status_job
+        if job is None or job[0].is_alive():
+            return
+        if self.closed or not self.authenticated or not self.structured:
+            return
+        self._status_sent_at = time.time()
+        self._send_status_lines(job)
+
+    def _send_status_lines(self, job):
         self._status_job = None
         for line in job[1]:
             self.send(line)
-        self._rebuild_shown = any(line.startswith("DCCORE REBUILD ") for line in job[1])
+        # `library` sent while a burst begun without the LIBRARY lines was
+        # still being computed joined that burst (#1367): one more, with them.
+        if self.reads_library and not job[2]:
+            self.request_status()
+        if self.draws_rebuild:
+            # Only for a script that draws them: a session that reads the
+            # library but not REBUILD lines never has one in a burst, and
+            # send_rebuild_progress() keeps its own count of the rebuild.
+            self._rebuild_shown = any(line.startswith("DCCORE REBUILD ") for line in job[1])
         self._rebuild_sent_at = time.time()
         self._packing_shown = any(line.startswith("DCCORE PACKING ") for line in job[1])
         self._packing_sent_at = time.time()
@@ -1267,8 +1450,14 @@ class Session:
         """A REBUILD line between bursts while a rebuild runs, and one
         `DCCORE REBUILD end` when it stops, so the panel does not wait up to a
         whole status interval to say the rebuild is over (#1024). Reads the
-        progress file only - no lock - so it is safe on the writer thread."""
-        if not (self.draws_rebuild and self.structured and self.authenticated):
+        progress file only - no lock - so it is safe on the writer thread.
+
+        A session that reads the library watches too, whether or not its
+        script draws REBUILD lines (#1367): the end of a rebuild is when its
+        totals change, so it asks for a burst then - and is sent no REBUILD
+        line it has no handler for."""
+        draws = self.draws_rebuild
+        if not ((draws or self.reads_library) and self.structured and self.authenticated):
             return
         now = time.time()
         if now - self._rebuild_sent_at < REBUILD_INTERVAL:
@@ -1278,7 +1467,13 @@ class Session:
             return
         self._rebuild_sent_at = now
         self._rebuild_shown = bool(lines)
-        self.send(lines[0] if lines else "DCCORE REBUILD end")
+        if draws:
+            self.send(lines[0] if lines else "DCCORE REBUILD end")
+        if not lines and self.reads_library:
+            # The new totals in a burst of their own, computed off this
+            # thread as every burst is (#1359): the first count of a list
+            # just published reads the whole file.
+            self.request_status()
 
     def send_packing_progress(self):
         """A PACKING line between bursts while a folder pack runs, and one
@@ -1356,6 +1551,9 @@ class Session:
             # fills silence only.
             if self._status_due and self.structured and self.authenticated:
                 self.send_status()
+            # A burst that missed STATUS_WAIT goes out as soon as it is done
+            # (#1367), not with the next one.
+            self.send_finished_status()
             if not self._outbox:
                 # The STATUS timer rides on the writer's own half-second
                 # wake rather than a thread of its own: one thread per
@@ -1371,6 +1569,7 @@ class Session:
                 self.send_rebuild_progress()
                 self.send_packing_progress()
                 self.send_downloads()
+                send_chat_history_limits(self)
                 self._wake.wait(0.5)
                 self._wake.clear()
                 continue
@@ -1682,14 +1881,26 @@ def _cmd_queue(session, args):
     queue = dict(getattr(config, "dcc_queue", {}))
     frozen = dict(getattr(config, "frozen_queues", {}))
     target = args.strip().lower()
+    # A nick whose next file is large while another large file is being sent
+    # (#1387) is passed over, keeping its place: said here, so it is not a mystery.
+    import dcc
+    active = list(getattr(config, "active_transfers", []))
+
+    def large_note(rows):
+        return dcc.waits_for_a_large_send(list(rows), active)
 
     if target:
         rows = queue.get(target, [])
         if not rows:
-            session.send(f"{target} has nothing queued.")
+            import dcc
+            fails = dcc.send_fails_paused(target)
+            session.send(f"{target} has nothing queued"
+                         + (f" - paused until midnight after {fails} failed sends today."
+                            if fails else "."))
             return
         session.send(f"{target}: {len(rows)} file(s)"
-                     f"{' (FROZEN)' if target in frozen else ''}")
+                     f"{' (FROZEN)' if target in frozen else ''}"
+                     f"{' (' + dcc.LARGE_FILE_WAIT_NOTE + ')' if large_note(rows) else ''}")
         for place, row in enumerate(rows, start=1):
             name = row.get("file", "?") if isinstance(row, dict) else str(row)
             session.send(f"  {place}. {name}")
@@ -1705,7 +1916,8 @@ def _cmd_queue(session, args):
     import commands
     for user_key in commands.queue_order():
         session.send(f"  {user_key:<20} {len(queue[user_key]):>4} file(s)"
-                     f"{'  FROZEN' if user_key in frozen else ''}")
+                     f"{'  FROZEN' if user_key in frozen else ''}"
+                     f"{'  ' + dcc.LARGE_FILE_WAIT_NOTE if large_note(queue[user_key]) else ''}")
 
 
 def _pack_progress_text(pack):
@@ -1725,6 +1937,56 @@ def _cmd_packing(session, args):
         return
     session.send("Packing " + _pack_progress_text(pack)
                  + (" - being cancelled" if pack.get("cancelled") else ""))
+
+
+def _cmd_library(session, args):
+    """The library's totals (#1359). A structured session gets the LIBRARY
+    lines in a burst now and in every burst after it; a person reads them."""
+    if session.structured:
+        session.reads_library = True
+        session.request_status()
+        return
+    try:
+        served, unreadable, index = library_figures()
+    except Exception as err:
+        session.send(f"The library's totals are unavailable: {err}")
+        return
+    several = len(served) + len(unreadable) > 1
+    for entry, files, _raw, size_text, summary, built in served:
+        line = f"{entry.name}{' (primary)' if entry.primary and several else ''}: "
+        if not built:
+            session.send(line + "no list built yet.")
+            continue
+        line += f"{files:,} files"
+        if summary["folders"]:
+            line += f" in {summary['folders']:,} folders"
+        line += f", {size_text}"
+        if summary["finished_at"]:
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(summary["finished_at"]))
+            line += f"; rebuilt {when}, in {_rebuild_time(summary['seconds'])}"
+        session.send(line + ".")
+    for entry in unreadable:
+        session.send(f"{entry.name}{' (primary)' if entry.primary and several else ''}: "
+                     f"its figures could not be read; the log says why.")
+    if index is None:
+        session.send("Search index: its totals could not be read; the log says why.")
+        return
+    rows, held, state = index
+    session.send({"none": "Search index: no list held from other bots.",
+                  "filling": f"Search index: {rows:,} rows from {held:,} held list(s), "
+                             f"still being filled.",
+                  }.get(state, f"Search index: {rows:,} rows from {held:,} held list(s), "
+                               f"up to date."))
+
+
+def _rebuild_time(seconds):
+    """How long a rebuild took, in the reply to `library` (#1367):
+    format_uptime() counts whole minutes, and a rebuild of a small list
+    under one read as "0 Min"."""
+    seconds = int(max(0, seconds))
+    if seconds < 60:
+        return f"{seconds} Sec"
+    return format_uptime(seconds)
 
 
 def _cmd_packcancel(session, args):
@@ -1753,6 +2015,13 @@ def _cmd_status(session, args):
     except Exception as err:
         session.send(f"Queued      : unavailable ({err})")
     session.send(f"Frozen      : {len(getattr(config, 'frozen_queues', {}))} queue(s)")
+    # Only with DAILY_SEND_FAILS_LIMIT on (#1389): who it has paused.
+    if dcc.daily_send_fails_limit():
+        paused = dcc.paused_for_send_fails()
+        session.send("Paused      : " + (
+            f"{len(paused)} nick(s) until midnight for failed sends today: "
+            + ", ".join(f"{nick} ({fails})" for nick, fails in sorted(paused.items()))
+            + ". unpause <nick> lifts it." if paused else "nobody for failed sends today"))
     session.send(f"Timed bans  : {len(getattr(config, 'banned_users', {}))}")
     try:
         import db
@@ -1867,6 +2136,22 @@ def _cmd_unignore(session, args):
         return
     ok, message = security.lift_ban(nick)
     session.send(message)
+
+
+def _cmd_unpause(session, args):
+    """Lift a DAILY_SEND_FAILS_LIMIT pause (#1389): the nick's failed sends
+    today are forgotten, and its next request is queued as usual."""
+    import dcc
+    nick = args.strip()
+    if not nick or " " in nick:
+        session.send("Usage: unpause <nick>")
+        return
+    fails = dcc.unpause_send_fails(nick)
+    if not fails:
+        session.send(f"{nick} has no failed sends counted today; nothing to lift.")
+        return
+    session.send(f"{nick}'s {fails} failed send(s) today are forgotten; "
+                 f"its requests are taken again.")
 
 
 def _cmd_bans(session, args):
@@ -2404,19 +2689,29 @@ def _cmd_hello(session, args):
             session.send(serverschat.peers_channel_line(chan))
     for line in serverschat.recent_lines():
         session.send(line)
+    # How long the chat's history is kept (#1401). Mid-rehash this sends
+    # nothing, and the writer's next pass sends it instead.
+    session.reads_chathist = script_reads_chathist(version)
+    session._chathist_sent = None
+    send_chat_history_limits(session)
     session.send_status()
     print(f"[ADMINCHAT] {session.nick}'s session switched to the structured feed "
           f"({session.client} {' '.join(parts[1:]) or '?'}).")
 
 
 def _cmd_pair(session, args):
-    """`pair <client> [version]`: mint a token this client can log in with.
+    """`pair <client> [version] [readonly]`: mint a token this client can log in with.
 
     Printed ONCE, here; only its hash is kept. Pairing the same name again
     replaces the old token, which is also how a lost one is rotated. For
     the script this is the first-run flow: the admin types the password by
     hand once, the script sends `pair dccore.mrc 1.0`, keeps the token, and
     logs in with it from then on. See docs/ADMIN-CONSOLE.md.
+
+    With `readonly` (#1374) the token can only look: see READ_ONLY_COMMANDS.
+    Its hash is kept as `readonly_hash`, never `hash`, so a bot from before
+    read-only tokens - after a downgrade - refuses it rather than letting it
+    in as a full one.
     """
     import datetime
     import secrets
@@ -2424,9 +2719,15 @@ def _cmd_pair(session, args):
     import console_settings
     if console_settings.refused_while_locked(session, "pair"):
         return
-    name = (args.split() or ["client"])[0]
+    words = args.split()
+    name = (words or ["client"])[0]
+    read_only = any(word.lower() == "readonly" for word in words[1:])
+    if name.lower() == "readonly":
+        # A client called "readonly" would be paired with a full token.
+        session.send("Name the client first: pair <client> [version] readonly")
+        return
     token = secrets.token_urlsafe(32)
-    entry = {"hash": make_password_hash(token),
+    entry = {("readonly_hash" if read_only else "hash"): make_password_hash(token),
              "created": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
              "by": session.nick}
     # Load, change and save as one step (runtime.admin_tokens_lock): a `pair`
@@ -2441,11 +2742,16 @@ def _cmd_pair(session, args):
         session.send(f"Could not pair {name}: the token store could not be written "
                      f"(see the bot's log). Nothing was changed.")
         return
-    print(f"[ADMINCHAT] {session.nick} paired a console client as {name!r}.")
+    print(f"[ADMINCHAT] {session.nick} paired a console client as {name!r}"
+          f"{', read-only' if read_only else ''}.")
     if session.structured:
         session.send(f"DCCORE TOKEN {name} {token}")
     else:
-        session.send(f"Paired {name}. Its token, shown once - it opens this chat and nothing else:")
+        if read_only:
+            session.send(f"Paired {name}, read-only. Its token, shown once - it opens this chat "
+                         f"to look, and changes nothing:")
+        else:
+            session.send(f"Paired {name}. Its token, shown once - it opens this chat and nothing else:")
         session.send(f"  {token}")
         session.send(f"Revoke it with: unpair {name}")
         if replaced:
@@ -2473,7 +2779,8 @@ def _cmd_unpair(session, args):
         session.send(f"{len(tokens)} paired client(s):")
         for key in sorted(tokens):
             entry = tokens[key] if isinstance(tokens[key], dict) else {}
-            session.send(f"  {key:<20} paired {entry.get('created', '?')} by {entry.get('by', '?')}")
+            session.send(f"  {key:<20} paired {entry.get('created', '?')} by {entry.get('by', '?')}"
+                         f"{', read-only' if 'readonly_hash' in entry else ''}")
         session.send("Revoke one with: unpair <name>")
         return
     _revoke_token(session, name)
@@ -2561,10 +2868,17 @@ _cmd_unlock = _settings_command("unlock")
 
 
 def _cmd_help(session, args):
+    read_only = getattr(session, "read_only", False)
     session.send("Available commands:")
     for name in sorted(COMMANDS):
+        if read_only and name not in READ_ONLY_COMMANDS | READ_ONLY_REPORTS:
+            continue
         _fn, summary, usage = COMMANDS[name]
         session.send(f"  {usage:<20} {summary}")
+    if read_only:
+        session.send("")
+        session.send("This console logged in with a read-only token: it can look, not change "
+                     "anything. Log in with the password for the rest.")
     session.send("")
     session.send("Channel commands still work as before; this console does not "
                  "replace them yet.")
@@ -2583,6 +2897,7 @@ COMMANDS = {
     "slots":      (_cmd_slots,      "what is sending right now",         "slots"),
     "packing":    (_cmd_packing,    "the folder pack that is running",   "packing"),
     "packcancel": (_cmd_packcancel, "stop the folder pack that is running", "packcancel"),
+    "library":    (_cmd_library,    "files, folders, size and last rebuild of each list", "library"),
     "bans":       (_cmd_bans,       "permanent and timed bans",          "bans"),
     "uptime":     (_cmd_uptime,     "how long the daemon has run",       "uptime"),
     "version":    (_cmd_version,    "build and platform",                "version"),
@@ -2595,6 +2910,7 @@ COMMANDS = {
     "ignore":     (_cmd_ignore,     "ignore a nick for some minutes (drops its requests)", "ignore <nick> <minutes>"),
     "clearandignore": (_cmd_clearandignore, "ignore a nick, then clear its queue - only if the ignore took", "clearandignore <nick> <minutes>"),
     "unignore":   (_cmd_unignore,   "end a timed ignore or ban now",     "unignore <nick>"),
+    "unpause":    (_cmd_unpause,    "lift a pause for failed sends today", "unpause <nick>"),
     "unban":      (_cmd_unban,      "remove a permanent wildcard ban",   "unban <pattern>"),
     "clearqueue": (_cmd_clearqueue, "force-clear another user's queue",  "clearqueue <nick>"),
     "rehash":     (_cmd_rehash,     "reload modules in place",           "rehash"),
@@ -2623,12 +2939,41 @@ COMMANDS = {
     "consolecaps": (_cmd_consolecaps, "which settings-window commands this bot has", "consolecaps"),
     "unlock":     (_cmd_unlock,     "let a token login change settings (once per session)", "unlock <password>"),
     "hello":      (_cmd_hello,      "switch to the structured feed (dccore.mrc)", "hello <client> <version>"),
-    "pair":       (_cmd_pair,       "mint a login token for a script",   "pair <client> [version]"),
+    "pair":       (_cmd_pair,       "mint a login token for a script",   "pair <client> [version] [readonly]"),
     "unpair":     (_cmd_unpair,     "list or revoke paired scripts",     "unpair [name]"),
     "shutdown":   (_cmd_shutdown,   "stop the bot",                      "shutdown now"),
     "help":       (_cmd_help,       "this list",                         "help"),
     "quit":       (_cmd_quit,       "close this session",                "quit"),
 }
+
+# What a session logged in with a read-only token may run (#1374). An
+# allow-list, not a block-list: a command added to COMMANDS later is refused
+# to such a session until someone decides that it only reads. The
+# READ_ONLY_REPORTS run with no argument only - with one they change a
+# setting. `unpair` of the session's own name is allowed as well (see
+# _refused_read_only()): giving up its own token harms nothing.
+READ_ONLY_COMMANDS = frozenset({
+    "status", "queue", "slots", "packing", "library", "bans", "uptime", "version",
+    "lists", "dlqueue", "downloads", "hello", "consolecaps", "help", "quit",
+})
+READ_ONLY_REPORTS = frozenset({"consolefeed", "checkupdates"})
+
+
+def _refused_read_only(session, command, args):
+    """Refuse `command` if this session logged in with a read-only token and
+    the command is not one it may run. True if refused."""
+    if not getattr(session, "read_only", False):
+        return False
+    if command in READ_ONLY_COMMANDS:
+        return False
+    if command in READ_ONLY_REPORTS and not args.strip():
+        return False
+    if command == "unpair" and args.split()[:1] == [session.paired_as]:
+        return False
+    import console_settings
+    console_settings.refused_read_only(session, command)
+    return True
+
 
 # What the admin handlers see as the "channel" a console command came from. It
 # is not a channel, and it must not look like one: announce.send_debug puts this
@@ -2689,6 +3034,8 @@ def handle_command(session, text):
     logged = _logged(command.lower(), stripped, args)
     if logged is not None:
         print(f"[ADMINCHAT] {session.nick} ran: {logged}")
+    if _refused_read_only(session, command.lower(), args):
+        return
     try:
         if getattr(getattr(session, "settings_txn", None), "implicit", False):
             import console_settings
@@ -2715,6 +3062,8 @@ def _forget(session):
 
 # What _promote() answers for a session that is no longer the pending one.
 _SUPERSEDED = object()
+# ... and for a read-only login while a full session holds the console.
+_IN_USE = object()
 
 
 def _promote(session):
@@ -2739,6 +3088,13 @@ def _promote(session):
         # and left no console at all.
         if session.closed or (_pending is not None and _pending is not session):
             return _SUPERSEDED
+        # A READ-ONLY LOGIN DOES NOT TAKE THE CONSOLE FROM A FULL ONE (#1374).
+        # A stats script logging in every few minutes would otherwise close
+        # the operator's console each time, and a stolen read-only token
+        # could do it at will. A full login still replaces anything.
+        if getattr(session, "read_only", False) and _session is not None \
+                and not _session.closed and not getattr(_session, "read_only", False):
+            return _IN_USE
         previous = _session
         _session = session
         if _pending is session:
@@ -2825,11 +3181,23 @@ def _token_matches(supplied):
     hashes in the same scheme as the password, so a stolen store is as
     useless as a stolen password hash; a handful of them per attempt is
     the cost, and attempts are already rate-limited."""
+    return _paired_token(supplied)[0]
+
+
+def _paired_token(supplied):
+    """_token_matches(), and whether the token is read-only: (name,
+    read_only), or (None, False). A read-only token's hash is
+    `readonly_hash` (#1374); an entry has one or the other, and
+    verify_password() answers an absent one at once."""
     import db
     for name, entry in db.load_admin_tokens().items():
-        if isinstance(entry, dict) and verify_password(entry.get("hash", ""), supplied):
-            return name
-    return None
+        if not isinstance(entry, dict):
+            continue
+        if verify_password(entry.get("readonly_hash", ""), supplied):
+            return name, True
+        if verify_password(entry.get("hash", ""), supplied):
+            return name, False
+    return None, False
 
 
 # A password sent as `DCCORE PASSWORD <value>` (#1273): the value encoded as
@@ -2871,14 +3239,16 @@ def _check_password(session, line):
     # The password, or a paired client's token (#550, step 3). A token opens
     # a chat and nothing else: the dashboard's login checks
     # ADMIN_PASSWORD_HASH alone and never sees the token store.
-    paired = _token_matches(supplied)
+    paired, read_only = _paired_token(supplied)
     if paired:
-        print(f"[ADMINCHAT] {session.nick} logged in with the token paired as {paired!r}.")
+        print(f"[ADMINCHAT] {session.nick} logged in with the {'read-only ' if read_only else ''}"
+              f"token paired as {paired!r}.")
     spaced = _spaced_password(supplied)
     if paired or verify_password(getattr(config, "ADMIN_PASSWORD_HASH", ""), supplied) or (
             spaced is not None and verify_password(getattr(config, "ADMIN_PASSWORD_HASH", ""), spaced)):
         session.authenticated = True
         session.paired_as = paired
+        session.read_only = read_only
         session.unlocked = not paired
         session.last_activity = time.time()
         clear_bad_ip(session.peer_ip)
@@ -2887,6 +3257,15 @@ def _check_password(session, line):
             session.authenticated = False
             print(f"[ADMINCHAT] {session.nick} ({session.peer_ip}) gave the password after a newer "
                   f"connection had replaced it; not logged in.")
+            return
+        if replaced is _IN_USE:
+            # A right credential, so not a failed attempt: nothing is counted.
+            session.authenticated = False
+            print(f"[ADMINCHAT] {session.nick} ({session.peer_ip}) logged in with a read-only token "
+                  f"while a full session held the console; refused, that session stays.")
+            session.close(announce_text="The console is in use. A read-only token does not take "
+                                        "it over; try again when it is free.")
+            _forget(session)
             return
         session.send("")
         session.send("Entering DCC Chat Admin Interface")
@@ -3362,6 +3741,10 @@ def _listen_and_serve_locked(irc_sock, nick, host, token=None, expected_ip=None)
         # and the server would read the fragment as a complete command.
         # Guarded by tests/test_no_socket_write_is_a_partial_write.py.
         irc_sock.sendall(offer.encode("utf-8", errors="ignore"))
+        # Recorded with no lane (#1386): unpaced and never sent again,
+        # recorded only so that the server refusing it is not taken for an
+        # older line to this nick, which would then go out twice.
+        runtime.note_paced_line(offer, None)
         print(f"[ADMINCHAT] Offered DCC CHAT to {nick} on "
               f"{dcc.dcc_address() or '?'}:{port}; waiting for the connection.")
         deadline = time.monotonic() + LISTEN_TIMEOUT

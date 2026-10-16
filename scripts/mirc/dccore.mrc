@@ -21,6 +21,11 @@
 ;    operators in the channels your bot is in, relayed by the bot - see
 ;    its section near the end of this file.
 ;
+;    And a dark theme and icons (#1368): /dccore theme dark gives the
+;    dialogs dark colours, and /dccore icons puts an icon on every menu
+;    item of this script and every page of the control panel - see "Theme
+;    and icons" below. dll\ beside this file holds the two DLLs it uses.
+;
 ;    When mIRC starts, @DCCore opens by itself, minimised, and says what it
 ;    is waiting for until the console connects; Chat and Downloads can do
 ;    the same - "Open when mIRC starts" in /dccore options (#1201).
@@ -63,6 +68,12 @@
 ;    characters above 127 this script draws are the middle dot and the
 ;    non-breaking space, which every Windows ANSI code page has.
 ;
+;    The dark theme and the icons (#1368) are extras on top of that: the
+;    dark dialogs and the menu icons need dll\dccore_ui.dll (mIRC 7.45 or
+;    later, 32-bit; Windows 10 for the dark title bars), the control
+;    panel's page icons DCX as well. Without them the script works and
+;    looks exactly as it did.
+;
 ;    A bot that answers `hello` - the DCCore this script ships with, or a
 ;    later one. An older bot answers "Unknown command" and the script drops to plain mode,
 ;    where the window simply shows the chat as it comes - still coloured
@@ -94,7 +105,7 @@
 
 alias dccore.ini { return $qt($+($scriptdir,dccore.ini)) }
 alias dccore.bot { return $hget(dccore,bot) }
-alias dccore.ver { return 1.19.4 }
+alias dccore.ver { return 1.20.0 }
 ;  The feed's protocol minor this script was written for. The bot says
 ;  its own in HELLO as major.minor; a different minor means a field was
 ;  inserted on one side and the lines would read wrong - see HELLO below.
@@ -161,27 +172,54 @@ alias dccore.init {
   dccore.default col.name 2
   dccore.default col.head 2
   ; The nick, the channel and the search term inside a feed line (#1259).
-  ; -1 is "same as the line": no colour codes at all, so nothing changes until
-  ; one is chosen. The term's "name" keeps it in the File names colour,
-  ; where it was before it had one of its own. The nick's "per" gives each
-  ; nick a colour of its own - see dccore.pernick.
-  dccore.default col.term name
-  dccore.default col.nick -1
-  dccore.default col.chan -1
+  ; -1 is "same as the line": no colour codes at all. The term's "name" is the
+  ; File names colour. The nick's "per" gives each nick a colour of its own -
+  ; see dccore.pernick. Each has a colour of its own by default (#1348): with
+  ; them all "same as the line", a busy window was nearly all black.
+  dccore.inlinecolours
+  dccore.default col.term 12
+  dccore.default col.nick 6
+  dccore.default col.chan 10
   ; DCCore Chat (#371): only the channels ticked in its window, until
   ; "all my channels" is chosen; the window opens by itself for a line
   ; Listening on every channel is the default (#958 follow-up): only lines
   ; from other DCCore bots arrive at all, so there is little to filter
   dccore.default chat.all 1
   dccore.default chat.popup 1
+  ; Its history file in mIRC's log folder, and the window flashing for a
+  ; line while it is not the active one (#1393): both on unless turned off
+  ; in the window's right-click menu.
+  dccore.default chat.history 1
+  dccore.default chat.flash 1
   ; Which windows open, minimised, when mIRC starts (#1201). @DCCore does by
   ; default, so the bot's window is there before anything has connected;
   ; Chat and Downloads only when asked for, as before.
   dccore.default start.main 1
   dccore.default start.chat 0
   dccore.default start.downloads 0
+  ; The settings window draws with DCX when it can (#1288); on forces the
+  ; built-in window.
+  dccore.default nodcx 0
+  ; The theme and the icons (#1368): auto follows mIRC's own dark mode;
+  ; icons puts them in the menus (drawn by DCX) and the control panel.
+  dccore.default theme auto
+  dccore.default icons 1
 }
 alias dccore.default { if ($hget(dccore,$1) == $null) { hadd dccore $1 $2- } }
+; #1348: the colours inside a line had no colour of their own until 1.20.0.
+; Every script before it saved them with the rest of the table, so a new
+; default alone would reach new installs only. Once, each of the three that
+; still holds its old default moves to the new one; a colour somebody picked
+; stays. The mark is saved with it, so "same as the line" picked again later
+; is never moved a second time.
+alias dccore.inlinecolours {
+  if ($hget(dccore,inlinecolours) != $null) { return }
+  if ($hget(dccore,col.term) == name) { hadd dccore col.term 12 }
+  if ($hget(dccore,col.nick) == -1) { hadd dccore col.nick 6 }
+  if ($hget(dccore,col.chan) == -1) { hadd dccore col.chan 10 }
+  hadd dccore inlinecolours 1
+  if ($isfile($dccore.ini)) { dccore.save }
+}
 alias dccore.save { hsave -o dccore $dccore.ini }
 alias dccore.set { hadd dccore $1 $2- | dccore.save }
 alias dccore.forget { hdel dccore $1 | dccore.save }
@@ -189,6 +227,7 @@ alias dccore.forget { hdel dccore $1 | dccore.save }
 on *:START: {
   dccore.init
   dccore.atstart
+  dccore.theme.start
 }
 ; The windows ticked under "Open when mIRC starts" (#1201): each minimised,
 ; its button at the end of the switchbar, so they are there without taking
@@ -206,9 +245,11 @@ alias dccore.atstart {
 on *:LOAD: {
   dccore.init
   echo 14 -a DCCore window script $dccore.ver loaded. Type /dccore pair <botnick> to connect for the first time, /dccore for help.
+  dccore.theme.start
 }
 on *:UNLOAD: {
   dccore.timers.off
+  dccore.theme.stop
   if ($hget(dccore)) { dccore.save | hfree dccore }
   if ($hget(dccore.live)) { hfree dccore.live }
 }
@@ -268,6 +309,24 @@ alias dccore {
   }
   if (%cmd == options) { dccore.options | return }
   if (%cmd == settings) { dccore.settings | return }
+  if (%cmd == dcx) {
+    if ($2 == check) { dccore.dcx.check }
+    else { dccore.dcx.status }
+    return
+  }
+  ; The theme and the icons (#1368): change, or say how they stand
+  if (%cmd == theme) {
+    if ($istok(auto dark light,$2,32)) { dccore.set theme $2 | dccore.theme.refresh }
+    elseif ($2 != $null) { dccore.sys Use: /dccore theme auto, dark or light. | return }
+    dccore.theme.status
+    return
+  }
+  if (%cmd == icons) {
+    if ($istok(on off,$2,32)) { dccore.set icons $iif($2 == on,1,0) | dccore.theme.refresh }
+    elseif ($2 != $null) { dccore.sys Use: /dccore icons on or off. | return }
+    dccore.theme.status
+    return
+  }
   if (%cmd == lists) { dccore.send lists | return }
   if (%cmd == fetch) { dccore.send fetch $2- | return }
   if (%cmd == window) { dccore.window | window -a $dccore.win | return }
@@ -307,6 +366,9 @@ alias dccore {
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore trust $+ $str($dccore.nbsp,16) accept the bot's current host as the one to send the token to
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore options $+ $str($dccore.nbsp,14) what to show, colours, panel, title bar, beep, windows at start
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore settings $+ $str($dccore.nbsp,13) the bot's settings, as its dashboard's Settings page has them
+  echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore dcx [check] $+ $str($dccore.nbsp,9) whether the settings window can use DCX, and why not; check tests it here
+  echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore theme <mode> $+ $str($dccore.nbsp,9) auto, dark or light: the dialogs, and colours readable on dark
+  echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore icons on|off $+ $str($dccore.nbsp,9) icons in this script's menus and the control panel's page list
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore window $+ $str($dccore.nbsp,15) open or focus @DCCore
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore downloads $+ $str($dccore.nbsp,10) open the downloads window: coming in, waiting, finished
   echo 14 -a $dccore.nbsp $+ $dccore.nbsp /dccore weburl [addr] $+ $str($dccore.nbsp,7) where the bot's dashboard is, for the window's menu
@@ -464,6 +526,33 @@ on *:CHATCLOSE: {
   }
   if (%was == in) { hadd dccore.live tries 0 }
   dccore.retry
+}
+; $true when the console is up: logged in, and a chat to the bot is open
+; (#1396). The state alone outlives a chat that ended without the CHATCLOSE
+; above (or a table that outlived its session), and the control panel's
+; start page read a stopped bot as connected from it. Nested, as mIRC
+; evaluates every identifier in an if-line.
+alias dccore.linked {
+  if ($dccore.st(state) != in) { return $false }
+  if ($dccore.bot == $null) { return $false }
+  return $iif($chat($dccore.bot),$true,$false)
+}
+; A state that says logged in with no chat to the bot is put right as the
+; CHATCLOSE above does it, without its message, its retry or its timers
+; (#1396): nothing dials from here. The titles and the side panel are
+; redrawn so they stop showing the old session; none of them dials.
+alias dccore.unstale {
+  if ($dccore.st(state) != in) { return }
+  if ($dccore.linked) { return }
+  hadd dccore.live state closed
+  hdel dccore.live mode
+  hdel dccore.live pairsent
+  hdel dccore.live vetted
+  hdel dccore.live typed
+  hdel dccore.live sw.unlocked
+  dccore.title
+  dccore.chat.title
+  dccore.panel
 }
 
 ; Every line the bot sends on the chat lands here. The chat window itself
@@ -640,6 +729,8 @@ alias dccore.plain {
   dccore.title
   dccore.chat.title
   dccore.panel
+  ; no HELLO, so no dccore.sw.lost: the start page says the link is up (#1396)
+  dccore.sw.home.fill
 }
 
 ; ---------------------------------------------------------------------
@@ -702,6 +793,9 @@ alias dccore.structured {
   ; DCCore Chat (#371): a line said in one of the bot's channels, and the
   ; channels it can chat in (after HELLO, and on `chat` with nothing after it).
   if (%type == CHAT) { dccore.chat.feed $2- | return }
+  ; <days> <max_mb>: how long and how much chat history is kept (#1401),
+  ; the bot's settings; after HELLO and when they change
+  if (%type == CHATHIST) { dccore.chat.hist.limits $2- | return }
   if (%type == CHANNELS) { dccore.chat.channels $2- | return }
   if (%type == PEERS) { dccore.chat.peerline $2- | return }
   if (%type == SLOT) { hadd dccore.live slot. $+ $dccore.st(nslots) $2- | hinc dccore.live nslots | dccore.panel.soon | return }
@@ -709,6 +803,12 @@ alias dccore.structured {
   ; <bot> <received> <total> <bps> <name>: one file the bot is leeching now
   ; (#1019), part of the same burst as SLOT; the panel's Downloading section.
   if (%type == FETCHING) { hadd dccore.live fetch. $+ $dccore.st(nfetch) $2- | hinc dccore.live nfetch | dccore.panel.soon | return }
+  ; <files> <folders> <bytes> <rebuilt_at> <rebuild_secs> <primary> <name>: one
+  ; list's totals (#1359), in every burst once `library` was sent, the name
+  ; last as it may hold spaces; SEARCHINDEX <rows> <lists> <state> after
+  ; them. For the control panel's start page; cleared by every STATUS.
+  if (%type == LIBRARY) { if ($dccore.st(nlib) == $null) { hadd dccore.live nlib 1 } | hadd dccore.live lib. $+ $dccore.st(nlib) $2- | hinc dccore.live nlib | return }
+  if (%type == SEARCHINDEX) { hadd dccore.live libindex $2- | dccore.panel.soon | return }
   ; <phase> <folder_index> <folder_count> <files> <elapsed>: a list rebuild is
   ; running (#1024), however it was started; `end` when it stops. Kept in
   ; dccore.live and cleared by every STATUS, so a missed `end` lasts one burst.
@@ -884,8 +984,11 @@ alias dccore.status {
   hdel -w dccore.live fetch.*
   hdel dccore.live rebuild
   hdel dccore.live packing
+  hdel -w dccore.live lib.*
+  hdel dccore.live libindex
   hadd dccore.live nslots 1
   hadd dccore.live nfetch 1
+  hadd dccore.live nlib 1
   dccore.title
   dccore.panel.soon
   ; Not while the side panel is shown (#1013): it carries the same figures,
@@ -1013,7 +1116,7 @@ alias dccore.tag {
   var %t = $+($chr(91),$1,$chr(93))
   return $+($chr(2),$chr(3),$dccore.col($2),%t,$chr(15),$str($dccore.nbsp,$calc(10 - $len(%t))))
 }
-alias dccore.col { return $base($dccore.opt(col. $+ $1),10,10,2) }
+alias dccore.col { return $base($dccore.theme.legible($dccore.opt(col. $+ $1),win),10,10,2) }
 alias dccore.name { return $+($chr(3),$dccore.col(name),",$1-,",$chr(15)) }
 ; The nick, the channel and the search term of a feed line (#1259), each in
 ; its own colour from Options. Every line that names a nick or a channel
@@ -1027,7 +1130,7 @@ alias dccore.name { return $+($chr(3),$dccore.col(name),",$1-,",$chr(15)) }
 ; theirs: the rest of the line has no colour of its own to return to.
 alias dccore.paint {
   if ($1 !isnum 0-15) { return $2 }
-  return $+($chr(3),$base($1,10,10,2),$2,$chr(15))
+  return $+($chr(3),$base($dccore.theme.legible($1,win),10,10,2),$2,$chr(15))
 }
 alias dccore.nick {
   var %c = $dccore.opt(col.nick)
@@ -1058,6 +1161,8 @@ alias dccore.pernick {
 ; and written here: the test re-computes it from dccore.rgb.
 alias dccore.nickpal {
   var %bg = $dccore.opt(bg)
+  ; mIRC's dark mode (#1368) draws on black, whatever $color says
+  if (%bg !isnum 0-15) && ($dccore.theme.mircdark) { %bg = 1 }
   if (%bg !isnum 0-15) { %bg = $color(background) }
   if (%bg !isnum 0-15) { %bg = 0 }
   return $gettok(02 03 04 05 06 10 12 13 14/03 04 07 08 09 10 11 13 14 15/03 04 07 08 09 10 11 13 14 15/02 08 11/02 08 11/07 08 09 11 13 15/08 09 11 15/02 05 12/02 03 04 05 06 10 12 14/02 05 06 12/02 08/02 03 04 05 06 12 14/07 08 09 11 15/02 05/02 08 11/02 05 06 12,$calc(%bg + 1),47)
@@ -1069,6 +1174,8 @@ alias dccore.nickpal {
 alias dccore.bytes {
   var %n = $1
   if (%n !isnum) { %n = 0 }
+  ; a library's size runs to terabytes (#1359): 21111GB read as a number, not a size
+  if (%n >= 1099511627776) { return $+($dccore.round($calc(%n / 1099511627776)),TB) }
   if (%n >= 1073741824) { return $+($dccore.round($calc(%n / 1073741824)),GB) }
   if (%n >= 1048576) { return $+($dccore.round($calc(%n / 1048576)),MB) }
   if (%n >= 1024) { return $+($dccore.round($calc(%n / 1024)),KB) }
@@ -1144,6 +1251,10 @@ alias dccore.out {
 }
 
 alias dccore.title {
+  ; the control panel's start page follows the state too (#1396): the
+  ; title is redrawn on every step of a dial. The timer dccore.panel.soon
+  ; uses, so the two coalesce; before the return, as @DCCore may be closed
+  if ($dialog(dccore.set)) { .timerdccoreSwHome -m 1 300 dccore.sw.home.fill }
   if (!$window($dccore.win)) { return }
   var %bot = $iif($dccore.bot,$dccore.bot,DCCore)
   var %net = $iif($network,$network,$server)
@@ -1172,7 +1283,11 @@ alias dccore.waiting {
 
 ; SLOT and QUEUE lines arrive one by one after STATUS with no end marker,
 ; so the panel is redrawn a quarter of a second after the last of them.
-alias dccore.panel.soon { .timerdccorePanel -m 1 250 dccore.panel }
+; and the control panel's start page, drawn from the same figures (#1288)
+alias dccore.panel.soon {
+  .timerdccorePanel -m 1 250 dccore.panel
+  if ($dialog(dccore.set)) { .timerdccoreSwHome -m 1 300 dccore.sw.home.fill }
+}
 
 ; THE BUTTON KEEPS ITS COLOUR ACROSS A REDRAW (#1013). The panel is redrawn
 ; after every status burst - about every 30 seconds - and it starts with
@@ -1206,7 +1321,7 @@ alias dccore.panel {
     dccore.relight %lit
     return
   }
-  var %head = $dccore.opt(col.head)
+  var %head = $dccore.lcol(head)
   var %used = $dccore.st(st.used), %slots = $dccore.st(st.slots)
   aline -l %head $dccore.win Sending %used $+ / $+ %slots
   var %i = 1
@@ -1214,7 +1329,7 @@ alias dccore.panel {
     var %l = $dccore.st(slot. $+ %i)
     ; <nick> <sent> <total> <bps> <name>
     var %pct = $iif($gettok(%l,3,32) > 0,$int($calc($gettok(%l,2,32) * 100 / $gettok(%l,3,32))),0)
-    aline -l $dccore.opt(col.sends) $dccore.win > $dccore.fit($gettok(%l,1,32),9) $dccore.rfit($dccore.bytes($gettok(%l,3,32)),7) $dccore.rfit(%pct $+ $chr(37),4) $dccore.rfit($dccore.speed($gettok(%l,4,32)),9)
+    aline -l $dccore.lcol(sends) $dccore.win > $dccore.fit($gettok(%l,1,32),9) $dccore.rfit($dccore.bytes($gettok(%l,3,32)),7) $dccore.rfit(%pct $+ $chr(37),4) $dccore.rfit($dccore.speed($gettok(%l,4,32)),9)
     inc %i
   }
   if (%used < %slots) { aline -l 14 $dccore.win $dccore.nbsp $+ $dccore.nbsp ( $+ $calc(%slots - %used) free) }
@@ -1230,7 +1345,7 @@ alias dccore.panel {
       var %l = $dccore.st(fetch. $+ %i)
       ; <bot> <received> <total> <bps> <name>
       var %pct = $iif($gettok(%l,3,32) > 0,$int($calc($gettok(%l,2,32) * 100 / $gettok(%l,3,32))),0)
-      aline -l $dccore.opt(col.sends) $dccore.win < $dccore.fit($gettok(%l,1,32),9) $dccore.rfit($dccore.bytes($gettok(%l,3,32)),7) $dccore.rfit(%pct $+ $chr(37),4) $dccore.rfit($dccore.speed($gettok(%l,4,32)),9)
+      aline -l $dccore.lcol(sends) $dccore.win < $dccore.fit($gettok(%l,1,32),9) $dccore.rfit($dccore.bytes($gettok(%l,3,32)),7) $dccore.rfit(%pct $+ $chr(37),4) $dccore.rfit($dccore.speed($gettok(%l,4,32)),9)
       inc %i
     }
     aline -l 14 $dccore.win $dccore.nbsp
@@ -1243,15 +1358,15 @@ alias dccore.panel {
     ; own from the Library menu - files read of files to read, and the rate.
     if ($istok(reading rewriting finding,$gettok(%r,1,32),32)) {
       aline -l %head $dccore.win Audio info
-      if ($gettok(%r,1,32) == rewriting) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp writing the list }
-      elseif ($gettok(%r,1,32) == finding) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp finding what to read }
-      elseif ($gettok(%r,4,32) > 0) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,2,32)) $+ / $+ $dccore.num($gettok(%r,3,32)) read $dccore.dot $dccore.num($gettok(%r,4,32)) $+ /s }
-      else { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,2,32)) $+ / $+ $dccore.num($gettok(%r,3,32)) read }
+      if ($gettok(%r,1,32) == rewriting) { aline -l $dccore.lcol(sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp writing the list }
+      elseif ($gettok(%r,1,32) == finding) { aline -l $dccore.lcol(sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp finding what to read }
+      elseif ($gettok(%r,4,32) > 0) { aline -l $dccore.lcol(sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,2,32)) $+ / $+ $dccore.num($gettok(%r,3,32)) read $dccore.dot $dccore.num($gettok(%r,4,32)) $+ /s }
+      else { aline -l $dccore.lcol(sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,2,32)) $+ / $+ $dccore.num($gettok(%r,3,32)) read }
     }
     else {
       aline -l %head $dccore.win Rebuilding $gettok(%r,1,32)
-      if ($gettok(%r,3,32) > 0) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp folder $gettok(%r,2,32) $+ / $+ $gettok(%r,3,32) $dccore.dot $dccore.num($gettok(%r,4,32)) files }
-      else { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,4,32)) files }
+      if ($gettok(%r,3,32) > 0) { aline -l $dccore.lcol(sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp folder $gettok(%r,2,32) $+ / $+ $gettok(%r,3,32) $dccore.dot $dccore.num($gettok(%r,4,32)) files }
+      else { aline -l $dccore.lcol(sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $dccore.num($gettok(%r,4,32)) files }
     }
     if ($gettok(%r,5,32) > 0) { aline -l 14 $dccore.win $dccore.nbsp $+ $dccore.nbsp running $dccore.dur($gettok(%r,5,32)) }
     aline -l 14 $dccore.win $dccore.nbsp
@@ -1261,9 +1376,9 @@ alias dccore.panel {
   if ($dccore.st(packing) != $null) {
     var %pk = $dccore.st(packing)
     aline -l %head $dccore.win Packing
-    aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $gettok(%pk,5-,32)
-    if ($gettok(%pk,3,32) > 0) { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp for $gettok(%pk,1,32) $dccore.dot $dccore.bytes($gettok(%pk,2,32)) of $dccore.bytes($gettok(%pk,3,32)) $dccore.dot $int($calc(100 * $gettok(%pk,2,32) / $gettok(%pk,3,32))) $+ $chr(37) }
-    else { aline -l $dccore.opt(col.sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp for $gettok(%pk,1,32) $dccore.dot $dccore.bytes($gettok(%pk,2,32)) }
+    aline -l $dccore.lcol(sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp $gettok(%pk,5-,32)
+    if ($gettok(%pk,3,32) > 0) { aline -l $dccore.lcol(sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp for $gettok(%pk,1,32) $dccore.dot $dccore.bytes($gettok(%pk,2,32)) of $dccore.bytes($gettok(%pk,3,32)) $dccore.dot $int($calc(100 * $gettok(%pk,2,32) / $gettok(%pk,3,32))) $+ $chr(37) }
+    else { aline -l $dccore.lcol(sends) $dccore.win $dccore.nbsp $+ $dccore.nbsp for $gettok(%pk,1,32) $dccore.dot $dccore.bytes($gettok(%pk,2,32)) }
     if ($gettok(%pk,4,32) > 0) { aline -l 14 $dccore.win $dccore.nbsp $+ $dccore.nbsp running $dccore.dur($gettok(%pk,4,32)) }
     aline -l 14 $dccore.win $dccore.nbsp
   }
@@ -1273,7 +1388,7 @@ alias dccore.panel {
     var %l = $dccore.st(queue. $+ %i)
     ; <nick> <files> <frozen_secs_left>
     var %files = $gettok(%l,2,32)
-    if ($gettok(%l,3,32) > 0) { aline -l $dccore.opt(col.fail) $dccore.win $dccore.rfit(%i,2) $dccore.fit($gettok(%l,1,32),9) frozen $dccore.dur($gettok(%l,3,32)) }
+    if ($gettok(%l,3,32) > 0) { aline -l $dccore.lcol(fail) $dccore.win $dccore.rfit(%i,2) $dccore.fit($gettok(%l,1,32),9) frozen $dccore.dur($gettok(%l,3,32)) }
     else { aline -l $dccore.win $dccore.rfit(%i,2) $dccore.fit($gettok(%l,1,32),9) %files $iif(%files == 1,file,files) }
     inc %i
   }
@@ -1424,7 +1539,7 @@ alias dccore.dl.draw {
   var %w = $dccore.dl.win
   if ($dccore.st(mode) != structured) { aline -l 14 %w $iif($dccore.st(state) == in,(no downloads in plain mode),(not connected)) | return }
   if (!$dccore.st(dlend)) { aline -l 14 %w (asking the bot...) | return }
-  var %head = $dccore.opt(col.head)
+  var %head = $dccore.lcol(head)
   var %n = $calc($dccore.st(dln) - 1)
   var %nd = 0, %i = 1
   while (%i <= %n) {
@@ -1453,37 +1568,36 @@ alias dccore.dl.draw {
       else { dccore.dl.add %head - Failed $iif(%nx > $dccore.dl.rows,(last $dccore.dl.rows of %nx),( $+ %nx $+ )) }
     }
     ; a nick once, its downloads under it
-    if (%bot != %lastbot) { %lastbot = %bot | dccore.dl.add $dccore.opt(col.name) - %bot }
+    if (%bot != %lastbot) { %lastbot = %bot | dccore.dl.add $dccore.lcol(name) - %bot }
     if (%k == d) {
       var %got = $gettok(%l,5,32), %total = $gettok(%l,6,32)
       var %pct = $iif(%total > 0,$int($calc(%got * 100 / %total)),0)
-      dccore.dl.add $dccore.opt(col.sends) %map %ind $+ %name
+      dccore.dl.add $dccore.lcol(sends) %map %ind $+ %name
       dccore.dl.add 14 %map %ind $+ $dccore.dl.bar(%pct) $dccore.rfit($iif(%total > 0,%pct $+ $chr(37),?),4) $dccore.rfit($dccore.speed($gettok(%l,7,32)),9) $dccore.rfit($dccore.bytes($iif(%total > 0,%total,%got)),7)
     }
     elseif (%k == w) {
       dccore.dl.add 14 %map %ind $+ %name
-      dccore.dl.add $dccore.opt(col.queued) %map %ind $+ %note
+      dccore.dl.add $dccore.lcol(queued) %map %ind $+ %note
     }
     elseif (%k == c) {
-      dccore.dl.add $dccore.opt(col.sends) %map %ind $+ $dccore.fit(%name,44) $dccore.rfit($dccore.bytes($gettok(%l,5,32)),7) $dccore.dl.when($gettok(%l,8,32))
+      dccore.dl.add $dccore.lcol(sends) %map %ind $+ $dccore.fit(%name,44) $dccore.rfit($dccore.bytes($gettok(%l,5,32)),7) $dccore.dl.when($gettok(%l,8,32))
     }
     else {
-      dccore.dl.add $dccore.opt(col.fail) %map %ind $+ $dccore.fit(%name,44) $dccore.rfit($dccore.bytes($gettok(%l,5,32)),7) $dccore.dl.when($gettok(%l,8,32))
-      dccore.dl.add $dccore.opt(col.fail) %map %ind $+ %note
+      dccore.dl.add $dccore.lcol(fail) %map %ind $+ $dccore.fit(%name,44) $dccore.rfit($dccore.bytes($gettok(%l,5,32)),7) $dccore.dl.when($gettok(%l,8,32))
+      dccore.dl.add $dccore.lcol(fail) %map %ind $+ %note
     }
     inc %i
   }
 }
 
 menu @DCCore-Downloads {
-  $iif($gettok($dccore.dl.pick,1,58) == w,Cancel this request):dccore.dl.do dlcancel
-  $iif($gettok($dccore.dl.pick,2,58) == failed,Download again):dccore.dl.do dlagain
-  Clear the finished ones...:dccore.confirm dlclear Clear the list of finished downloads? Only the list is cleared and no files are deleted.
+  $iif($gettok($dccore.dl.pick,1,58) == w,$dccore.mi(cancel) Cancel this request):dccore.dl.do dlcancel
+  $iif($gettok($dccore.dl.pick,2,58) == failed,$dccore.mi(again) Download again):dccore.dl.do dlagain
+  $dccore.mi(purge) Clear the finished ones...:dccore.confirm dlclear Clear the list of finished downloads? Only the list is cleared and no files are deleted.
   -
-  Open the dashboard in the browser:dccore.dl.web
-  Options...:dccore.options
-  Settings...:dccore.settings
-  Close:window -c @DCCore-Downloads
+  $dccore.mi(dashboard) Open the dashboard in the browser:dccore.dl.web
+  $dccore.mi(settings) Control Panel...:dccore.settings
+  $dccore.mi(cancel) Close:window -c @DCCore-Downloads
 }
 
 ; ---------------------------------------------------------------------
@@ -1562,7 +1676,7 @@ dialog dccore.dq {
   button "Refresh", 5, 125 181 40 12
   button "Close", 6, 285 181 40 12, cancel
 }
-on *:dialog:dccore.dq:init:0: { dccore.dq.ask }
+on *:dialog:dccore.dq:init:0: { dccore.dq.ask | dccore.theme.dialog dccore.dq init }
 on *:dialog:dccore.dq:sclick:3: { dccore.dq.remove }
 on *:dialog:dccore.dq:sclick:4: {
   if ($dccore.st(dqcount) == 0) || (!$dccore.st(dqend)) { return }
@@ -1664,297 +1778,557 @@ alias dccore.askfont {
 
 ; Every /dccore command, and every console command worth a click, is here.
 menu @DCCore {
-  $iif($dccore.st(packing) != $null,Cancel the running pack...):dccore.packcancel
-  Script Settings:dccore.options
-  Bot Settings:dccore.settings
-  Console command:dccore.askraw
+  $iif($dccore.st(packing) != $null,$dccore.mi(cancel) Cancel the running pack...):dccore.packcancel
+  $dccore.mi(settings) Control Panel:dccore.settings
+  $dccore.mi(console) Console command:dccore.askraw
   -
-  Info
-  .Status:dccore.send status
-  .Slots:dccore.send slots
-  .Queue:dccore.send queue
-  .Download queues...:dccore.queues
-  .Uptime:dccore.send uptime
-  .Version:dccore.send version
+  $dccore.mi(version) Info
+  .$dccore.mi(status) Status:dccore.send status
+  .$dccore.mi(slots) Slots:dccore.send slots
+  .$dccore.mi(queue) Queue:dccore.send queue
+  .$dccore.mi(dlqueue) Download queues...:dccore.queues
+  .$dccore.mi(uptime) Uptime:dccore.send uptime
+  .$dccore.mi(version) Version:dccore.send version
   .-
-  .Command list:dccore
-  Lists
-  .Show the lists:dccore lists
-  .Fetch the changed lists:dccore fetch
-  .Ask a bot for its list...:dccore.ask fetch Ask which bot for its list
-  .Purge every held list...:if ($input(Forget every held bot list? Each rebuilds on its own - a changed advert or your next fetch - with its channel resolved fresh. Nothing of yours is touched.,yq,DCCore)) { dccore.send purgealllists confirm }
-  Library
-  .Find duplicate filenames:dccore.send verify
-  .Rebuild the list...:dccore.confirm update Rebuild the list? It walks the whole library and can take minutes.
-  .Read audio info:dccore.send audioinfo
-  User control
-  .Bans:dccore.send bans
-  .Ban...:dccore.ask ban Ban pattern (for example *!*@host.example)
-  .Unban...:dccore.ask unban Pattern to remove
-  .Clear a queue...:dccore.ask clearqueue Clear the queue of which nick
-  .Ignore a nick...:dccore.ask ignore Which nick and for how many minutes - for example someone 30
-  .Stop ignoring a nick...:dccore.ask unignore Stop ignoring which nick
-  .Move in the queue...:dccore.ask queuemove Nick then up or down - or nick then file number then up or down
-  .Remove one queued file...:dccore.ask queueremove Nick then the file number from Queue of the nick
-  Control
-  .Check for a new version:dccore.send checkversion
-  .Daily update check $iif($dccore.st(checkupdates) == on,off,on):dccore.send checkupdates $iif($dccore.st(checkupdates) == on,off,on)
-  .Console feed $iif($dccore.st(consolefeed) == on,off,on):dccore.send consolefeed $iif($dccore.st(consolefeed) == on,off,on)
+  .$dccore.mi(help) Command list:dccore
+  $dccore.mi(lists) Lists
+  .$dccore.mi(lists) Show the lists:dccore lists
+  .$dccore.mi(fetch) Fetch the changed lists:dccore fetch
+  .$dccore.mi(ask) Ask a bot for its list...:dccore.ask fetch Ask which bot for its list
+  .$dccore.mi(purge) Purge every held list...:if ($input(Forget every held bot list? Each rebuilds on its own - a changed advert or your next fetch - with its channel resolved fresh. Nothing of yours is touched.,yq,DCCore)) { dccore.send purgealllists confirm }
+  $dccore.mi(library) Library
+  .$dccore.mi(search) Find duplicate filenames:dccore.send verify
+  .$dccore.mi(rebuild) Rebuild the list...:dccore.confirm update Rebuild the list? It walks the whole library and can take minutes.
+  .$dccore.mi(audio) Read audio info:dccore.send audioinfo
+  $dccore.mi(user) User control
+  .$dccore.mi(ban) Bans:dccore.send bans
+  .$dccore.mi(ban) Ban...:dccore.ask ban Ban pattern (for example *!*@host.example)
+  .$dccore.mi(unban) Unban...:dccore.ask unban Pattern to remove
+  .$dccore.mi(clear) Clear a queue...:dccore.ask clearqueue Clear the queue of which nick
+  .$dccore.mi(ignore) Ignore a nick...:dccore.ask ignore Which nick and for how many minutes - for example someone 30
+  .$dccore.mi(unban) Stop ignoring a nick...:dccore.ask unignore Stop ignoring which nick
+  .$dccore.mi(unban) Unpause a nick...:dccore.ask unpause Unpause which nick - its sends failed too often today
+  .$dccore.mi(moveup) Move in the queue...:dccore.ask queuemove Nick then up or down - or nick then file number then up or down
+  .$dccore.mi(clear) Remove one queued file...:dccore.ask queueremove Nick then the file number from Queue of the nick
+  $dccore.mi(rehash) Control
+  .$dccore.mi(update) Check for a new version:dccore.send checkversion
+  .$dccore.mi(update) Daily update check $iif($dccore.st(checkupdates) == on,off,on):dccore.send checkupdates $iif($dccore.st(checkupdates) == on,off,on)
+  .$dccore.mi(console) Console feed $iif($dccore.st(consolefeed) == on,off,on):dccore.send consolefeed $iif($dccore.st(consolefeed) == on,off,on)
   .-
-  .Reload the bot (rehash)...:dccore.confirm rehash Reload the bot's code and settings?
-  .Stop the bot...:if ($input(Stop the bot? It leaves IRC and ends; start it again with start-dccore.,yq,DCCore)) { dccore.send shutdown now }
+  .$dccore.mi(rehash) Reload the bot (rehash)...:dccore.confirm rehash Reload the bot's code and settings?
+  .$dccore.mi(stop) Stop the bot...:if ($input(Stop the bot? It leaves IRC and ends; start it again with start-dccore.,yq,DCCore)) { dccore.send shutdown now }
   -
-  $iif($dccore.selq,Queue of $dccore.selq):dccore.send queue $dccore.selq
-  $iif($dccore.selq,Clear the queue of $dccore.selq):dccore.send clearqueue $dccore.selq
-  $iif($dccore.selq,Ignore $dccore.selq for...):dccore.ignorefor $dccore.selq
-  $iif($dccore.selq,Clear the queue of $dccore.selq and ignore for...):dccore.clearignore $dccore.selq
-  $iif($dccore.selq,Move $dccore.selq earlier in line):dccore.send queuemove $dccore.selq up
-  $iif($dccore.selq,Move $dccore.selq later in line):dccore.send queuemove $dccore.selq down
-  $iif($dccore.sels,Queue of $dccore.sels):dccore.send queue $dccore.sels
+  $iif($dccore.selq,$dccore.mi(queue) Queue of $dccore.selq):dccore.send queue $dccore.selq
+  $iif($dccore.selq,$dccore.mi(clear) Clear the queue of $dccore.selq):dccore.send clearqueue $dccore.selq
+  $iif($dccore.selq,$dccore.mi(ignore) Ignore $dccore.selq for...):dccore.ignorefor $dccore.selq
+  $iif($dccore.selq,$dccore.mi(ban) Clear the queue of $dccore.selq and ignore for...):dccore.clearignore $dccore.selq
+  $iif($dccore.selq,$dccore.mi(moveup) Move $dccore.selq earlier in line):dccore.send queuemove $dccore.selq up
+  $iif($dccore.selq,$dccore.mi(movedown) Move $dccore.selq later in line):dccore.send queuemove $dccore.selq down
+  $iif($dccore.sels,$dccore.mi(queue) Queue of $dccore.sels):dccore.send queue $dccore.sels
   -
-  Connection
-  .$iif($chat($dccore.bot),Disconnect,Connect):dccore $iif($chat($dccore.bot),disconnect,connect)
-  .Pair with the bot:dccore pair $dccore.bot
-  .Forget the token (unpair):dccore unpair
-  .Trust the bot's host:dccore trust
-  Window
-  .DCCore Chat:dccore chat
-  .Downloads window:dccore downloads
+  $dccore.mi(connect) Connection
+  .$iif($chat($dccore.bot),$dccore.mi(disconnect) Disconnect,$dccore.mi(connect) Connect):dccore $iif($chat($dccore.bot),disconnect,connect)
+  .$dccore.mi(pair) Pair with the bot:dccore pair $dccore.bot
+  .$dccore.mi(unpair) Forget the token (unpair):dccore unpair
+  .$dccore.mi(trust) Trust the bot's host:dccore trust
+  $dccore.mi(panel) Window
+  .$dccore.mi(chat) DCCore Chat:dccore chat
+  .$dccore.mi(downloads) Downloads window:dccore downloads
   .-
-  .Panel $iif($dccore.opt(panel),off,on):dccore panel $iif($dccore.opt(panel),off,on)
-  .Font size...:dccore.askfont
-  .Dashboard address...:dccore weburl
-  .Clear window:clear @DCCore
-  Clear finished...:dccore.confirm dlclear Clear the list of finished downloads? Only the list is cleared and no files are deleted.
+  .$dccore.mi(panel) Panel $iif($dccore.opt(panel),off,on):dccore panel $iif($dccore.opt(panel),off,on)
+  .$dccore.mi(font) Font size...:dccore.askfont
+  .$dccore.mi(dashboard) Dashboard address...:dccore weburl
+  .$dccore.mi(clear) Clear window:clear @DCCore
+  .-
+  .$dccore.mi(palette) Theme
+  ..$iif($dccore.theme.mode == auto,$style(1)) Follow mIRC:dccore theme auto
+  ..$iif($dccore.theme.mode == dark,$style(1)) Dark:dccore theme dark
+  ..$iif($dccore.theme.mode == light,$style(1)) Light:dccore theme light
+  ..-
+  ..$iif($dccore.theme.icons,$style(1)) Icons in the menus and the control panel:dccore icons $iif($dccore.theme.icons,off,on)
+  $dccore.mi(purge) Clear finished...:dccore.confirm dlclear Clear the list of finished downloads? Only the list is cleared and no files are deleted.
 }
 
 menu nicklist {
-  DCCore
-  .Queue of $1:dccore.send queue $1
-  .Clear the queue of $1:dccore.send clearqueue $1
-  .Ignore $1 for...:dccore.ignorefor $1
-  .Clear the queue of $1 and ignore for...:dccore.clearignore $1
-  .Stop ignoring $1:dccore.send unignore $1
+  $dccore.mi(app) DCCore
+  .$dccore.mi(queue) Queue of $1:dccore.send queue $1
+  .$dccore.mi(clear) Clear the queue of $1:dccore.send clearqueue $1
+  .$dccore.mi(ignore) Ignore $1 for...:dccore.ignorefor $1
+  .$dccore.mi(ban) Clear the queue of $1 and ignore for...:dccore.clearignore $1
+  .$dccore.mi(unban) Stop ignoring $1:dccore.send unignore $1
 }
 
 menu status,channel {
-  DCCore
-  .Open the window:dccore window
-  .Open DCCore Chat:dccore chat
-  .Open the Downloads window:dccore downloads
-  .Download queues...:dccore.queues
-  .Show the lists:dccore lists
-  .Fetch the changed lists:dccore fetch
-  .Command list:dccore
-  .$iif($chat($dccore.bot),Disconnect,Connect):dccore $iif($chat($dccore.bot),disconnect,connect)
-  .Options...:dccore.options
-  .Settings...:dccore.settings
+  $dccore.mi(app) DCCore
+  .$dccore.mi(console) Open the window:dccore window
+  .$dccore.mi(chat) Open DCCore Chat:dccore chat
+  .$dccore.mi(downloads) Open the Downloads window:dccore downloads
+  .$dccore.mi(dlqueue) Download queues...:dccore.queues
+  .$dccore.mi(lists) Show the lists:dccore lists
+  .$dccore.mi(fetch) Fetch the changed lists:dccore fetch
+  .$dccore.mi(help) Command list:dccore
+  .$iif($chat($dccore.bot),$dccore.mi(disconnect) Disconnect,$dccore.mi(connect) Connect):dccore $iif($chat($dccore.bot),disconnect,connect)
+  .$dccore.mi(settings) Control Panel...:dccore.settings
 }
 
 ; ---------------------------------------------------------------------
-;  Options dialog
+;  Theme and icons (#1368): the dark theme of the dialogs and the menus,
+;  readable colours on a dark background, and icons in the menus and in
+;  the control panel's page list
 ; ---------------------------------------------------------------------
+;
+;  /dccore theme auto|dark|light. auto follows mIRC's own dark mode -
+;  $darkmode, mIRC 7.79 and later; an older mIRC has none, so there auto
+;  is light and dark is chosen by hand. light leaves everything exactly as
+;  it was before the theme existed: every call below does nothing then.
+;
+;  What dark changes
+;    - The dialogs (the control panel, the list window, download queues):
+;      the title bar, the background and mIRC's own controls, through
+;      dll\dccore_ui.dll (dccore.theme.dialog). Not while mIRC itself is in
+;      dark mode: it draws its dialogs dark already, and two hands on the
+;      same controls is one too many. A dialog DCX has marked is passed with
+;      "x": DCX paints its background and its own controls, and those take
+;      their colours here instead - dccore.theme.sys for the lines, frames
+;      and tabs as dccore.sw.dcx makes them, and the texts, the lists and
+;      the background just after (dccore.theme.dcxset) - or, for what is
+;      made later (a page's frames, the tables), as it is made.
+;    - Not the right-click menus. Windows draws every menu of a program in
+;      one style, so a dark menu here would be every menu in mIRC dark, and
+;      other scripts' are not this script's to change. mIRC's own dark mode
+;      (Options, Display - mIRC 7.79 and later) is exactly that, and auto
+;      follows it.
+;    - The colours in @DCCore, its panel, DCCore Chat and the Downloads
+;      window, on a dark background - mIRC's dark mode, a dark colour scheme
+;      (Alt+K) or a dark Background chosen in the mIRC settings: the colours
+;      meant for a white one (navy, blue, maroon, purple, the dark green)
+;      are drawn as their light neighbours (dccore.theme.legible). The
+;      windows themselves keep mIRC's colours: mIRC has no per-window text,
+;      listbox or editbox colour, so a dark window is mIRC's to give.
+;
+;  /dccore icons on|off: an icon in front of each of this script's menu
+;  items, and of each page in the control panel's DCX page list
+;  (dll\dccore_icons.dll). Only this script's items: dll\dccore_ui.dll hooks
+;  the opening of a menu (MenuIcons), finds the items that begin with the
+;  mark $dccore.mi gives them, takes the mark off and puts the icon beside
+;  the text - as a plain menu bitmap, so the menu is still Windows' and
+;  mIRC's own, every other item and every other script's menu untouched.
+;
+;  An item gets its icon from $dccore.mi(<name>) in front of its text: "<N>"
+;  and $chr(11), N the icon's number counted from 1, while the hook is on -
+;  and nothing otherwise, so a menu reads as it always did without it. A
+;  checked item ($style(1)) has none: the check mark is its picture.
+;
+;  dccore_ui.dll is checked against the build it was shipped as before it
+;  is loaded, as dcx.dll is: a file that is not that one is not run.
+;  dccore_icons.dll holds pictures only and is never run.
 
-alias dccore.options {
-  dccore.init
-  if ($dialog(dccore.opt)) { dialog -v dccore.opt | return }
-  dialog -m dccore.opt dccore.opt
+alias dccore.theme.dir { return $scriptdir $+ dll\ }
+alias dccore.theme.uifile { return $dccore.theme.dir $+ dccore_ui.dll }
+alias dccore.theme.iconfile { return $dccore.theme.dir $+ dccore_icons.dll }
+alias dccore.theme.uisha256 { return 3927391c2c3bfd1ed7a64cdbd806c45b758dce53665d6c7bcde54ae276d14e1c }
+
+alias dccore.theme.mode {
+  var %m = $dccore.opt(theme)
+  return $iif($istok(dark light,%m,32),%m,auto)
+}
+; mIRC's own dark mode. $darkmode is mIRC 7.79's; before it, no dark mode.
+; Asked as a condition, not compared with $true, so it is right whether it
+; answers $true or 1.
+alias dccore.theme.mircdark {
+  if ($version < 7.79) { return $false }
+  return $iif($darkmode,$true,$false)
+  :error
+  reseterror
+  return $false
+}
+alias dccore.theme.dark {
+  var %m = $dccore.theme.mode
+  if (%m == dark) { return $true }
+  if (%m == light) { return $false }
+  return $dccore.theme.mircdark
+}
+; Why dll\dccore_ui.dll is not used, or nothing when it is ($sha256 needs
+; mIRC 7.45, as DCX does; the dll is 32-bit, as dcx.dll is). Its hash is
+; worked out again for as long as mIRC does not hold the dll - a file put
+; right is taken without a restart, a file swapped is caught before it is
+; loaded - and kept once mIRC holds it, which a file changed on disk cannot
+; change.
+alias dccore.theme.uiwhy {
+  if (!$isfile($dccore.theme.uifile)) { return dll\dccore_ui.dll is missing }
+  if ($version < 7.45) { return it needs mIRC 7.45 or later }
+  if ($bits == 64) { return this mIRC is 64-bit and dll\dccore_ui.dll is 32-bit }
+  if ($dccore.st(ui.sha) == $null) || (!$dccore.theme.uiloaded) { hadd dccore.live ui.sha $sha256($dccore.theme.uifile,2) }
+  if ($dccore.st(ui.sha) != $dccore.theme.uisha256) { return dll\dccore_ui.dll is not the build this script was shipped with }
+}
+alias dccore.theme.ui { return $iif($dccore.theme.uiwhy == $null,$true,$false) }
+; Every call into dll\dccore_ui.dll goes through here: $1 the function, $2-
+; what it is given. Nothing unless the file is the build the script pins,
+; asked here and not by each caller, so no call can come before the check.
+; A dll that cannot be opened all the same is an error that would stop the
+; script, so it is caught, as dccore.dcx.version does.
+alias dccore.theme.call {
+  if (!$dccore.theme.ui) { return }
+  return $dll($dccore.theme.uifile,$1,$2-)
+  :error
+  reseterror
+  return
+}
+; Whether the dialogs are drawn dark: the theme is dark and something draws
+; them so - mIRC's own dark mode, or dccore_ui.dll. Without either they stay
+; light, the control panel's DCX parts too, so nothing is half dark.
+alias dccore.theme.dialogsdark {
+  if (!$dccore.theme.dark) { return $false }
+  if ($dccore.theme.mircdark) { return $true }
+  return $dccore.theme.ui
+}
+; The icons option: on unless it is set to 0, so a script reloaded over an
+; older one (/reload -rs runs neither on LOAD nor on START, and so sets no
+; default) has them as a fresh one does.
+alias dccore.theme.icons { return $iif($dccore.opt(icons) == 0,$false,$true) }
+
+; The colours of dark, as $rgb gives them: bg the dialogs, face the DCX
+; frames and the tab chosen, light the pills and the other tabs, line the
+; DCX lines, panel the lists, fg the text, grey the quieter text.
+alias dccore.theme.rgb {
+  if ($1 == bg) || ($1 == face) { return $rgb(32,32,32) }
+  if ($1 == light) { return $rgb(45,45,48) }
+  if ($1 == line) { return $rgb(85,85,85) }
+  if ($1 == panel) { return $rgb(43,45,48) }
+  if ($1 == fg) { return $rgb(238,238,238) }
+  if ($1 == grey) { return $rgb(150,150,150) }
+}
+; The control panel's DCX colours (#1288): dark, the theme's; light, the
+; system's, exactly what the window always used. Dark only where its
+; dialogs are drawn dark too (dccore.theme.dialogsdark).
+alias dccore.theme.sys {
+  if ($dccore.theme.dialogsdark) { return $dccore.theme.rgb($1) }
+  if ($1 == line) { return $dccore.dcx(GetSystemColor,COLOR_3DSHADOW) }
+  if ($1 == face) { return $dccore.dcx(GetSystemColor,COLOR_3DFACE) }
+  if ($1 == light) { return $dccore.dcx(GetSystemColor,COLOR_3DLIGHT) }
+  return $dccore.dcx(GetSystemColor,COLOR_GRAYTEXT)
+}
+; $1 a dialog: dark or back to the system's look, through dccore_ui.dll.
+; $2 init: the dialog is just made, and only a dark one needs anything.
+; The control panel is "x" when DCX has marked it, the DCX check always.
+alias dccore.theme.dialog {
+  var %d = $1
+  if (!$dialog(%d)) { return }
+  if ($dccore.theme.mircdark) { return }
+  if ($2 == init) && (!$dccore.theme.dark) { return }
+  ; light: only through a dll that has darkened something, never by loading
+  ; one to draw a dialog the way it already is
+  if (!$dccore.theme.dark) && (!$dccore.theme.uiloaded) { return }
+  var %x = -
+  if (%d == dccore.dcxcheck) { %x = x }
+  elseif (%d == dccore.set) && ($hget(dccore.sws,dcx)) { %x = x }
+  noop $dccore.theme.call(ApplyTheme,$dialog(%d).hwnd $iif($dccore.theme.dark,1,0) %x)
 }
 
-dialog dccore.opt {
-  title "DCCore window - options"
-  size -1 -1 322 340
-  option dbu
-  box "Show in @DCCore", 100, 5 3 312 126
-  check "Requests (who asked for what)", 101, 10 13 170 10
-  check "Queue positions", 102, 10 24 170 10
-  check "Sends: starting, resuming, done", 103, 10 35 170 10
-  check "Failed transfers", 104, 10 46 170 10
-  check "Searches and result counts", 105, 10 57 170 10
-  check "Joins, parts, quits of queued users", 106, 10 68 170 10
-  check "Bans, mutes, floods", 107, 10 79 170 10
-  check "Other log lines", 108, 10 90 170 10
-  combo 201, 192 12 52 70, drop
-  combo 202, 192 23 52 70, drop
-  combo 203, 192 34 52 70, drop
-  combo 204, 192 45 52 70, drop
-  combo 205, 192 56 52 70, drop
-  combo 206, 192 67 52 70, drop
-  combo 207, 192 78 52 70, drop
-  combo 208, 192 89 52 70, drop
-  text "File names", 210, 248 14 66 8
-  combo 211, 248 23 52 70, drop
-  text "Console replies", 212, 248 36 66 8
-  combo 213, 248 45 52 70, drop
-  text "Status every", 214, 248 60 66 8
-  edit "", 215, 248 69 18 11, autohs
-  text "min, 0 = off", 216, 268 71 49 8
-  text "Panel headings", 217, 248 83 66 8
-  combo 218, 248 91 52 70, drop
-  text "Search text", 220, 10 104 92 8
-  combo 221, 10 113 92 80, drop
-  text "Nicks", 222, 112 104 92 8
-  combo 223, 112 113 92 80, drop
-  text "Channels", 224, 214 104 92 8
-  combo 225, 214 113 92 80, drop
-  box "Window", 300, 5 132 312 58
-  check "Side panel: slots, queue and totals", 301, 10 142 170 10
-  check "Slots, queue and speed in the title bar", 302, 10 153 170 10
-  check "Console replies in a separate window", 303, 10 164 170 10
-  check "Beep on a failed transfer", 304, 192 142 118 10
-  check "Fixed-width font, size", 305, 192 153 100 10
-  edit "", 306, 294 152 18 11, autohs
-  text "Finished downloads to show", 309, 10 177 130 8
-  edit "", 310, 142 175 18 11, autohs
-  text "Background", 307, 192 166 48 8
-  combo 308, 242 164 56 70, drop
-  box "Connection", 400, 5 193 312 63
-  text "Bot nick", 401, 10 205 36 8
-  edit "", 402, 48 203 56 11, autohs
-  text "", 403, 110 205 204 8
-  check "Reconnect and log in by itself when the bot comes back", 404, 10 218 300 10
-  check "Console feed on (also requests and sends - not just status)", 405, 10 230 300 10
-  check "Check GitHub for a new DCCore version", 406, 10 242 260 10
-  box "DCCore Chat (public)", 600, 5 259 312 36
-  check "Listen on every channel the bot is in, not only the ticked ones", 601, 10 269 300 10
-  check "Open the chat window when a line arrives", 602, 10 280 300 10
-  box "Open when mIRC starts (minimised)", 700, 5 298 312 24
-  check "@DCCore", 701, 10 308 60 10
-  check "@DCCore-Chat", 702, 90 308 80 10
-  check "@DCCore-Downloads", 703, 192 308 110 10
-  button "OK", 1, 232 326 40 12, ok default
-  button "Cancel", 2, 276 326 40 12, cancel
-  button "Pair again...", 501, 5 326 46 12
-  button "Forget token", 502, 54 326 46 12
+; ---- colours in the windows ------------------------------------------
+
+; The background a colour is drawn on, as a palette number: $1 win for a
+; window's text, list for a side listbox. The window's own Background from
+; the mIRC settings first, then mIRC's dark mode (black), then mIRC's own
+; colour for it.
+alias dccore.theme.bgidx {
+  if ($1 != list) && ($dccore.opt(bg) isnum 0-15) { return $dccore.opt(bg) }
+  if ($dccore.theme.mircdark) { return 1 }
+  var %c = $color($iif($1 == list,listbox,background))
+  return $iif(%c isnum 0-15,%c,0)
 }
+; $1 a colour number, $2 win or list: the same colour, or on a dark
+; background (black, navy, maroon, purple) the light neighbour of one that
+; would not be seen there. Anything that is not a colour number - -1,
+; "name", "per" - and everything in the light theme, unchanged.
+alias dccore.theme.legible {
+  if ($1 !isnum 0-15) { return $1 }
+  if ($dccore.theme.mode == light) { return $1 }
+  if (!$istok(1 2 5 6,$int($dccore.theme.bgidx($2)),32)) { return $1 }
+  var %at = $findtok(1 2 3 5 6 12,$int($1),1,32)
+  return $iif(%at,$gettok(0 11 9 4 13 11,%at,32),$1)
+}
+; A colour from the mIRC settings for a side listbox line (the panel, the
+; Downloads list)
+alias dccore.lcol { return $dccore.theme.legible($dccore.opt(col. $+ $1),list) }
+
+; ---- menus -----------------------------------------------------------
+
+; The icons in dll\dccore_icons.dll, in its order: the Nth name is icon N-1
+; in the file, N in a menu's or a listview's image list.
+alias dccore.ico.names { return app console settings script status slots queue dlqueue uptime version help lists fetch ask purge library rebuild audio ban unban clear ignore moveup movedown update rehash stop connect disconnect pair unpair trust chat downloads panel font dashboard cancel again user speed search pack folder hash palette megaphone mail bug key home shield }
+; $1 an icon's name: what goes in front of a menu item's text
+alias dccore.mi {
+  ; a script reloaded with /reload -rs ran no on START: the first menu
+  ; drawn starts the hook, once
+  if (!$dccore.st(mi.tried)) { dccore.theme.menus }
+  if (!$dccore.st(mi.on)) { return }
+  var %n = $findtok($dccore.ico.names,$1,1,32)
+  if (%n) { return %n $+ $chr(11) }
+}
+
+; The menu icons on or off, as /dccore icons says, through dccore_ui.dll's
+; hook (MenuIcons).
+alias dccore.theme.menus {
+  hadd dccore.live mi.tried 1
+  var %on = 0
+  if ($dccore.theme.icons) && ($isfile($dccore.theme.iconfile)) { %on = 1 }
+  if (%on) && ($dccore.theme.ui) {
+    hadd dccore.live mi.on $iif($dccore.theme.call(MenuIcons,$dccore.theme.iconfile) == OK,1,0)
+    return
+  }
+  dccore.theme.menusoff
+}
+; the hook off - only through a dccore_ui.dll this script has loaded already,
+; never by loading it for that
+alias dccore.theme.menusoff {
+  if ($dccore.st(mi.on)) && ($dccore.theme.uiloaded) { noop $dccore.theme.call(MenuIcons,off) }
+  hdel dccore.live mi.on
+}
+; Whether mIRC holds dll\dccore_ui.dll loaded now: $dll(N) names the Nth
+; dll it has loaded, $dll(0) how many (the dll asks to be kept, mKeep, so
+; mIRC does not drop it after ten idle minutes as it does others)
+alias dccore.theme.uiloaded {
+  var %i = 1
+  while (%i <= $dll(0)) {
+    if ($nopath($dll(%i)) == dccore_ui.dll) { return $true }
+    inc %i
+  }
+  return $false
+}
+
+; ---- the control panel's DCX parts ------------------------------------
+
+; Just after the control panel is made (its init): the page list's icons,
+; and in the dark theme the background, the texts and the lists. Each in a
+; timer of its own: a DCX command that fails halts what called it, and so
+; it halts only that part, never the window being made.
+alias dccore.theme.dcxset {
+  if (!$hget(dccore.sws,dcx)) { return }
+  if ($dccore.theme.icons) && ($isfile($dccore.theme.iconfile)) { .timerdccoreThemeIcons -m 1 0 dccore.theme.pageicons }
+  if (!$dccore.theme.dialogsdark) { return }
+  .timerdccoreThemeBg -m 1 0 dccore.theme.dcxbg
+  .timerdccoreThemeText -m 1 0 dccore.theme.dcxtexts
+  .timerdccoreThemeLists -m 1 0 dccore.theme.dcxlists
+}
+alias dccore.theme.dcxbg { if ($dialog(dccore.set)) { dccore.dcx xdialog dccore.set -g +b $dccore.theme.rgb(bg) } }
+; $1 a DCX text, $2 1 when it has no background of its own: light text, on
+; the face
+alias dccore.theme.dcxtext {
+  dccore.dcx xdid dccore.set $1 -C +t $dccore.theme.rgb(fg)
+  if ($2) { dccore.dcx xdid dccore.set $1 -C +b $dccore.theme.rgb(face) }
+}
+; Every DCX text made at open, from the layout's own ids (dccore.sw.data).
+; The quieter texts keep the grey dccore.sw.dcxhome and dcxstats gave them.
+alias dccore.theme.dcxtexts {
+  if (!$dialog(dccore.set)) || (!$hget(dccore.swm)) { return }
+  ; the tabs' names: the third control of each tab
+  var %t = $dccore.sw.m(dcxtabs), %i = 1
+  while (%i <= $gettok(%t,6,32)) {
+    dccore.theme.dcxtext $calc($gettok(%t,1,32) + $gettok(%t,2,32) * (%i - 1) + 2)
+    inc %i
+  }
+  ; the page's name and the side's name, over the window's background
+  dccore.theme.dcxtext $gettok($dccore.sw.m(dcxtitle),1,32) 1
+  dccore.theme.dcxtext $gettok($dccore.sw.m(dcxcrumb),1,32) 1
+  ; the frames' titles take theirs as a page's frames are made, the first
+  ; time it is shown (dccore.sw.dcxframes)
+  ; the pills' names, and the arrow of the way back
+  %i = 1
+  while (%i <= $dccore.sw.m(home.n)) {
+    dccore.theme.dcxtext $calc($gettok($dccore.sw.m(home. $+ %i),1,32) + 2)
+    inc %i
+  }
+  dccore.theme.dcxtext $calc($gettok($dccore.sw.m(dcxback),1,32) + 2)
+  ; the start page's figures: each frame's title, each value (its key stays
+  ; grey) or each line of fixed-width text
+  %i = 1
+  while (%i <= $dccore.sw.m(home.f.n)) {
+    dccore.theme.dcxtext $gettok($dccore.sw.m(home.f. $+ %i),2,32)
+    var %j = 1
+    while (%j <= $dccore.sw.m($+(home.f.,%i,.n))) {
+      var %r = $dccore.sw.m($+(home.f.,%i,.r.,%j))
+      if ($gettok(%r,2,32)) {
+        dccore.dcx xdid dccore.set $gettok(%r,1,32) -C +b $dccore.theme.rgb(face)
+        dccore.theme.dcxtext $gettok(%r,2,32) 1
+      }
+      else { dccore.theme.dcxtext $gettok(%r,1,32) 1 }
+      inc %j
+    }
+    inc %i
+  }
+  ; the Connection row keeps its state's colour (dccore.sw.home.ink)
+  var %ink = $dccore.sw.s(home.ink)
+  if (%ink != $null) { dccore.dcx xdid dccore.set $gettok(%ink,1,32) -C +t $gettok(%ink,2,32) }
+}
+; The page list's colours. The tables get theirs as they are made, the
+; first time they are needed (dccore.sw.lv.make) - enabled, as
+; dccore.sw.enable keeps them in the dark theme.
+alias dccore.theme.dcxlists {
+  if (!$dialog(dccore.set)) || (!$hget(dccore.swm)) { return }
+  dccore.theme.dcxlist $gettok($dccore.sw.m(dcxpages),1,32)
+}
+; $1 a DCX listview: light text on the lists' colour - a listview's colours
+; are -i, not -C
+alias dccore.theme.dcxlist {
+  dccore.dcx xdid dccore.set $1 -i +bk $dccore.theme.rgb(panel)
+  dccore.dcx xdid dccore.set $1 -i +t $dccore.theme.rgb(fg)
+}
+; The page list's icons: the whole file into its image list, so a page's
+; icon is its number among dccore.ico.names - then its rows again, now
+; with their pictures, as dccore.sw.tab fills them
+alias dccore.theme.pageicons {
+  if (!$dialog(dccore.set)) || (!$hget(dccore.swm)) { return }
+  dccore.dcx xdid dccore.set $gettok($dccore.sw.m(dcxpages),1,32) -w +n -1 $dccore.theme.iconfile
+  hadd dccore.sws theme.icons 1
+  var %g = $dccore.sw.s(tab)
+  if (!%g) { return }
+  dccore.sw.dcxpages $dccore.sw.m(g. $+ %g $+ .pages)
+  if ($dccore.sw.s(page)) { dccore.sw.dcxshow $dccore.sw.s(page) }
+}
+; $1 a page's number: its icon in the page list, 0 for none - a page the
+; layout gains later simply has none until it is named here
+alias dccore.theme.pageicon {
+  if (!$dccore.sw.s(theme.icons)) { return 0 }
+  var %pair = $wildtok($dccore.theme.pagemap,$dccore.sw.untext($dccore.sw.m(p. $+ $1)) $+ =*,1,44)
+  if (%pair == $null) { return 0 }
+  return $findtok($dccore.ico.names,$gettok(%pair,2,61),1,32)
+}
+alias dccore.theme.pagemap { return IRC Server=connect,General Settings=settings,Channels=hash,Operator=user,Appearance=palette,Advertising=megaphone,Lists=lists,Channel bindings=pair,List settings=library,Rebuild=rebuild,Transfers=slots,Search=search,List discovery=fetch,Fetch tuning=speed,Queue=queue,Anti-flood=shield,Bans & ignores=ban,Private messages=mail,Admin console=key,Web dashboard=dashboard,Console feed=status,Debug & logging=bug,File locations=folder,@DCCore window=console,Window=panel,Connection=pair,Chat=chat }
+
+; ---- start, stop, change ---------------------------------------------
+
+alias dccore.theme.start { dccore.theme.menus }
+alias dccore.theme.stop { dccore.theme.menusoff }
+; After /dccore theme or icons: what is open drawn again. The control panel
+; is drawn once, when it opens, so it takes a change the next time.
+alias dccore.theme.refresh {
+  dccore.theme.menus
+  var %w = dccore.dq dccore.setl dccore.dcxcheck, %i = 1
+  while (%i <= $numtok(%w,32)) {
+    if ($dialog($gettok(%w,%i,32))) { dccore.theme.dialog $gettok(%w,%i,32) }
+    inc %i
+  }
+  if ($dialog(dccore.set)) { dccore.sys The control panel takes the change the next time it opens. }
+  if ($window($dccore.win)) { dccore.panel }
+  if ($window($dccore.dl.win)) { dccore.dl.draw }
+}
+alias dccore.theme.status {
+  var %ui = $dccore.theme.uiwhy
+  dccore.sys Theme: $dccore.theme.mode $+ , now $iif($dccore.theme.dark,dark,light) $+ $iif($dccore.theme.mircdark,$chr(44) as mIRC's own dark mode) $+ . $iif(($dccore.theme.dark) && (!$dccore.theme.mircdark) && (%ui != $null),The dialogs stay light: %ui $+ .) $iif(($dccore.theme.dark) && (!$dccore.theme.mircdark),The menus follow mIRC: its own dark mode follows Windows in mIRC 7.79 and later and is under Options - Display in mIRC 7.81 and later.) /dccore theme auto|dark|light
+  if (!$dccore.theme.icons) { dccore.sys Icons: off. /dccore icons on | return }
+  if (!$isfile($dccore.theme.iconfile)) { dccore.sys Icons: dll\dccore_icons.dll is missing. | return }
+  dccore.sys Icons: $iif($dccore.st(mi.on),on in this script's menus,not in the menus - $iif(%ui != $null,%ui,the menu hook would not start)) $+ ; the control panel's page list has them when DCX draws it. /dccore icons off
+}
+
+; ---------------------------------------------------------------------
+;  This mIRC's own settings: the control panel's mIRC side (#1288)
+; ---------------------------------------------------------------------
+;
+;  What @DCCore shows and in which colours, the window's look, the bot
+;  this mIRC is paired with, DCCore Chat - kept in dccore.ini beside the
+;  script, never on the bot. They were the Options dialog; they are pages
+;  of the control panel now, in its form - its mIRC side, the mIRC tab
+;  of the native form - and /dccore options opens the window there. The
+;  checks among them are the window's locals (dccore.sw.savelocal); the
+;  menus, the fields, the pairing line and the console feed check are
+;  filled by dccore.sw.opt.fill and read back by dccore.sw.opt.save,
+;  which Apply runs and which redraws what changed. The console feed
+;  check is the bot's own live state, never saved here.
+
+alias dccore.options { dccore.settings mirc }
 
 alias dccore.colours { return 00 white,01 black,02 navy,03 green,04 red,05 maroon,06 purple,07 orange,08 yellow,09 lime,10 teal,11 cyan,12 blue,13 pink,14 grey,15 silver }
 alias dccore.groups { return request queued sends fail search joins bans info }
 
-on *:dialog:dccore.opt:init:0: {
+; The Script pages filled from dccore.ini: the line types' checks and
+; colours (1620 up, a check and a menu each - a menu's lines are added when
+; its page is first shown, dccore.sw.cb.fill), the colours of file names,
+; console replies, panel headings, search text, nicks and channels (1640
+; to 1645), the status line's minutes (1637), the font (1670, 1671), the
+; background (1673), the finished downloads shown (1675), the bot's nick
+; and pairing (1681, 1682), the console feed (1685).
+alias dccore.sw.opt.fill {
   var %i = 1
   while (%i <= 8) {
     var %g = $gettok($dccore.groups,%i,32)
-    if ($dccore.opt(show. $+ %g)) { did -c dccore.opt $calc(100 + %i) }
-    dccore.fillcombo $calc(200 + %i) $dccore.opt(col. $+ %g)
+    if ($dccore.opt(show. $+ %g)) { did -c dccore.set $calc(1618 + 2 * %i) }
+    dccore.fillcombo $calc(1619 + 2 * %i) $dccore.opt(col. $+ %g)
     inc %i
   }
-  dccore.fillcombo 211 $dccore.opt(col.name)
-  dccore.fillcombo 213 $dccore.opt(col.console)
-  dccore.fillcombo 218 $dccore.opt(col.head)
-  dccore.fillspan 221 $dccore.opt(col.term) name -1
-  dccore.fillspan 223 $dccore.opt(col.nick) -1 per
-  dccore.fillspan 225 $dccore.opt(col.chan) -1
-  did -ra dccore.opt 215 $dccore.opt(statusmin)
-  if ($dccore.opt(panel)) { did -c dccore.opt 301 }
-  if ($dccore.opt(titlebar)) { did -c dccore.opt 302 }
-  if ($dccore.opt(separate)) { did -c dccore.opt 303 }
-  if ($dccore.opt(beep)) { did -c dccore.opt 304 }
-  if ($dccore.opt(font)) { did -c dccore.opt 305 }
-  did -ra dccore.opt 306 $dccore.fontsize
-  did -ra dccore.opt 310 $dccore.dl.rows
-  dccore.fillbg
-  if ($dccore.bot) { did -ra dccore.opt 402 $dccore.bot }
-  did -ra dccore.opt 403 $iif($dccore.opt(token),Paired $dccore.opt(paired) (token in dccore.ini),Not paired: the bot will ask for the password)
-  if ($dccore.opt(auto)) { did -c dccore.opt 404 }
-  ; The bot's own setting, not a local pref (#572 follow-up) - nothing is
+  dccore.fillcombo 1640 $dccore.opt(col.name)
+  dccore.fillcombo 1641 $dccore.opt(col.console)
+  dccore.fillcombo 1642 $dccore.opt(col.head)
+  dccore.fillspan 1643 $dccore.opt(col.term) name -1
+  dccore.fillspan 1644 $dccore.opt(col.nick) -1 per
+  dccore.fillspan 1645 $dccore.opt(col.chan) -1
+  did -ra dccore.set 1637 $dccore.opt(statusmin)
+  if ($dccore.opt(font)) { did -c dccore.set 1670 }
+  did -ra dccore.set 1671 $dccore.fontsize
+  dccore.fillbg 1673
+  did -ra dccore.set 1675 $dccore.dl.rows
+  ; the theme (#1368): auto, dark, light on lines 1 to 3, and the icons
+  did -r dccore.set 1691
+  did -a dccore.set 1691 Follow mIRC
+  did -a dccore.set 1691 Dark
+  did -a dccore.set 1691 Light
+  did -c dccore.set 1691 $findtok(auto dark light,$dccore.theme.mode,1,32)
+  if ($dccore.theme.icons) { did -c dccore.set 1692 }
+  if ($dccore.bot) { did -ra dccore.set 1681 $dccore.bot }
+  did -ra dccore.set 1682 $iif($dccore.opt(token),Paired $dccore.opt(paired) (token in dccore.ini),Not paired: the bot will ask for the password)
+  ; The bot's own setting, not a local pref (#572 follow-up): nothing is
   ; saved for it in dccore.ini, it lives only in dccore.live, refreshed
-  ; every time the bot says HELLO. Unknown (never told yet - a dialog
+  ; every time the bot says HELLO. Unknown (never told yet - a window
   ; opened in the instant after connecting) leaves it unchecked rather
-  ; than guessing either way.
-  ; Same "unknown leaves it unchecked" reasoning as checkupdates just above -
-  ; dccore.live, never dccore.ini (#1006 follow-up).
-  if ($dccore.st(consolefeed) == on) { did -c dccore.opt 405 }
-  if ($dccore.st(checkupdates) == on) { did -c dccore.opt 406 }
-  if ($dccore.opt(chat.all)) { did -c dccore.opt 601 }
-  if ($dccore.opt(chat.popup)) { did -c dccore.opt 602 }
-  if ($dccore.opt(start.main)) { did -c dccore.opt 701 }
-  if ($dccore.opt(start.chat)) { did -c dccore.opt 702 }
-  if ($dccore.opt(start.downloads)) { did -c dccore.opt 703 }
+  ; than guessing either way (#1006 follow-up).
+  if ($dccore.st(consolefeed) == on) { did -c dccore.set 1685 }
+  hadd dccore.sws opt.sig $dccore.sw.opt.sig
 }
-; "none" first, then the sixteen colours: the selected line is the colour + 2
-alias dccore.fillbg {
-  var %i = 1
-  did -a dccore.opt 308 none (mIRC's)
-  while (%i <= 16) { did -a dccore.opt 308 $gettok($dccore.colours,%i,44) | inc %i }
-  did -c dccore.opt 308 $calc($dccore.opt(bg) + 2)
+; Every one of those controls as it is now, in one line: what "changed"
+; means for them (the checks among the locals have their own test)
+alias dccore.sw.opt.sig {
+  var %i = 1, %s
+  while (%i <= 8) { %s = %s $did(dccore.set,$calc(1618 + 2 * %i)).state $dccore.sw.cb.sel($calc(1619 + 2 * %i)) | inc %i }
+  %i = 1640
+  while (%i <= 1645) { %s = %s $dccore.sw.cb.sel(%i) | inc %i }
+  return %s $did(dccore.set,1637).text $did(dccore.set,1670).state $did(dccore.set,1671).text $dccore.sw.cb.sel(1673) $did(dccore.set,1675).text $did(dccore.set,1681).text $did(dccore.set,1685).state $did(dccore.set,1691).sel $did(dccore.set,1692).state
 }
-alias dccore.fillcombo {
-  var %i = 1
-  while (%i <= 16) { did -a dccore.opt $1 $gettok($dccore.colours,%i,44) | inc %i }
-  did -c dccore.opt $1 $calc($2 + 1)
-}
-; The nick, channel and search text combos (#1259): their own lines first,
-; then the sixteen colours. $1 the combo, $2 the saved value, $3- the values
-; of the lines before the colours, in order (-1 "same as the line", per
-; "per nick", name "same as File names"). With N such lines, colour C is
-; line C + N + 1.
-alias dccore.fillspan {
-  var %own = $3-, %n = $numtok(%own,32), %i = 1
-  while (%i <= %n) { did -a dccore.opt $1 $dccore.spanlabel($gettok(%own,%i,32)) | inc %i }
-  %i = 1
-  while (%i <= 16) { did -a dccore.opt $1 $gettok($dccore.colours,%i,44) | inc %i }
-  var %at = $findtok(%own,$2,1,32)
-  if (!%at) { %at = $iif($2 isnum 0-15,$calc($2 + %n + 1),1) }
-  did -c dccore.opt $1 %at
-}
-alias dccore.spanlabel {
-  if ($1 == name) { return same as File names }
-  if ($1 == per) { return per nick }
-  return same as the line
-}
-; What the selected line of such a combo means: $1 the combo, $2 the same
-; values dccore.fillspan was given, as one argument.
-alias dccore.spanval {
-  var %sel = $did(dccore.opt,$1).sel, %n = $numtok($2,32)
-  if (%sel <= %n) { return $gettok($2,$iif(%sel < 1,1,%sel),32) }
-  return $calc(%sel - %n - 1)
-}
-on *:dialog:dccore.opt:sclick:1: {
-  var %i = 1
-  var %panel = $dccore.opt(panel)
-  var %bg = $dccore.opt(bg)
-  var %dl = $dccore.dl.rows
+alias dccore.sw.opt.dirty { return $iif($dccore.sw.opt.sig === $dccore.sw.s(opt.sig),$false,$true) }
+; Apply: this mIRC's switches (the locals) and the pages above into
+; dccore.ini, and the window redrawn where that changes it. How many
+; switches changed.
+alias dccore.sw.opt.save {
+  var %panel = $dccore.opt(panel), %bg = $dccore.opt(bg), %dl = $dccore.dl.rows, %n = $dccore.sw.savelocal, %i = 1
   while (%i <= 8) {
     var %g = $gettok($dccore.groups,%i,32)
-    hadd dccore show. $+ %g $did(dccore.opt,$calc(100 + %i)).state
-    hadd dccore col. $+ %g $calc($did(dccore.opt,$calc(200 + %i)).sel - 1)
+    hadd dccore show. $+ %g $did(dccore.set,$calc(1618 + 2 * %i)).state
+    hadd dccore col. $+ %g $calc($dccore.sw.cb.sel($calc(1619 + 2 * %i)) - 1)
     inc %i
   }
-  hadd dccore col.name $calc($did(dccore.opt,211).sel - 1)
-  hadd dccore col.console $calc($did(dccore.opt,213).sel - 1)
-  hadd dccore col.head $calc($did(dccore.opt,218).sel - 1)
-  hadd dccore col.term $dccore.spanval(221,name -1)
-  hadd dccore col.nick $dccore.spanval(223,-1 per)
-  hadd dccore col.chan $dccore.spanval(225,-1)
-  hadd dccore statusmin $iif($did(dccore.opt,215).text isnum,$int($did(dccore.opt,215).text),5)
-  hadd dccore panel $did(dccore.opt,301).state
-  hadd dccore titlebar $did(dccore.opt,302).state
-  hadd dccore separate $did(dccore.opt,303).state
-  hadd dccore beep $did(dccore.opt,304).state
-  hadd dccore font $did(dccore.opt,305).state
-  if ($did(dccore.opt,306).text isnum) && ($did(dccore.opt,306).text >= 6) { hadd dccore fontsize $did(dccore.opt,306).text }
-  hadd dccore bg $calc($did(dccore.opt,308).sel - 2)
-  hadd dccore dlfinished $iif($did(dccore.opt,310).text isnum 1-15,$int($did(dccore.opt,310).text),15)
-  hadd dccore auto $did(dccore.opt,404).state
-  hadd dccore chat.all $did(dccore.opt,601).state
-  hadd dccore chat.popup $did(dccore.opt,602).state
-  hadd dccore start.main $did(dccore.opt,701).state
-  hadd dccore start.chat $did(dccore.opt,702).state
-  hadd dccore start.downloads $did(dccore.opt,703).state
-  if ($did(dccore.opt,402).text != $null) { hadd dccore bot $did(dccore.opt,402).text }
+  hadd dccore col.name $calc($dccore.sw.cb.sel(1640) - 1)
+  hadd dccore col.console $calc($dccore.sw.cb.sel(1641) - 1)
+  hadd dccore col.head $calc($dccore.sw.cb.sel(1642) - 1)
+  hadd dccore col.term $dccore.spanval(1643,name -1)
+  hadd dccore col.nick $dccore.spanval(1644,-1 per)
+  hadd dccore col.chan $dccore.spanval(1645,-1)
+  hadd dccore statusmin $iif($did(dccore.set,1637).text isnum,$int($did(dccore.set,1637).text),5)
+  hadd dccore font $did(dccore.set,1670).state
+  if ($did(dccore.set,1671).text isnum) && ($did(dccore.set,1671).text >= 6) { hadd dccore fontsize $did(dccore.set,1671).text }
+  hadd dccore bg $calc($dccore.sw.cb.sel(1673) - 2)
+  hadd dccore dlfinished $iif($did(dccore.set,1675).text isnum 1-15,$int($did(dccore.set,1675).text),15)
+  if ($did(dccore.set,1681).text != $null) { hadd dccore bot $did(dccore.set,1681).text }
+  ; the theme and the icons (#1368): saved as /dccore theme and /dccore
+  ; icons save them, and what is open drawn again only when one changed
+  var %theme = $gettok(auto dark light,$did(dccore.set,1691).sel,32), %icons = $iif($did(dccore.set,1692).state == 1,1,0), %retheme = 0
+  if (%theme != $null) && (%theme != $dccore.theme.mode) { hadd dccore theme %theme | %retheme = 1 }
+  if (%icons != $iif($dccore.theme.icons,1,0)) { hadd dccore icons %icons | %retheme = 1 }
   dccore.save
-  ; checkupdates is the bot's own setting (#572 follow-up): sent only when
-  ; the checkbox actually disagrees with what the bot last told us, so
-  ; opening and closing the dialog untouched does not trigger a rehash.
-  ; And only once the bot HAS told us: before its first CHECKUPDATES line
-  ; the state is empty, the box shows unticked, and an empty state never
-  ; equals "off" - so OK pressed in that moment used to turn the check off.
-  var %checkupdates = $iif($did(dccore.opt,406).state == 1,on,off)
-  if ($dccore.st(checkupdates) != $null && %checkupdates != $dccore.st(checkupdates)) { dccore.send checkupdates %checkupdates }
-  ; consolefeed (#1006 follow-up): same "only when it actually disagrees,
-  ; and only once the bot has told us" reasoning as checkupdates above.
-  var %consolefeed = $iif($did(dccore.opt,405).state == 1,on,off)
+  ; consolefeed is the bot's own (#1006 follow-up): sent only when the
+  ; check disagrees with what the bot last told us, so an Apply that did
+  ; not touch it does not rehash the bot - and only once the bot HAS told
+  ; us: before its first line the state is empty, the box shows unticked,
+  ; and empty never equals "off"
+  var %consolefeed = $iif($did(dccore.set,1685).state == 1,on,off)
   if ($dccore.st(consolefeed) != $null && %consolefeed != $dccore.st(consolefeed)) { dccore.send consolefeed %consolefeed }
   if ($window($dccore.dl.win)) && (%dl != $dccore.dl.rows) { dccore.dl.tell }
   if ($window($dccore.win)) {
@@ -1964,15 +2338,56 @@ on *:dialog:dccore.opt:sclick:1: {
     dccore.title
     dccore.panel
   }
+  if (%retheme) { dccore.theme.refresh }
+  hadd dccore.sws opt.sig $dccore.sw.opt.sig
+  return %n
 }
-on *:dialog:dccore.opt:sclick:501: {
-  if ($did(dccore.opt,402).text != $null) { dccore.set bot $did(dccore.opt,402).text }
-  dialog -x dccore.opt
+; Pair again, Forget token: the window closes and the pairing takes over
+alias dccore.sw.opt.pair {
+  if ($did(dccore.set,1681).text != $null) { dccore.set bot $did(dccore.set,1681).text }
+  dialog -x dccore.set
   dccore pair
 }
-on *:dialog:dccore.opt:sclick:502: {
-  dialog -x dccore.opt
+alias dccore.sw.opt.unpair {
+  dialog -x dccore.set
   dccore unpair
+}
+; These three set a menu up: its lines are added the first time its page
+; is shown (dccore.sw.cb.fill, recipe bg, colours or span), its selection
+; is kept till then (dccore.sw.cb.select).
+; $1 a menu: "none" first, then the sixteen colours - the selected line is the colour + 2
+alias dccore.fillbg {
+  dccore.sw.cb.lazy $1 bg
+  dccore.sw.cb.select $1 $calc($dccore.opt(bg) + 2)
+}
+; $1 a menu, $2 the saved colour: the sixteen colours, colour C on line C + 1
+alias dccore.fillcombo {
+  dccore.sw.cb.lazy $1 colours
+  dccore.sw.cb.select $1 $calc($2 + 1)
+}
+; The nick, channel and search text menus (#1259): their own lines first,
+; then the sixteen colours. $1 the menu, $2 the saved value, $3- the values
+; of the lines before the colours, in order (-1 "same as the line", per
+; "per nick", name "same as File names"). With N such lines, colour C is
+; line C + N + 1.
+alias dccore.fillspan {
+  var %own = $3-, %n = $numtok(%own,32)
+  dccore.sw.cb.lazy $1 span %own
+  var %at = $findtok(%own,$2,1,32)
+  if (!%at) { %at = $iif($2 isnum 0-15,$calc($2 + %n + 1),1) }
+  dccore.sw.cb.select $1 %at
+}
+alias dccore.spanlabel {
+  if ($1 == name) { return same as File names }
+  if ($1 == per) { return per nick }
+  return same as the line
+}
+; What the selected line of such a menu means: $1 the menu, $2 the same
+; values dccore.fillspan was given, as one argument.
+alias dccore.spanval {
+  var %sel = $dccore.sw.cb.sel($1), %n = $numtok($2,32)
+  if (%sel <= %n) { return $gettok($2,$iif(%sel < 1,1,%sel),32) }
+  return $calc(%sel - %n - 1)
 }
 
 
@@ -2014,11 +2429,120 @@ on *:dialog:dccore.opt:sclick:502: {
 ;
 ;  It needs mIRC 6.17 or later, for $regsubex, which decodes the values.
 
+; The control panel: with DCX it opens on its start page, Bot or mIRC to
+; choose from; the native form on its first tab. $1 mirc: opened on this
+; mIRC's own settings - the mIRC side, the mIRC tab
 alias dccore.settings {
   dccore.init
-  if ($version < 6.17) { dccore.sys The settings window needs mIRC 6.17 or later. The console has the same: type settings in this window. | return }
-  if ($dialog(dccore.set)) { dialog -v dccore.set | return }
+  if ($version < 6.17) { dccore.sys The control panel needs mIRC 6.17 or later. The console has the same: type settings in this window. | return }
+  if ($dialog(dccore.set)) {
+    dialog -v dccore.set
+    if ($1 == mirc) { dccore.sw.go $iif($dccore.sw.s(dcx),side 2,tab $dccore.sw.m(groups)) }
+    return
+  }
+  hadd dccore.live sw.open $iif($1 == mirc,mirc,start)
   dialog -m dccore.set dccore.set
+}
+; $1 a tab's name: its number, or 1
+alias dccore.sw.group {
+  var %g = 1
+  while (%g <= $dccore.sw.m(groups)) {
+    if ($dccore.sw.m(g. $+ %g) == $1) { return %g }
+    inc %g
+  }
+  return 1
+}
+
+; ---- DCX (#1288) -------------------------------------------------------
+;  The settings window is to be drawn with DCX (scripts/mirc/dcx/dcx.dll,
+;  BSD-3-Clause - see the README beside it) when it can be loaded, and with
+;  mIRC's own controls when it cannot. $dccore.dcx.why says why not, or
+;  nothing when DCX can be used; /dccore dcx shows it.
+;
+;  The dll is checked against the release it was shipped as before it is
+;  loaded: a file that is not that one is not run. One already loaded by
+;  another script is used as it is - it is in this mIRC already, and a second
+;  copy of dcx.dll beside it is what DCX itself warns against.
+
+alias dccore.dcx.sha256 { return 321e9ac2168734edd6ff6e48f4bd9540e9297f5e1360773edda9d554e620db12 }
+; Microsoft's WebView2 loader, shipped beside it: DCX loads it every time it
+; starts (from mIRC's folder, then from beside dcx.dll) and writes a warning
+; to the status window when it is not there. Missing is harmless; a file
+; that is not the shipped one is not let near the dll.
+alias dccore.dcx.wv2sha256 { return 5659cbae9f3d412662515671a6c85aefe08eee17118c3de1330a2fed74dc415f }
+alias dccore.dcx.file { return $scriptdir $+ dcx\dcx.dll }
+alias dccore.dcx.wv2file { return $scriptdir $+ dcx\WebView2Loader.dll }
+alias dccore.dcx.loaded { return $dll(dcx.dll) }
+alias dccore.dcx.path { return $iif($dccore.dcx.loaded,$v1,$dccore.dcx.file) }
+alias dccore.dcx.why {
+  if ($dccore.opt(nodcx)) { return the option to use the built-in window is on }
+  if ($version < 7.45) { return DCX needs mIRC 7.45 or later }
+  if ($bits == 64) { return this mIRC is 64-bit and dcx.dll is 32-bit }
+  if (!$dccore.dcx.loaded) {
+    if (!$isfile($dccore.dcx.file)) { return $dccore.dcx.file is missing }
+    if ($sha256($dccore.dcx.file,2) != $dccore.dcx.sha256) { return $dccore.dcx.file is not the release this script was shipped with }
+    if ($isfile($dccore.dcx.wv2file)) && ($sha256($dccore.dcx.wv2file,2) != $dccore.dcx.wv2sha256) { return $dccore.dcx.wv2file is not the one this script was shipped with }
+  }
+  if ($dccore.dcx.version == $null) { return dcx.dll would not load }
+}
+; The dll's own version line, or nothing when it does not load. A dll that
+; cannot be opened is an error that would stop the script, so it is caught.
+alias dccore.dcx.version {
+  return $dll($dccore.dcx.path,Version,$null)
+  :error
+  reseterror
+  return
+}
+; DCX itself: /dccore.dcx <function> <args>, or $dccore.dcx(<function>,<args>).
+; Its xdialog and xdid take the dialog first: /dccore.dcx xdialog <dialog> -c ...
+alias dccore.dcx {
+  if ($isid) { return $dll($dccore.dcx.path,$1,$2-) }
+  dll $qt($dccore.dcx.path) $1 $2-
+}
+alias dccore.dcx.status {
+  var %why = $dccore.dcx.why
+  if (%why == $null) { dccore.sys DCX: $dccore.dcx.version from $dccore.dcx.path $+ . /dccore dcx check opens a small window that tests it in this mIRC. }
+  else { dccore.sys DCX is not used: %why $+ . The settings window uses mIRC's own controls. }
+}
+
+; /dccore dcx check: what can only be learnt in a real mIRC. Whether mIRC's
+; own controls still raise their events once DCX has marked the dialog, and
+; how DCX's pixels line up with this dialog's units: the tree is placed by
+; the scale $dialog().cw reports, so it fills the box exactly when that
+; scale is right and sits small in its corner when it is not.
+dialog dccore.dcxcheck {
+  title "DCCore - DCX check"
+  size -1 -1 240 120
+  option dbu
+  button "Click this (mIRC's own button)", 1, 4 4 100 13
+  box "The DCX tree should fill this box", 2, 110 4 126 90
+  text "Click the button and an item in the tree, then read @DCCore.", 3, 4 22 100 40
+  button "Close", 4, 190 102 46 13, cancel
+}
+on *:dialog:dccore.dcxcheck:init:0: { dccore.dcx.checkinit | dccore.theme.dialog dccore.dcxcheck init }
+on *:dialog:dccore.dcxcheck:sclick:1: { dccore.sys DCX check: mIRC's own button raised its click in the DCX-marked window. }
+alias dccore.dcx.check {
+  var %why = $dccore.dcx.why
+  if (%why != $null) { dccore.sys DCX check skipped: %why $+ . | return }
+  if ($dialog(dccore.dcxcheck)) { dialog -v dccore.dcxcheck | return }
+  dialog -m dccore.dcxcheck dccore.dcxcheck
+}
+alias dccore.dcx.checkinit {
+  dccore.dcx Mark dccore.dcxcheck dccore.dcx.checkcb
+  var %cw = $dialog(dccore.dcxcheck).cw, %ch = $dialog(dccore.dcxcheck).ch
+  var %sx = $calc(%cw / 240), %sy = $calc(%ch / 120)
+  dccore.sys DCX check: $dccore.dcx.version $+ . The 240 x 120 unit window reports a client area of %cw x %ch $+ , a scale of %sx x %sy $+ .
+  var %x = $round($calc(114 * %sx),0), %y = $round($calc(14 * %sy),0), %w = $round($calc(118 * %sx),0), %h = $round($calc(76 * %sy),0)
+  dccore.dcx xdialog dccore.dcxcheck -c 10 treeview %x %y %w %h hasbuttons haslines linesatroot showsel
+  dccore.dcx xdid dccore.dcxcheck 10 -a $+(-1,$chr(9),+eE 0 0 0 0 0 0 0 0 General)
+  dccore.dcx xdid dccore.dcxcheck 10 -a $+(1 -1,$chr(9),+E 0 0 0 0 0 0 0 0 IRC Server)
+  dccore.dcx xdid dccore.dcxcheck 10 -a $+(1 -1,$chr(9),+E 0 0 0 0 0 0 0 0 Channels)
+  dccore.dcx xdid dccore.dcxcheck 10 -a $+(-1,$chr(9),+eE 0 0 0 0 0 0 0 0 Sharing)
+  dccore.dcx xdid dccore.dcxcheck 10 -a $+(2 -1,$chr(9),+E 0 0 0 0 0 0 0 0 Search)
+}
+; DCX's events: $1 the dialog, $2 the event, $3 the control, $4- its details
+alias dccore.dcx.checkcb {
+  if ($2 == sclick) && ($3 == 10) { dccore.sys DCX check: the tree raised its click (item $4- $+ ). }
 }
 
 ; The lines this window reads, routed here by dccore.structured while it is
@@ -2099,6 +2623,8 @@ alias dccore.sw.untok {
   if ($1 == -) { return }
   return $dccore.sw.dec($1)
 }
+; An encoded value (enc's form, which may hold single spaces) as one token.
+alias dccore.sw.retok { return $replace($1-,$chr(32),$chr(37) $+ 20) }
 
 ; The bot runs on this PC, so a path picked with the "..." buttons is one it
 ; can read: the console connection is loopback, or the bot's CAPS line ends
@@ -2126,8 +2652,8 @@ alias dccore.sw.can {
   return $iif($wildtok($dccore.sw.s(caps),$1 $+ :*,1,32),$true,$false)
 }
 
-on *:dialog:dccore.set:init:0: { dccore.sw.init }
-on *:dialog:dccore.set:close:0: { dccore.sw.closed }
+on *:dialog:dccore.set:init:0: { dccore.sw.init | dccore.theme.dialog dccore.set init | dccore.theme.dcxset }
+on *:dialog:dccore.set:close:0: { dccore.sw.closed | if ($dialog(dccore.setl)) { dialog -x dccore.setl } }
 on *:dialog:dccore.set:sclick:*: { dccore.sw.click $did }
 on *:dialog:dccore.set:edit:*: { dccore.sw.touched $did }
 on *:dialog:dccore.set:mouse:*: { dccore.sw.hover $did }
@@ -2144,6 +2670,7 @@ alias dccore.sw.init {
     inc %i
   }
   dccore.sw.combos
+  dccore.sw.opt.fill
   ; this mIRC's own switches, from dccore.ini
   var %all = $dccore.sw.m(locals)
   %i = 1
@@ -2154,46 +2681,183 @@ alias dccore.sw.init {
   %i = 1
   while (%i <= $dccore.sw.m(pages)) { dccore.sw.showpage %i -h | inc %i }
   dccore.sw.enable 0
-  dccore.sw.tab 1
+  dccore.sw.dcx
+  if ($dccore.sw.s(dcx)) { dccore.sw.side $iif($hget(dccore.live,sw.open) == mirc,2,0) }
+  else { dccore.sw.tab $iif($hget(dccore.live,sw.open) == mirc,$dccore.sw.m(groups),1) }
+  if ($hget(dccore.live,sw.open)) { hdel dccore.live sw.open }
   .timerdccoreSwTick 0 5 dccore.sw.tick
   dccore.sw.start
+  ; what is made from here on is made after the init's dccore.theme.dialog
+  hadd dccore.sws inited 1
 }
 
 ; Every combo's lines: the choices with the dashboard's labels, the three
-; answers of a setting that may be unset, the sixteen colours.
+; answers of a setting that may be unset, the sixteen colours. A setting's
+; menu only gets its recipe here, and its lines the first time its page is
+; shown (dccore.sw.cb.fill). The bindings' Mode menus are filled now: the
+; rows are drawn again as the lists change.
 alias dccore.sw.combos {
+  var %modes = $dccore.sw.untext($dccore.sw.m(modelabels))
   var %j = 1
   while (%j <= $dccore.sw.m(keys.n)) {
     var %keys = $dccore.sw.m(keys. $+ %j), %i = 1
     while (%i <= $numtok(%keys,32)) {
       var %k = $gettok(%keys,%i,32), %id = $gettok($dccore.sw.m(k. $+ %k),1,32), %kind = $gettok($dccore.sw.m(k. $+ %k),2,32)
-      if (%kind == choice) {
-        var %c = 1
-        while (%c <= $numtok($dccore.sw.m(ch. $+ %k),32)) { did -a dccore.set %id $dccore.sw.untext($dccore.sw.m($+(cl.,%k,.,%c))) | inc %c }
-      }
-      elseif (%kind == tri) { dccore.sw.fillfrom %id $dccore.sw.untext($dccore.sw.m(tri)) }
+      if (%kind == choice) { dccore.sw.cb.lazy %id choice %k }
+      elseif (%kind == tri) { dccore.sw.cb.lazy %id tri }
       elseif (%kind == colour) {
-        did -a dccore.set %id $dccore.sw.untext($dccore.sw.m(themedefault))
-        dccore.sw.fillfrom %id $dccore.sw.untext($dccore.sw.m(colours))
-        did -a dccore.set $calc(%id + 1) $dccore.sw.untext($dccore.sw.m(keepprevious))
-        dccore.sw.fillfrom $calc(%id + 1) $dccore.sw.untext($dccore.sw.m(colours))
+        dccore.sw.cb.lazy %id colour themedefault
+        dccore.sw.cb.lazy $calc(%id + 1) colour keepprevious
       }
       inc %i
     }
     inc %j
   }
-  dccore.sw.fillfrom 1547 $dccore.sw.untext($dccore.sw.m(modelabels))
+  ; the Mode menus of the bindings rows, and of the row that adds one
+  var %r = 1
+  while (%r <= 15) { dccore.sw.fillfrom $calc($dccore.sw.srv.rowbase(%r) + 2) %modes | inc %r }
+  dccore.sw.fillfrom 1772 %modes
 }
-; $1 a combo, $2- its lines separated by commas
-alias dccore.sw.fillfrom {
-  var %i = 1
-  while (%i <= $numtok($2-,44)) { did -a dccore.set $1 $gettok($2-,%i,44) | inc %i }
+; $1 a combo, $2- its lines separated by commas: in one didtok
+alias dccore.sw.fillfrom { if ($2- != $null) { didtok dccore.set $1 44 $2- } }
+
+; ---- menus filled when their page is first shown (#1382) -------------
+;  A line of a combo costs mIRC some 0.6 ms, nearly 2 while the window is
+;  made, whichever command adds it: the panel's menus were about 1 s of
+;  every open. So a setting's menu and the mIRC side's colour menus get a
+;  recipe in dccore.sws at open (cb.<id>), and their lines the first time
+;  their page is shown (cbmade.<id>). Till then the line selected is kept
+;  as a number (cbsel.<id>, 0 for none), and a colour menu's 18th line "As
+;  set: ..." as its text (cbx.<id>). Every read and write of such a menu's
+;  selection goes through dccore.sw.cb.sel and dccore.sw.cb.select, which
+;  say the same thing either way.
+;  The recipes: choice <KEY> (the setting's labels), tri (the layout's three
+;  answers), colour <themedefault|keepprevious> (that line, then the
+;  layout's sixteen colours), colours (the sixteen of dccore.colours), bg
+;  ("none (mIRC's)", then those), span <values> (dccore.fillspan's own lines
+;  for those values, then those).
+
+; $1 a menu, $2- its recipe
+alias dccore.sw.cb.lazy { hadd dccore.sws cb. $+ $1 $2- }
+; Whether $1 is a menu still waiting for its lines
+alias dccore.sw.cb.waits { return $iif(($dccore.sw.s(cb. $+ $1) != $null) && (!$dccore.sw.s(cbmade. $+ $1)),$true,$false) }
+; $1 a menu: its selected line, 0 for none - as one number either way, so a
+; selection kept and the same one shown compare equal (the dirty checks)
+alias dccore.sw.cb.sel {
+  var %s = $dccore.sw.s(cbsel. $+ $1)
+  if (!$dccore.sw.cb.waits($1)) { %s = $did(dccore.set,$1).sel }
+  return $iif(%s isnum 1-,%s,0)
+}
+; $1 a menu, $2 a line to select, 0 or nothing to select none. A line the
+; menu has not got selects none, as did -c leaves a filled one (a colour
+; written into dccore.ini by hand): a waiting menu is measured against the
+; lines it will have (dccore.sw.cb.lines), so Apply and the dirty checks
+; read the same either way
+alias dccore.sw.cb.select {
+  var %n = $iif($2 isnum 1-,$2,0)
+  if ($dccore.sw.cb.waits($1)) {
+    if (%n > $dccore.sw.cb.lines($1)) { %n = 0 }
+    hadd dccore.sws cbsel. $+ $1 %n
+    return
+  }
+  if (%n) { did -c dccore.set $1 %n }
+  else { did -u dccore.set $1 }
+}
+; $1 a menu waiting for its lines: how many it will have, from its recipe
+; (as dccore.sw.cb.fill adds them), and the "As set" line kept for it
+alias dccore.sw.cb.lines {
+  var %r = $dccore.sw.s(cb. $+ $1), %k = $gettok(%r,1,32), %n = 0
+  if (%k == choice) { %n = $numtok($dccore.sw.m(ch. $+ $gettok(%r,2,32)),32) }
+  elseif (%k == tri) { %n = $numtok($dccore.sw.untext($dccore.sw.m(tri)),44) }
+  elseif (%k == colour) { %n = $calc(1 + $numtok($dccore.sw.untext($dccore.sw.m(colours)),44)) }
+  elseif (%k == colours) { %n = $numtok($dccore.colours,44) }
+  elseif (%k == bg) { %n = $calc(1 + $numtok($dccore.colours,44)) }
+  elseif (%k == span) { %n = $calc($numtok($gettok(%r,2-,32),32) + $numtok($dccore.colours,44)) }
+  if ($dccore.sw.s(cbx. $+ $1) != $null) { inc %n }
+  return %n
+}
+; $1 a colour menu, $2- the text of its 18th line ("As set: ..."), or
+; nothing for none: the line there is taken away, and this one added
+alias dccore.sw.cb.extra {
+  if ($dccore.sw.cb.waits($1)) { dccore.sw.keep cbx. $+ $1 $2- | return }
+  if ($did(dccore.set,$1).lines >= 18) { did -d dccore.set $1 18 }
+  if ($2- != $null) { did -a dccore.set $1 $2- }
+}
+; $1 a page: its menus' lines, the first time it is shown. Its controls are
+; the layout's own list of them (p.<page>.<n>).
+alias dccore.sw.cb.page {
+  if ($dccore.sw.s(cbpage. $+ $1)) { return }
+  hadd dccore.sws cbpage. $+ $1 1
+  var %j = 1
+  while (%j <= $dccore.sw.m(p. $+ $1 $+ .n)) {
+    var %ids = $dccore.sw.m($+(p.,$1,.,%j)), %i = 1
+    while (%i <= $numtok(%ids,44)) {
+      if ($dccore.sw.cb.waits($gettok(%ids,%i,44))) { dccore.sw.cb.fill $gettok(%ids,%i,44) }
+      inc %i
+    }
+    inc %j
+  }
+}
+; $1 a menu: its lines from its recipe, each list in one didtok - where a
+; line is a label of its own, joined on $chr(7), which no label has, so a
+; label with a comma stays one line - then the "As set" line kept for it,
+; and the line kept as selected. Once: marked before, so a failure is not
+; a second set of lines.
+alias dccore.sw.cb.fill {
+  if (!$dccore.sw.cb.waits($1)) { return }
+  hadd dccore.sws cbmade. $+ $1 1
+  var %r = $dccore.sw.s(cb. $+ $1), %k = $gettok(%r,1,32)
+  if (%k == choice) {
+    var %key = $gettok(%r,2,32), %c = 1, %l
+    while (%c <= $numtok($dccore.sw.m(ch. $+ %key),32)) { %l = $+(%l,$chr(7),$dccore.sw.untext($dccore.sw.m($+(cl.,%key,.,%c)))) | inc %c }
+    if (%l != $null) { didtok dccore.set $1 7 $mid(%l,2) }
+  }
+  elseif (%k == tri) { dccore.sw.fillfrom $1 $dccore.sw.untext($dccore.sw.m(tri)) }
+  elseif (%k == colour) { didtok dccore.set $1 7 $+($dccore.sw.untext($dccore.sw.m($gettok(%r,2,32))),$chr(7),$replace($dccore.sw.untext($dccore.sw.m(colours)),$chr(44),$chr(7))) }
+  elseif (%k == colours) { didtok dccore.set $1 44 $dccore.colours }
+  elseif (%k == bg) {
+    did -a dccore.set $1 none (mIRC's)
+    didtok dccore.set $1 44 $dccore.colours
+  }
+  elseif (%k == span) {
+    var %own = $gettok(%r,2-,32), %i = 1, %l
+    while (%i <= $numtok(%own,32)) { %l = $+(%l,$chr(44),$dccore.spanlabel($gettok(%own,%i,32))) | inc %i }
+    if (%l != $null) { didtok dccore.set $1 44 $mid(%l,2) }
+    didtok dccore.set $1 44 $dccore.colours
+  }
+  var %x = $dccore.sw.s(cbx. $+ $1), %sel = $dccore.sw.s(cbsel. $+ $1)
+  if (%x != $null) { did -a dccore.set $1 %x }
+  if (%sel isnum 1-) { did -c dccore.set $1 %sel }
 }
 
-; $1 a page, $2 -h or -v: every control of the page hidden or shown
+; $1 a page, $2 -h or -v: every control of the page hidden or shown - and
+; with DCX its tables' listviews with them, their native lists kept hidden,
+; and the page's name put in the title (#1288). A page's DCX frames and
+; tables are made the first time it is shown (#1382), so hiding one never
+; shown touches no DCX id: there is none yet, and DCX halts on a missing one
 alias dccore.sw.showpage {
+  ; its menus' lines the first time, in either window, before it shows
+  if ($2 == -v) { dccore.sw.cb.page $1 }
   var %j = 1
   while (%j <= $dccore.sw.m(p. $+ $1 $+ .n)) { did $2 dccore.set $dccore.sw.m($+(p.,$1,.,%j)) | inc %j }
+  if (!$dccore.sw.s(dcx)) { return }
+  ; the frames: the native boxes stay hidden, their DCX lines and titles
+  ; come and go with the page
+  var %bx = $dccore.sw.m(p. $+ $1 $+ .bx)
+  if (%bx != $null) {
+    did -h dccore.set %bx
+    if ($2 == -v) { dccore.sw.dcxframes $1 }
+    if ($dccore.sw.s(frmade. $+ $1)) { dccore.dcx xdid dccore.set $dccore.sw.m(p. $+ $1 $+ .fr) $iif($2 == -v,-s,-h) }
+  }
+  ; the tables: lv.id makes one the first time (dccore.sw.lv.need)
+  var %lvs = $dccore.sw.m(p. $+ $1 $+ .lv), %i = 1
+  while (%i <= $numtok(%lvs,32)) {
+    var %lv = $gettok(%lvs,%i,32)
+    did -h dccore.set %lv
+    if ($2 == -v) || ($dccore.sw.s(lvmade. $+ %lv)) { dccore.dcx xdid dccore.set $dccore.sw.lv.id(%lv) $iif($2 == -v,-s,-h) }
+    inc %i
+  }
+  if ($2 == -v) { dccore.dcx xdid dccore.set $gettok($dccore.sw.m(dcxtitle),1,32) -t $dccore.sw.untext($dccore.sw.m(p. $+ $1)) }
 }
 ; $1 1 or 0: every control that edits the bot enabled or not. The "..."
 ; buttons only for a bot on this PC.
@@ -2207,7 +2871,18 @@ alias dccore.sw.enable {
   if ($1) && (!$dccore.sw.local) {
     var %i = 1, %n = $hfind(dccore.swm,br.*,0,w)
     while (%i <= %n) { did -b dccore.set $gettok($hfind(dccore.swm,br.*,%i,w),2,46) | inc %i }
-    did -b dccore.set 1550
+  }
+  if ($dccore.sw.s(dcx)) {
+    ; a disabled listview is drawn light grey whatever its colours, so in
+    ; the dark theme the tables stay enabled: their rows do nothing by
+    ; themselves, the buttons that act on them are what is disabled. A
+    ; table not made yet is left alone: dccore.sw.lv.make gives it lv.e
+    var %lvs = $dccore.sw.m(lvs), %i = 1, %e = $iif(($1) || ($dccore.theme.dialogsdark),-e,-b)
+    hadd dccore.sws lv.e %e
+    while (%i <= $numtok(%lvs,32)) {
+      if ($dccore.sw.s(lvmade. $+ $gettok(%lvs,%i,32))) { dccore.dcx xdid dccore.set $dccore.sw.lv.id($gettok(%lvs,%i,32)) %e }
+      inc %i
+    }
   }
 }
 
@@ -2216,15 +2891,18 @@ alias dccore.sw.enable {
 ; last shown in it.
 alias dccore.sw.tab {
   hadd dccore.sws tab $1
+  ; the bot's tab last shown, for the way back to its side from the start
+  if ($1 < $dccore.sw.m(groups)) { hadd dccore.sws bottab $1 }
   var %pages = $dccore.sw.m(g. $+ $1 $+ .pages), %i = 1
   while (%i <= $dccore.sw.m(slots)) {
     if (%i <= $numtok(%pages,32)) {
       did -ra dccore.set $calc(1019 + %i) $replace($dccore.sw.untext($dccore.sw.m(p. $+ $gettok(%pages,%i,32))),&,&&)
-      did -v dccore.set $calc(1019 + %i)
+      if (!$dccore.sw.s(dcx)) { did -v dccore.set $calc(1019 + %i) }
     }
     else { did -h dccore.set $calc(1019 + %i) }
     inc %i
   }
+  if ($dccore.sw.s(dcx)) { dccore.sw.dcxpages %pages | dccore.sw.dcxtabsel }
   var %last = $dccore.sw.s(last. $+ $1)
   if (%last == $null) { %last = $gettok(%pages,1,32) }
   dccore.sw.page %last
@@ -2236,6 +2914,8 @@ alias dccore.sw.page {
   hadd dccore.sws page $1
   hadd dccore.sws last. $+ $dccore.sw.s(tab) $1
   dccore.sw.showpage $1 -v
+  ; showing a page shows every control of it: the bindings' spare rows go again
+  if ($istok($dccore.sw.m(p. $+ $1 $+ .w),srvchans,32)) { dccore.sw.srv.rowsvis }
   ; its button pressed, every other one not
   var %at = $findtok($dccore.sw.m(g. $+ $dccore.sw.s(tab) $+ .pages),$1,1,32), %i = 1
   while (%i <= $dccore.sw.m(slots)) {
@@ -2243,6 +2923,7 @@ alias dccore.sw.page {
     else { did -u dccore.set $calc(1019 + %i) }
     inc %i
   }
+  if ($dccore.sw.s(dcx)) { dccore.sw.dcxshow $1 }
   did -r dccore.set 1012
   var %asks = $dccore.sw.m(p. $+ $1 $+ .ask), %i = 1
   while (%i <= $numtok(%asks,32)) {
@@ -2256,13 +2937,610 @@ alias dccore.sw.goto {
   if (%page == $null) { return }
   while (%g <= $dccore.sw.m(groups)) {
     if ($istok($dccore.sw.m(g. $+ %g $+ .pages),%page,32)) {
-      did -f dccore.set $calc(1000 + %g)
+      if (!$dccore.sw.s(dcx)) { did -f dccore.set $calc(1000 + %g) }
       hadd dccore.sws last. $+ %g %page
+      ; with DCX the page's side first, from the start page or the other side
+      if ($dccore.sw.s(dcx)) && ($dccore.sw.s(side) != $iif(%g == $dccore.sw.m(groups),2,1)) { dccore.sw.side $iif(%g == $dccore.sw.m(groups),2,1) }
       dccore.sw.tab %g
       return
     }
     inc %g
   }
+}
+
+; ---- the DCX page list, title and tables (#1288) -----------------------
+;  When DCX can be used the window is marked and gets the mockup's
+;  navigation: the tab strip stays for the groups, the page buttons are
+;  hidden under a DCX list of the chosen tab's pages (a row each, the whole
+;  row highlighted), the page's name goes, in bold, into the row between
+;  the tabs and the page, and each table - a native list control - is
+;  hidden under a DCX listview with columns over its place. Every page,
+;  control and line of logic stays the built-in window's: the list only
+;  drives dccore.sw.page, as the buttons do, and a table is read and
+;  written through dccore.sw.lv.*, which address whichever of the two is
+;  there. /dccore dcx check showed what this rests on in a real mIRC - its
+;  own controls keep raising their events in a marked dialog, and
+;  $dialog().cw over the width in dialog units is the pixel scale. When DCX
+;  cannot be used none of this runs and the window is exactly the built-in
+;  one.
+alias dccore.sw.dcx {
+  if ($dccore.dcx.why != $null) { return }
+  dccore.dcx Mark dccore.set dccore.sw.dcxcb
+  hadd dccore.sws dcx 1
+  ; the theme as the window is made, asked once (each asking may check the
+  ; dll's hash again): dark, its dialogs drawn dark - what is made later
+  ; takes its dark colours from this - and noct, dccore_ui.dll is what draws
+  ; them so: DCX's texts then get their fonts without ClearType
+  ; (dccore.sw.fontflags), mIRC's own dark mode keeps it
+  hadd dccore.sws dark $iif($dccore.theme.dialogsdark,1,0)
+  hadd dccore.sws noct $iif(($dccore.sw.s(dark)) && (!$dccore.theme.mircdark),1,0)
+  ; every line of the window is the script's own, in one colour - the
+  ; system's, so a theme is followed: Windows draws its tabs and frames in
+  ; light greys, and the first tab with no left edge. The native tabs and
+  ; page buttons go; the frames are hidden page by page (dccore.sw.showpage)
+  hadd dccore.sws line $dccore.theme.sys(line)
+  hadd dccore.sws face $dccore.theme.sys(face)
+  hadd dccore.sws light $dccore.theme.sys(light)
+  var %i = 1
+  while (%i <= $dccore.sw.m(groups)) { did -h dccore.set $calc(1000 + %i) | inc %i }
+  %i = 1
+  while (%i <= $dccore.sw.m(slots)) { did -h dccore.set $calc(1019 + %i) | inc %i }
+  ; the body frame under the tabs, then the tab strip - after the frame,
+  ; since the chosen tab stands on its top line. A page's own frames are
+  ; made the first time it is shown (dccore.sw.showpage)
+  var %b = $dccore.sw.m(dcxbody)
+  dccore.sw.dcxring $gettok(%b,1,32) $dccore.sw.dcxrect($gettok(%b,2-5,32))
+  dccore.sw.dcxtabs
+  dccore.sw.dcxhome
+  ; the chosen tab's pages, where the page buttons were: filled by dccore.sw.tab
+  var %t = $dccore.sw.m(dcxpages), %id = $gettok(%t,1,32), %rect = $dccore.sw.dcxrect($gettok(%t,2-5,32))
+  dccore.dcx xdialog dccore.set -c %id listview %rect report noheader singlesel fullrow showsel
+  dccore.dcx xdid dccore.set %id -t +l 0 $calc($gettok(%rect,3,32) - 4) Pages
+  dccore.sw.dcxaa %id listview
+  ; the page's name, bold, between the tabs and the page
+  %t = $dccore.sw.m(dcxtitle)
+  dccore.dcx xdialog dccore.set -c $gettok(%t,1,32) text $dccore.sw.dcxrect($gettok(%t,2-5,32)) nowrap noprefix noformat
+  dccore.dcx xdid dccore.set $gettok(%t,1,32) -f $dccore.sw.fontflags(b) default 9 Tahoma
+  ; the tables are made when first needed (dccore.sw.lv.need)
+}
+; DCX's texts and tables without ClearType. ClearType tints the edges of
+; each letter red and blue, and light letters on the dark background look
+; blurred by it. dccore_ui.dll gives mIRC's own controls a font without it;
+; DCX draws with the font xdid -f gave it, so where the DLL darkens the
+; window (noct, dccore.sw.dcx) each DCX text and table is given its font
+; with the flag a (anti-aliased, no ClearType) as it is made. In mIRC's own
+; dark mode mIRC's controls keep ClearType, and DCX's keep it with them.
+; $1 the other flags, b for bold: "+b", or "+ab" there.
+alias dccore.sw.fontflags { return $+(+,$iif($dccore.sw.s(noct),a),$1) }
+; $1 a DCX text or listview just made with no font of its own, $2 its type,
+; text or listview: where fonts go without ClearType (fontflags), the font
+; DCX gave it, again with the flag a. That font is asked of the first one
+; of each type a window makes, and kept: DCX gives every one of a type the
+; same. One already anti-aliased, or a font with no name, stays as it is.
+alias dccore.sw.dcxaa {
+  if (!$dccore.sw.s(noct)) { return }
+  var %f = $dccore.sw.s(deffont. $+ $2)
+  if (%f == $null) {
+    ; +flags charset size name
+    var %q = $dccore.dcx(_xdid,dccore.set $1 font), %fl = $gettok(%q,1,32)
+    %f = -
+    if ($left(%fl,1) == +) && (a !isincs %fl) && ($gettok(%q,4,32) != $null) { %f = $+(+a,$remove($mid(%fl,2),d)) $gettok(%q,2-,32) }
+    hadd dccore.sws deffont. $+ $2 %f
+  }
+  if (%f != -) { dccore.dcx xdid dccore.set $1 -f %f }
+}
+; $1 a DCX id, $2- a rectangle in pixels: a panel there in the line colour
+alias dccore.sw.dcxline {
+  dccore.dcx xdialog dccore.set -c $1 panel $2 $3 $4 $5
+  dccore.dcx xdid dccore.set $1 -C +b $dccore.sw.s(line)
+}
+; $1 a DCX id, $2- a rectangle in pixels: a panel there in the line colour,
+; shaped by its window region - so nothing else of it is drawn or clicked -
+; as a ring a pixel wide with rounded corners: the inside first, then the
+; outside less that (a region combined is the new one less the old). The
+; corners are the midpoint circle's pixels, as GDI draws one with a pen, and
+; the polygons run on pixel edges, so the ring is exactly those: a ring cut
+; from GDI's rounded rectangle came out as dots, the frame of one uneven
+alias dccore.sw.dcxring {
+  dccore.sw.dcxline $1 $2 $3 $4 $5
+  dccore.dcx xdid dccore.set $1 -R +p $dccore.sw.dcxpoly($4,$5,i,4)
+  dccore.dcx xdid dccore.set $1 -R +ip $dccore.sw.dcxpoly($4,$5,o,4)
+}
+alias dccore.sw.dcxpt { return $+($1,$chr(44),$2) }
+; $1 a width and $2 a height in pixels, $3 o for the outside or i for the
+; inside, $4 the corners rounded - 4, or 2 for the top ones and a straight
+; bottom: the polygon, the generator's top-left corner (a staircase from
+; the left edge up to the top edge) mirrored to the other three
+alias dccore.sw.dcxpoly {
+  var %c = $dccore.sw.m(dcxcorner. $+ $3), %n = $numtok(%c,32), %i = 1, %tl, %tr, %br, %bl
+  while (%i <= %n) {
+    var %p = $gettok(%c,%i,32), %x = $gettok(%p,1,44), %y = $gettok(%p,2,44)
+    %tl = %tl $dccore.sw.dcxpt(%x,%y)
+    %tr = $dccore.sw.dcxpt($calc($1 - %x),%y) %tr
+    %br = %br $dccore.sw.dcxpt($calc($1 - %x),$calc($2 - %y))
+    %bl = $dccore.sw.dcxpt(%x,$calc($2 - %y)) %bl
+    inc %i
+  }
+  if ($4 == 2) { var %e = $iif($3 == i,1,0) | return $dccore.sw.dcxpt(%e,$2) %tl %tr $dccore.sw.dcxpt($calc($1 - %e),$2) }
+  return %tl %tr %br %bl
+}
+; $1 a page: each of its frames drawn - the ring, and over its top line the
+; title on the window's face, in the dark theme light - hidden until the
+; page is shown, when the native box under it is hidden instead
+; (dccore.sw.showpage). Once a window, the first time the page is shown:
+; a DCX id made twice is an error.
+alias dccore.sw.dcxframes {
+  if ($dccore.sw.s(frmade. $+ $1)) { return }
+  hadd dccore.sws frmade. $+ $1 1
+  var %bx = $dccore.sw.m(p. $+ $1 $+ .bx), %i = 1
+  while (%i <= $numtok(%bx,44)) {
+    var %f = $dccore.sw.m(fr. $+ $gettok(%bx,%i,44)), %base = $gettok(%f,1,32), %title = $calc(%base + 1)
+    dccore.sw.dcxring %base $dccore.sw.dcxrect($gettok(%f,2-5,32))
+    dccore.dcx xdialog dccore.set -c %title text $dccore.sw.dcxrect($gettok(%f,6-9,32)) nowrap center noprefix noformat
+    dccore.sw.dcxaa %title text
+    dccore.dcx xdid dccore.set %title -C +b $dccore.sw.s(face)
+    if ($dccore.sw.s(dark)) { dccore.theme.dcxtext %title }
+    dccore.dcx xdid dccore.set %title -t $gettok(%f,10-,32)
+    dccore.dcx xdid dccore.set $+(%base,-,%title) -h
+    inc %i
+  }
+}
+; the tab strip: for each tab an outline panel in the line colour, a panel
+; on the face inside it and a text with the tab's name - laid out by
+; dccore.sw.dcxtabsel
+alias dccore.sw.dcxtabs {
+  var %t = $dccore.sw.m(dcxtabs), %i = 1
+  while (%i <= $gettok(%t,6,32)) {
+    var %id = $calc($gettok(%t,1,32) + $gettok(%t,2,32) * (%i - 1))
+    dccore.sw.dcxline %id 0 0 1 1
+    dccore.dcx xdialog dccore.set -c $calc(%id + 1) panel 0 0 1 1
+    dccore.dcx xdialog dccore.set -c $calc(%id + 2) text 0 0 1 1 nowrap center noprefix noformat
+    dccore.sw.dcxaa $calc(%id + 2) text
+    dccore.dcx xdid dccore.set $calc(%id + 2) -t $dccore.sw.m(g. $+ %i)
+    inc %i
+  }
+}
+; the tabs laid out for the tab chosen: that one from the strip's top down
+; onto the body frame's top line, on the window's face, so the two join; the
+; others a little lower, ending above the line, on the lighter face. The
+; outline's region is the tab's shape, round at the top and straight below,
+; the face's the inside of that, so the outline shows as a line a pixel wide
+; with no bottom. Both are hidden while they are moved and shaped, and shown
+; again after: a region set does not redraw, so what a panel had drawn
+; outside its new region - the chosen tab's extra height - stayed on the
+; screen, and hiding it first has the window wipe all of it. The text a line
+; of dialog text tall, in the middle - the dll has no vcenter. Not on the
+; mIRC side, which has no strip: its tabs stay hidden
+alias dccore.sw.dcxtabsel {
+  if ($dccore.sw.s(side) == 2) { return }
+  var %t = $dccore.sw.m(dcxtabs), %first = $gettok(%t,1,32), %stride = $gettok(%t,2,32), %top = $gettok(%t,3,32), %lift = $gettok(%t,5,32)
+  var %line = $gettok($dccore.sw.dcxrect($gettok($dccore.sw.m(dcxbody),2-5,32)),2,32), %th = $gettok($dccore.sw.dcxrect(0 8 0 0),2,32), %i = 1
+  while (%i <= $gettok(%t,6,32)) {
+    var %id = $calc(%first + %stride * (%i - 1)), %tab = $dccore.sw.m(tab. $+ %i), %sel = $iif(%i == $dccore.sw.s(tab),1,0)
+    var %r = $dccore.sw.dcxrect($gettok(%tab,1,32) $calc(%top + $iif(%sel,0,%lift)) $calc($gettok(%tab,1,32) + $gettok(%tab,2,32)) 1)
+    var %x = $gettok(%r,1,32), %y = $gettok(%r,2,32), %w = $calc($gettok(%r,3,32) - %x), %h = $calc(%line - %y + %sel), %face = $iif(%sel,$dccore.sw.s(face),$dccore.sw.s(light))
+    dccore.dcx xdid dccore.set $+(%id,-,$calc(%id + 2)) -h
+    dccore.dcx xdid dccore.set %id -p %x %y %w %h
+    dccore.dcx xdid dccore.set %id -R +p $dccore.sw.dcxpoly(%w,%h,o,2)
+    dccore.dcx xdid dccore.set $calc(%id + 1) -p %x %y %w %h
+    dccore.dcx xdid dccore.set $calc(%id + 1) -R +p $dccore.sw.dcxpoly(%w,%h,i,2)
+    dccore.dcx xdid dccore.set $calc(%id + 1) -C +b %face
+    dccore.dcx xdid dccore.set $calc(%id + 2) -p $calc(%x + 2) $calc(%y + 1 + $int($calc((%h - 1 - %th) / 2))) $calc(%w - 4) %th
+    dccore.dcx xdid dccore.set $calc(%id + 2) -C +b %face
+    dccore.dcx xdid dccore.set $+(%id,-,$calc(%id + 2)) -s
+    inc %i
+  }
+}
+; $1 the first of two DCX ids, $2- a rectangle in pixels: a pill - an
+; outline in the line colour and, inside it, the lighter face - shaped
+; like a frame, four round corners; its text is the caller's (dcxlabel)
+alias dccore.sw.dcxpill {
+  dccore.sw.dcxline $1 $2 $3 $4 $5
+  dccore.dcx xdid dccore.set $1 -R +p $dccore.sw.dcxpoly($4,$5,o,4)
+  dccore.dcx xdialog dccore.set -c $calc($1 + 1) panel $2 $3 $4 $5
+  dccore.dcx xdid dccore.set $calc($1 + 1) -R +p $dccore.sw.dcxpoly($4,$5,i,4)
+  dccore.dcx xdid dccore.set $calc($1 + 1) -C +b $dccore.sw.s(light)
+}
+; $1 a DCX id, $2-4 x, y and a width in pixels, $5 1 for bold, $6- the
+; text: a line of text, a line of dialog text tall, centred, on the
+; lighter face
+alias dccore.sw.dcxlabel {
+  dccore.dcx xdialog dccore.set -c $1 text $2 $3 $4 $dccore.sw.dcxth nowrap center noprefix noformat
+  dccore.dcx xdid dccore.set $1 -C +b $dccore.sw.s(light)
+  if ($5) { dccore.dcx xdid dccore.set $1 -f $dccore.sw.fontflags(b) default 8 Tahoma }
+  else { dccore.sw.dcxaa $1 text }
+  dccore.dcx xdid dccore.set $1 -t $6-
+}
+; a line of dialog text, in pixels
+alias dccore.sw.dcxth { return $gettok($dccore.sw.dcxrect(0 8 0 0),2,32) }
+; the start page - a pill for each side, Bot and mIRC, its name and a line
+; on what is there - and the way back from a side: a pill with an arrow at
+; the strip's left end and the side's name beside it. All of it made here;
+; dccore.sw.side shows what the side shown has
+alias dccore.sw.dcxhome {
+  var %th = $dccore.sw.dcxth, %b = $dccore.sw.m(dcxback), %r = $dccore.sw.dcxrect($gettok(%b,2-5,32))
+  dccore.sw.dcxpill $gettok(%b,1,32) %r
+  dccore.sw.dcxlabel $calc($gettok(%b,1,32) + 2) $calc($gettok(%r,1,32) + 1) $calc($gettok(%r,2,32) + $int($calc(($gettok(%r,4,32) - %th) / 2))) $calc($gettok(%r,3,32) - 2) 1 $chr(8592)
+  var %c = $dccore.sw.m(dcxcrumb)
+  dccore.dcx xdialog dccore.set -c $gettok(%c,1,32) text $dccore.sw.dcxrect($gettok(%c,2-5,32)) nowrap noprefix noformat
+  dccore.dcx xdid dccore.set $gettok(%c,1,32) -f $dccore.sw.fontflags(b) default 8 Tahoma
+  var %i = 1
+  while (%i <= $dccore.sw.m(home.n)) {
+    var %p = $dccore.sw.m(home. $+ %i), %id = $gettok(%p,1,32)
+    %r = $dccore.sw.dcxrect($gettok(%p,2-5,32))
+    var %x = $calc($gettok(%r,1,32) + 2), %y = $calc($gettok(%r,2,32) + $int($calc(($gettok(%r,4,32) - 2 * %th) / 2))), %w = $calc($gettok(%r,3,32) - 4)
+    dccore.sw.dcxpill %id %r
+    dccore.sw.dcxlabel $calc(%id + 2) %x %y %w 1 $dccore.sw.m(home. $+ %i $+ .t)
+    dccore.sw.dcxlabel $calc(%id + 3) %x $calc(%y + %th) %w 0 $dccore.sw.m(home. $+ %i $+ .s)
+    dccore.dcx xdid dccore.set $calc(%id + 3) -C +t $dccore.theme.sys(grey)
+    inc %i
+  }
+  dccore.sw.dcxstats
+}
+; the start page's figures: frames like a page's, with rows of a key and a
+; value, or lines of fixed-width text (the running sends, as the side panel
+; has them) - made here, filled by dccore.sw.home.fill
+alias dccore.sw.dcxstats {
+  var %i = 1, %grey = $dccore.theme.sys(grey)
+  while (%i <= $dccore.sw.m(home.f.n)) {
+    var %f = $dccore.sw.m(home.f. $+ %i), %title = $gettok(%f,2,32)
+    dccore.sw.dcxring $gettok(%f,1,32) $dccore.sw.dcxrect($gettok(%f,3-6,32))
+    dccore.dcx xdialog dccore.set -c %title text $dccore.sw.dcxrect($gettok(%f,7-10,32)) nowrap center noprefix noformat
+    dccore.sw.dcxaa %title text
+    dccore.dcx xdid dccore.set %title -C +b $dccore.sw.s(face)
+    dccore.dcx xdid dccore.set %title -t $gettok(%f,12-,32)
+    var %j = 1
+    while (%j <= $dccore.sw.m($+(home.f.,%i,.n))) {
+      var %r = $dccore.sw.m($+(home.f.,%i,.r.,%j)), %k = $gettok(%r,1,32), %v = $gettok(%r,2,32)
+      dccore.dcx xdialog dccore.set -c %k text $dccore.sw.dcxrect($gettok(%r,3-6,32)) nowrap noprefix noformat
+      if (%v) {
+        dccore.sw.dcxaa %k text
+        dccore.dcx xdid dccore.set %k -C +t %grey
+        dccore.dcx xdid dccore.set %k -t $gettok(%r,11-,32)
+        dccore.dcx xdialog dccore.set -c %v text $dccore.sw.dcxrect($gettok(%r,7-10,32)) nowrap noprefix noformat endellipsis
+        dccore.sw.dcxaa %v text
+      }
+      else { dccore.dcx xdid dccore.set %k -f $dccore.sw.fontflags default 8 Lucida Console }
+      inc %j
+    }
+    inc %i
+  }
+}
+; the figures filled from what the bot sends for the side panel (dccore.live,
+; st.*): when the start page shows, and on every status burst while it does
+alias dccore.sw.home.fill {
+  if (!$dialog(dccore.set)) || (!$dccore.sw.s(dcx)) || ($dccore.sw.s(side) != 0) { return }
+  ; the library's totals come in every burst once asked for (#1359), from
+  ; a bot that has them; asked once a window
+  if (!$dccore.sw.s(asked.library)) && ($dccore.sw.can(library)) { hadd dccore.sws asked.library 1 | dccore.send library }
+  var %i = 1
+  while (%i <= $dccore.sw.m(home.f.n)) {
+    var %f = $dccore.sw.m(home.f. $+ %i)
+    dccore.sw.home.frame %i $gettok(%f,2,32) $gettok(%f,12-,32)
+    inc %i
+  }
+}
+; $1 a frame's number, $2 its title's DCX id, $3- its title: its rows filled.
+; Not linked to the bot (dccore.linked, #1396), nothing the bot sent is shown
+; as current - those are the last session's - only the nick and network,
+; which are this mIRC's own; the Connection row says which, in colour
+alias dccore.sw.home.frame {
+  var %on = $dccore.linked
+  if ($3 == Bot) {
+    dccore.sw.home.row $1 1 $iif($dccore.bot,$dccore.bot,-)
+    dccore.sw.home.row $1 2 $iif($network,$network,$iif($server,$server,-))
+    var %since = $iif(%on,$dccore.st(st.started))
+    dccore.sw.home.row $1 3 $iif(%since > 0,$asctime(%since,ddd d mmm HH:nn) ( $+ $dccore.dur($calc($ctime - %since)) $+ ),-)
+    var %state = $dccore.st(state)
+    if (%on) {
+      dccore.sw.home.ink $1 4 on
+      dccore.sw.home.row $1 4 $chr(9679) connected $iif($dccore.st(mode) == structured,(structured console),(plain console))
+    }
+    elseif ($istok(opening waiting banner auth password,%state,32)) {
+      dccore.sw.home.ink $1 4 wait
+      dccore.sw.home.row $1 4 $chr(9679) connecting: %state
+    }
+    else {
+      dccore.sw.home.ink $1 4 off
+      dccore.sw.home.row $1 4 $chr(9679) offline
+    }
+    return
+  }
+  if (!%on) && ($istok(Today Library,$3,32)) {
+    var %j = 1
+    while (%j <= $dccore.sw.m($+(home.f.,$1,.n))) { dccore.sw.home.row $1 %j - | inc %j }
+    return
+  }
+  if ($3 == Sending) {
+    var %used = $dccore.st(st.used), %slots = $iif(%on,$dccore.st(st.slots))
+    dccore.dcx xdid dccore.set $2 -t Sending $iif(%slots != $null,%used $+ / $+ %slots)
+    var %j = 1
+    while (%j <= $dccore.sw.m($+(home.f.,$1,.n))) {
+      var %l = $dccore.st(slot. $+ %j), %line
+      if (!%on) { %line = $iif(%j == 1,(bot offline)) }
+      elseif (%l != $null) {
+        ; <nick> <sent> <total> <bps> <name>, as the side panel draws it
+        var %pct = $iif($gettok(%l,3,32) > 0,$int($calc($gettok(%l,2,32) * 100 / $gettok(%l,3,32))),0)
+        %line = > $dccore.fit($gettok(%l,1,32),9) $dccore.rfit($dccore.bytes($gettok(%l,3,32)),7) $dccore.rfit(%pct $+ $chr(37),4) $dccore.rfit($dccore.speed($gettok(%l,4,32)),9) $gettok(%l,5-,32)
+      }
+      elseif (%slots != $null) && (%j == $calc(%used + 1)) && (%used < %slots) { %line = ( $+ $calc(%slots - %used) free) }
+      dccore.sw.home.row $1 %j %line
+      inc %j
+    }
+    return
+  }
+  if ($3 == Today) {
+    dccore.sw.home.row $1 1 $iif($dccore.st(st.sent) != $null,$dccore.st(st.sent) files / $dccore.bytes($dccore.st(st.bytes)),-)
+    dccore.sw.home.row $1 2 $iif($dccore.st(st.qusers) == $null,-,$iif($dccore.st(st.qusers) == 0,(empty),$dccore.st(st.qusers) users with $dccore.st(st.qfiles) files))
+    dccore.sw.home.row $1 3 $iif($dccore.st(st.record) != $null,$dccore.speed($dccore.st(st.record)),-)
+    var %failed = $iif($dccore.st(st.failed) != $null,$dccore.st(st.failed),$dccore.st(failed))
+    var %searches = $iif($dccore.st(st.searches) != $null,$dccore.st(st.searches),$dccore.st(searches))
+    dccore.sw.home.row $1 4 $iif(%failed != $null,%failed,0)
+    dccore.sw.home.row $1 5 $iif(%searches != $null,%searches,0)
+    return
+  }
+  if ($3 == Library) {
+    dccore.sw.home.row $1 1 $dccore.sw.home.lists
+    dccore.sw.home.row $1 2 $dccore.sw.home.lib(files)
+    dccore.sw.home.row $1 3 $dccore.sw.home.lib(size)
+    dccore.sw.home.row $1 4 $dccore.sw.home.lib(rebuilt)
+    dccore.sw.home.row $1 5 $dccore.sw.home.lib(index)
+    dccore.sw.home.row $1 6 $iif($dccore.st(rebuild) != $null,$dccore.rebuild.short,idle)
+    dccore.sw.home.row $1 7 $iif($dccore.st(packing) != $null,$gettok($dccore.st(packing),5-,32) for $gettok($dccore.st(packing),1,32),none)
+  }
+}
+; $1 files, size, rebuilt or index: the library's totals from the LIBRARY
+; and SEARCHINDEX lines of the last burst (#1359) - every list's files,
+; folders and bytes added up, the newest rebuild and how long it took, the
+; search index of the lists held from other bots - or - from a bot that
+; has sent none (not asked yet, or an older bot)
+alias dccore.sw.home.lib {
+  if ($dccore.st(lib.1) == $null) { return - }
+  var %i = 1, %files = 0, %folders = 0, %bytes = 0, %at = 0, %secs = 0
+  while ($dccore.st(lib. $+ %i) != $null) {
+    var %l = $dccore.st(lib. $+ %i)
+    inc %files $gettok(%l,1,32)
+    inc %folders $gettok(%l,2,32)
+    inc %bytes $gettok(%l,3,32)
+    if ($gettok(%l,4,32) > %at) { %at = $gettok(%l,4,32) | %secs = $gettok(%l,5,32) }
+    inc %i
+  }
+  if ($1 == files) { return $dccore.num(%files) files $iif(%folders > 0,in $dccore.num(%folders) folders) }
+  if ($1 == size) { return $dccore.bytes(%bytes) }
+  if ($1 == rebuilt) { return $iif(%at > 0,$asctime(%at,ddd d mmm HH:nn) $+ $chr(44) took $dccore.dur(%secs),not since the bot was updated) }
+  var %x = $dccore.st(libindex)
+  if (%x == $null) { return - }
+  if ($gettok(%x,3,32) == none) { return no list held }
+  return $dccore.num($gettok(%x,1,32)) rows from $gettok(%x,2,32) lists $+ $chr(44) $iif($gettok(%x,3,32) == filling,still filling,up to date)
+}
+; $1 a frame's number, $2 a row's, $3- the text: into the row's value, or
+; its line; nothing becomes a blank, which the dll takes where no text is
+alias dccore.sw.home.row {
+  var %r = $dccore.sw.m($+(home.f.,$1,.r.,$2)), %id = $iif($gettok(%r,2,32),$gettok(%r,2,32),$gettok(%r,1,32))
+  dccore.dcx xdid dccore.set %id -t $iif($3 == $null,$dccore.nbsp,$3-)
+}
+; $1 a frame's number, $2 a row's, $3 on, wait or off: the row's text in
+; green, amber or red (#1396) - set on every fill, so no colour outlives the
+; state it was for. The theme has no such colours: these are darker on the
+; light face and lighter on the dark one. Kept (home.ink) for
+; dccore.theme.dcxtexts, which gives every value the theme's text colour
+; once, just after the window is made - after its first fill
+alias dccore.sw.home.ink {
+  var %r = $dccore.sw.m($+(home.f.,$1,.r.,$2)), %id = $iif($gettok(%r,2,32),$gettok(%r,2,32),$gettok(%r,1,32))
+  var %dark = $iif($dccore.theme.dialogsdark,1,0), %rgb
+  if ($3 == on) { %rgb = $iif(%dark,$rgb(110,200,110),$rgb(0,128,0)) }
+  elseif ($3 == wait) { %rgb = $iif(%dark,$rgb(230,170,50),$rgb(160,100,0)) }
+  else { %rgb = $iif(%dark,$rgb(240,100,100),$rgb(192,0,0)) }
+  hadd dccore.sws home.ink %id %rgb
+  dccore.dcx xdid dccore.set %id -C +t %rgb
+}
+; the lists' names, (primary) after the primary one - asked for from the
+; bot once, as the Lists page asks, the first time the start page shows
+alias dccore.sw.home.lists {
+  ; from the LIBRARY lines when a bot sends them (#1359): the name, the
+  ; primary marked, and each list's files
+  if ($dccore.st(lib.1) != $null) {
+    var %i = 1, %out
+    while ($dccore.st(lib. $+ %i) != $null) {
+      var %l = $dccore.st(lib. $+ %i), %name = $gettok(%l,7-,32) $iif($gettok(%l,6,32) == 1,(primary)) $dccore.num($gettok(%l,1,32)) files
+      %out = $iif(%out == $null,%name,%out $+ $chr(44) %name)
+      inc %i
+    }
+    return %out
+  }
+  if (!$dccore.sw.s(srv.ok)) {
+    if (!$dccore.sw.s(asked.served)) && ($dccore.sw.can(served)) { dccore.sw.ask served }
+    return $iif($dccore.sw.s(live),loading...,-)
+  }
+  var %order = $dccore.sw.s(srv.order), %i = 1, %out
+  while (%i <= $numtok(%order,32)) {
+    var %id = $gettok(%order,%i,32), %name = $dccore.sw.srv.listname(%id) $iif($gettok($dccore.sw.s(srv.l. $+ %id),1,32) == 1,(primary))
+    %out = $iif(%out == $null,%name,%out $+ $chr(44) %name)
+    inc %i
+  }
+  return $iif(%out == $null,none,%out)
+}
+; $1 a side: 0 the start page, 1 the bot's settings, 2 this mIRC's. The
+; start page's pills and the way back swap places; the bot's tabs show on
+; its side only, and on the mIRC side its group - the last - fills the
+; list straight away. A page shown is hidden on the way to the start,
+; with the list, the page's name and the help under it
+alias dccore.sw.side {
+  hadd dccore.sws side $1
+  var %h = $dccore.sw.m(home. $+ $dccore.sw.m(home.n)), %b = $dccore.sw.m(dcxback), %t = $dccore.sw.m(dcxtabs)
+  var %pills = $+($gettok($dccore.sw.m(home.1),1,32),-,$calc($gettok(%h,1,32) + 3))
+  var %way = $+($gettok(%b,1,32),-,$gettok($dccore.sw.m(dcxcrumb),1,32))
+  var %tabs = $+($gettok(%t,1,32),-,$calc($gettok(%t,1,32) + $gettok(%t,2,32) * $gettok(%t,6,32) - 1))
+  var %list = $gettok($dccore.sw.m(dcxpages),1,32), %title = $gettok($dccore.sw.m(dcxtitle),1,32), %figures = $dccore.sw.m(home.f.ids)
+  if ($1 == 0) {
+    if ($dccore.sw.s(page)) { dccore.sw.showpage $dccore.sw.s(page) -h | hdel dccore.sws page }
+    dccore.dcx xdid dccore.set %way -h
+    dccore.dcx xdid dccore.set %tabs -h
+    dccore.dcx xdid dccore.set %list -h
+    dccore.dcx xdid dccore.set %title -h
+    did -h dccore.set 1012
+    dccore.dcx xdid dccore.set %pills -s
+    dccore.dcx xdid dccore.set %figures -s
+    dccore.sw.home.fill
+    return
+  }
+  dccore.dcx xdid dccore.set %pills -h
+  dccore.dcx xdid dccore.set %figures -h
+  dccore.dcx xdid dccore.set $gettok($dccore.sw.m(dcxcrumb),1,32) -t $iif($1 == 1,Bot,mIRC)
+  dccore.dcx xdid dccore.set %way -s
+  dccore.dcx xdid dccore.set %list -s
+  dccore.dcx xdid dccore.set %title -s
+  did -v dccore.set 1012
+  if ($1 == 2) { dccore.dcx xdid dccore.set %tabs -h | dccore.sw.tab $dccore.sw.m(groups) | return }
+  var %bt = $dccore.sw.s(bottab)
+  dccore.sw.tab $iif(%bt,%bt,1)
+}
+; $1- the pages of the tab shown: the list filled with their names, a row
+; each, without that being taken as a click
+alias dccore.sw.dcxpages {
+  var %id = $gettok($dccore.sw.m(dcxpages),1,32), %i = 1
+  hadd dccore.sws dcxquiet 1
+  dccore.dcx xdid dccore.set %id -r
+  while (%i <= $numtok($1-,32)) {
+    dccore.dcx xdid dccore.set %id -a 0 0 + $dccore.theme.pageicon($gettok($1-,%i,32)) 0 0 0 0 0 $dccore.sw.untext($dccore.sw.m(p. $+ $gettok($1-,%i,32)))
+    inc %i
+  }
+  hdel dccore.sws dcxquiet
+}
+; $1- a rectangle in dialog units, "x y w h": the same in DCX's pixels. An
+; identifier's parameters are split on commas, not spaces, so the four
+; numbers arrive as one and are taken apart here - as $1 to $4 they were
+; one number and three blanks, and every DCX control was made zero-sized.
+alias dccore.sw.dcxrect {
+  var %r = $1-, %sx = $calc($dialog(dccore.set).cw / $gettok($dccore.sw.m(size),1,32)), %sy = $calc($dialog(dccore.set).ch / $gettok($dccore.sw.m(size),2,32))
+  return $round($calc($gettok(%r,1,32) * %sx),0) $round($calc($gettok(%r,2,32) * %sy),0) $round($calc($gettok(%r,3,32) * %sx),0) $round($calc($gettok(%r,4,32) * %sy),0)
+}
+; $1 a native list: hidden, and the DCX listview with its columns made over
+; its place - hidden too, until its page is shown. Made when first needed
+; (dccore.sw.lv.need), so it takes here what the window gave the others:
+; its font, the state dccore.sw.enable last gave the tables (lv.e; made
+; enabled) and in the dark theme the lists' colours. Made after the window
+; was, where dccore_ui.dll darkens it, the dll once more: it gives a
+; listview its dark scroll bars and header (dccore.sw.lv.dark).
+alias dccore.sw.lv.make {
+  var %l = $dccore.sw.m(lv. $+ $1), %id = $gettok(%l,1,32), %rect = $dccore.sw.dcxrect($gettok(%l,2-5,32))
+  did -h dccore.set $1
+  dccore.dcx xdialog dccore.set -c %id listview %rect report singlesel fullrow showsel $dccore.sw.m(lvx. $+ $1)
+  ; the columns: widths in dialog units made pixels, the last one the rest
+  var %cols = $dccore.sw.m(lvc. $+ $1), %i = 1, %left = $calc($gettok(%rect,3,32) - 20), %sx = $calc($gettok(%rect,3,32) / $gettok(%l,4,32)), %out
+  while (%i <= $numtok(%cols,44)) {
+    var %c = $gettok(%cols,%i,44), %w = $round($calc($gettok(%c,1,32) * %sx),0)
+    if (%w == 0) { %w = %left }
+    %left = $calc(%left - %w)
+    %out = $+(%out,$iif(%i > 1,$chr(9)),+l 0 %w $gettok(%c,2-,32))
+    inc %i
+  }
+  dccore.dcx xdid dccore.set %id -t %out
+  dccore.sw.dcxaa %id listview
+  if ($dccore.sw.s(lv.e) == -b) { dccore.dcx xdid dccore.set %id -b }
+  if ($dccore.sw.s(dark)) { dccore.theme.dcxlist %id }
+  dccore.dcx xdid dccore.set %id -h
+  ; in a timer, so a failure there halts nothing of this; 250 ms, and the
+  ; same name restarts it, so tables made close together - the settings
+  ; snapshot's and the served lists' - usually share one pass of the dll
+  if ($dccore.sw.s(inited)) && ($dccore.sw.s(noct)) { .timerdccoreThemeLv -m 1 250 dccore.sw.lv.dark }
+}
+; The dll once more over the control panel, for the tables made since it
+; opened - only while the theme it opened with still holds. The panel takes
+; a theme change only when it opens again: dccore.theme.dialog reads the
+; theme now, and after /dccore theme light it would turn mIRC's controls
+; light under DCX parts that stay dark. (An if evaluates all of its
+; conditions; each of these is safe to ask with the window gone.)
+alias dccore.sw.lv.dark {
+  if ($dialog(dccore.set)) && ($dccore.sw.s(noct)) && ($dccore.theme.dialogsdark) && (!$dccore.theme.mircdark) { dccore.theme.dialog dccore.set }
+}
+; $1 the page now shown: its row selected in the list, without that
+; selection being taken as a click
+alias dccore.sw.dcxshow {
+  var %g = $dccore.sw.s(tab), %at = $findtok($dccore.sw.m(g. $+ %g $+ .pages),$1,1,32)
+  if (!%at) { return }
+  hadd dccore.sws dcxquiet 1
+  dccore.dcx xdid dccore.set $gettok($dccore.sw.m(dcxpages),1,32) -c %at
+  hdel dccore.sws dcxquiet
+}
+; DCX's events: $1 the dialog, $2 the event, $3 the control, $4- the row
+alias dccore.sw.dcxcb {
+  if ($dccore.sw.s(dcxquiet)) { return }
+  ; the way back, or a side's pill on the start page: any part of it
+  if ($2 == sclick) && ($3 isnum) {
+    var %b = $gettok($dccore.sw.m(dcxback),1,32), %h = $gettok($dccore.sw.m(home.1),1,32)
+    if ($3 >= %b) && ($3 < $calc(%b + 3)) { dccore.sw.go side 0 | return }
+    if ($3 >= %h) && ($3 < $calc(%h + 4 * $dccore.sw.m(home.n))) { dccore.sw.go side $calc($int($calc(($3 - %h) / 4)) + 1) | return }
+  }
+  ; a tab of the strip clicked, its outline or its text
+  if ($2 == sclick) && ($3 isnum) && ($3 >= $gettok($dccore.sw.m(dcxtabs),1,32)) {
+    var %g = $calc($int($calc(($3 - $gettok($dccore.sw.m(dcxtabs),1,32)) / $gettok($dccore.sw.m(dcxtabs),2,32))) + 1)
+    if (%g <= $dccore.sw.m(groups)) { dccore.sw.go tab %g | return }
+  }
+  ; a page picked in the list: the Nth page of the tab shown
+  if ($3 != $gettok($dccore.sw.m(dcxpages),1,32)) || (!$istok(sclick selected,$2,32)) || ($4 !isnum) { return }
+  var %p = $gettok($dccore.sw.m(g. $+ $dccore.sw.s(tab) $+ .pages),$4,32)
+  if (%p == $null) || (%p == $dccore.sw.s(page)) { return }
+  dccore.sw.go page %p
+}
+
+; ---- the tables ------------------------------------------------------
+;  Each table is a native list control, with DCX hidden under a listview
+;  with columns (dccore.sw.lv.make). Everything that reads or writes one
+;  goes through these, which say the same thing to either, and every DCX
+;  command on a table takes its id from dccore.sw.lv.id.
+
+; $1 a native list: the control to address - the listview over it, made
+; the first time it is needed, or itself
+alias dccore.sw.lv.id {
+  if (!$dccore.sw.s(dcx)) { return $1 }
+  dccore.sw.lv.need $1
+  return $gettok($dccore.sw.m(lv. $+ $1),1,32)
+}
+; $1 a native list: with DCX, its listview made once a window, the first
+; time its page shows it or anything reads or writes it (#1382) - not at
+; open, where each one costs time and some GDI objects that DCX never gives
+; back (#1381). A page shown, the bot's rows or an Apply may come first.
+alias dccore.sw.lv.need {
+  if (!$dccore.sw.s(dcx)) || ($dccore.sw.s(lvmade. $+ $1)) { return }
+  hadd dccore.sws lvmade. $+ $1 1
+  dccore.sw.lv.make $1
+}
+alias dccore.sw.lv.clear {
+  if ($dccore.sw.s(dcx)) { dccore.dcx xdid dccore.set $dccore.sw.lv.id($1) -r }
+  else { did -r dccore.set $1 }
+}
+; $1 a native list, $2- a row's cells as tokens (encoded, "-" for an empty
+; one - dccore.sw.tok's form): one column each in a listview, joined with
+; " - " in a native list
+alias dccore.sw.lv.add {
+  var %i = 1, %row
+  while (%i <= $numtok($2-,32)) {
+    var %cell = $dccore.sw.untok($gettok($2-,%i,32))
+    if ($dccore.sw.s(dcx)) { %row = $+(%row,$iif(%i > 1,$+($chr(9),+ 0 0 0 0 $chr(32))),$iif(%cell != $null,%cell,$chr(160))) }
+    elseif (%cell != $null) { %row = $+(%row,$iif(%row != $null,$+($chr(32),-,$chr(32))),%cell) }
+    inc %i
+  }
+  if ($dccore.sw.s(dcx)) { dccore.dcx xdid dccore.set $dccore.sw.lv.id($1) -a 0 0 + 0 0 0 0 0 0 %row }
+  else { did -a dccore.set $1 %row }
+}
+; $1 a native list: its selected row's number, or nothing
+alias dccore.sw.lv.sel {
+  if ($dccore.sw.s(dcx)) { var %s = $dccore.dcx(_xdid,dccore.set $dccore.sw.lv.id($1) sel) | return $iif(%s isnum 1-,%s) }
+  return $did(dccore.set,$1).sel
+}
+alias dccore.sw.lv.count {
+  if ($dccore.sw.s(dcx)) { return $dccore.dcx(_xdid,dccore.set $dccore.sw.lv.id($1) num) }
+  return $did(dccore.set,$1).lines
+}
+; $1 a native list, $2 a row: its first cell
+alias dccore.sw.lv.text {
+  if ($dccore.sw.s(dcx)) { return $dccore.dcx(_xdid,dccore.set $dccore.sw.lv.id($1) text $2) }
+  return $did(dccore.set,$1,$2).text
+}
+alias dccore.sw.lv.del {
+  if ($dccore.sw.s(dcx)) { dccore.dcx xdid dccore.set $dccore.sw.lv.id($1) -d $2 }
+  else { did -d dccore.set $1 $2 }
 }
 
 ; ---- talking to the bot ----------------------------------------------
@@ -2277,6 +3555,7 @@ alias dccore.sw.start {
   ; nothing asked before this start is still awaited
   hdel -w dccore.sws w.*
   dccore.sw.enable 0
+  dccore.unstale
   if ($dccore.st(mode) != structured) || (!$chat($dccore.bot)) {
     dccore.sw.put 1013 Not connected to the bot
     dccore.sw.status Not connected to the bot: /dccore connect, then Reload. Only this mIRC's own switches can be changed now.
@@ -2316,6 +3595,8 @@ alias dccore.sw.lost {
     if ($dccore.sw.changed != $null) || ($dccore.sw.unsaved != $null) { hadd dccore.sws keep 1 }
   }
   dccore.sw.start
+  ; the start page says the link dropped or came up now, not at Reload (#1396)
+  dccore.sw.home.fill
 }
 alias dccore.sw.load {
   hadd dccore.sws phase load
@@ -2393,7 +3674,10 @@ alias dccore.sw.line {
     }
     hadd dccore.sws live 1
     dccore.sw.load
-    dccore.sw.page $dccore.sw.s(page)
+    ; the start page asks for the lists and the library's totals now
+    ; that it can, not at the next burst (#1359); a page shown again
+    if ($dccore.sw.s(side) == 0) { dccore.sw.home.fill }
+    else { dccore.sw.page $dccore.sw.s(page) }
     return
   }
   ; settings: SETBEGIN <n>, SETF <KEY> <type> [value], SETEND <n>
@@ -2512,13 +3796,14 @@ alias dccore.sw.line {
     dccore.sw.waited served
     if ($dccore.sw.s(srv.got) != $2-4) {
       hdel dccore.sws srv.ok
-      dccore.sw.status The lists arrived cut short ( $+ $dccore.sw.s(srv.got) of $2-4 $+ ) - press Refresh on Lists & channels.
+      dccore.sw.status The lists arrived cut short ( $+ $dccore.sw.s(srv.got) of $2-4 $+ ) - press Refresh on Lists.
       return
     }
     hadd dccore.sws srv.ok 1
     hdel dccore.sws srv.dirty
     hadd dccore.sws srv.sig0 $dccore.sw.srv.sig
     dccore.sw.srv.draw
+    dccore.sw.home.fill
     ; no lists.json: the one implied list's folders are the served folders,
     ; which the folders command edits without making the list real
     if ($dccore.sw.s(srv.src) == implied) { dccore.sw.reask folders }
@@ -2532,9 +3817,9 @@ alias dccore.sw.line {
     hdel dccore.sws srv.errs
     ; only a save that went through clears the edits: a refused one keeps
     ; them, so OK still says they are not saved
-    if ($2 == ok) { hdel dccore.sws srv.dirty | dccore.sw.status $4- | dccore.sw.reask served | return }
-    if ($2 == unchanged) { hdel dccore.sws srv.dirty | dccore.sw.status $3- | return }
-    if ($2 == error) { dccore.sw.status Not saved: %errs $3- Your changes are still here: correct them and Save lists again. | return }
+    if ($2 == ok) { hdel dccore.sws srv.dirty | dccore.sw.status $4- | dccore.sw.reask served | dccore.sw.maybeclose | return }
+    if ($2 == unchanged) { hdel dccore.sws srv.dirty | dccore.sw.status $3- | dccore.sw.maybeclose | return }
+    if ($2 == error) { hdel dccore.sws close | dccore.sw.status Not saved: %errs $3- Your changes are still here: correct them and Apply again. | return }
     return
   }
   ; the folders of a bot with no lists.json: FLDBEGIN <n> <source>,
@@ -2553,7 +3838,7 @@ alias dccore.sw.line {
   }
   if (%t == FLDEND) {
     dccore.sw.waited folders
-    if ($dccore.sw.s(fld.got) != $2) || ($dccore.sw.s(fld.want) != $2) { dccore.sw.status The served folders arrived cut short - press Refresh on Lists & channels. | return }
+    if ($dccore.sw.s(fld.got) != $2) || ($dccore.sw.s(fld.want) != $2) { dccore.sw.status The served folders arrived cut short - press Refresh on Lists. | return }
     dccore.sw.srv.implied
     return
   }
@@ -2582,9 +3867,9 @@ alias dccore.sw.line {
     hdel dccore.sws saving.oc
     var %errs = $dccore.sw.s(oc.errs)
     hdel dccore.sws oc.errs
-    if ($2 == ok) { dccore.sw.status $4- | dccore.sw.reask onconnect | return }
-    if ($2 == unchanged) { dccore.sw.status $3- | return }
-    if ($2 == error) { dccore.sw.status Not saved: %errs $3- | return }
+    if ($2 == ok) { dccore.sw.status $4- | dccore.sw.reask onconnect | dccore.sw.maybeclose | return }
+    if ($2 == unchanged) { dccore.sw.status $3- | dccore.sw.maybeclose | return }
+    if ($2 == error) { hdel dccore.sws close | dccore.sw.status Not saved: %errs $3- | return }
     return
   }
   if (%t == OCRESEND) {
@@ -2652,7 +3937,7 @@ alias dccore.sw.done {
     ; ok <written> <unchanged> <restart> <message>
     var %said = Saved $2 setting(s) $+ $iif($3 > 0,$chr(32) $+ $chr(40) $+ $3 unchanged $+ $chr(41)) $+ .
     if ($4 != -) { %said = %said Restart the bot to apply $replace($4,$chr(44),$chr(44) $+ $chr(32)) $+ . }
-    if ($dccore.sw.s(close)) { dccore.sys Settings: %said | dialog -x dccore.set | return }
+    if ($dccore.sw.s(close)) { dccore.sys Settings: %said | dccore.sw.maybeclose | return }
     ; something written: the bot applies it with a rehash, which may first
     ; wait for transfers, and says SETAPPLIED when it has. Until then the
     ; values just sent are the baseline (a reload now would show the old
@@ -2675,6 +3960,7 @@ alias dccore.sw.done {
     return
   }
   ; aborted
+  hdel dccore.sws close
   if (%phase != preview) && ($dccore.sw.s(lockednote) == $null) { dccore.sw.status Nothing was saved. }
   hdel dccore.sws lockednote
 }
@@ -2683,7 +3969,7 @@ alias dccore.sw.confirm {
   var %q = $dccore.sw.s(question)
   ; the wait starts once it is answered: timers run while $input is up,
   ; and a question left open for a minute is not a bot that stopped answering
-  if ($input(%q,yq,DCCore - Settings)) {
+  if ($input(%q,yq,DCCore - Control Panel)) {
     hadd dccore.sws phase apply
     dccore.sw.wait settings
     hadd dccore.sws lastcommit setcommit confirm
@@ -2821,18 +4107,15 @@ alias dccore.sw.fill {
     if (%v == true) { did -c dccore.set %id }
     else { did -u dccore.set %id }
   }
-  elseif (%kind == tri) { did -c dccore.set %id $iif(%v == true,2,$iif(%v == false,3,1)) }
-  elseif (%kind == choice) {
-    var %at = $findtok($dccore.sw.m(ch. $+ $1),%v,1,32)
-    if (%at) { did -c dccore.set %id %at }
-    else { did -u dccore.set %id }
-  }
+  elseif (%kind == tri) { dccore.sw.cb.select %id $iif(%v == true,2,$iif(%v == false,3,1)) }
+  ; a value the choices do not have: nothing selected
+  elseif (%kind == choice) { dccore.sw.cb.select %id $findtok($dccore.sw.m(ch. $+ $1),%v,1,32) }
   elseif (%kind == colour) { dccore.sw.colourfill %id %v }
   elseif (%kind == chanlist) {
-    did -r dccore.set %id
+    dccore.sw.lv.clear %id
     var %i = 1
     while (%i <= $numtok(%v,44)) {
-      if ($remove($gettok(%v,%i,44),$chr(32)) != $null) { did -a dccore.set %id $remove($gettok(%v,%i,44),$chr(32)) }
+      if ($remove($gettok(%v,%i,44),$chr(32)) != $null) { dccore.sw.lv.add %id $dccore.sw.tok($remove($gettok(%v,%i,44),$chr(32))) }
       inc %i
     }
   }
@@ -2864,25 +4147,29 @@ alias dccore.sw.fillall {
 ; a colour is picked over it. (\x2C is a comma, which would end $regex's
 ; argument.)
 alias dccore.sw.colourfill {
-  if ($did(dccore.set,$1).lines >= 18) { did -d dccore.set $1 18 }
-  var %bg = 1
-  if ($2 == $null) { did -c dccore.set $1 1 }
-  elseif ($regex(dccoresw,$2,/^\\x03(\d\d?)$/)) && ($regml(dccoresw,1) <= 15) { did -c dccore.set $1 $calc($regml(dccoresw,1) + 2) }
+  var %fg = 1, %bg = 1, %x
+  if ($2 == $null) { %fg = 1 }
+  elseif ($regex(dccoresw,$2,/^\\x03(\d\d?)$/)) && ($regml(dccoresw,1) <= 15) { %fg = $calc($regml(dccoresw,1) + 2) }
   elseif ($regex(dccoresw,$2,/^\\x03(\d\d?)\x2C(\d\d?)$/)) && ($regml(dccoresw,1) <= 15) && ($regml(dccoresw,2) <= 15) {
-    did -c dccore.set $1 $calc($regml(dccoresw,1) + 2)
+    %fg = $calc($regml(dccoresw,1) + 2)
     %bg = $calc($regml(dccoresw,2) + 2)
   }
   else {
-    did -a dccore.set $1 As set: $2-
-    did -c dccore.set $1 18
+    %x = As set: $2-
+    %fg = 18
   }
-  did -c dccore.set $calc($1 + 1) %bg
+  ; the 18th line first - taken away, or "As set" - then the selections:
+  ; a menu waiting for its lines counts line 18 only once it is kept
+  dccore.sw.cb.extra $1 %x
+  dccore.sw.cb.select $1 %fg
+  dccore.sw.cb.select $calc($1 + 1) %bg
   dccore.sw.colourbg $1
 }
 ; No background without a foreground: "\x03,05" is not a colour.
 alias dccore.sw.colourbg {
-  if ($did(dccore.set,$1).sel > 1) && ($did(dccore.set,$1).sel < 18) { did -e dccore.set $calc($1 + 1) }
-  else { did -c dccore.set $calc($1 + 1) 1 | did -b dccore.set $calc($1 + 1) }
+  var %fg = $dccore.sw.cb.sel($1)
+  if (%fg > 1) && (%fg < 18) { did -e dccore.set $calc($1 + 1) }
+  else { dccore.sw.cb.select $calc($1 + 1) 1 | did -b dccore.set $calc($1 + 1) }
 }
 
 ; $1 a setting: what its control shows now, to compare with what it showed
@@ -2890,8 +4177,8 @@ alias dccore.sw.colourbg {
 alias dccore.sw.shown {
   var %m = $dccore.sw.m(k. $+ $1), %id = $gettok(%m,1,32), %kind = $gettok(%m,2,32)
   if (%kind == bool) { return $did(dccore.set,%id).state }
-  if (%kind == tri) || (%kind == choice) { return $did(dccore.set,%id).sel }
-  if (%kind == colour) { return $did(dccore.set,%id).sel $+ / $+ $did(dccore.set,$calc(%id + 1)).sel }
+  if (%kind == tri) || (%kind == choice) { return $dccore.sw.cb.sel(%id) }
+  if (%kind == colour) { return $dccore.sw.cb.sel(%id) $+ / $+ $dccore.sw.cb.sel($calc(%id + 1)) }
   if (%kind == chanlist) { return $dccore.sw.chans }
   return $did(dccore.set,%id).text
 }
@@ -2925,18 +4212,18 @@ alias dccore.sw.value {
   var %m = $dccore.sw.m(k. $+ $1), %id = $gettok(%m,1,32), %kind = $gettok(%m,2,32), %f = $gettok(%m,3,32)
   if (%kind == bool) { return $iif($did(dccore.set,%id).state == 1,true,false) }
   if (%kind == tri) {
-    if ($did(dccore.set,%id).sel == 2) { return true }
-    if ($did(dccore.set,%id).sel == 3) { return false }
+    if ($dccore.sw.cb.sel(%id) == 2) { return true }
+    if ($dccore.sw.cb.sel(%id) == 3) { return false }
     return
   }
   ; nothing selected (a value the choices do not have): the value as loaded,
   ; never $gettok(...,0,32), which is the number of choices
   if (%kind == choice) {
-    if (!$did(dccore.set,%id).sel) { return $dccore.sw.dec($mid($dccore.sw.s(v. $+ $1),2)) }
-    return $gettok($dccore.sw.m(ch. $+ $1),$did(dccore.set,%id).sel,32)
+    if (!$dccore.sw.cb.sel(%id)) { return $dccore.sw.dec($mid($dccore.sw.s(v. $+ $1),2)) }
+    return $gettok($dccore.sw.m(ch. $+ $1),$dccore.sw.cb.sel(%id),32)
   }
   if (%kind == colour) {
-    var %fg = $did(dccore.set,%id).sel, %bg = $did(dccore.set,$calc(%id + 1)).sel
+    var %fg = $dccore.sw.cb.sel(%id), %bg = $dccore.sw.cb.sel($calc(%id + 1))
     if (%fg == 18) { return $dccore.sw.dec($mid($dccore.sw.s(v. $+ $1),2)) }
     if (%fg <= 1) { return }
     var %code = \x03 $+ $base($calc(%fg - 2),10,10,2)
@@ -2955,8 +4242,8 @@ alias dccore.sw.value {
 ; exactly as the bot sent it.
 alias dccore.sw.wire {
   var %m = $dccore.sw.m(k. $+ $1), %id = $gettok(%m,1,32), %kind = $gettok(%m,2,32), %f = $gettok(%m,3,32)
-  if (%kind == choice) && (!$did(dccore.set,%id).sel) { return $mid($dccore.sw.s(v. $+ $1),2) }
-  if (%kind == colour) && ($did(dccore.set,%id).sel == 18) { return $mid($dccore.sw.s(v. $+ $1),2) }
+  if (%kind == choice) && (!$dccore.sw.cb.sel(%id)) { return $mid($dccore.sw.s(v. $+ $1),2) }
+  if (%kind == colour) && ($dccore.sw.cb.sel(%id) == 18) { return $mid($dccore.sw.s(v. $+ $1),2) }
   if ($istok(bool tri choice colour chanlist,%kind,32)) { return $dccore.sw.enc($dccore.sw.value($1)) }
   if (%f > 1) && ($did(dccore.set,%id).text isnum) { return $round($calc($did(dccore.set,%id).text * %f),0) }
   return $dccore.sw.enc($did(dccore.set,%id).text)
@@ -2969,16 +4256,23 @@ alias dccore.sw.label {
 
 ; ---- Apply, OK, Cancel ------------------------------------------------
 
-; Apply ($1 = apply), or OK ($1 = close): the window closes once the bot has
-; saved (at once when nothing changed). One transaction for every setting
-; that changed: setbegin, a set for each, setcommit - one save, one rehash.
-; $2 = asked: the File locations question has been answered yes.
+; Apply ($1 = apply), or OK ($1 = close): everything that changed, each kind
+; in a transaction of its own - the on-connect commands (onconnect), the
+; lists and bindings (served), this mIRC's own switches (dccore.ini, at
+; once) and the settings as one setbegin, a set for each, setcommit: one
+; save, one rehash. There are no Save buttons on the pages: Apply is the
+; one that saves, and OK closes once every reply has come back ok, at once
+; when nothing changed. $2 = asked: the File locations question has been
+; answered yes.
 alias dccore.sw.apply {
   if ($istok(apply confirm aborting preview locked,$dccore.sw.s(phase),32)) { dccore.sw.status Still waiting for the bot... | return }
-  if ($1 == close) && ($dccore.sw.unsaved) { dccore.sw.status $dccore.sw.unsaved has changes of its own not saved yet: save them there first, or Cancel to drop them. | return }
-  var %local = $dccore.sw.savelocal
+  hadd dccore.sws close $iif($1 == close,1,0)
+  var %local = $dccore.sw.opt.save, %sent = 0
+  if ($dccore.sw.ocdirty) && (!$dccore.sw.s(saving.oc)) { dccore.sw.oc.save | inc %sent }
+  if ($dccore.sw.s(srv.dirty)) && (!$dccore.sw.s(saving.srv)) { dccore.sw.srv.save | inc %sent }
   var %keys = $iif($dccore.sw.s(loaded),$dccore.sw.changed)
   if (%keys == $null) {
+    if (%sent) { dccore.sw.maybeclose | return }
     if ($1 == close) { dialog -x dccore.set | return }
     dccore.sw.status $iif(%local,Saved this mIRC's own switches.,Nothing has changed.)
     return
@@ -2995,7 +4289,6 @@ alias dccore.sw.apply {
   dccore.sw.wait settings
   hadd dccore.sws sent %keys
   hadd dccore.sws lastcommit setcommit
-  hadd dccore.sws close $iif($1 == close,1,0)
   hdel dccore.sws errs
   hdel dccore.sws errkey
   dccore.send setbegin
@@ -3011,8 +4304,68 @@ alias dccore.sw.riskyask {
   if (!$dialog(dccore.set)) || ($dccore.sw.s(asking) == $null) { return }
   var %how = $dccore.sw.s(asking)
   hdel dccore.sws asking
-  if ($input(Change where the bot keeps its files? A wrong path there can lose a queue or a statistics file.,yq,DCCore - Settings)) { dccore.sw.apply %how asked | return }
-  dccore.sw.status Nothing was sent.
+  if ($input(Change where the bot keeps its files? A wrong path there can lose a queue or a statistics file.,yq,DCCore - Control Panel)) { dccore.sw.apply %how asked | return }
+  hdel dccore.sws close
+  dccore.sw.status The settings were not sent.
+}
+; OK: the window closes once nothing is still being saved - the settings
+; (phase), the lists, the on-connect commands - and every reply was ok.
+alias dccore.sw.maybeclose {
+  if (!$dccore.sw.s(close)) { return }
+  if ($dccore.sw.s(saving.srv)) || ($dccore.sw.s(saving.oc)) || ($istok(apply confirm aborting,$dccore.sw.s(phase),32)) { return }
+  dialog -x dccore.set
+}
+
+; ---- leaving a page with changes not saved ---------------------------
+;  A click on a tab or a page while something is not saved asks first:
+;  Apply saves everything, so the question is only whether to save now.
+;  $input waits for an answer, which a dialog event may not do, so it is
+;  asked from a timer, and the window stays on its page until then.
+
+; $1 tab or page, $2 which: as the click meant
+alias dccore.sw.go {
+  if ($1 == side) && ($2 == $dccore.sw.s(side)) { return }
+  if ($1 == tab) && ($2 == $dccore.sw.s(tab)) && ($dccore.sw.s(page)) { return }
+  if ($1 == page) && ($2 == $dccore.sw.s(page)) { return }
+  if (!$dccore.sw.anydirty) { dccore.sw.goon $1 $2 | return }
+  hadd dccore.sws going $1 $2
+  dccore.sw.stay
+  .timerdccoreSwAsk -m 1 0 dccore.sw.leaveask
+}
+alias dccore.sw.goon {
+  if ($1 == side) { dccore.sw.side $2 }
+  elseif ($1 == tab) { dccore.sw.tab $2 }
+  else { dccore.sw.page $2 }
+}
+; The tab and the page shown selected again, after the click elsewhere
+alias dccore.sw.stay {
+  if ($dccore.sw.s(dcx)) { dccore.sw.dcxshow $dccore.sw.s(page) | return }
+  did -f dccore.set $calc(1000 + $dccore.sw.s(tab))
+  var %at = $findtok($dccore.sw.m(g. $+ $dccore.sw.s(tab) $+ .pages),$dccore.sw.s(page),1,32)
+  if (%at) { did -c dccore.set $calc(1019 + %at) }
+}
+alias dccore.sw.leaveask {
+  if (!$dialog(dccore.set)) || ($dccore.sw.s(going) == $null) { return }
+  var %go = $dccore.sw.s(going)
+  hdel dccore.sws going
+  if ($input(You have changes that are not saved. Save them before leaving this page? Yes saves them and goes on; No stays here.,yq,DCCore - Control Panel)) { dccore.sw.apply apply | dccore.sw.goon %go }
+}
+; Whether anything in the window is not saved: a setting, one of this
+; mIRC's switches, the lists and bindings, the on-connect commands.
+alias dccore.sw.anydirty {
+  if ($dccore.sw.s(srv.dirty)) || ($dccore.sw.ocdirty) { return $true }
+  if ($dccore.sw.s(loaded)) && ($dccore.sw.changed != $null) { return $true }
+  if ($dccore.sw.localdirty) { return $true }
+  return $dccore.sw.opt.dirty
+}
+alias dccore.sw.localdirty {
+  var %all = $dccore.sw.m(locals), %i = 1
+  while (%i <= $numtok(%all,32)) {
+    var %o = $gettok(%all,%i,32)
+    if ($did(dccore.set,$dccore.sw.m(lo. $+ %o)).state != $iif($dccore.opt(%o),1,0)) { return $true }
+    inc %i
+  }
+  return $false
 }
 ; What Apply sent is the baseline now (SETDONE ok, before SETAPPLIED).
 alias dccore.sw.rebase {
@@ -3045,7 +4398,7 @@ alias dccore.sw.savelocal {
 }
 ; The structured page with edits of its own not saved, or nothing.
 alias dccore.sw.unsaved {
-  if ($dccore.sw.s(srv.dirty)) { return Lists & channels }
+  if ($dccore.sw.s(srv.dirty)) { return Lists and Channel bindings }
   if ($dccore.sw.ocdirty) { return IRC Server }
   return
 }
@@ -3080,11 +4433,11 @@ alias dccore.sw.closed {
 
 alias dccore.sw.click {
   var %id = $1
-  if (%id isnum 1001-1006) { dccore.sw.tab $calc(%id - 1000) | return }
+  if (%id isnum 1001-1007) { dccore.sw.go tab $calc(%id - 1000) | return }
   ; a page button: slot N of the tab shown is its Nth page
   if (%id >= 1020) && (%id < $calc(1020 + $dccore.sw.m(slots))) {
     var %p = $gettok($dccore.sw.m(g. $+ $dccore.sw.s(tab) $+ .pages),$calc(%id - 1019),32)
-    if (%p) { dccore.sw.page %p }
+    if (%p) { dccore.sw.go page %p }
     return
   }
   if (%id == 1014) { dccore.sw.apply apply | return }
@@ -3093,30 +4446,27 @@ alias dccore.sw.click {
   if ($dccore.sw.m(br. $+ %id) != $null) { dccore.sw.browse %id $calc(%id - 1) $gettok($dccore.sw.m(br. $+ %id),1,32) | return }
   ; Channels
   if (%id == 1522) { dccore.sw.chanadd | return }
-  if (%id == 1523) { if ($did(dccore.set,1520).sel) { did -d dccore.set 1520 $did(dccore.set,1520).sel } | return }
-  ; IRC Server: the on-connect commands
-  if (%id == 1504) { dccore.sw.oc.save | return }
+  if (%id == 1523) { dccore.sw.chandel | return }
+  ; IRC Server: the on-connect commands (Apply saves them)
   if (%id == 1505) { if ($dccore.sw.can(onconnect)) { hadd dccore.sws resending.oc 1 | dccore.sw.status Sending the on-connect commands again... | dccore.send onconnect resend } | return }
   if (%id == 1506) { dccore.sw.unlockbutton | return }
-  ; Lists & channels
-  if (%id == 1540) { dccore.sw.srv.pick | return }
-  if (%id == 1550) { dccore.sw.browse %id 1549 dir | return }
-  if (%id == 1551) { dccore.sw.srv.addlist | return }
-  if (%id == 1552) { dccore.sw.srv.newchan | return }
-  if (%id == 1553) { dccore.sw.srv.newfolder | return }
-  if (%id == 1554) { dccore.sw.srv.change | return }
-  if (%id == 1555) { dccore.sw.srv.remove | return }
-  if (%id == 1556) { dccore.sw.srv.save | return }
-  if (%id == 1557) { dccore.sw.reask served | return }
+  ; Lists (the table 1540 and its buttons) and Channel bindings (rows 1700 up)
+  if (%id == 1551) { dccore.sw.srv.open new | return }
+  if (%id == 1554) { if ($dccore.sw.srv.selected != $null) { dccore.sw.srv.open $v1 } | else { dccore.sw.status Select the list to edit first. } | return }
+  if (%id == 1555) { dccore.sw.srv.delete | return }
+  if (%id == 1557) || (%id == 1567) { dccore.sw.reask served | return }
+  if (%id == 1773) { dccore.sw.srv.newchan | return }
+  if (%id isnum 1700-1759) { dccore.sw.srv.rowclick %id | return }
   ; Bans & ignores
   if (%id == 1581) { dccore.sw.ban.lift | return }
   if (%id == 1582) { dccore.sw.reask banlist | return }
   if (%id == 1587) { dccore.sw.ban.ignore | return }
   if (%id == 1596) { dccore.sw.ban.unban | return }
   if (%id == 1598) { dccore.sw.ban.add | return }
-  ; Appearance, and This mIRC window
+  ; Appearance, and the mIRC side's pairing
   if (%id == 1610) { dccore.sw.preview | return }
-  if (%id == 1616) { dccore.options | return }
+  if (%id == 1683) { dccore.sw.opt.pair | return }
+  if (%id == 1684) { dccore.sw.opt.unpair | return }
   ; a setting: its help, and a background colour follows its foreground
   var %k = $dccore.sw.m(i. $+ %id)
   if (%k != $null) {
@@ -3159,14 +4509,20 @@ alias dccore.sw.browse {
 
 alias dccore.sw.chans {
   var %id = $gettok($dccore.sw.m(k.CHANNEL),1,32), %i = 1, %out
-  while (%i <= $did(dccore.set,%id).lines) { %out = $addtok(%out,$did(dccore.set,%id,%i).text,44) | inc %i }
+  while (%i <= $dccore.sw.lv.count(%id)) { %out = $addtok(%out,$dccore.sw.lv.text(%id,%i),44) | inc %i }
   return %out
 }
 alias dccore.sw.chanadd {
   var %c = $remove($did(dccore.set,1521).text,$chr(32),$chr(44))
   if (%c == $null) { dccore.sw.status Type the channel to add first. | return }
-  did -a dccore.set 1520 %c
+  dccore.sw.lv.add 1520 $dccore.sw.tok(%c)
   did -r dccore.set 1521
+  dccore.sw.pending
+}
+alias dccore.sw.chandel {
+  var %sel = $dccore.sw.lv.sel(1520)
+  if (!%sel) { dccore.sw.status Select the channel to remove first. | return }
+  dccore.sw.lv.del 1520 %sel
   dccore.sw.pending
 }
 
@@ -3249,18 +4605,25 @@ alias dccore.sw.oc.wire {
   return $mid(%now,2)
 }
 
-; ---- Lists & channels -------------------------------------------------
+; ---- Lists, and Channel bindings ------------------------------------
 ;
-;  The lists as rows: a list, its folders under it, then every channel
-;  binding as "#chan -> List - Mode". Each list has an id of the window's
-;  own (srv.l.<id> = "<primary> <name>", in srv.order), so removing one
+;  Two pages, as the mockup draws them. Lists: a table with a row per list
+;  (Name | Primary | Folders) and Add list, Edit, Delete and Refresh under
+;  it - Add list and Edit open the list window (dccore.setl) for one
+;  list's name, primary flag and folders. Channel bindings: a row per
+;  channel with its own List and Mode menus and a Remove button (a change
+;  in a menu is kept at once), a scrollbar beside the fifteen rows shown
+;  for the channels beyond them, and the row that adds one under them.
+;  Each list has an id of the window's own
+;  (srv.l.<id> = "<primary> <name>", in srv.order), so removing one
 ;  renumbers nothing; channels and folders name the id of their list
 ;  (srv.c.<n> = "<list> <channel token> <mode>", srv.f.<n> = "<list>
-;  <label token> <path>"). Names and paths are kept ENCODED - as the bot
-;  sent them, or enc() of what was typed, taken straight from the control -
-;  and decoded only to be shown, so a row nobody touched goes back byte for
-;  byte. Save sends the whole set back, in the order the bot sent it, so a
-;  set left as it was saves nothing.
+;  <label token> <path>"). The table's row N is mapped back by srv.rowl.N,
+;  a bindings row R by bind.row.R. Names and paths are kept ENCODED - as
+;  the bot sent them, or enc() of what was typed, taken straight from the
+;  control - and decoded only to be shown, so a row nobody touched goes
+;  back byte for byte. Save lists sends the whole set back, in the order
+;  the bot sent it, so a set left as it was saves nothing.
 
 ; Count a row of the snapshot: $1 is 1 for a list, 2 a channel, 3 a folder.
 alias dccore.sw.srv.count {
@@ -3313,71 +4676,32 @@ alias dccore.sw.srv.modelabel {
   return $gettok($dccore.sw.untext($dccore.sw.m(modelabels)),%at,44)
 }
 alias dccore.sw.srv.draw {
-  did -r dccore.set 1540
-  did -r dccore.set 1545
-  hdel -w dccore.sws srv.row.*
-  var %order = $dccore.sw.s(srv.order), %f = $dccore.sw.s(srv.forder), %c = $dccore.sw.s(srv.corder), %i = 1, %line = 0
+  dccore.sw.lv.clear 1540
+  hdel -w dccore.sws srv.rowl.*
+  var %order = $dccore.sw.s(srv.order), %f = $dccore.sw.s(srv.forder), %i = 1
   while (%i <= $numtok(%order,32)) {
-    var %id = $gettok(%order,%i,32)
-    var %l = $dccore.sw.s(srv.l. $+ %id)
-    did -a dccore.set 1540 List: $dccore.sw.srv.listname(%id) $iif($gettok(%l,1,32) == 1,$+($chr(91),primary,$chr(93)))
-    inc %line
-    hadd dccore.sws srv.row. $+ %line L %id
-    did -a dccore.set 1545 $iif($gettok(%l,2-,32) != $null,$dccore.sw.srv.listname(%id),$chr(40) $+ unnamed $+ $chr(41))
-    var %j = 1
+    var %id = $gettok(%order,%i,32), %l = $dccore.sw.s(srv.l. $+ %id), %j = 1, %folders
     while (%j <= $numtok(%f,32)) {
       var %row = $dccore.sw.s(srv.f. $+ $gettok(%f,%j,32))
-      if ($gettok(%row,1,32) == %id) {
-        did -a dccore.set 1540 $str($chr(160),4) $+ folder $dccore.sw.untok($gettok(%row,2,32)) = $dccore.sw.dec($gettok(%row,3-,32))
-        inc %line
-        hadd dccore.sws srv.row. $+ %line F $gettok(%f,%j,32)
-      }
+      if ($gettok(%row,1,32) == %id) { %folders = %folders $+ $iif(%folders != $null,$+($chr(59),$chr(32))) $+ $dccore.sw.untok($gettok(%row,2,32)) = $dccore.sw.dec($gettok(%row,3-,32)) }
       inc %j
     }
+    dccore.sw.lv.add 1540 $iif($gettok(%l,2-,32) != $null,$dccore.sw.retok($gettok(%l,2-,32)),$dccore.sw.tok($chr(40) $+ unnamed $+ $chr(41))) $iif($gettok(%l,1,32) == 1,$chr(10003),-) $dccore.sw.tok(%folders)
+    hadd dccore.sws srv.rowl. $+ %i %id
     inc %i
   }
-  %i = 1
-  while (%i <= $numtok(%c,32)) {
-    var %row = $dccore.sw.s(srv.c. $+ $gettok(%c,%i,32))
-    did -a dccore.set 1540 $dccore.sw.untok($gettok(%row,2,32)) -> $dccore.sw.srv.listname($gettok(%row,1,32)) - $dccore.sw.srv.modelabel($gettok(%row,3,32))
-    inc %line
-    hadd dccore.sws srv.row. $+ %line C $gettok(%c,%i,32)
-    inc %i
-  }
+  dccore.sw.srv.drawrows
 }
-; A row selected: its fields into the controls under the list.
-alias dccore.sw.srv.pick {
-  var %r = $dccore.sw.s(srv.row. $+ $did(dccore.set,1540).sel)
-  if (%r == $null) { return }
-  var %kind = $gettok(%r,1,32), %n = $gettok(%r,2,32), %order = $dccore.sw.s(srv.order)
-  if (%kind == L) {
-    dccore.sw.put 1542 $dccore.sw.srv.listname(%n)
-    if ($gettok($dccore.sw.s(srv.l. $+ %n),1,32) == 1) { did -c dccore.set 1543 }
-    else { did -u dccore.set 1543 }
-    dccore.sw.pickline 1545 $findtok(%order,%n,1,32)
-    return
-  }
-  if (%kind == C) {
-    var %row = $dccore.sw.s(srv.c. $+ %n)
-    dccore.sw.put 1542 $dccore.sw.untok($gettok(%row,2,32))
-    dccore.sw.pickline 1545 $findtok(%order,$gettok(%row,1,32),1,32)
-    dccore.sw.pickline 1547 $findtok($dccore.sw.m(modes),$gettok(%row,3,32),1,32)
-    return
-  }
-  var %row = $dccore.sw.s(srv.f. $+ %n)
-  dccore.sw.put 1542 $dccore.sw.untok($gettok(%row,2,32))
-  dccore.sw.put 1549 $dccore.sw.dec($gettok(%row,3-,32))
-  dccore.sw.pickline 1545 $findtok(%order,$gettok(%row,1,32),1,32)
-}
+; The lists table's selected row: its list's id, or nothing.
+alias dccore.sw.srv.selected { return $dccore.sw.s(srv.rowl. $+ $dccore.sw.lv.sel(1540)) }
+; The mode chosen in the Mode menu $1: the first when none is.
+alias dccore.sw.srv.mode { return $gettok($dccore.sw.m(modes),$iif($did(dccore.set,$1).sel,$did(dccore.set,$1).sel,1),32) }
+; The list chosen in the List menu $1, as an id: the first when none is.
+alias dccore.sw.srv.chosen { return $gettok($dccore.sw.s(srv.order),$iif($did(dccore.set,$1).sel,$did(dccore.set,$1).sel,1),32) }
 ; Select line $2 of combo $1 - or none, when $findtok found nothing (0).
 alias dccore.sw.pickline {
   if ($2) { did -c dccore.set $1 $2 }
   else { did -u dccore.set $1 }
-}
-; The list chosen in the List combo, as an id: the first one when none is.
-alias dccore.sw.srv.chosen {
-  var %sel = $did(dccore.set,1545).sel
-  return $gettok($dccore.sw.s(srv.order),$iif(%sel,%sel,1),32)
 }
 alias dccore.sw.srv.ready {
   if ($dccore.sw.s(srv.ok)) { return $true }
@@ -3393,83 +4717,134 @@ alias dccore.sw.srv.oneprimary {
     inc %i
   }
 }
-alias dccore.sw.srv.addlist {
+; $1 a List menu: the lists' names into it, in srv.order
+alias dccore.sw.srv.listsinto {
+  did -r dccore.set $1
+  var %order = $dccore.sw.s(srv.order), %i = 1
+  while (%i <= $numtok(%order,32)) {
+    var %l = $dccore.sw.s(srv.l. $+ $gettok(%order,%i,32))
+    did -a dccore.set $1 $iif($gettok(%l,2-,32) != $null,$dccore.sw.srv.listname($gettok(%order,%i,32)),$chr(40) $+ unnamed $+ $chr(41))
+    inc %i
+  }
+}
+; Delete: the selected list goes, with its channels and folders.
+alias dccore.sw.srv.delete {
   if (!$dccore.sw.srv.ready) { return }
-  if ($did(dccore.set,1542).text == $null) { dccore.sw.status Type the new list's name in Name first. | return }
-  if ($numtok($dccore.sw.s(srv.order),32) >= $dccore.sw.s(srv.max)) { dccore.sw.status A bot serves at most $dccore.sw.s(srv.max) lists. | return }
-  hinc dccore.sws srv.next
-  var %id = $dccore.sw.s(srv.next)
-  hadd dccore.sws srv.l. $+ %id $did(dccore.set,1543).state $dccore.sw.enc($did(dccore.set,1542).text)
-  hadd dccore.sws srv.order $dccore.sw.s(srv.order) %id
-  if ($did(dccore.set,1543).state) { dccore.sw.srv.oneprimary %id }
+  var %n = $dccore.sw.srv.selected
+  if (%n == $null) { dccore.sw.status Select the list to delete first. | return }
+  hdel dccore.sws srv.l. $+ %n
+  dccore.sw.keep srv.order $remtok($dccore.sw.s(srv.order),%n,1,32)
+  var %c = $dccore.sw.s(srv.corder), %i = $numtok(%c,32)
+  while (%i >= 1) {
+    if ($gettok($dccore.sw.s(srv.c. $+ $gettok(%c,%i,32)),1,32) == %n) { hdel dccore.sws srv.c. $+ $gettok(%c,%i,32) | %c = $deltok(%c,%i,32) }
+    dec %i
+  }
+  dccore.sw.keep srv.corder %c
+  var %f = $dccore.sw.s(srv.forder)
+  %i = $numtok(%f,32)
+  while (%i >= 1) {
+    if ($gettok($dccore.sw.s(srv.f. $+ $gettok(%f,%i,32)),1,32) == %n) { hdel dccore.sws srv.f. $+ $gettok(%f,%i,32) | %f = $deltok(%f,%i,32) }
+    dec %i
+  }
+  dccore.sw.keep srv.forder %f
   dccore.sw.srv.edited
 }
+
+; -- Channel bindings: the mockup's rows ----------------------------------
+;  Row R of the fifteen: its channel is 1700 + 4(R-1), its List menu +1,
+;  its Mode menu +2, its Remove +3; the scrollbar beside them is 1774, the
+;  row that adds one 1770 to 1773, and the count sits beside Save lists
+;  (1568). The rows never move: the scrollbar's position is bind.off, the
+;  first binding shown, and the rows are filled from it - bind.row.R is
+;  the binding (its number in srv.corder) row R holds.
+alias dccore.sw.srv.rowbase { return $calc(1700 + 4 * ($1 - 1)) }
+; The rows from bind.off: a row each, the spare rows hidden, the scrollbar
+; ranged over what is beyond the fifteen
+alias dccore.sw.srv.drawrows {
+  var %c = $dccore.sw.s(srv.corder), %n = $numtok(%c,32), %off = $dccore.sw.s(bind.off), %r = 1
+  if (%off == $null) { %off = 0 }
+  if (%off > $calc(%n - 15)) { %off = $calc(%n - 15) }
+  if (%off < 0) { %off = 0 }
+  hadd dccore.sws bind.off %off
+  did -z dccore.set 1774 range 0 $iif(%n > 15,$calc(%n - 15),0)
+  did -c dccore.set 1774 %off
+  did $iif(%n > 15,-e,-b) dccore.set 1774
+  hdel -w dccore.sws bind.row.*
+  while (%r <= 15) {
+    var %k = $calc(%off + %r), %base = $dccore.sw.srv.rowbase(%r)
+    if (%k <= %n) {
+      var %row = $dccore.sw.s(srv.c. $+ $gettok(%c,%k,32))
+      hadd dccore.sws bind.row. $+ %r $gettok(%c,%k,32)
+      dccore.sw.put %base $dccore.sw.untok($gettok(%row,2,32))
+      dccore.sw.srv.listsinto $calc(%base + 1)
+      dccore.sw.pickline $calc(%base + 1) $findtok($dccore.sw.s(srv.order),$gettok(%row,1,32),1,32)
+      dccore.sw.pickline $calc(%base + 2) $findtok($dccore.sw.m(modes),$gettok(%row,3,32),1,32)
+    }
+    inc %r
+  }
+  ; the row that adds one offers the first list and the first mode, as the mockup does
+  dccore.sw.srv.listsinto 1771
+  dccore.sw.pickline 1771 $iif($dccore.sw.s(srv.order) != $null,1,0)
+  if (!$did(dccore.set,1772).sel) { did -c dccore.set 1772 1 }
+  dccore.sw.srv.rowsvis
+  dccore.sw.put 1568 $iif(%n,%n channel binding $+ $iif(%n != 1,s),No channel bindings yet)
+}
+; The scrollbar moved: the rows filled from its position
+on *:dialog:dccore.set:scroll:*: { dccore.sw.scrolled $did }
+alias dccore.sw.scrolled {
+  if ($1 != 1774) { return }
+  hadd dccore.sws bind.off $did(dccore.set,1774).sel
+  dccore.sw.srv.drawrows
+}
+; The rows with a binding shown, the rest hidden - again each time the
+; page is shown, since showing a page shows every control of it. Only
+; while that page IS the one shown: the lists arrive from the bot a moment
+; after they were asked for, by which time another page may be up, and a
+; row shown then sits on top of it.
+alias dccore.sw.srv.rowsvis {
+  if (!$istok($dccore.sw.m(p. $+ $dccore.sw.s(page) $+ .w),srvchans,32)) { return }
+  var %r = 1, %n = $numtok($dccore.sw.s(srv.corder),32), %off = $dccore.sw.s(bind.off)
+  if (%off == $null) { %off = 0 }
+  while (%r <= 15) {
+    var %base = $dccore.sw.srv.rowbase(%r)
+    did $iif($calc(%off + %r) <= %n,-v,-h) dccore.set $+(%base,$chr(44),$calc(%base + 1),$chr(44),$calc(%base + 2),$chr(44),$calc(%base + 3))
+    inc %r
+  }
+}
+; A click in a row ($1 the control): its List or Mode menu changed, kept
+; at once, or its Remove pressed
+alias dccore.sw.srv.rowclick {
+  var %r = $calc($int($calc(($1 - 1700) / 4)) + 1), %what = $calc(($1 - 1700) - 4 * $int($calc(($1 - 1700) / 4))), %base = $dccore.sw.srv.rowbase(%r)
+  var %n = $dccore.sw.s(bind.row. $+ %r)
+  if (%n == $null) || (!$dccore.sw.srv.ready) { return }
+  if (%what == 3) {
+    hdel dccore.sws srv.c. $+ %n
+    dccore.sw.keep srv.corder $remtok($dccore.sw.s(srv.corder),%n,1,32)
+    dccore.sw.srv.edited
+    return
+  }
+  if (%what == 1) || (%what == 2) {
+    var %row = $dccore.sw.s(srv.c. $+ %n)
+    hadd dccore.sws srv.c. $+ %n $dccore.sw.srv.chosen($calc(%base + 1)) $gettok(%row,2,32) $dccore.sw.srv.mode($calc(%base + 2))
+    hadd dccore.sws srv.dirty 1
+    dccore.sw.status $dccore.sw.untok($gettok(%row,2,32)) changed - Apply or OK sends the lists and bindings to the bot.
+  }
+}
+; The row that adds one: the channel typed, the list and mode chosen.
 alias dccore.sw.srv.newchan {
   if (!$dccore.sw.srv.ready) { return }
-  var %chan = $remove($did(dccore.set,1542).text,$chr(32))
-  if (%chan == $null) || ($dccore.sw.srv.chosen == $null) { dccore.sw.status Type the channel in Name and pick its List first. | return }
-  dccore.sw.srv.addchan $dccore.sw.srv.chosen $dccore.sw.tok(%chan) $gettok($dccore.sw.m(modes),$iif($did(dccore.set,1547).sel,$did(dccore.set,1547).sel,1),32)
-  dccore.sw.srv.edited
-}
-alias dccore.sw.srv.newfolder {
-  if (!$dccore.sw.srv.ready) { return }
-  if ($did(dccore.set,1549).text == $null) || ($dccore.sw.srv.chosen == $null) { dccore.sw.status Type the folder path and pick its List first (Name is the folder's label). | return }
-  dccore.sw.srv.addfolder $dccore.sw.srv.chosen $dccore.sw.tok($did(dccore.set,1542).text) $dccore.sw.enc($did(dccore.set,1549).text)
-  dccore.sw.srv.edited
-}
-; The selected row takes what the controls say now.
-alias dccore.sw.srv.change {
-  if (!$dccore.sw.srv.ready) { return }
-  var %r = $dccore.sw.s(srv.row. $+ $did(dccore.set,1540).sel)
-  if (%r == $null) { dccore.sw.status Select the row to change first. | return }
-  var %kind = $gettok(%r,1,32), %n = $gettok(%r,2,32)
-  if (%kind == L) {
-    if ($did(dccore.set,1542).text == $null) { dccore.sw.status A list needs a name. | return }
-    hadd dccore.sws srv.l. $+ %n $did(dccore.set,1543).state $dccore.sw.enc($did(dccore.set,1542).text)
-    if ($did(dccore.set,1543).state) { dccore.sw.srv.oneprimary %n }
-  }
-  elseif (%kind == C) {
-    var %chan = $remove($did(dccore.set,1542).text,$chr(32))
-    if (%chan == $null) { dccore.sw.status A binding needs a channel. | return }
-    hadd dccore.sws srv.c. $+ %n $dccore.sw.srv.chosen $dccore.sw.tok(%chan) $gettok($dccore.sw.m(modes),$iif($did(dccore.set,1547).sel,$did(dccore.set,1547).sel,1),32)
-  }
-  else {
-    if ($did(dccore.set,1549).text == $null) { dccore.sw.status A folder needs a path. | return }
-    hadd dccore.sws srv.f. $+ %n $dccore.sw.srv.chosen $dccore.sw.tok($did(dccore.set,1542).text) $dccore.sw.enc($did(dccore.set,1549).text)
-  }
-  dccore.sw.srv.edited
-}
-; The selected row goes; a list takes its channels and folders with it.
-alias dccore.sw.srv.remove {
-  if (!$dccore.sw.srv.ready) { return }
-  var %r = $dccore.sw.s(srv.row. $+ $did(dccore.set,1540).sel)
-  if (%r == $null) { dccore.sw.status Select the row to remove first. | return }
-  var %kind = $gettok(%r,1,32), %n = $gettok(%r,2,32)
-  if (%kind == C) { hdel dccore.sws srv.c. $+ %n | dccore.sw.keep srv.corder $remtok($dccore.sw.s(srv.corder),%n,1,32) }
-  elseif (%kind == F) { hdel dccore.sws srv.f. $+ %n | dccore.sw.keep srv.forder $remtok($dccore.sw.s(srv.forder),%n,1,32) }
-  else {
-    hdel dccore.sws srv.l. $+ %n
-    dccore.sw.keep srv.order $remtok($dccore.sw.s(srv.order),%n,1,32)
-    var %c = $dccore.sw.s(srv.corder), %i = $numtok(%c,32)
-    while (%i >= 1) {
-      if ($gettok($dccore.sw.s(srv.c. $+ $gettok(%c,%i,32)),1,32) == %n) { hdel dccore.sws srv.c. $+ $gettok(%c,%i,32) | %c = $deltok(%c,%i,32) }
-      dec %i
-    }
-    dccore.sw.keep srv.corder %c
-    var %f = $dccore.sw.s(srv.forder)
-    %i = $numtok(%f,32)
-    while (%i >= 1) {
-      if ($gettok($dccore.sw.s(srv.f. $+ $gettok(%f,%i,32)),1,32) == %n) { hdel dccore.sws srv.f. $+ $gettok(%f,%i,32) | %f = $deltok(%f,%i,32) }
-      dec %i
-    }
-    dccore.sw.keep srv.forder %f
-  }
+  var %chan = $remove($did(dccore.set,1770).text,$chr(32))
+  if (%chan == $null) || ($dccore.sw.s(srv.order) == $null) { dccore.sw.status Type the channel first, and have a list for it. | return }
+  dccore.sw.srv.addchan $dccore.sw.srv.chosen(1771) $dccore.sw.tok(%chan) $dccore.sw.srv.mode(1772)
+  did -r dccore.set 1770
+  ; scrolled to the end, where the new row is
+  hadd dccore.sws bind.off $calc($numtok($dccore.sw.s(srv.corder),32) - 15)
   dccore.sw.srv.edited
 }
 alias dccore.sw.srv.edited {
   hadd dccore.sws srv.dirty 1
   dccore.sw.srv.draw
-  dccore.sw.status Lists & channels changed - Save lists sends them to the bot.
+  dccore.sw.status Lists or bindings changed - Apply or OK sends the whole set to the bot.
 }
 ; The whole set back to the bot. With no lists.json and only the folders
 ; changed, through the folders command, which does not make the implied
@@ -3516,27 +4891,175 @@ alias dccore.sw.srv.save {
   dccore.sw.status Saving the lists...
 }
 
+; -- the list window: Add list and Edit ----------------------------------
+;  One list's name, primary flag and folders, in dccore.swl while it is
+;  open: id (the list's id, or "new"), name (encoded), primary, f.N =
+;  "<label token> <path>" in forder. OK writes them into the set, Cancel
+;  drops them; nothing reaches the bot until Save lists. Its folders are
+;  typed here and kept, as the set's are, tok() or enc() of the control.
+dialog dccore.setl {
+  title "DCCore - List"
+  size -1 -1 300 168
+  option dbu
+  text "Name", 1, 6 8 30 8
+  edit "", 2, 40 6 150 11, autohs
+  check "Primary: answers a private message, and any channel bound to no list", 3, 6 22 288 10
+  box "Folders", 4, 6 36 288 106
+  list 5, 12 46 276 42, hsbar vsbar
+  text "Label", 6, 12 94 24 8
+  edit "", 7, 38 92 100 11, autohs
+  text "Path", 8, 144 94 20 8
+  edit "", 9, 166 92 104 11, autohs
+  button "...", 10, 272 91 16 13
+  button "Add folder", 11, 12 108 52 13
+  button "Change", 12, 67 108 46 13
+  button "Remove", 13, 116 108 46 13
+  text "", 14, 12 124 276 16
+  button "OK", 15, 196 150 46 13
+  button "Cancel", 16, 246 150 46 13, cancel
+}
+on *:dialog:dccore.setl:init:0: { dccore.sw.srv.linit | dccore.theme.dialog dccore.setl init }
+on *:dialog:dccore.setl:sclick:*: { dccore.sw.srv.lclick $did }
+; $1 a list's id, or "new"
+alias dccore.sw.srv.open {
+  if (!$dccore.sw.srv.ready) { return }
+  if ($dialog(dccore.setl)) { dialog -v dccore.setl | return }
+  if ($1 == new) && ($numtok($dccore.sw.s(srv.order),32) >= $dccore.sw.s(srv.max)) { dccore.sw.status A bot serves at most $dccore.sw.s(srv.max) lists. | return }
+  if ($hget(dccore.swl)) { hfree dccore.swl }
+  hmake dccore.swl 20
+  hadd dccore.swl id $1
+  hadd dccore.swl fnext 0
+  if ($1 != new) {
+    var %l = $dccore.sw.s(srv.l. $+ $1)
+    hadd dccore.swl primary $gettok(%l,1,32)
+    if ($gettok(%l,2-,32) != $null) { hadd dccore.swl name $gettok(%l,2-,32) }
+    var %f = $dccore.sw.s(srv.forder), %i = 1
+    while (%i <= $numtok(%f,32)) {
+      var %row = $dccore.sw.s(srv.f. $+ $gettok(%f,%i,32))
+      if ($gettok(%row,1,32) == $1) { dccore.sw.srv.lfolder $gettok(%row,2-,32) }
+      inc %i
+    }
+  }
+  dialog -m dccore.setl dccore.setl
+}
+; $1 a label token, $2- a path (encoded): a folder of the window's list
+alias dccore.sw.srv.lfolder {
+  hinc dccore.swl fnext
+  hadd dccore.swl f. $+ $hget(dccore.swl,fnext) $1-
+  hadd dccore.swl forder $hget(dccore.swl,forder) $hget(dccore.swl,fnext)
+}
+alias dccore.sw.srv.linit {
+  dialog -t dccore.setl $iif($hget(dccore.swl,id) == new,DCCore - New list,DCCore - Edit list)
+  dccore.sw.lput 2 $dccore.sw.dec($hget(dccore.swl,name))
+  if ($hget(dccore.swl,primary) == 1) { did -c dccore.setl 3 }
+  if (!$dccore.sw.local) { did -b dccore.setl 10 }
+  dccore.sw.srv.ldraw
+}
+; Put a text into a control of the list window: did -a refuses an empty one.
+alias dccore.sw.lput {
+  did -r dccore.setl $1
+  if ($2- != $null) { did -a dccore.setl $1 $2- }
+}
+alias dccore.sw.srv.ldraw {
+  did -r dccore.setl 5
+  var %f = $hget(dccore.swl,forder), %i = 1
+  while (%i <= $numtok(%f,32)) {
+    var %row = $hget(dccore.swl,f. $+ $gettok(%f,%i,32))
+    did -a dccore.setl 5 $dccore.sw.untok($gettok(%row,1,32)) = $dccore.sw.dec($gettok(%row,2-,32))
+    inc %i
+  }
+}
+; The folder row selected: its number in forder, or nothing.
+alias dccore.sw.srv.lsel { return $gettok($hget(dccore.swl,forder),$did(dccore.setl,5).sel,32) }
+alias dccore.sw.srv.lclick {
+  if ($1 == 5) {
+    var %row = $hget(dccore.swl,f. $+ $dccore.sw.srv.lsel)
+    if (%row != $null) { dccore.sw.lput 7 $dccore.sw.untok($gettok(%row,1,32)) | dccore.sw.lput 9 $dccore.sw.dec($gettok(%row,2-,32)) }
+    return
+  }
+  if ($1 == 10) { dccore.sw.srv.lbrowse | return }
+  if ($1 == 11) {
+    if ($did(dccore.setl,9).text == $null) { did -ra dccore.setl 14 Type the folder's path first; Label is what the list calls it. | return }
+    dccore.sw.srv.lfolder $dccore.sw.tok($did(dccore.setl,7).text) $dccore.sw.enc($did(dccore.setl,9).text)
+    dccore.sw.srv.ldraw
+    return
+  }
+  if ($1 == 12) {
+    var %n = $dccore.sw.srv.lsel
+    if (%n == $null) { did -ra dccore.setl 14 Select the folder to change first. | return }
+    if ($did(dccore.setl,9).text == $null) { did -ra dccore.setl 14 A folder needs a path. | return }
+    hadd dccore.swl f. $+ %n $dccore.sw.tok($did(dccore.setl,7).text) $dccore.sw.enc($did(dccore.setl,9).text)
+    dccore.sw.srv.ldraw
+    return
+  }
+  if ($1 == 13) {
+    var %n = $dccore.sw.srv.lsel
+    if (%n == $null) { did -ra dccore.setl 14 Select the folder to remove first. | return }
+    hdel dccore.swl f. $+ %n
+    var %o = $remtok($hget(dccore.swl,forder),%n,1,32)
+    if (%o == $null) { hdel dccore.swl forder }
+    else { hadd dccore.swl forder %o }
+    dccore.sw.srv.ldraw
+    return
+  }
+  if ($1 == 15) { dccore.sw.srv.lok }
+}
+; OK: the window's list into the set - a new id for a new list - its old
+; folders out and the window's in, then the tables drawn again
+alias dccore.sw.srv.lok {
+  if ($did(dccore.setl,2).text == $null) { did -ra dccore.setl 14 A list needs a name. | return }
+  if (!$dccore.sw.srv.ready) { dialog -x dccore.setl | return }
+  var %id = $hget(dccore.swl,id)
+  if (%id == new) {
+    hinc dccore.sws srv.next
+    %id = $dccore.sw.s(srv.next)
+    hadd dccore.sws srv.order $dccore.sw.s(srv.order) %id
+  }
+  hadd dccore.sws srv.l. $+ %id $did(dccore.setl,3).state $dccore.sw.enc($did(dccore.setl,2).text)
+  if ($did(dccore.setl,3).state) { dccore.sw.srv.oneprimary %id }
+  var %f = $dccore.sw.s(srv.forder), %i = $numtok(%f,32)
+  while (%i >= 1) {
+    if ($gettok($dccore.sw.s(srv.f. $+ $gettok(%f,%i,32)),1,32) == %id) { hdel dccore.sws srv.f. $+ $gettok(%f,%i,32) | %f = $deltok(%f,%i,32) }
+    dec %i
+  }
+  dccore.sw.keep srv.forder %f
+  var %w = $hget(dccore.swl,forder)
+  %i = 1
+  while (%i <= $numtok(%w,32)) { dccore.sw.srv.addfolder %id $hget(dccore.swl,f. $+ $gettok(%w,%i,32)) | inc %i }
+  dialog -x dccore.setl
+  dccore.sw.srv.edited
+}
+; A folder on the bot's machine, so only when that is this PC.
+alias dccore.sw.srv.lbrowse {
+  if (!$dccore.sw.local) { did -ra dccore.setl 14 The bot runs on another computer: type the path as it is there. | return }
+  var %now = $did(dccore.setl,9).text
+  var %start = $iif($isdir($nofile(%now)),$nofile(%now),$mircdir)
+  var %p = $sdir(%start,Choose a folder)
+  if ($right(%p,1) == \) && ($len(%p) > 3) { %p = $left(%p,-1) }
+  if (%p != $null) { dccore.sw.lput 9 %p }
+}
+
 ; ---- Bans & ignores ---------------------------------------------------
 
 ; $1 permanent, $2 timed: the true totals, of which at most 200 each came
 alias dccore.sw.ban.draw {
-  did -r dccore.set 1580
-  did -r dccore.set 1595
+  dccore.sw.lv.clear 1580
+  dccore.sw.lv.clear 1595
   var %i = 1
   while (%i <= $dccore.sw.s(ban.gt)) {
     var %row = $dccore.sw.s(ban.t. $+ %i)
-    did -a dccore.set 1580 $gettok(%row,2,32) - $duration($gettok(%row,1,32)) left
+    dccore.sw.lv.add 1580 $dccore.sw.tok($gettok(%row,2,32)) $dccore.sw.tok($duration($gettok(%row,1,32)) left)
     inc %i
   }
   %i = 1
-  while (%i <= $dccore.sw.s(ban.gp)) { did -a dccore.set 1595 $dccore.sw.s(ban.p. $+ %i) | inc %i }
+  while (%i <= $dccore.sw.s(ban.gp)) { dccore.sw.lv.add 1595 $dccore.sw.tok($dccore.sw.s(ban.p. $+ %i)) | inc %i }
   dccore.sw.status $1 permanent pattern(s) and $2 timed ban(s) or ignore(s) $+ $iif(($1 > 200) || ($2 > 200),$chr(32) $+ - the first 200 of each are shown) $+ .
 }
 ; ban, unban, ignore and unignore report in @DCCore and some finish in the
 ; background, so the list is asked for again a moment later.
 alias dccore.sw.ban.after { .timerdccoreSwBan 1 2 dccore.sw.reask banlist }
 alias dccore.sw.ban.lift {
-  var %sel = $did(dccore.set,1580).sel
+  var %sel = $dccore.sw.lv.sel(1580)
   if (!%sel) { dccore.sw.status Select the nick to lift first. | return }
   dccore.send unignore $gettok($dccore.sw.s(ban.t. $+ %sel),2,32)
   dccore.sw.ban.after
@@ -3548,7 +5071,7 @@ alias dccore.sw.ban.ignore {
   dccore.sw.ban.after
 }
 alias dccore.sw.ban.unban {
-  var %sel = $did(dccore.set,1595).sel
+  var %sel = $dccore.sw.lv.sel(1595)
   if (!%sel) { dccore.sw.status Select the pattern to remove first. | return }
   dccore.send unban $dccore.sw.s(ban.p. $+ %sel)
   dccore.sw.ban.after
@@ -3565,543 +5088,916 @@ alias dccore.sw.ban.add {
 ; Generated - do not edit by hand. Change scripts/mirc/settings_window_layout.py (or the
 ; bot's settings metadata) and run: python scripts/mirc/build_settings_window.py
 dialog dccore.set {
-  title "DCCore - Settings"
-  size -1 -1 420 298
+  title "DCCore - Control Panel"
+  size -1 -1 488 364
   option dbu
-  tab "General", 1001, 4 2 412 14
+  tab "General", 1001, 4 2 480 338
   tab "Sharing", 1002
   tab "Downloads", 1003
   tab "Security", 1004
   tab "Dashboard && Console", 1005
   tab "Advanced", 1006
-  radio "", 1020, 4 20 84 15, push group
-  radio "", 1021, 4 37 84 15, push
-  radio "", 1022, 4 54 84 15, push
-  radio "", 1023, 4 71 84 15, push
-  radio "", 1024, 4 88 84 15, push
-  radio "", 1025, 4 105 84 15, push
-  text "", 1012, 94 246 322 24
-  text "", 1013, 4 272 254 8
-  text "", 1018, 4 281 254 16
-  button "Reload", 1017, 262 279 36 13
-  button "Apply", 1014, 302 279 36 13
-  button "OK", 1015, 341 279 36 13
-  button "Cancel", 1016, 380 279 36 13, cancel
-  text "Connection", 1100, 94 18 322 8
-  text "IRC server", 2000, 94 30 186 8
-  edit "", 2001, 284 28 132 11, autohs
-  text "Port", 2004, 94 42 186 8
-  edit "", 2005, 284 40 132 11, autohs
-  text "Nickname", 2008, 94 54 186 8
-  edit "", 2009, 284 52 132 11, autohs
-  text "Alt nickname", 2012, 94 66 186 8
-  edit "", 2013, 284 64 132 11, autohs
-  text "Reconnection", 1101, 94 78 322 8
-  text "Rejoin attempts after a kick (0 = never)", 2016, 94 90 186 8
-  edit "", 2017, 284 88 132 11, autohs
-  text "Check the on-connect commands worked every (minutes, 0 = never)", 2020, 94 102 186 16
-  edit "", 2021, 284 100 132 11, autohs
-  text "On connect", 1102, 94 122 322 8
-  text "", 1500, 94 132 322 16
-  edit "", 1501, 94 150 322 40, multi return autohs autovs hsbar vsbar
-  text "Seconds between commands", 1502, 94 195 92 8
-  edit "", 1503, 188 193 24 11, autohs
-  button "Save on-connect commands", 1504, 264 192 100 13
-  button "Resend now", 1505, 368 192 48 13
-  button "Unlock", 1506, 216 192 44 13
-  text "The on/off switches used most, here from their own pages so there is one place to check.", 1103, 94 18 322 8
-  text "Open when mIRC starts (minimised)", 1104, 94 31 322 8
-  check "DCCore window", 2025, 94 41 322 10
-  check "Chat", 2029, 94 52 322 10
-  check "Downloads", 2033, 94 63 322 10
-  text "Connection", 1105, 94 76 322 8
-  check "Reconnect and log in to the bot by itself when it comes back", 2037, 94 86 322 10
-  text "Sharing && search", 1106, 94 99 322 8
-  check "Answer @find searches", 2041, 94 109 322 10
-  check "Announce finished transfers in the channel", 2045, 94 120 322 10
-  check "Enable !rar folder packing", 2049, 94 131 322 10
-  text "Messaging && dashboard", 1107, 94 144 322 8
-  check "Keep private messages (off: keep none, reply once instead)", 2053, 94 154 322 10
-  check "Enable web dashboard", 2057, 94 165 322 10
-  check "Answer CTCP VERSION", 2061, 94 176 322 10
-  text "Updates", 1108, 94 189 322 8
-  check "Tell me when a new version is out", 2065, 94 199 322 10
-  text "Admin channels", 1109, 94 18 322 8
-  text "A separate channel the bot sends its own diagnostic lines to - never one it also serves files in.", 1110, 94 28 322 8
-  text "Debug channel", 2068, 94 41 186 8
-  edit "", 2069, 284 39 132 11, autohs
-  text "Serving channels", 1111, 94 53 322 8
-  text "Which channels the bot joins and sits in. What each one serves - which list, which folders, Normal, Silent or Request only - is set per list under Sharing > Lists && channels.", 1112, 94 63 322 16
-  list 1520, 94 82 200 50, vsbar
-  edit "", 1521, 300 82 116 11, autohs
-  button "Add channel", 1522, 300 96 56 13
-  button "Remove", 1523, 300 112 56 13
-  text "Admin", 1113, 94 18 322 8
-  text "Admin nick(s)", 2072, 94 30 186 8
-  edit "", 2073, 284 28 132 11, autohs
-  text "What the channel sees", 1114, 94 18 322 8
-  text "Colour theme", 2076, 94 30 186 8
-  combo 2077, 284 28 132 80, drop
-  button "Preview", 1610, 94 41 50 13
-  text "Draws the sample advert and notice in @DCCore-preview with the colours chosen here, before they are saved.", 1611, 150 41 266 16
-  text "Custom override - surface colours", 1115, 94 63 322 8
-  text "Set any of these and it replaces that one role in the theme above. Keep previous keeps whatever background the segment before left.", 1116, 94 73 322 16
-  text "Border colour", 2080, 94 94 186 8
-  combo 2081, 284 92 64 120, drop
-  combo 2082, 352 92 64 120, drop
-  text "Separator colour", 2084, 94 107 186 8
-  combo 2085, 284 105 64 120, drop
-  combo 2086, 352 105 64 120, drop
-  text "Text box colour", 2088, 94 120 186 8
-  combo 2089, 284 118 64 120, drop
-  combo 2090, 352 118 64 120, drop
-  text "Custom override - text colours", 1117, 94 133 322 8
-  text "Value colour", 2092, 94 145 186 8
-  combo 2093, 284 143 64 120, drop
-  combo 2094, 352 143 64 120, drop
-  text "Alert colour", 2096, 94 158 186 8
-  combo 2097, 284 156 64 120, drop
-  combo 2098, 352 156 64 120, drop
-  text "Accent colour", 2100, 94 171 186 8
-  combo 2101, 284 169 64 120, drop
-  combo 2102, 352 169 64 120, drop
-  text "Advert", 1118, 94 18 322 8
-  text "Advert interval (seconds)", 2104, 94 30 186 8
-  edit "", 2105, 284 28 132 11, autohs
-  text "Broadcast search", 1119, 94 42 322 8
-  text "Broadcast search channel", 2108, 94 54 186 8
-  edit "", 2109, 284 52 132 11, autohs
-  text "Broadcast search cooldown (seconds)", 2112, 94 66 186 8
-  edit "", 2113, 284 64 132 11, autohs
-  text "Timing", 1120, 94 78 322 8
-  text "Message delay (seconds)", 2116, 94 90 186 8
-  edit "", 2117, 284 88 132 11, autohs
-  text "Debug message delay (seconds)", 2120, 94 102 186 8
-  edit "", 2121, 284 100 132 11, autohs
-  text "Sending", 1121, 94 18 322 8
-  text "Max simultaneous sends", 2124, 94 30 186 8
-  edit "", 2125, 284 28 132 11, autohs
-  text "Max queue per user", 2128, 94 42 186 8
-  edit "", 2129, 284 40 132 11, autohs
-  text "Max global queue", 2132, 94 54 186 8
-  edit "", 2133, 284 52 132 11, autohs
-  text "Search (@find)", 1122, 94 66 322 8
-  text "How much the bot says back once it answers (the on/off switch is under General > General Settings).", 1123, 94 76 322 16
-  text "Max search results", 2136, 94 97 186 8
-  edit "", 2137, 284 95 132 11, autohs
-  check "Name the folder in search replies", 2141, 94 107 322 10
-  text "Longest folder shown (characters)", 2144, 94 120 186 8
-  edit "", 2145, 284 118 132 11, autohs
-  text "During a rebuild", 1124, 94 132 322 8
-  check "Pause sharing during !update", 2149, 94 142 322 10
-  check "Pause for the whole rebuild", 2153, 94 153 322 10
-  text "Seconds a rehash waits for transfers to finish", 2156, 94 166 186 8
-  edit "", 2157, 284 164 132 11, autohs
-  text "Buffers && packet size", 1125, 94 18 322 8
-  text "Packet size", 2160, 94 30 186 8
-  combo 2161, 284 28 132 80, drop
-  text "Socket send buffer (0 = the default for your platform) (KB)", 2164, 94 43 186 16
-  edit "", 2165, 284 41 132 11, autohs
-  text "Ports && reliability", 1126, 94 63 322 8
-  text "DCC port range start", 2168, 94 75 186 8
-  edit "", 2169, 284 73 132 11, autohs
-  text "DCC port range end", 2172, 94 87 186 8
-  edit "", 2173, 284 85 132 11, autohs
-  text "Wait for the receiver to connect (seconds)", 2176, 94 99 186 8
-  edit "", 2177, 284 97 132 11, autohs
-  text "Max send failures", 2180, 94 111 186 8
-  edit "", 2181, 284 109 132 11, autohs
-  text "Library", 1127, 94 18 322 8
-  text "Music directory (used only when no folders are set)", 2184, 94 30 186 8
-  edit "", 2185, 284 28 116 11, autohs
-  button "...", 2186, 402 27 14 12
-  text "List base name", 2188, 94 42 186 8
-  edit "", 2189, 284 40 132 11, autohs
-  text "List delivery format", 2192, 94 54 186 8
-  combo 2193, 284 52 132 80, drop
-  text "File types to leave out of the list", 2196, 94 67 186 8
-  edit "", 2197, 284 65 132 11, autohs
-  text "Film && series", 1128, 94 79 322 8
-  check "Publish film and series as a separate list", 2201, 94 89 322 10
-  text "File types that go in the film list", 2204, 94 102 186 8
-  edit "", 2205, 284 100 132 11, autohs
-  text "File types that follow a film into its list (subtitles, .nfo, .sfv)", 2208, 94 114 186 16
-  edit "", 2209, 284 112 132 11, autohs
-  text "!rar packing", 1129, 94 134 322 8
-  text "File types a folder needs to be !rar-packable", 2212, 94 146 186 8
-  edit "", 2213, 284 144 132 11, autohs
-  text "RAR binary path", 2216, 94 158 186 8
-  edit "", 2217, 284 156 116 11, autohs
-  button "...", 2218, 402 155 14 12
-  text "Largest folder !rar will pack (0 = no limit) (MB)", 2220, 94 170 186 8
-  edit "", 2221, 284 168 132 11, autohs
-  text "RAR pack timeout (seconds)", 2224, 94 182 186 8
-  edit "", 2225, 284 180 132 11, autohs
-  text "List banner", 1130, 94 194 322 8
-  text "List banner file", 2228, 94 206 186 8
-  edit "", 2229, 284 204 116 11, autohs
-  button "...", 2230, 402 203 14 12
-  text "List banner size limit (KB)", 2232, 94 218 186 8
-  edit "", 2233, 284 216 132 11, autohs
-  check "Length and quality in the list", 2237, 94 228 322 10
-  text "What each list shares: a name, its folders, and whether it is primary (it answers a private message, and any channel bound to none). Then which list answers in each channel, and that channel's mode.", 1131, 94 18 322 16
-  list 1540, 94 37 322 84, hsbar vsbar
-  text "Name", 1541, 94 128 44 8
-  edit "", 1542, 140 126 150 11, autohs
-  check "Primary", 1543, 298 126 60 10
-  text "List", 1544, 94 141 44 8
-  combo 1545, 140 139 96 80, drop
-  text "Mode", 1546, 244 141 26 8
-  combo 1547, 272 139 96 60, drop
-  text "Folder path", 1548, 94 154 44 8
-  edit "", 1549, 140 152 260 11, autohs
-  button "...", 1550, 402 151 14 13
-  button "Add list", 1551, 94 168 50 13
-  button "Add channel", 1552, 147 168 56 13
-  button "Add folder", 1553, 206 168 52 13
-  button "Change", 1554, 261 168 46 13
-  button "Remove", 1555, 310 168 46 13
-  button "Save lists", 1556, 94 184 56 13
-  button "Refresh", 1557, 153 184 46 13
-  text "Automatic rebuild", 1132, 94 18 322 8
-  text "Rebuild the list automatically", 2240, 94 30 186 8
-  edit "", 2241, 284 28 132 11, autohs
-  text "List rebuild hard cap (seconds, 0 = none)", 2244, 94 42 186 8
-  edit "", 2245, 284 40 132 11, autohs
-  text "Give up if a rebuild reports nothing for (seconds)", 2248, 94 54 186 8
-  edit "", 2249, 284 52 132 11, autohs
-  text "Performance", 1133, 94 66 322 8
-  text "Time limit for reading audio files (no longer used)", 2252, 94 78 186 8
-  edit "", 2253, 284 76 132 11, autohs
-  text "Audio files read at once", 2256, 94 90 186 8
-  edit "", 2257, 284 88 132 11, autohs
-  text "Folders scanned at once", 2260, 94 102 186 8
-  edit "", 2261, 284 100 132 11, autohs
-  text "Auto-grab", 1134, 94 18 322 8
-  check "Grab the lists of bots you have no list from", 2265, 94 28 322 10
-  text "Minutes between automatic grabs", 2268, 94 41 186 8
-  edit "", 2269, 284 39 132 11, autohs
-  text "Skip bots with fewer files than", 2272, 94 53 186 8
-  edit "", 2273, 284 51 132 11, autohs
-  text "Skip bots slower than (KB/s)", 2276, 94 65 186 8
-  edit "", 2277, 284 63 132 11, autohs
-  text "Discover lists", 1135, 94 77 322 8
-  check "Discover a bot's other channel-bound lists", 2281, 94 87 322 10
-  text "Hold stable this long first (seconds)", 2284, 94 100 186 8
-  edit "", 2285, 284 98 132 11, autohs
-  text "Slots && re-fetch", 1136, 94 18 322 8
-  text "Max fetch slots", 2288, 94 30 186 8
-  edit "", 2289, 284 28 132 11, autohs
-  check "Re-fetch a held list when its bot advertises a new one", 2293, 94 40 322 10
-  text "Least time between re-fetches of one bot (hours)", 2296, 94 53 186 8
-  edit "", 2297, 284 51 132 11, autohs
-  text "Most lists to re-fetch in one sweep", 2300, 94 65 186 8
-  edit "", 2301, 284 63 132 11, autohs
-  text "Timeouts", 1137, 94 77 322 8
-  text "Wait for a reply to a fetch request (seconds)", 2304, 94 89 186 8
-  edit "", 2305, 284 87 132 11, autohs
-  text "Fetch transfer timeout (seconds)", 2308, 94 101 186 8
-  edit "", 2309, 284 99 132 11, autohs
-  text "Wait for a reply to a folder (.rar) request (seconds)", 2312, 94 113 186 8
-  edit "", 2313, 284 111 132 11, autohs
-  text "...from a bot that publishes no .rar list (seconds)", 2316, 94 125 186 8
-  edit "", 2317, 284 123 132 11, autohs
-  text "Folder (.rar) fetch transfer timeout (seconds)", 2320, 94 137 186 8
-  edit "", 2321, 284 135 132 11, autohs
-  text "Size limits", 1138, 94 149 322 8
-  text "Max fetch file size (MB)", 2324, 94 161 186 8
-  edit "", 2325, 284 159 132 11, autohs
-  text "Max folder (.rar) fetch size (MB)", 2328, 94 173 186 8
-  edit "", 2329, 284 171 132 11, autohs
-  text "Max fetched master-list zip size (MB)", 2332, 94 185 186 8
-  edit "", 2333, 284 183 132 11, autohs
-  text "Largest list text accepted from a peer (MB)", 2336, 94 197 186 8
-  edit "", 2337, 284 195 132 11, autohs
-  text "History", 1139, 94 209 322 8
-  text "Keep finished downloads for (days)", 2340, 94 221 186 8
-  edit "", 2341, 284 219 132 11, autohs
-  text "Maximum finished downloads kept", 2344, 94 233 186 8
-  edit "", 2345, 284 231 132 11, autohs
-  text "Fetch queue", 1140, 94 18 322 8
-  text "Files asked of one bot at once", 2348, 94 30 186 8
-  edit "", 2349, 284 28 132 11, autohs
-  text "Wait for a queued request (s)", 2352, 94 42 186 8
-  edit "", 2353, 284 40 132 11, autohs
-  text "Failed requests in a row that pause a bot", 2356, 94 54 186 8
-  edit "", 2357, 284 52 132 11, autohs
-  text "Minutes a failing bot stays paused", 2360, 94 66 186 8
-  edit "", 2361, 284 64 132 11, autohs
-  text "Flood protection", 1141, 94 18 322 8
-  text "Max commands per window", 2364, 94 30 186 8
-  edit "", 2365, 284 28 132 11, autohs
-  text "Request window (seconds)", 2368, 94 42 186 8
-  edit "", 2369, 284 40 132 11, autohs
-  text "Mute duration (seconds)", 2372, 94 54 186 8
-  edit "", 2373, 284 52 132 11, autohs
-  text "Ban after flooding while muted (seconds)", 2376, 94 66 186 8
-  edit "", 2377, 284 64 132 11, autohs
-  text "Temporary (by nick)", 1142, 94 18 322 8
-  text "Flood protection bans a nick by itself; Ignore is the same timed block, started by hand.", 1143, 94 28 322 8
-  list 1580, 94 39 240 44, vsbar
-  button "Lift now", 1581, 340 39 50 13
-  button "Refresh", 1582, 340 55 50 13
-  text "Nick", 1583, 94 89 20 8
-  edit "", 1584, 116 87 90 11, autohs
-  text "Minutes", 1585, 212 89 32 8
-  edit "", 1586, 246 87 30 11, autohs
-  button "Ignore", 1587, 282 86 50 13
-  text "Permanent (by hostmask pattern)", 1144, 94 105 322 8
-  text "Wildcard patterns such as *!*@host.example - the same as ban and unban in the console.", 1145, 94 115 322 8
-  list 1595, 94 126 240 44, vsbar
-  button "Remove", 1596, 340 126 50 13
-  edit "", 1597, 94 174 182 11, autohs
-  button "Add pattern", 1598, 282 173 50 13
-  text "Auto-reply", 1146, 94 18 322 8
-  text "Record one private message per sender every (seconds)", 2380, 94 30 186 8
-  edit "", 2381, 284 28 132 11, autohs
-  text "", 2384, 94 42 186 8
-  edit "", 2385, 284 40 132 11, autohs
-  text "Reply to the same sender once every (seconds)", 2388, 94 54 186 8
-  edit "", 2389, 284 52 132 11, autohs
-  text "Rate limit", 1147, 94 66 322 8
-  text "Most replies to send in one burst window", 2392, 94 78 186 8
-  edit "", 2393, 284 76 132 11, autohs
-  text "How long that burst window is (seconds)", 2396, 94 90 186 8
-  edit "", 2397, 284 88 132 11, autohs
-  text "Access", 1148, 94 18 322 8
-  text "Admin hostmasks", 2400, 94 30 186 8
-  edit "", 2401, 284 28 132 11, autohs
-  text "DCC chat connection mode", 2404, 94 42 186 8
-  combo 2405, 284 40 132 80, drop
-  text "Behaviour", 1149, 94 55 322 8
-  check "Allow admin commands in channel", 2409, 94 65 322 10
-  check "Colour the tags in the admin DCC chat", 2413, 94 76 322 10
-  text "Server", 1150, 94 18 322 8
-  text "Host", 2416, 94 30 186 8
-  edit "", 2417, 284 28 132 11, autohs
-  text "Port", 2420, 94 42 186 8
-  edit "", 2421, 284 40 132 11, autohs
-  text "Other names the dashboard answers to", 2424, 94 54 186 8
-  edit "", 2425, 284 52 132 11, autohs
-  text "Console && browser", 1151, 94 66 322 8
-  text "Enable the Console page (remote admin)", 2428, 94 78 186 8
-  combo 2429, 284 76 132 80, drop
-  check "Open the dashboard in a browser at startup", 2433, 94 89 322 10
-  check "Folder picker on the Settings page", 2437, 94 100 322 10
-  text "What shows in @DCCore", 1152, 94 18 322 8
-  check "Show requests (who asked for what)", 2441, 94 28 322 10
-  check "Show queue positions", 2445, 94 39 322 10
-  check "Show transfers starting, resuming and completing", 2449, 94 50 322 10
-  check "Show failed transfers", 2453, 94 61 322 10
-  check "Show searches and their result counts", 2457, 94 72 322 10
-  text "Debug channel", 1153, 94 85 322 8
-  check "Also send requests, queue positions, starts and searches to the IRC debug channel", 2461, 94 95 322 10
-  text "What @DCCore shows and in which colours, its side panel, font and background, and the bot's nick and pairing are this mIRC's own options, kept in dccore.ini beside the script.", 1615, 94 18 322 24
-  button "@DCCore window options...", 1616, 94 46 100 13
-  text "Debug", 1154, 94 18 322 8
-  check "Debug mode", 2465, 94 28 322 10
-  check "Send debug lines to channel", 2469, 94 39 322 10
-  check "Send debug lines to admin console", 2473, 94 50 322 10
-  text "Logging", 1155, 94 63 322 8
-  text "Time prefix on every console line (strftime; blank = none)", 2476, 94 75 186 8
-  edit "", 2477, 284 73 132 11, autohs
-  text "Log file (blank = none)", 2480, 94 87 186 8
-  edit "", 2481, 284 85 116 11, autohs
-  button "...", 2482, 402 84 14 12
-  text "Start a new log file at (MB)", 2484, 94 99 186 8
-  edit "", 2485, 284 97 132 11, autohs
-  text "Old log files to keep", 2488, 94 111 186 8
-  edit "", 2489, 284 109 132 11, autohs
-  text "Window && project", 1156, 94 123 322 8
-  text "The bot's window on Windows (normal, minimised, hidden)", 2492, 94 135 186 8
-  combo 2493, 284 133 132 80, drop
-  text "Project URL", 2496, 94 148 186 8
-  edit "", 2497, 284 146 132 11, autohs
-  text "Library && lists", 1157, 94 18 157 8
-  text "Temp archive directory", 2500, 94 30 87 8
-  edit "", 2501, 185 28 50 11, autohs
-  button "...", 2502, 237 27 14 12
-  text "Master list directory", 2504, 94 42 87 8
-  edit "", 2505, 185 40 50 11, autohs
-  button "...", 2506, 237 39 14 12
-  text "Fetched files directory", 2508, 94 54 87 8
-  edit "", 2509, 185 52 50 11, autohs
-  button "...", 2510, 237 51 14 12
-  text "Served folders file", 2512, 94 66 87 8
-  edit "", 2513, 185 64 50 11, autohs
-  button "...", 2514, 237 63 14 12
-  text "Served lists file", 2516, 94 78 87 8
-  edit "", 2517, 185 76 50 11, autohs
-  button "...", 2518, 237 75 14 12
-  text "Security", 1158, 94 90 157 8
-  text "Bans file", 2520, 94 102 87 8
-  edit "", 2521, 185 100 50 11, autohs
-  button "...", 2522, 237 99 14 12
-  text "Hard bans file", 2524, 94 114 87 8
-  edit "", 2525, 185 112 50 11, autohs
-  button "...", 2526, 237 111 14 12
-  text "Stats && bots", 1159, 94 126 157 8
-  text "Stats file", 2528, 94 138 87 8
-  edit "", 2529, 185 136 50 11, autohs
-  button "...", 2530, 237 135 14 12
-  text "Known bots file", 2532, 94 150 87 8
-  edit "", 2533, 185 148 50 11, autohs
-  button "...", 2534, 237 147 14 12
-  text "Fetched bot lists file", 2536, 94 162 87 8
-  edit "", 2537, 185 160 50 11, autohs
-  button "...", 2538, 237 159 14 12
-  text "Search && audio", 1160, 94 174 157 8
-  text "Cross-list search index", 2540, 94 186 87 8
-  edit "", 2541, 185 184 50 11, autohs
-  button "...", 2542, 237 183 14 12
-  text "Audio info cache", 2544, 94 198 87 8
-  edit "", 2545, 185 196 50 11, autohs
-  button "...", 2546, 237 195 14 12
-  text "Fetch history", 1161, 259 18 157 8
-  text "Fetch history file", 2548, 259 30 87 8
-  edit "", 2549, 350 28 50 11, autohs
-  button "...", 2550, 402 27 14 12
-  text "Download counts file", 2552, 259 42 87 8
-  edit "", 2553, 350 40 50 11, autohs
-  button "...", 2554, 402 39 14 12
-  text "Transfer record file", 2556, 259 54 87 8
-  edit "", 2557, 350 52 50 11, autohs
-  button "...", 2558, 402 51 14 12
-  text "List build", 1162, 259 66 157 8
-  text "List size file", 2560, 259 78 87 8
-  edit "", 2561, 350 76 50 11, autohs
-  button "...", 2562, 402 75 14 12
-  text "List raw bytes file", 2564, 259 90 87 8
-  edit "", 2565, 350 88 50 11, autohs
-  button "...", 2566, 402 87 14 12
-  text "List rebuild progress file", 2568, 259 102 87 8
-  edit "", 2569, 350 100 50 11, autohs
-  button "...", 2570, 402 99 14 12
-  text "Console && messaging", 1163, 259 114 157 8
-  text "Paired console scripts file", 2572, 259 126 87 8
-  edit "", 2573, 350 124 50 11, autohs
-  button "...", 2574, 402 123 14 12
-  text "On-connect commands file", 2576, 259 138 87 8
-  edit "", 2577, 350 136 50 11, autohs
-  button "...", 2578, 402 135 14 12
-  text "Operator notices file", 2580, 259 150 87 8
-  edit "", 2581, 350 148 50 11, autohs
-  button "...", 2582, 402 147 14 12
-  text "Private messages file", 2584, 259 162 87 8
-  edit "", 2585, 350 160 50 11, autohs
-  button "...", 2586, 402 159 14 12
-  text "DCC queue file", 2588, 259 174 87 8
-  edit "", 2589, 350 172 50 11, autohs
-  button "...", 2590, 402 171 14 12
+  tab "mIRC", 1007
+  radio "", 1020, 10 24 88 15, push group
+  radio "", 1021, 10 41 88 15, push
+  radio "", 1022, 10 58 88 15, push
+  radio "", 1023, 10 75 88 15, push
+  radio "", 1024, 10 92 88 15, push
+  radio "", 1025, 10 109 88 15, push
+  text "", 1012, 110 314 370 24
+  text "", 1013, 10 342 310 8
+  text "", 1018, 10 351 310 10
+  button "Reload", 1017, 331 346 36 13
+  button "Apply", 1014, 370 346 36 13
+  button "OK", 1015, 409 346 36 13
+  button "Cancel", 1016, 448 346 36 13, cancel
+  box "Connection", 1100, 110 38 370 106
+  text "IRC server", 2000, 116 48 358 8
+  edit "", 2001, 116 57 358 11, autohs
+  text "Port", 2004, 116 71 358 8
+  edit "", 2005, 116 80 358 11, autohs
+  text "Nickname", 2008, 116 94 358 8
+  edit "", 2009, 116 103 358 11, autohs
+  text "Alt nickname", 2012, 116 117 358 8
+  edit "", 2013, 116 126 358 11, autohs
+  box "Reconnection", 1101, 110 148 370 60
+  text "Rejoin attempts after a kick (0 = never)", 2016, 116 158 358 8
+  edit "", 2017, 116 167 358 11, autohs
+  text "Check the on-connect commands worked every (minutes, 0 = never)", 2020, 116 181 358 8
+  edit "", 2021, 116 190 358 11, autohs
+  box "On connect", 1102, 110 212 370 91
+  text "", 1500, 116 222 358 16
+  edit "", 1501, 116 240 358 40, multi return autohs autovs hsbar vsbar
+  text "Seconds between commands", 1502, 116 285 120 8
+  edit "", 1503, 240 283 24 11, autohs
+  button "Unlock", 1506, 272 282 44 13
+  button "Resend now", 1505, 324 282 56 13
+  text "The on/off switches used most, here from their own pages so there is one place to check.", 1103, 110 38 370 8
+  box "Open when mIRC starts (minimised)", 1104, 110 53 370 47
+  check "DCCore window", 2025, 116 63 358 10
+  check "Chat", 2029, 116 74 358 10
+  check "Downloads", 2033, 116 85 358 10
+  box "Connection", 1105, 110 104 370 25
+  check "Reconnect and log in to the bot by itself when it comes back", 2037, 116 114 358 10
+  box "Sharing && search", 1106, 110 133 370 36
+  check "Answer @find searches", 2041, 116 143 358 10
+  check "Announce finished transfers in the channel", 2045, 116 154 358 10
+  box "Messaging && dashboard", 1107, 110 173 370 47
+  check "Keep private messages (off: keep none, reply once instead)", 2049, 116 183 358 10
+  check "Enable web dashboard", 2053, 116 194 358 10
+  check "Answer CTCP VERSION", 2057, 116 205 358 10
+  box "Updates", 1108, 110 224 370 25
+  check "Tell me when a new version is out", 2061, 116 234 358 10
+  box "Admin channels", 1109, 110 38 370 56
+  text "A separate channel the bot sends its own diagnostic lines to - never one it also serves files in.", 1110, 116 48 358 16
+  text "Debug channel", 2064, 116 67 358 8
+  edit "", 2065, 116 76 358 11, autohs
+  box "Serving channels", 1111, 110 98 370 213
+  text "Which channels the bot joins and sits in. What each one serves - which list, which folders, Normal, Silent or Request only - is set under Sharing > Lists and Channel bindings.", 1112, 116 108 358 24
+  list 1520, 116 135 250 168, vsbar
+  edit "", 1521, 372 135 102 11, autohs
+  button "Add channel", 1522, 372 149 56 13
+  button "Remove", 1523, 372 165 56 13
+  box "Admin", 1113, 110 38 370 37
+  text "Admin nick(s)", 2068, 116 48 358 8
+  edit "", 2069, 116 57 358 11, autohs
+  box "What the channel sees", 1114, 110 38 370 57
+  text "Colour theme", 2072, 116 48 358 8
+  combo 2073, 116 57 120 80, drop
+  button "Preview", 1610, 116 71 50 13
+  text "Draws the sample advert and notice in @DCCore-preview with the colours chosen here, before they are saved.", 1611, 172 71 302 16
+  box "Custom override - surface colours", 1115, 110 99 370 102
+  text "Set any of these and it replaces that one role in the theme above. Keep previous keeps whatever background the segment before left.", 1116, 116 109 358 16
+  text "Border colour", 2076, 116 128 358 8
+  combo 2077, 116 137 80 120, drop
+  combo 2078, 200 137 80 120, drop
+  text "Separator colour", 2080, 116 151 358 8
+  combo 2081, 116 160 80 120, drop
+  combo 2082, 200 160 80 120, drop
+  text "Text box colour", 2084, 116 174 358 8
+  combo 2085, 116 183 80 120, drop
+  combo 2086, 200 183 80 120, drop
+  box "Custom override - text colours", 1117, 110 205 370 83
+  text "Value colour", 2088, 116 215 358 8
+  combo 2089, 116 224 80 120, drop
+  combo 2090, 200 224 80 120, drop
+  text "Alert colour", 2092, 116 238 358 8
+  combo 2093, 116 247 80 120, drop
+  combo 2094, 200 247 80 120, drop
+  text "Accent colour", 2096, 116 261 358 8
+  combo 2097, 116 270 80 120, drop
+  combo 2098, 200 270 80 120, drop
+  box "Advert", 1118, 110 38 370 37
+  text "Advert interval (seconds)", 2100, 116 48 358 8
+  edit "", 2101, 116 57 358 11, autohs
+  box "Broadcast search", 1119, 110 79 370 60
+  text "Broadcast search channel", 2104, 116 89 358 8
+  edit "", 2105, 116 98 358 11, autohs
+  text "Broadcast search cooldown (seconds)", 2108, 116 112 358 8
+  edit "", 2109, 116 121 358 11, autohs
+  box "Timing", 1120, 110 143 370 60
+  text "Message delay (seconds)", 2112, 116 153 358 8
+  edit "", 2113, 116 162 358 11, autohs
+  text "Debug message delay (seconds)", 2116, 116 176 358 8
+  edit "", 2117, 116 185 358 11, autohs
+  text "What each list shares: a name, its folders, and whether it is primary (it answers a private message, and any channel bound to none). Add list and Edit open a window for one list; Apply sends the whole set to the bot.", 1121, 110 38 370 24
+  box "Lists", 1122, 110 69 370 99
+  list 1540, 116 79 358 64, hsbar vsbar
+  button "Add list", 1551, 116 147 50 13
+  button "Edit", 1554, 169 147 46 13
+  button "Delete", 1555, 218 147 46 13
+  button "Refresh", 1557, 267 147 46 13
+  text "Which list answers in each channel, and that channel's mode. A change in a menu is kept at once; Apply sends the set to the bot.", 1123, 110 38 370 16
+  box "Channel bindings", 1124, 110 61 370 229
+  text "", 1700, 116 73 98 8
+  combo 1701, 218 71 84 80, drop
+  combo 1702, 306 71 84 60, drop
+  button "Remove", 1703, 400 70 56 13
+  text "", 1704, 116 86 98 8
+  combo 1705, 218 84 84 80, drop
+  combo 1706, 306 84 84 60, drop
+  button "Remove", 1707, 400 83 56 13
+  text "", 1708, 116 99 98 8
+  combo 1709, 218 97 84 80, drop
+  combo 1710, 306 97 84 60, drop
+  button "Remove", 1711, 400 96 56 13
+  text "", 1712, 116 112 98 8
+  combo 1713, 218 110 84 80, drop
+  combo 1714, 306 110 84 60, drop
+  button "Remove", 1715, 400 109 56 13
+  text "", 1716, 116 125 98 8
+  combo 1717, 218 123 84 80, drop
+  combo 1718, 306 123 84 60, drop
+  button "Remove", 1719, 400 122 56 13
+  text "", 1720, 116 138 98 8
+  combo 1721, 218 136 84 80, drop
+  combo 1722, 306 136 84 60, drop
+  button "Remove", 1723, 400 135 56 13
+  text "", 1724, 116 151 98 8
+  combo 1725, 218 149 84 80, drop
+  combo 1726, 306 149 84 60, drop
+  button "Remove", 1727, 400 148 56 13
+  text "", 1728, 116 164 98 8
+  combo 1729, 218 162 84 80, drop
+  combo 1730, 306 162 84 60, drop
+  button "Remove", 1731, 400 161 56 13
+  text "", 1732, 116 177 98 8
+  combo 1733, 218 175 84 80, drop
+  combo 1734, 306 175 84 60, drop
+  button "Remove", 1735, 400 174 56 13
+  text "", 1736, 116 190 98 8
+  combo 1737, 218 188 84 80, drop
+  combo 1738, 306 188 84 60, drop
+  button "Remove", 1739, 400 187 56 13
+  text "", 1740, 116 203 98 8
+  combo 1741, 218 201 84 80, drop
+  combo 1742, 306 201 84 60, drop
+  button "Remove", 1743, 400 200 56 13
+  text "", 1744, 116 216 98 8
+  combo 1745, 218 214 84 80, drop
+  combo 1746, 306 214 84 60, drop
+  button "Remove", 1747, 400 213 56 13
+  text "", 1748, 116 229 98 8
+  combo 1749, 218 227 84 80, drop
+  combo 1750, 306 227 84 60, drop
+  button "Remove", 1751, 400 226 56 13
+  text "", 1752, 116 242 98 8
+  combo 1753, 218 240 84 80, drop
+  combo 1754, 306 240 84 60, drop
+  button "Remove", 1755, 400 239 56 13
+  text "", 1756, 116 255 98 8
+  combo 1757, 218 253 84 80, drop
+  combo 1758, 306 253 84 60, drop
+  button "Remove", 1759, 400 252 56 13
+  scroll "", 1774, 463 71 11 194, range 0 0 vertical
+  edit "", 1770, 116 270 98 11, autohs
+  combo 1771, 218 270 84 80, drop
+  combo 1772, 306 270 84 60, drop
+  button "Add", 1773, 400 269 56 13
+  button "Refresh", 1567, 110 294 46 13
+  text "", 1568, 162 296 200 8
+  box "Library", 1125, 110 38 181 83
+  text "List base name", 2120, 116 48 169 8
+  edit "", 2121, 116 57 169 11, autohs
+  text "List delivery format", 2124, 116 71 169 8
+  combo 2125, 116 80 120 80, drop
+  text "File types to leave out of the list", 2128, 116 94 169 8
+  edit "", 2129, 116 103 169 11, autohs
+  box "Film && series", 1126, 110 125 181 79
+  check "Separate film and series list", 2133, 116 135 169 10
+  text "File types that go in the film list", 2136, 116 146 169 8
+  edit "", 2137, 116 155 169 11, autohs
+  text "File types that follow a film into its list (subtitles, .nfo, .sfv)", 2140, 116 169 169 16
+  edit "", 2141, 116 186 169 11, autohs
+  box "!rar packing", 1127, 299 38 181 133
+  check "Enable !rar folder packing", 2145, 305 48 169 10
+  text "File types a folder needs to be !rar-packable", 2148, 305 59 169 16
+  edit "", 2149, 305 76 169 11, autohs
+  text "RAR binary path", 2152, 305 90 169 8
+  edit "", 2153, 305 99 153 11, autohs
+  button "...", 2154, 460 98 14 12
+  text "Largest folder !rar will pack (0 = no limit) (MB)", 2156, 305 113 169 16
+  edit "", 2157, 305 130 169 11, autohs
+  text "RAR pack timeout (seconds)", 2160, 305 144 169 8
+  edit "", 2161, 305 153 169 11, autohs
+  box "List banner", 1128, 299 175 181 71
+  text "List banner file", 2164, 305 185 169 8
+  edit "", 2165, 305 194 153 11, autohs
+  button "...", 2166, 460 193 14 12
+  text "List banner size limit (KB)", 2168, 305 208 169 8
+  edit "", 2169, 305 217 169 11, autohs
+  check "Length and quality in the list", 2173, 305 231 169 10
+  box "Automatic rebuild", 1129, 110 38 370 83
+  text "Rebuild the list automatically", 2176, 116 48 358 8
+  edit "", 2177, 116 57 358 11, autohs
+  text "List rebuild hard cap (seconds, 0 = none)", 2180, 116 71 358 8
+  edit "", 2181, 116 80 358 11, autohs
+  text "Give up if a rebuild reports nothing for (seconds)", 2184, 116 94 358 8
+  edit "", 2185, 116 103 358 11, autohs
+  box "Performance", 1130, 110 125 370 83
+  text "Time limit for reading audio files (no longer used)", 2188, 116 135 358 8
+  edit "", 2189, 116 144 358 11, autohs
+  text "Audio files read at once", 2192, 116 158 358 8
+  edit "", 2193, 116 167 358 11, autohs
+  text "Folders scanned at once", 2196, 116 181 358 8
+  edit "", 2197, 116 190 358 11, autohs
+  box "Speed limits", 1131, 110 38 181 87
+  text "Upload is your sends to people; download is everything the bot fetches. Each is one limit shared by all transfers that way.", 1132, 116 48 169 24
+  text "Max upload speed (KB/s, 0 = no limit)", 2200, 116 75 169 8
+  edit "", 2201, 116 84 169 11, autohs
+  text "Max download speed (KB/s, 0 = no limit)", 2204, 116 98 169 8
+  edit "", 2205, 116 107 169 11, autohs
+  box "Buffers && packet size", 1133, 110 129 181 68
+  text "Packet size", 2208, 116 139 169 8
+  combo 2209, 116 148 120 80, drop
+  text "Socket send buffer (0 = the default for your platform) (KB)", 2212, 116 162 169 16
+  edit "", 2213, 116 179 169 11, autohs
+  box "Ports && reliability", 1134, 299 38 181 145
+  text "DCC port range start", 2216, 305 48 169 8
+  edit "", 2217, 305 57 169 11, autohs
+  text "DCC port range end", 2220, 305 71 169 8
+  edit "", 2221, 305 80 169 11, autohs
+  text "Wait for the receiver to connect (seconds)", 2224, 305 94 169 16
+  edit "", 2225, 305 111 169 11, autohs
+  text "Max send failures", 2228, 305 125 169 8
+  edit "", 2229, 305 134 169 11, autohs
+  text "Failed sends in a day before a nick is paused (0 = off)", 2232, 305 148 169 16
+  edit "", 2233, 305 165 169 11, autohs
+  box "Sending", 1135, 110 38 181 129
+  text "Max simultaneous sends", 2236, 116 48 169 8
+  edit "", 2237, 116 57 169 11, autohs
+  text "One large file from (MB, 0 = off)", 2240, 116 71 169 8
+  edit "", 2241, 116 80 169 11, autohs
+  text "Stop sends slower than (KB/s, 0 = off)", 2244, 116 94 169 8
+  edit "", 2245, 116 103 169 11, autohs
+  text "Max queue per user", 2248, 116 117 169 8
+  edit "", 2249, 116 126 169 11, autohs
+  text "Max global queue", 2252, 116 140 169 8
+  edit "", 2253, 116 149 169 11, autohs
+  box "Search (@find)", 1136, 299 38 181 98
+  text "How much the bot says back once it answers (the on/off switch is under General > General Settings).", 1137, 305 48 169 24
+  text "Max search results", 2256, 305 75 169 8
+  edit "", 2257, 305 84 169 11, autohs
+  check "Name the folder in search replies", 2261, 305 98 169 10
+  text "Longest folder shown (characters)", 2264, 305 109 169 8
+  edit "", 2265, 305 118 169 11, autohs
+  box "During a rebuild", 1138, 299 140 181 67
+  check "Pause sharing during !update", 2269, 305 150 169 10
+  check "Pause for the whole rebuild", 2273, 305 161 169 10
+  text "Seconds a rehash waits for transfers to finish", 2276, 305 172 169 16
+  edit "", 2277, 305 189 169 11, autohs
+  box "Auto-grab", 1139, 110 38 370 94
+  check "Grab the lists of bots you have no list from", 2281, 116 48 358 10
+  text "Minutes between automatic grabs", 2284, 116 59 358 8
+  edit "", 2285, 116 68 358 11, autohs
+  text "Skip bots with fewer files than", 2288, 116 82 358 8
+  edit "", 2289, 116 91 358 11, autohs
+  text "Skip bots slower than (KB/s)", 2292, 116 105 358 8
+  edit "", 2293, 116 114 358 11, autohs
+  box "Discover lists", 1140, 110 136 370 48
+  check "Discover a bot's other channel-bound lists", 2297, 116 146 358 10
+  text "Hold stable this long first (seconds)", 2300, 116 157 358 8
+  edit "", 2301, 116 166 358 11, autohs
+  box "Slots && re-fetch", 1141, 110 38 181 102
+  text "Max fetch slots", 2304, 116 48 169 8
+  edit "", 2305, 116 57 169 11, autohs
+  check "Re-fetch when a bot has a new list", 2309, 116 71 169 10
+  text "Least time between re-fetches of one bot (hours)", 2312, 116 82 169 16
+  edit "", 2313, 116 99 169 11, autohs
+  text "Most lists to re-fetch in one sweep", 2316, 116 113 169 8
+  edit "", 2317, 116 122 169 11, autohs
+  box "Timeouts", 1142, 110 144 181 161
+  text "Wait for a reply to a fetch request (seconds)", 2320, 116 154 169 16
+  edit "", 2321, 116 171 169 11, autohs
+  text "Fetch transfer timeout (seconds)", 2324, 116 185 169 8
+  edit "", 2325, 116 194 169 11, autohs
+  text "Wait for a reply to a folder (.rar) request (seconds)", 2328, 116 208 169 16
+  edit "", 2329, 116 225 169 11, autohs
+  text "...from a bot that publishes no .rar list (seconds)", 2332, 116 239 169 16
+  edit "", 2333, 116 256 169 11, autohs
+  text "Folder (.rar) fetch transfer timeout (seconds)", 2336, 116 270 169 16
+  edit "", 2337, 116 287 169 11, autohs
+  box "Size limits", 1143, 299 38 181 114
+  text "Max fetch file size (MB)", 2340, 305 48 169 8
+  edit "", 2341, 305 57 169 11, autohs
+  text "Max folder (.rar) fetch size (MB)", 2344, 305 71 169 8
+  edit "", 2345, 305 80 169 11, autohs
+  text "Max fetched master-list zip size (MB)", 2348, 305 94 169 8
+  edit "", 2349, 305 103 169 11, autohs
+  text "Largest list text accepted from a peer (MB)", 2352, 305 117 169 16
+  edit "", 2353, 305 134 169 11, autohs
+  box "History", 1144, 299 156 181 60
+  text "Keep finished downloads for (days)", 2356, 305 166 169 8
+  edit "", 2357, 305 175 169 11, autohs
+  text "Maximum finished downloads kept", 2360, 305 189 169 8
+  edit "", 2361, 305 198 169 11, autohs
+  box "Fetch queue", 1145, 110 38 370 106
+  text "Files asked of one bot at once", 2364, 116 48 358 8
+  edit "", 2365, 116 57 358 11, autohs
+  text "Wait for a queued request (s)", 2368, 116 71 358 8
+  edit "", 2369, 116 80 358 11, autohs
+  text "Failed requests in a row that pause a bot", 2372, 116 94 358 8
+  edit "", 2373, 116 103 358 11, autohs
+  text "Minutes a failing bot stays paused", 2376, 116 117 358 8
+  edit "", 2377, 116 126 358 11, autohs
+  box "List requests", 1146, 110 148 370 37
+  text "Tag on your list requests", 2380, 116 158 358 8
+  edit "", 2381, 116 167 358 11, autohs
+  box "Flood protection", 1147, 110 38 370 106
+  text "Max commands per window", 2384, 116 48 358 8
+  edit "", 2385, 116 57 358 11, autohs
+  text "Request window (seconds)", 2388, 116 71 358 8
+  edit "", 2389, 116 80 358 11, autohs
+  text "Mute duration (seconds)", 2392, 116 94 358 8
+  edit "", 2393, 116 103 358 11, autohs
+  text "Ban after flooding while muted (seconds)", 2396, 116 117 358 8
+  edit "", 2397, 116 126 358 11, autohs
+  box "Temporary (by nick)", 1148, 110 38 370 121
+  text "Flood protection bans a nick by itself; Ignore is the same timed block, started by hand.", 1149, 116 48 358 8
+  list 1580, 116 59 358 60, vsbar
+  text "Nick", 1583, 116 125 20 8
+  edit "", 1584, 138 123 90 11, autohs
+  text "Minutes", 1585, 234 125 32 8
+  edit "", 1586, 268 123 30 11, autohs
+  button "Ignore", 1587, 304 122 50 13
+  button "Lift now", 1581, 116 138 50 13
+  button "Refresh", 1582, 169 138 46 13
+  box "Permanent (by hostmask pattern)", 1150, 110 163 370 129
+  text "Wildcard patterns such as *!*@host.example - the same as ban and unban in the console.", 1151, 116 173 358 16
+  list 1595, 116 192 358 60, vsbar
+  edit "", 1597, 116 256 250 11, autohs
+  button "Add pattern", 1598, 370 255 56 13
+  button "Remove", 1596, 116 271 50 13
+  box "Auto-reply", 1152, 110 38 370 83
+  text "Record one private message per sender every (seconds)", 2400, 116 48 358 8
+  edit "", 2401, 116 57 358 11, autohs
+  text "", 2404, 116 71 358 8
+  edit "", 2405, 116 80 358 11, autohs
+  text "Reply to the same sender once every (seconds)", 2408, 116 94 358 8
+  edit "", 2409, 116 103 358 11, autohs
+  box "Rate limit", 1153, 110 125 370 60
+  text "Most replies to send in one burst window", 2412, 116 135 358 8
+  edit "", 2413, 116 144 358 11, autohs
+  text "How long that burst window is (seconds)", 2416, 116 158 358 8
+  edit "", 2417, 116 167 358 11, autohs
+  box "Access", 1154, 110 38 370 60
+  text "Admin hostmasks", 2420, 116 48 358 8
+  edit "", 2421, 116 57 358 11, autohs
+  text "DCC chat connection mode", 2424, 116 71 358 8
+  combo 2425, 116 80 120 80, drop
+  box "Behaviour", 1155, 110 102 370 36
+  check "Allow admin commands in channel", 2429, 116 112 358 10
+  check "Colour the tags in the admin DCC chat", 2433, 116 123 358 10
+  box "Server", 1156, 110 38 370 83
+  text "Host", 2436, 116 48 358 8
+  edit "", 2437, 116 57 358 11, autohs
+  text "Port", 2440, 116 71 358 8
+  edit "", 2441, 116 80 358 11, autohs
+  text "Other names the dashboard answers to", 2444, 116 94 358 8
+  edit "", 2445, 116 103 358 11, autohs
+  box "Console && browser", 1157, 110 125 370 59
+  text "Enable the Console page (remote admin)", 2448, 116 135 358 8
+  combo 2449, 116 144 120 80, drop
+  check "Open the dashboard in a browser at startup", 2453, 116 158 358 10
+  check "Folder picker on the Settings page", 2457, 116 169 358 10
+  box "What shows in @DCCore", 1158, 110 38 370 69
+  check "Show requests (who asked for what)", 2461, 116 48 358 10
+  check "Show queue positions", 2465, 116 59 358 10
+  check "Show transfers starting, resuming and completing", 2469, 116 70 358 10
+  check "Show failed transfers", 2473, 116 81 358 10
+  check "Show searches and their result counts", 2477, 116 92 358 10
+  box "Debug channel", 1159, 110 111 370 25
+  check "Also send requests, queue positions, starts and searches to the IRC debug channel", 2481, 116 121 358 10
+  box "Debug", 1160, 110 38 370 47
+  check "Debug mode", 2485, 116 48 358 10
+  check "Send debug lines to channel", 2489, 116 59 358 10
+  check "Send debug lines to admin console", 2493, 116 70 358 10
+  box "Logging", 1161, 110 89 370 106
+  text "Time prefix on every console line (strftime; blank = none)", 2496, 116 99 358 8
+  edit "", 2497, 116 108 358 11, autohs
+  text "Log file (blank = none)", 2500, 116 122 358 8
+  edit "", 2501, 116 131 342 11, autohs
+  button "...", 2502, 460 130 14 12
+  text "Start a new log file at (MB)", 2504, 116 145 358 8
+  edit "", 2505, 116 154 358 11, autohs
+  text "Old log files to keep", 2508, 116 168 358 8
+  edit "", 2509, 116 177 358 11, autohs
+  box "Window && project", 1162, 110 199 370 60
+  text "The bot's window on Windows (normal, minimised, hidden)", 2512, 116 209 358 8
+  combo 2513, 116 218 120 80, drop
+  text "Project URL", 2516, 116 232 358 8
+  edit "", 2517, 116 241 358 11, autohs
+  box "Library && lists", 1163, 110 38 181 90
+  text "Temp archive directory", 2520, 116 50 81 16
+  edit "", 2521, 201 48 68 11, autohs
+  button "...", 2522, 271 47 14 12
+  text "Master list directory", 2524, 116 70 81 8
+  edit "", 2525, 201 68 68 11, autohs
+  button "...", 2526, 271 67 14 12
+  text "Fetched files directory", 2528, 116 82 81 16
+  edit "", 2529, 201 80 68 11, autohs
+  button "...", 2530, 271 79 14 12
+  text "Served folders file", 2532, 116 102 81 8
+  edit "", 2533, 201 100 68 11, autohs
+  button "...", 2534, 271 99 14 12
+  text "Served lists file", 2536, 116 114 81 8
+  edit "", 2537, 201 112 68 11, autohs
+  button "...", 2538, 271 111 14 12
+  box "Security", 1164, 110 132 181 38
+  text "Bans file", 2540, 116 144 81 8
+  edit "", 2541, 201 142 68 11, autohs
+  button "...", 2542, 271 141 14 12
+  text "Hard bans file", 2544, 116 156 81 8
+  edit "", 2545, 201 154 68 11, autohs
+  button "...", 2546, 271 153 14 12
+  box "Stats && bots", 1165, 110 174 181 50
+  text "Stats file", 2548, 116 186 81 8
+  edit "", 2549, 201 184 68 11, autohs
+  button "...", 2550, 271 183 14 12
+  text "Known bots file", 2552, 116 198 81 8
+  edit "", 2553, 201 196 68 11, autohs
+  button "...", 2554, 271 195 14 12
+  text "Fetched bot lists file", 2556, 116 210 81 8
+  edit "", 2557, 201 208 68 11, autohs
+  button "...", 2558, 271 207 14 12
+  box "Search && audio", 1166, 110 228 181 46
+  text "Cross-list search index", 2560, 116 240 81 16
+  edit "", 2561, 201 238 68 11, autohs
+  button "...", 2562, 271 237 14 12
+  text "Audio info cache", 2564, 116 260 81 8
+  edit "", 2565, 201 258 68 11, autohs
+  button "...", 2566, 271 257 14 12
+  box "Fetch history", 1167, 299 38 181 58
+  text "Fetch history file", 2568, 305 50 81 8
+  edit "", 2569, 390 48 68 11, autohs
+  button "...", 2570, 460 47 14 12
+  text "Download counts file", 2572, 305 62 81 16
+  edit "", 2573, 390 60 68 11, autohs
+  button "...", 2574, 460 59 14 12
+  text "Transfer record file", 2576, 305 82 81 8
+  edit "", 2577, 390 80 68 11, autohs
+  button "...", 2578, 460 79 14 12
+  box "List build", 1168, 299 100 181 58
+  text "List size file", 2580, 305 112 81 8
+  edit "", 2581, 390 110 68 11, autohs
+  button "...", 2582, 460 109 14 12
+  text "List raw bytes file", 2584, 305 124 81 8
+  edit "", 2585, 390 122 68 11, autohs
+  button "...", 2586, 460 121 14 12
+  text "List rebuild progress file", 2588, 305 136 81 16
+  edit "", 2589, 390 134 68 11, autohs
+  button "...", 2590, 460 133 14 12
+  box "Console && messaging", 1169, 299 162 181 106
+  text "Paired console scripts file", 2592, 305 174 81 16
+  edit "", 2593, 390 172 68 11, autohs
+  button "...", 2594, 460 171 14 12
+  text "On-connect commands file", 2596, 305 194 81 16
+  edit "", 2597, 390 192 68 11, autohs
+  button "...", 2598, 460 191 14 12
+  text "Operator notices file", 2600, 305 214 81 16
+  edit "", 2601, 390 212 68 11, autohs
+  button "...", 2602, 460 211 14 12
+  text "Private messages file", 2604, 305 234 81 16
+  edit "", 2605, 390 232 68 11, autohs
+  button "...", 2606, 460 231 14 12
+  text "DCC queue file", 2608, 305 254 81 8
+  edit "", 2609, 390 252 68 11, autohs
+  button "...", 2610, 460 251 14 12
+  box "Show in @DCCore", 1170, 110 38 370 133
+  check "Requests (who asked for what)", 1620, 116 49 176 10
+  combo 1621, 304 48 96 80, drop
+  check "Queue positions", 1622, 116 62 176 10
+  combo 1623, 304 61 96 80, drop
+  check "Sends: starting, resuming, done", 1624, 116 75 176 10
+  combo 1625, 304 74 96 80, drop
+  check "Failed transfers", 1626, 116 88 176 10
+  combo 1627, 304 87 96 80, drop
+  check "Searches and result counts", 1628, 116 101 176 10
+  combo 1629, 304 100 96 80, drop
+  check "Joins, parts, quits of queued users", 1630, 116 114 176 10
+  combo 1631, 304 113 96 80, drop
+  check "Bans, mutes, floods", 1632, 116 127 176 10
+  combo 1633, 304 126 96 80, drop
+  check "Other log lines", 1634, 116 140 176 10
+  combo 1635, 304 139 96 80, drop
+  text "Status every", 1636, 116 154 60 8
+  edit "", 1637, 178 152 24 11, autohs
+  text "min, 0 = off", 1638, 210 154 70 8
+  box "Colours", 1171, 110 175 370 122
+  text "Search text is the term searched for. Each of the three can be the same as its line; Search text can be the same as File names, and Nicks can be per nick, a colour of its own from the name.", 1172, 116 185 358 24
+  text "File names", 1660, 116 214 110 8
+  combo 1640, 230 212 96 80, drop
+  text "Console replies", 1661, 116 227 110 8
+  combo 1641, 230 225 96 80, drop
+  text "Panel headings", 1662, 116 240 110 8
+  combo 1642, 230 238 96 80, drop
+  text "Search text", 1663, 116 253 110 8
+  combo 1643, 230 251 96 80, drop
+  text "Nicks", 1664, 116 266 110 8
+  combo 1644, 230 264 96 80, drop
+  text "Channels", 1665, 116 279 110 8
+  combo 1645, 230 277 96 80, drop
+  box "Window", 1173, 110 38 370 99
+  check "Side panel: slots, queue and totals", 2613, 116 48 358 10
+  check "Slots, queue and speed in the title bar", 2617, 116 59 358 10
+  check "Console replies in a separate window", 2621, 116 70 358 10
+  check "Beep on a failed transfer", 2625, 116 81 358 10
+  check "Fixed-width font, size", 1670, 116 93 110 10
+  edit "", 1671, 250 92 24 11, autohs
+  text "Background", 1672, 116 107 120 8
+  combo 1673, 250 105 96 80, drop
+  text "Finished downloads to show", 1674, 116 120 120 8
+  edit "", 1675, 250 118 24 11, autohs
+  box "Theme", 1174, 110 141 370 78
+  text "Dark colours for the script's windows - the control panel, the list window, the download queues - and an icon beside each of the script's menu items and pages. Follow mIRC takes mIRC's own dark mode (7.79 and later). The control panel takes a change the next time it opens; /dccore theme says what applies and why.", 1175, 116 151 358 32
+  text "Theme", 1690, 116 188 120 8
+  combo 1691, 250 186 96 80, drop
+  check "Icons in the menus and the control panel's page list", 1692, 116 201 358 10
+  box "Settings window", 1176, 110 223 370 52
+  text "Drawn with DCX (scripts\mirc\dcx) when this mIRC can load it, with mIRC's own controls when not - /dccore dcx says which and why. Takes effect the next time the window opens.", 1177, 116 233 358 24
+  check "Use the built-in settings window, not DCX", 2629, 116 260 358 10
+  box "Bot", 1178, 110 38 370 78
+  text "The bot this mIRC is paired with. Reconnecting and logging in by itself when it comes back is under General > General Settings.", 1179, 116 48 358 16
+  text "Bot nick", 1680, 116 69 36 8
+  edit "", 1681, 156 67 80 11, autohs
+  text "", 1682, 242 69 232 8
+  button "Pair again...", 1683, 116 81 56 13
+  button "Forget token", 1684, 175 81 56 13
+  check "Console feed on (also requests and sends - not just status)", 1685, 116 98 358 10
+  box "DCCore Chat (public)", 1180, 110 38 370 36
+  check "Listen on every channel the bot is in, not only the ticked ones", 2633, 116 48 358 10
+  check "Open the chat window when a line arrives", 2637, 116 59 358 10
+  box "History", 1181, 110 78 370 79
+  text "Whole months of the history file are deleted: those that ended longer ago than the days, then the oldest while the folder is over the size. 0 is no limit.", 1182, 116 88 358 16
+  text "Keep for (days)", 2640, 116 107 358 8
+  edit "", 2641, 116 116 358 11, autohs
+  text "At most (MB)", 2644, 116 130 358 8
+  edit "", 2645, 116 139 358 11, autohs
 }
 alias dccore.sw.data {
   if ($hget(dccore.swm)) { hfree dccore.swm }
   hmake dccore.swm 100
-  hadd dccore.swm groups 6
+  hadd dccore.swm groups 7
   hadd dccore.swm slots 6
+  hadd dccore.swm size 488 364
+  hadd dccore.swm dcxpages 900 10 24 88 286
+  hadd dccore.swm dcxtitle 901 110 26 370 10
+  hadd dccore.swm dcxtabs 800 3 2 14 2 6
+  hadd dccore.swm dcxbody 830 4 16 480 324
+  hadd dccore.swm dcxcorner.o 0,7 0,4 1,4 1,3 2,3 2,2 3,2 3,1 4,1 4,0
+  hadd dccore.swm dcxcorner.i 1,7 1,4 2,4 2,3 3,3 3,2 4,2 4,1
+  hadd dccore.swm dcxback 840 8 3 14 12
+  hadd dccore.swm dcxcrumb 843 26 5 22 9
+  hadd dccore.swm home.n 2
+  hadd dccore.swm home.1 844 98 28 140 24
+  hadd dccore.swm home.2 848 250 28 140 24
+  hadd dccore.swm lvs 1520 1540 1580 1595
   hadd dccore.swm g.1 General
   hadd dccore.swm g.1.pages 1 2 3 4 5 6
   hadd dccore.swm g.2 Sharing
-  hadd dccore.swm g.2.pages 7 8 9 10 11
+  hadd dccore.swm g.2.pages 7 8 9 10 11 12
   hadd dccore.swm g.3 Downloads
-  hadd dccore.swm g.3.pages 12 13 14
+  hadd dccore.swm g.3.pages 13 14 15
   hadd dccore.swm g.4 Security
-  hadd dccore.swm g.4.pages 15 16 17 18
+  hadd dccore.swm g.4.pages 16 17 18 19
   hadd dccore.swm g.5 Dashboard & Console
-  hadd dccore.swm g.5.pages 19 20 21
+  hadd dccore.swm g.5.pages 20 21
   hadd dccore.swm g.6 Advanced
   hadd dccore.swm g.6.pages 22 23
-  hadd dccore.swm pages 23
+  hadd dccore.swm g.7 mIRC
+  hadd dccore.swm g.7.pages 24 25 26 27
+  hadd dccore.swm home.1.t Bot
+  hadd dccore.swm home.1.s The bot's settings, sent with Apply
+  hadd dccore.swm home.2.t mIRC
+  hadd dccore.swm home.2.s This mIRC's own: window, link, chat
+  hadd dccore.swm home.f.n 4
+  hadd dccore.swm home.f.ids 300-345
+  hadd dccore.swm home.f.1 300 301 12 66 228 46 18 62 15 9 kv Bot
+  hadd dccore.swm home.f.1.n 4
+  hadd dccore.swm home.f.1.r.1 302 303 18 72 52 8 74 72 160 8 Nick
+  hadd dccore.swm home.f.1.r.2 304 305 18 81 52 8 74 81 160 8 Network
+  hadd dccore.swm home.f.1.r.3 306 307 18 90 52 8 74 90 160 8 Up since
+  hadd dccore.swm home.f.1.r.4 308 309 18 99 52 8 74 99 160 8 Connection
+  hadd dccore.swm home.f.2 310 311 248 66 228 64 254 62 50 9 full Sending
+  hadd dccore.swm home.f.2.n 6
+  hadd dccore.swm home.f.2.r.1 312 0 254 72 216 8 0 0 0 0
+  hadd dccore.swm home.f.2.r.2 313 0 254 81 216 8 0 0 0 0
+  hadd dccore.swm home.f.2.r.3 314 0 254 90 216 8 0 0 0 0
+  hadd dccore.swm home.f.2.r.4 315 0 254 99 216 8 0 0 0 0
+  hadd dccore.swm home.f.2.r.5 316 0 254 108 216 8 0 0 0 0
+  hadd dccore.swm home.f.2.r.6 317 0 254 117 216 8 0 0 0 0
+  hadd dccore.swm home.f.3 318 319 12 122 228 55 18 118 24 9 kv Today
+  hadd dccore.swm home.f.3.n 5
+  hadd dccore.swm home.f.3.r.1 320 321 18 128 52 8 74 128 160 8 Sent
+  hadd dccore.swm home.f.3.r.2 322 323 18 137 52 8 74 137 160 8 Queue
+  hadd dccore.swm home.f.3.r.3 324 325 18 146 52 8 74 146 160 8 Speed record
+  hadd dccore.swm home.f.3.r.4 326 327 18 155 52 8 74 155 160 8 Failed
+  hadd dccore.swm home.f.3.r.5 328 329 18 164 52 8 74 164 160 8 Searches
+  hadd dccore.swm home.f.4 330 331 248 140 228 73 254 136 26 9 kv Library
+  hadd dccore.swm home.f.4.n 7
+  hadd dccore.swm home.f.4.r.1 332 333 254 146 52 8 310 146 160 8 Lists
+  hadd dccore.swm home.f.4.r.2 334 335 254 155 52 8 310 155 160 8 Files
+  hadd dccore.swm home.f.4.r.3 336 337 254 164 52 8 310 164 160 8 Size
+  hadd dccore.swm home.f.4.r.4 338 339 254 173 52 8 310 173 160 8 Last rebuild
+  hadd dccore.swm home.f.4.r.5 340 341 254 182 52 8 310 182 160 8 Search index
+  hadd dccore.swm home.f.4.r.6 342 343 254 191 52 8 310 191 160 8 Rebuild
+  hadd dccore.swm home.f.4.r.7 344 345 254 200 52 8 310 200 160 8 Packing
+  hadd dccore.swm tab.1 50 35
+  hadd dccore.swm tab.2 86 34
+  hadd dccore.swm tab.3 121 45
+  hadd dccore.swm tab.4 167 36
+  hadd dccore.swm tab.5 204 79
+  hadd dccore.swm tab.6 284 42
+  hadd dccore.swm fr.1100 100 110 42 370 102 116 38 40 9 Connection
+  hadd dccore.swm fr.1101 102 110 152 370 56 116 148 48 9 Reconnection
+  hadd dccore.swm fr.1102 104 110 216 370 87 116 212 41 9 On connect
+  hadd dccore.swm fr.1104 106 110 57 370 43 116 53 118 9 Open when mIRC starts (minimised)
+  hadd dccore.swm fr.1105 108 110 108 370 21 116 104 40 9 Connection
+  hadd dccore.swm fr.1106 110 110 137 370 32 116 133 58 9 Sharing & search
+  hadd dccore.swm fr.1107 112 110 177 370 43 116 173 80 9 Messaging & dashboard
+  hadd dccore.swm fr.1108 114 110 228 370 21 116 224 31 9 Updates
+  hadd dccore.swm fr.1109 116 110 42 370 52 116 38 54 9 Admin channels
+  hadd dccore.swm fr.1111 118 110 102 370 209 116 98 58 9 Serving channels
+  hadd dccore.swm fr.1113 120 110 42 370 33 116 38 24 9 Admin
+  hadd dccore.swm fr.1114 122 110 42 370 53 116 38 78 9 What the channel sees
+  hadd dccore.swm fr.1115 124 110 103 370 98 116 99 112 9 Custom override - surface colours
+  hadd dccore.swm fr.1117 126 110 209 370 79 116 205 102 9 Custom override - text colours
+  hadd dccore.swm fr.1118 128 110 42 370 33 116 38 26 9 Advert
+  hadd dccore.swm fr.1119 130 110 83 370 56 116 79 60 9 Broadcast search
+  hadd dccore.swm fr.1120 132 110 147 370 56 116 143 24 9 Timing
+  hadd dccore.swm fr.1122 134 110 73 370 95 116 69 18 9 Lists
+  hadd dccore.swm fr.1124 136 110 65 370 225 116 61 58 9 Channel bindings
+  hadd dccore.swm fr.1125 138 110 42 181 79 116 38 26 9 Library
+  hadd dccore.swm fr.1126 140 110 129 181 75 116 125 44 9 Film & series
+  hadd dccore.swm fr.1127 142 299 42 181 129 305 38 42 9 !rar packing
+  hadd dccore.swm fr.1128 144 299 179 181 67 305 175 40 9 List banner
+  hadd dccore.swm fr.1129 146 110 42 370 79 116 38 60 9 Automatic rebuild
+  hadd dccore.swm fr.1130 148 110 129 370 79 116 125 45 9 Performance
+  hadd dccore.swm fr.1131 150 110 42 181 83 116 38 42 9 Speed limits
+  hadd dccore.swm fr.1133 152 110 133 181 64 116 129 72 9 Buffers & packet size
+  hadd dccore.swm fr.1134 154 299 42 181 141 305 38 58 9 Ports & reliability
+  hadd dccore.swm fr.1135 156 110 42 181 125 116 38 30 9 Sending
+  hadd dccore.swm fr.1136 158 299 42 181 94 305 38 52 9 Search (@find)
+  hadd dccore.swm fr.1138 160 299 144 181 63 305 140 54 9 During a rebuild
+  hadd dccore.swm fr.1139 162 110 42 370 90 116 38 37 9 Auto-grab
+  hadd dccore.swm fr.1140 164 110 140 370 44 116 136 46 9 Discover lists
+  hadd dccore.swm fr.1141 166 110 42 181 98 116 38 54 9 Slots & re-fetch
+  hadd dccore.swm fr.1142 168 110 148 181 157 116 144 33 9 Timeouts
+  hadd dccore.swm fr.1143 170 299 42 181 110 305 38 34 9 Size limits
+  hadd dccore.swm fr.1144 172 299 160 181 56 305 156 27 9 History
+  hadd dccore.swm fr.1145 174 110 42 370 102 116 38 44 9 Fetch queue
+  hadd dccore.swm fr.1146 176 110 152 370 33 116 148 45 9 List requests
+  hadd dccore.swm fr.1147 178 110 42 370 102 116 38 56 9 Flood protection
+  hadd dccore.swm fr.1148 180 110 42 370 117 116 38 68 9 Temporary (by nick)
+  hadd dccore.swm fr.1150 182 110 167 370 125 116 163 112 9 Permanent (by hostmask pattern)
+  hadd dccore.swm fr.1152 184 110 42 370 79 116 38 38 9 Auto-reply
+  hadd dccore.swm fr.1153 186 110 129 370 56 116 125 34 9 Rate limit
+  hadd dccore.swm fr.1154 188 110 42 370 56 116 38 26 9 Access
+  hadd dccore.swm fr.1155 190 110 106 370 32 116 102 36 9 Behaviour
+  hadd dccore.swm fr.1156 192 110 42 370 79 116 38 26 9 Server
+  hadd dccore.swm fr.1157 194 110 129 370 55 116 125 64 9 Console & browser
+  hadd dccore.swm fr.1158 196 110 42 370 65 116 38 84 9 What shows in @DCCore
+  hadd dccore.swm fr.1159 198 110 115 370 21 116 111 52 9 Debug channel
+  hadd dccore.swm fr.1160 200 110 42 370 43 116 38 25 9 Debug
+  hadd dccore.swm fr.1161 202 110 93 370 102 116 89 29 9 Logging
+  hadd dccore.swm fr.1162 204 110 203 370 56 116 199 61 9 Window & project
+  hadd dccore.swm fr.1163 206 110 42 181 86 116 38 47 9 Library & lists
+  hadd dccore.swm fr.1164 208 110 136 181 34 116 132 30 9 Security
+  hadd dccore.swm fr.1165 210 110 178 181 46 116 174 44 9 Stats & bots
+  hadd dccore.swm fr.1166 212 110 232 181 42 116 228 52 9 Search & audio
+  hadd dccore.swm fr.1167 214 299 42 181 54 305 38 46 9 Fetch history
+  hadd dccore.swm fr.1168 216 299 104 181 54 305 100 32 9 List build
+  hadd dccore.swm fr.1169 218 299 166 181 102 305 162 72 9 Console & messaging
+  hadd dccore.swm fr.1170 220 110 42 370 129 116 38 62 9 Show in @DCCore
+  hadd dccore.swm fr.1171 222 110 179 370 118 116 175 28 9 Colours
+  hadd dccore.swm fr.1173 224 110 42 370 95 116 38 30 9 Window
+  hadd dccore.swm fr.1174 226 110 145 370 74 116 141 26 9 Theme
+  hadd dccore.swm fr.1176 228 110 227 370 48 116 223 56 9 Settings window
+  hadd dccore.swm fr.1178 230 110 42 370 74 116 38 15 9 Bot
+  hadd dccore.swm fr.1180 232 110 42 370 32 116 38 72 9 DCCore Chat (public)
+  hadd dccore.swm fr.1181 234 110 82 370 75 116 78 27 9 History
+  hadd dccore.swm lv.1520 910 116 135 250 168
+  hadd dccore.swm lvc.1520 0 Channel
+  hadd dccore.swm lvx.1520 noheader
+  hadd dccore.swm lv.1540 911 116 79 358 64
+  hadd dccore.swm lvc.1540 120 Name,44 Primary,0 Folders
+  hadd dccore.swm lv.1580 913 116 59 358 60
+  hadd dccore.swm lvc.1580 160 Nick,0 Time left
+  hadd dccore.swm lv.1595 914 116 192 358 60
+  hadd dccore.swm lvc.1595 0 Pattern
+  hadd dccore.swm pages 27
   hadd dccore.swm p.1 IRC Server
+  hadd dccore.swm p.1.layout roomy 1
   hadd dccore.swm p.1.n 1
-  hadd dccore.swm p.1.1 1100,2000,2001,2004,2005,2008,2009,2012,2013,1101,2016,2017,2020,2021,1102,1500,1501,1502,1503,1504,1505,1506
+  hadd dccore.swm p.1.1 1100,2000,2001,2004,2005,2008,2009,2012,2013,1101,2016,2017,2020,2021,1102,1500,1501,1502,1503,1506,1505
+  hadd dccore.swm p.1.bx 1100,1101,1102
+  hadd dccore.swm p.1.fr 100-105
   hadd dccore.swm p.1.w onconnect
   hadd dccore.swm p.1.ask onconnect
   hadd dccore.swm p.2 General Settings
+  hadd dccore.swm p.2.layout roomy 1
   hadd dccore.swm p.2.n 1
-  hadd dccore.swm p.2.1 1103,1104,2025,2029,2033,1105,2037,1106,2041,2045,2049,1107,2053,2057,2061,1108,2065
+  hadd dccore.swm p.2.1 1103,1104,2025,2029,2033,1105,2037,1106,2041,2045,1107,2049,2053,2057,1108,2061
+  hadd dccore.swm p.2.bx 1104,1105,1106,1107,1108
+  hadd dccore.swm p.2.fr 106-115
   hadd dccore.swm p.3 Channels
+  hadd dccore.swm p.3.layout roomy 1
   hadd dccore.swm p.3.n 1
-  hadd dccore.swm p.3.1 1109,1110,2068,2069,1111,1112,1520,1521,1522,1523
+  hadd dccore.swm p.3.1 1109,1110,2064,2065,1111,1112,1520,1521,1522,1523
+  hadd dccore.swm p.3.lv 1520
+  hadd dccore.swm p.3.bx 1109,1111
+  hadd dccore.swm p.3.fr 116-119
   hadd dccore.swm p.3.w channels
   hadd dccore.swm p.4 Operator
+  hadd dccore.swm p.4.layout roomy 1
   hadd dccore.swm p.4.n 1
-  hadd dccore.swm p.4.1 1113,2072,2073
+  hadd dccore.swm p.4.1 1113,2068,2069
+  hadd dccore.swm p.4.bx 1113
+  hadd dccore.swm p.4.fr 120-121
   hadd dccore.swm p.5 Appearance
+  hadd dccore.swm p.5.layout roomy 1
   hadd dccore.swm p.5.n 1
-  hadd dccore.swm p.5.1 1114,2076,2077,1610,1611,1115,1116,2080,2081,2082,2084,2085,2086,2088,2089,2090,1117,2092,2093,2094,2096,2097,2098,2100,2101,2102
+  hadd dccore.swm p.5.1 1114,2072,2073,1610,1611,1115,1116,2076,2077,2078,2080,2081,2082,2084,2085,2086,1117,2088,2089,2090,2092,2093,2094,2096,2097,2098
+  hadd dccore.swm p.5.bx 1114,1115,1117
+  hadd dccore.swm p.5.fr 122-127
   hadd dccore.swm p.5.w preview
   hadd dccore.swm p.6 Advertising
+  hadd dccore.swm p.6.layout roomy 1
   hadd dccore.swm p.6.n 1
-  hadd dccore.swm p.6.1 1118,2104,2105,1119,2108,2109,2112,2113,1120,2116,2117,2120,2121
-  hadd dccore.swm p.7 Search
+  hadd dccore.swm p.6.1 1118,2100,2101,1119,2104,2105,2108,2109,1120,2112,2113,2116,2117
+  hadd dccore.swm p.6.bx 1118,1119,1120
+  hadd dccore.swm p.6.fr 128-133
+  hadd dccore.swm p.7 Lists
+  hadd dccore.swm p.7.layout roomy 1
   hadd dccore.swm p.7.n 1
-  hadd dccore.swm p.7.1 1121,2124,2125,2128,2129,2132,2133,1122,1123,2136,2137,2141,2144,2145,1124,2149,2153,2156,2157
-  hadd dccore.swm p.8 Transfers
-  hadd dccore.swm p.8.n 1
-  hadd dccore.swm p.8.1 1125,2160,2161,2164,2165,1126,2168,2169,2172,2173,2176,2177,2180,2181
-  hadd dccore.swm p.9 Your list
+  hadd dccore.swm p.7.1 1121,1122,1540,1551,1554,1555,1557
+  hadd dccore.swm p.7.lv 1540
+  hadd dccore.swm p.7.bx 1122
+  hadd dccore.swm p.7.fr 134-135
+  hadd dccore.swm p.7.w srvlists
+  hadd dccore.swm p.7.ask served
+  hadd dccore.swm p.8 Channel bindings
+  hadd dccore.swm p.8.layout roomy 1
+  hadd dccore.swm p.8.n 2
+  hadd dccore.swm p.8.1 1123,1124,1700,1701,1702,1703,1704,1705,1706,1707,1708,1709,1710,1711,1712,1713,1714,1715,1716,1717,1718,1719,1720,1721,1722,1723,1724,1725,1726,1727,1728,1729,1730,1731,1732,1733,1734,1735,1736,1737,1738,1739,1740,1741,1742,1743,1744,1745,1746,1747
+  hadd dccore.swm p.8.2 1748,1749,1750,1751,1752,1753,1754,1755,1756,1757,1758,1759,1774,1770,1771,1772,1773,1567,1568
+  hadd dccore.swm p.8.bx 1124
+  hadd dccore.swm p.8.fr 136-137
+  hadd dccore.swm p.8.w srvchans srvsaveb
+  hadd dccore.swm p.8.ask served
+  hadd dccore.swm p.9 List settings
+  hadd dccore.swm p.9.layout roomy 2
   hadd dccore.swm p.9.n 1
-  hadd dccore.swm p.9.1 1127,2184,2185,2186,2188,2189,2192,2193,2196,2197,1128,2201,2204,2205,2208,2209,1129,2212,2213,2216,2217,2218,2220,2221,2224,2225,1130,2228,2229,2230,2232,2233,2237
-  hadd dccore.swm p.10 Lists & channels
+  hadd dccore.swm p.9.1 1125,2120,2121,2124,2125,2128,2129,1126,2133,2136,2137,2140,2141,1127,2145,2148,2149,2152,2153,2154,2156,2157,2160,2161,1128,2164,2165,2166,2168,2169,2173
+  hadd dccore.swm p.9.bx 1125,1126,1127,1128
+  hadd dccore.swm p.9.fr 138-145
+  hadd dccore.swm p.10 Rebuild
+  hadd dccore.swm p.10.layout roomy 1
   hadd dccore.swm p.10.n 1
-  hadd dccore.swm p.10.1 1131,1540,1541,1542,1543,1544,1545,1546,1547,1548,1549,1550,1551,1552,1553,1554,1555,1556,1557
-  hadd dccore.swm p.10.w served
-  hadd dccore.swm p.10.ask served
-  hadd dccore.swm p.11 Rebuild
+  hadd dccore.swm p.10.1 1129,2176,2177,2180,2181,2184,2185,1130,2188,2189,2192,2193,2196,2197
+  hadd dccore.swm p.10.bx 1129,1130
+  hadd dccore.swm p.10.fr 146-149
+  hadd dccore.swm p.11 Transfers
+  hadd dccore.swm p.11.layout roomy 2
   hadd dccore.swm p.11.n 1
-  hadd dccore.swm p.11.1 1132,2240,2241,2244,2245,2248,2249,1133,2252,2253,2256,2257,2260,2261
-  hadd dccore.swm p.12 List discovery
+  hadd dccore.swm p.11.1 1131,1132,2200,2201,2204,2205,1133,2208,2209,2212,2213,1134,2216,2217,2220,2221,2224,2225,2228,2229,2232,2233
+  hadd dccore.swm p.11.bx 1131,1133,1134
+  hadd dccore.swm p.11.fr 150-155
+  hadd dccore.swm p.12 Search
+  hadd dccore.swm p.12.layout roomy 2
   hadd dccore.swm p.12.n 1
-  hadd dccore.swm p.12.1 1134,2265,2268,2269,2272,2273,2276,2277,1135,2281,2284,2285
-  hadd dccore.swm p.13 Fetch tuning
+  hadd dccore.swm p.12.1 1135,2236,2237,2240,2241,2244,2245,2248,2249,2252,2253,1136,1137,2256,2257,2261,2264,2265,1138,2269,2273,2276,2277
+  hadd dccore.swm p.12.bx 1135,1136,1138
+  hadd dccore.swm p.12.fr 156-161
+  hadd dccore.swm p.13 List discovery
+  hadd dccore.swm p.13.layout roomy 1
   hadd dccore.swm p.13.n 1
-  hadd dccore.swm p.13.1 1136,2288,2289,2293,2296,2297,2300,2301,1137,2304,2305,2308,2309,2312,2313,2316,2317,2320,2321,1138,2324,2325,2328,2329,2332,2333,2336,2337,1139,2340,2341,2344,2345
-  hadd dccore.swm p.14 Queue
+  hadd dccore.swm p.13.1 1139,2281,2284,2285,2288,2289,2292,2293,1140,2297,2300,2301
+  hadd dccore.swm p.13.bx 1139,1140
+  hadd dccore.swm p.13.fr 162-165
+  hadd dccore.swm p.14 Fetch tuning
+  hadd dccore.swm p.14.layout roomy 2
   hadd dccore.swm p.14.n 1
-  hadd dccore.swm p.14.1 1140,2348,2349,2352,2353,2356,2357,2360,2361
-  hadd dccore.swm p.15 Anti-flood
+  hadd dccore.swm p.14.1 1141,2304,2305,2309,2312,2313,2316,2317,1142,2320,2321,2324,2325,2328,2329,2332,2333,2336,2337,1143,2340,2341,2344,2345,2348,2349,2352,2353,1144,2356,2357,2360,2361
+  hadd dccore.swm p.14.bx 1141,1142,1143,1144
+  hadd dccore.swm p.14.fr 166-173
+  hadd dccore.swm p.15 Queue
+  hadd dccore.swm p.15.layout roomy 1
   hadd dccore.swm p.15.n 1
-  hadd dccore.swm p.15.1 1141,2364,2365,2368,2369,2372,2373,2376,2377
-  hadd dccore.swm p.16 Bans & ignores
+  hadd dccore.swm p.15.1 1145,2364,2365,2368,2369,2372,2373,2376,2377,1146,2380,2381
+  hadd dccore.swm p.15.bx 1145,1146
+  hadd dccore.swm p.15.fr 174-177
+  hadd dccore.swm p.16 Anti-flood
+  hadd dccore.swm p.16.layout roomy 1
   hadd dccore.swm p.16.n 1
-  hadd dccore.swm p.16.1 1142,1143,1580,1581,1582,1583,1584,1585,1586,1587,1144,1145,1595,1596,1597,1598
-  hadd dccore.swm p.16.w bantimed banperm
-  hadd dccore.swm p.16.ask banlist
-  hadd dccore.swm p.17 Private messages
+  hadd dccore.swm p.16.1 1147,2384,2385,2388,2389,2392,2393,2396,2397
+  hadd dccore.swm p.16.bx 1147
+  hadd dccore.swm p.16.fr 178-179
+  hadd dccore.swm p.17 Bans & ignores
+  hadd dccore.swm p.17.layout roomy 1
   hadd dccore.swm p.17.n 1
-  hadd dccore.swm p.17.1 1146,2380,2381,2384,2385,2388,2389,1147,2392,2393,2396,2397
-  hadd dccore.swm p.18 Admin console
+  hadd dccore.swm p.17.1 1148,1149,1580,1583,1584,1585,1586,1587,1581,1582,1150,1151,1595,1597,1598,1596
+  hadd dccore.swm p.17.lv 1580 1595
+  hadd dccore.swm p.17.bx 1148,1150
+  hadd dccore.swm p.17.fr 180-183
+  hadd dccore.swm p.17.w bantimed banperm
+  hadd dccore.swm p.17.ask banlist
+  hadd dccore.swm p.18 Private messages
+  hadd dccore.swm p.18.layout roomy 1
   hadd dccore.swm p.18.n 1
-  hadd dccore.swm p.18.1 1148,2400,2401,2404,2405,1149,2409,2413
-  hadd dccore.swm p.19 Web dashboard
+  hadd dccore.swm p.18.1 1152,2400,2401,2404,2405,2408,2409,1153,2412,2413,2416,2417
+  hadd dccore.swm p.18.bx 1152,1153
+  hadd dccore.swm p.18.fr 184-187
+  hadd dccore.swm p.19 Admin console
+  hadd dccore.swm p.19.layout roomy 1
   hadd dccore.swm p.19.n 1
-  hadd dccore.swm p.19.1 1150,2416,2417,2420,2421,2424,2425,1151,2428,2429,2433,2437
-  hadd dccore.swm p.20 Console feed
+  hadd dccore.swm p.19.1 1154,2420,2421,2424,2425,1155,2429,2433
+  hadd dccore.swm p.19.bx 1154,1155
+  hadd dccore.swm p.19.fr 188-191
+  hadd dccore.swm p.20 Web dashboard
+  hadd dccore.swm p.20.layout roomy 1
   hadd dccore.swm p.20.n 1
-  hadd dccore.swm p.20.1 1152,2441,2445,2449,2453,2457,1153,2461
-  hadd dccore.swm p.21 This mIRC window
+  hadd dccore.swm p.20.1 1156,2436,2437,2440,2441,2444,2445,1157,2448,2449,2453,2457
+  hadd dccore.swm p.20.bx 1156,1157
+  hadd dccore.swm p.20.fr 192-195
+  hadd dccore.swm p.21 Console feed
+  hadd dccore.swm p.21.layout roomy 1
   hadd dccore.swm p.21.n 1
-  hadd dccore.swm p.21.1 1615,1616
-  hadd dccore.swm p.21.w mircwin
+  hadd dccore.swm p.21.1 1158,2461,2465,2469,2473,2477,1159,2481
+  hadd dccore.swm p.21.bx 1158,1159
+  hadd dccore.swm p.21.fr 196-199
   hadd dccore.swm p.22 Debug & logging
+  hadd dccore.swm p.22.layout roomy 1
   hadd dccore.swm p.22.n 1
-  hadd dccore.swm p.22.1 1154,2465,2469,2473,1155,2476,2477,2480,2481,2482,2484,2485,2488,2489,1156,2492,2493,2496,2497
+  hadd dccore.swm p.22.1 1160,2485,2489,2493,1161,2496,2497,2500,2501,2502,2504,2505,2508,2509,1162,2512,2513,2516,2517
+  hadd dccore.swm p.22.bx 1160,1161,1162
+  hadd dccore.swm p.22.fr 200-205
   hadd dccore.swm p.23 File locations
+  hadd dccore.swm p.23.layout compact 2
   hadd dccore.swm p.23.n 2
-  hadd dccore.swm p.23.1 1157,2500,2501,2502,2504,2505,2506,2508,2509,2510,2512,2513,2514,2516,2517,2518,1158,2520,2521,2522,2524,2525,2526,1159,2528,2529,2530,2532,2533,2534,2536,2537,2538,1160,2540,2541,2542,2544,2545,2546,1161,2548,2549,2550,2552,2553,2554,2556,2557,2558
-  hadd dccore.swm p.23.2 1162,2560,2561,2562,2564,2565,2566,2568,2569,2570,1163,2572,2573,2574,2576,2577,2578,2580,2581,2582,2584,2585,2586,2588,2589,2590
-  hadd dccore.swm keys.n 10
-  hadd dccore.swm keys.1 SERVER PORT NICKNAME ALT_NICKNAME REJOIN_ATTEMPTS ON_CONNECT_CHECK_MINUTES SEARCH_ENABLED ANNOUNCE_TRANSFERS RAR_ENABLED PRIVATE_MESSAGES_ENABLED WEBUI_ENABLED CTCP_VERSION_REPLY CHECK_FOR_UPDATES DEBUG_CHANNEL CHANNEL
-  hadd dccore.swm keys.2 ADMIN_NICK THEME CUSTOM_THEME_BORDER CUSTOM_THEME_SEPARATOR CUSTOM_THEME_TEXTBOX CUSTOM_THEME_VALUE CUSTOM_THEME_ALERT CUSTOM_THEME_ACCENT ANNOUNCE_INTERVAL BROADCAST_SEARCH_CHANNEL BROADCAST_SEARCH_COOLDOWN MSG_DELAY DEBUG_MSG_DELAY MAX_DCC_SLOTS MAX_USER_QUEUE
-  hadd dccore.swm keys.3 MAX_GLOBAL_QUEUE MAX_SEARCH_RESULTS SEARCH_SHOW_FOLDER SEARCH_FOLDER_MAX_CHARS PAUSE_ON_UPDATE PAUSE_FOR_WHOLE_UPDATE REHASH_TRANSFER_WAIT DCC_BLOCK_SIZE DCC_SEND_BUFFER DCC_PORT_START DCC_PORT_END DCC_ACCEPT_TIMEOUT MAX_SEND_FAILS FILE_DIRECTORY LIST_BASE_NAME
-  hadd dccore.swm keys.4 LIST_FORMAT LIST_IGNORED_EXTENSIONS SEPARATE_VIDEO_LIST LIST_VIDEO_EXTENSIONS LIST_VIDEO_COMPANION_EXTENSIONS RAR_EXTENSIONS RAR_BINARY MAX_RAR_FOLDER_SIZE RAR_TIMEOUT LIST_HEADER_FILE LIST_HEADER_MAX_BYTES LIST_SHOW_AUDIO_INFO LIST_REBUILD_SCHEDULE LIST_UPDATE_TIMEOUT LIST_UPDATE_STALL_SECONDS
-  hadd dccore.swm keys.5 LIST_AUDIO_INFO_MINUTES LIST_AUDIO_INFO_THREADS LIST_SCAN_THREADS AUTO_GRAB_LISTS AUTO_GRAB_EVERY_MINUTES AUTO_GRAB_MIN_FILES AUTO_GRAB_MIN_SPEED_KB AUTO_DISCOVER_CHANNEL_LISTS MULTI_CHANNEL_LIST_STABLE_SECONDS MAX_FETCH_SLOTS AUTO_REFETCH_LISTS AUTO_REFETCH_INTERVAL_HOURS AUTO_REFETCH_MAX_PER_RUN FETCH_OFFER_TIMEOUT FETCH_TRANSFER_TIMEOUT
-  hadd dccore.swm keys.6 FETCH_FOLDER_OFFER_TIMEOUT FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED FETCH_FOLDER_TRANSFER_TIMEOUT MAX_FETCH_FILE_SIZE MAX_FETCH_FOLDER_FILE_SIZE MAX_FETCH_LIST_FILE_SIZE MAX_LIST_TEXT_SIZE FETCH_HISTORY_DAYS FETCH_HISTORY_MAX_ROWS FETCH_MAX_PER_BOT FETCH_QUEUED_TIMEOUT FETCH_BOT_MAX_FAILS FETCH_BOT_COOLDOWN_MINUTES MAX_REQUESTS REQUEST_WINDOW
-  hadd dccore.swm keys.7 MUTE_TIME FLOOD_BAN_SECONDS PRIVATE_MESSAGE_COOLDOWN_SECONDS PRIVATE_MESSAGE_DECLINE_TEXT PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS PRIVATE_MESSAGE_DECLINE_BURST PRIVATE_MESSAGE_DECLINE_BURST_SECONDS ADMIN_HOSTMASKS ADMIN_CHAT_MODE ADMIN_CHANNEL_COMMANDS ADMIN_CHAT_COLOURS WEBUI_HOST WEBUI_PORT WEBUI_ALLOWED_HOSTS WEBUI_CONSOLE_ENABLED
-  hadd dccore.swm keys.8 WEBUI_OPEN_BROWSER WEBUI_FOLDER_BROWSER_ENABLED CONSOLE_SHOW_REQUESTS CONSOLE_SHOW_QUEUE CONSOLE_SHOW_SENDS CONSOLE_SHOW_FAILURES CONSOLE_SHOW_SEARCHES DEBUG_CHANNEL_FEED DEBUG_MODE DEBUG_TO_CHANNEL DEBUG_TO_CONSOLE CONSOLE_TIMESTAMP_FORMAT CONSOLE_LOG_FILE CONSOLE_LOG_MAX_MB CONSOLE_LOG_KEEP
-  hadd dccore.swm keys.9 BOT_WINDOW PROJECT_URL TMP_ZIP_DIR LOCAL_LIST_DIR FETCHED_FILES_DIR LIBRARY_FOLDERS_FILE LISTS_FILE BANS_FILE HARD_BANS_FILE STATS_FILE KNOWN_BOTS_FILE FETCHED_BOT_LISTS_FILE LIST_INDEX_FILE LIST_AUDIO_INFO_CACHE FETCH_HISTORY_FILE
-  hadd dccore.swm keys.10 DOWNLOAD_COUNTS_FILE TRANSFER_LOG_FILE LIST_SIZE_FILE LIST_RAWBYTES_FILE LIST_PROGRESS_FILE ADMIN_TOKENS_FILE ON_CONNECT_FILE NOTICES_FILE PRIVATE_MESSAGES_FILE DCC_QUEUE_FILE
+  hadd dccore.swm p.23.1 1163,2520,2521,2522,2524,2525,2526,2528,2529,2530,2532,2533,2534,2536,2537,2538,1164,2540,2541,2542,2544,2545,2546,1165,2548,2549,2550,2552,2553,2554,2556,2557,2558,1166,2560,2561,2562,2564,2565,2566,1167,2568,2569,2570,2572,2573,2574,2576,2577,2578
+  hadd dccore.swm p.23.2 1168,2580,2581,2582,2584,2585,2586,2588,2589,2590,1169,2592,2593,2594,2596,2597,2598,2600,2601,2602,2604,2605,2606,2608,2609,2610
+  hadd dccore.swm p.23.bx 1163,1164,1165,1166,1167,1168,1169
+  hadd dccore.swm p.23.fr 206-219
+  hadd dccore.swm p.24 @DCCore window
+  hadd dccore.swm p.24.layout roomy 1
+  hadd dccore.swm p.24.n 1
+  hadd dccore.swm p.24.1 1170,1620,1621,1622,1623,1624,1625,1626,1627,1628,1629,1630,1631,1632,1633,1634,1635,1636,1637,1638,1171,1172,1660,1640,1661,1641,1662,1642,1663,1643,1664,1644,1665,1645
+  hadd dccore.swm p.24.bx 1170,1171
+  hadd dccore.swm p.24.fr 220-223
+  hadd dccore.swm p.24.w showin showcolours
+  hadd dccore.swm p.25 Window
+  hadd dccore.swm p.25.layout roomy 1
+  hadd dccore.swm p.25.n 1
+  hadd dccore.swm p.25.1 1173,2613,2617,2621,2625,1670,1671,1672,1673,1674,1675,1174,1175,1690,1691,1692,1176,1177,2629
+  hadd dccore.swm p.25.bx 1173,1174,1176
+  hadd dccore.swm p.25.fr 224-229
+  hadd dccore.swm p.25.w winlook theme
+  hadd dccore.swm p.26 Connection
+  hadd dccore.swm p.26.layout roomy 1
+  hadd dccore.swm p.26.n 1
+  hadd dccore.swm p.26.1 1178,1179,1680,1681,1682,1683,1684,1685
+  hadd dccore.swm p.26.bx 1178
+  hadd dccore.swm p.26.fr 230-231
+  hadd dccore.swm p.26.w botlink
+  hadd dccore.swm p.27 Chat
+  hadd dccore.swm p.27.layout roomy 1
+  hadd dccore.swm p.27.n 1
+  hadd dccore.swm p.27.1 1180,2633,2637,1181,1182,2640,2641,2644,2645
+  hadd dccore.swm p.27.bx 1180,1181
+  hadd dccore.swm p.27.fr 232-235
+  hadd dccore.swm keys.n 11
+  hadd dccore.swm keys.1 SERVER PORT NICKNAME ALT_NICKNAME REJOIN_ATTEMPTS ON_CONNECT_CHECK_MINUTES SEARCH_ENABLED ANNOUNCE_TRANSFERS PRIVATE_MESSAGES_ENABLED WEBUI_ENABLED CTCP_VERSION_REPLY CHECK_FOR_UPDATES DEBUG_CHANNEL CHANNEL ADMIN_NICK
+  hadd dccore.swm keys.2 THEME CUSTOM_THEME_BORDER CUSTOM_THEME_SEPARATOR CUSTOM_THEME_TEXTBOX CUSTOM_THEME_VALUE CUSTOM_THEME_ALERT CUSTOM_THEME_ACCENT ANNOUNCE_INTERVAL BROADCAST_SEARCH_CHANNEL BROADCAST_SEARCH_COOLDOWN MSG_DELAY DEBUG_MSG_DELAY LIST_BASE_NAME LIST_FORMAT LIST_IGNORED_EXTENSIONS
+  hadd dccore.swm keys.3 SEPARATE_VIDEO_LIST LIST_VIDEO_EXTENSIONS LIST_VIDEO_COMPANION_EXTENSIONS RAR_ENABLED RAR_EXTENSIONS RAR_BINARY MAX_RAR_FOLDER_SIZE RAR_TIMEOUT LIST_HEADER_FILE LIST_HEADER_MAX_BYTES LIST_SHOW_AUDIO_INFO LIST_REBUILD_SCHEDULE LIST_UPDATE_TIMEOUT LIST_UPDATE_STALL_SECONDS LIST_AUDIO_INFO_MINUTES
+  hadd dccore.swm keys.4 LIST_AUDIO_INFO_THREADS LIST_SCAN_THREADS MAX_UPLOAD_KB MAX_DOWNLOAD_KB DCC_BLOCK_SIZE DCC_SEND_BUFFER DCC_PORT_START DCC_PORT_END DCC_ACCEPT_TIMEOUT MAX_SEND_FAILS DAILY_SEND_FAILS_LIMIT MAX_DCC_SLOTS LARGE_FILE_MB SLOW_SEND_MIN_KB MAX_USER_QUEUE
+  hadd dccore.swm keys.5 MAX_GLOBAL_QUEUE MAX_SEARCH_RESULTS SEARCH_SHOW_FOLDER SEARCH_FOLDER_MAX_CHARS PAUSE_ON_UPDATE PAUSE_FOR_WHOLE_UPDATE REHASH_TRANSFER_WAIT AUTO_GRAB_LISTS AUTO_GRAB_EVERY_MINUTES AUTO_GRAB_MIN_FILES AUTO_GRAB_MIN_SPEED_KB AUTO_DISCOVER_CHANNEL_LISTS MULTI_CHANNEL_LIST_STABLE_SECONDS MAX_FETCH_SLOTS AUTO_REFETCH_LISTS
+  hadd dccore.swm keys.6 AUTO_REFETCH_INTERVAL_HOURS AUTO_REFETCH_MAX_PER_RUN FETCH_OFFER_TIMEOUT FETCH_TRANSFER_TIMEOUT FETCH_FOLDER_OFFER_TIMEOUT FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED FETCH_FOLDER_TRANSFER_TIMEOUT MAX_FETCH_FILE_SIZE MAX_FETCH_FOLDER_FILE_SIZE MAX_FETCH_LIST_FILE_SIZE MAX_LIST_TEXT_SIZE FETCH_HISTORY_DAYS FETCH_HISTORY_MAX_ROWS FETCH_MAX_PER_BOT FETCH_QUEUED_TIMEOUT
+  hadd dccore.swm keys.7 FETCH_BOT_MAX_FAILS FETCH_BOT_COOLDOWN_MINUTES LIST_REQUEST_TAG MAX_REQUESTS REQUEST_WINDOW MUTE_TIME FLOOD_BAN_SECONDS PRIVATE_MESSAGE_COOLDOWN_SECONDS PRIVATE_MESSAGE_DECLINE_TEXT PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS PRIVATE_MESSAGE_DECLINE_BURST PRIVATE_MESSAGE_DECLINE_BURST_SECONDS ADMIN_HOSTMASKS ADMIN_CHAT_MODE ADMIN_CHANNEL_COMMANDS
+  hadd dccore.swm keys.8 ADMIN_CHAT_COLOURS WEBUI_HOST WEBUI_PORT WEBUI_ALLOWED_HOSTS WEBUI_CONSOLE_ENABLED WEBUI_OPEN_BROWSER WEBUI_FOLDER_BROWSER_ENABLED CONSOLE_SHOW_REQUESTS CONSOLE_SHOW_QUEUE CONSOLE_SHOW_SENDS CONSOLE_SHOW_FAILURES CONSOLE_SHOW_SEARCHES DEBUG_CHANNEL_FEED DEBUG_MODE DEBUG_TO_CHANNEL
+  hadd dccore.swm keys.9 DEBUG_TO_CONSOLE CONSOLE_TIMESTAMP_FORMAT CONSOLE_LOG_FILE CONSOLE_LOG_MAX_MB CONSOLE_LOG_KEEP BOT_WINDOW PROJECT_URL TMP_ZIP_DIR LOCAL_LIST_DIR FETCHED_FILES_DIR LIBRARY_FOLDERS_FILE LISTS_FILE BANS_FILE HARD_BANS_FILE STATS_FILE
+  hadd dccore.swm keys.10 KNOWN_BOTS_FILE FETCHED_BOT_LISTS_FILE LIST_INDEX_FILE LIST_AUDIO_INFO_CACHE FETCH_HISTORY_FILE DOWNLOAD_COUNTS_FILE TRANSFER_LOG_FILE LIST_SIZE_FILE LIST_RAWBYTES_FILE LIST_PROGRESS_FILE ADMIN_TOKENS_FILE ON_CONNECT_FILE NOTICES_FILE PRIVATE_MESSAGES_FILE DCC_QUEUE_FILE
+  hadd dccore.swm keys.11 CHAT_HISTORY_DAYS CHAT_HISTORY_MAX_MB
   hadd dccore.swm k.SERVER 2001 str 1 2000
   hadd dccore.swm pg.SERVER 1
   hadd dccore.swm n.SERVER IRC server
@@ -4134,27 +6030,23 @@ alias dccore.sw.data {
   hadd dccore.swm pg.ANNOUNCE_TRANSFERS 2
   hadd dccore.swm n.ANNOUNCE_TRANSFERS Announce finished transfers in the channel
   hadd dccore.swm h.ANNOUNCE_TRANSFERS Post a line in the channel each time a file has been sent. Everything else about a transfer is private to the person who asked; this is the only public part. A file asked for by private message is never announced.
-  hadd dccore.swm k.RAR_ENABLED 2049 bool 1 2049
-  hadd dccore.swm pg.RAR_ENABLED 2
-  hadd dccore.swm n.RAR_ENABLED Enable !rar folder packing
-  hadd dccore.swm h.RAR_ENABLED Let people request a whole folder packed as one .rar file (with !rar). Turn off if you do not have the rar program or do not want the bot packing folders. Single-file downloads work either way.
-  hadd dccore.swm k.PRIVATE_MESSAGES_ENABLED 2053 bool 1 2053
+  hadd dccore.swm k.PRIVATE_MESSAGES_ENABLED 2049 bool 1 2049
   hadd dccore.swm pg.PRIVATE_MESSAGES_ENABLED 2
   hadd dccore.swm n.PRIVATE_MESSAGES_ENABLED Keep private messages (off: keep none~2C reply once instead)
   hadd dccore.swm h.PRIVATE_MESSAGES_ENABLED Keep private messages people send to the bot so you can read them on the Messages page. The bot does not answer them. Turn off to keep none and instead reply once telling the sender where to go.
-  hadd dccore.swm k.WEBUI_ENABLED 2057 bool 1 2057
+  hadd dccore.swm k.WEBUI_ENABLED 2053 bool 1 2053
   hadd dccore.swm pg.WEBUI_ENABLED 2
   hadd dccore.swm n.WEBUI_ENABLED Enable web dashboard
   hadd dccore.swm h.WEBUI_ENABLED Turn the web dashboard on. Off by default so nothing opens a web page just because the bot was updated. Needs the Flask package installed.
-  hadd dccore.swm k.CTCP_VERSION_REPLY 2061 bool 1 2061
+  hadd dccore.swm k.CTCP_VERSION_REPLY 2057 bool 1 2057
   hadd dccore.swm pg.CTCP_VERSION_REPLY 2
   hadd dccore.swm n.CTCP_VERSION_REPLY Answer CTCP VERSION
   hadd dccore.swm h.CTCP_VERSION_REPLY Answer when somebody asks the bot what software it runs (a CTCP VERSION request). The answer goes only to the person who asked. Turn off to stay quiet about it.
-  hadd dccore.swm k.CHECK_FOR_UPDATES 2065 bool 1 2065
+  hadd dccore.swm k.CHECK_FOR_UPDATES 2061 bool 1 2061
   hadd dccore.swm pg.CHECK_FOR_UPDATES 2
   hadd dccore.swm n.CHECK_FOR_UPDATES Tell me when a new version is out
   hadd dccore.swm h.CHECK_FOR_UPDATES Once a day~2C ask GitHub whether a newer DCCore has been released~2C and say so on the dashboard~2C in the console and in the mIRC window. Only the version numbers are compared; nothing about your bot is sent. Turn it off on a machine that should not go out.
-  hadd dccore.swm k.DEBUG_CHANNEL 2069 str 1 2068
+  hadd dccore.swm k.DEBUG_CHANNEL 2065 str 1 2064
   hadd dccore.swm pg.DEBUG_CHANNEL 3
   hadd dccore.swm n.DEBUG_CHANNEL Debug channel
   hadd dccore.swm h.DEBUG_CHANNEL A channel of your own where the bot reports what it is doing - transfers~2C joins~2C bans~2C problems. Leave blank for none. Do not use a channel other people sit in: everything the bot reports goes there.
@@ -4162,11 +6054,11 @@ alias dccore.sw.data {
   hadd dccore.swm pg.CHANNEL 3
   hadd dccore.swm n.CHANNEL Channels
   hadd dccore.swm h.CHANNEL The channel(s) the bot serves in~2C each starting with ~23~2C separated by commas. The first one is where announcements go unless a request came from another channel. Required.
-  hadd dccore.swm k.ADMIN_NICK 2073 str 1 2072
+  hadd dccore.swm k.ADMIN_NICK 2069 str 1 2068
   hadd dccore.swm pg.ADMIN_NICK 4
   hadd dccore.swm n.ADMIN_NICK Admin nick(s)
   hadd dccore.swm h.ADMIN_NICK Your own nick(s) - the people allowed to use the admin commands such as !ban~2C !rehash and !update. Separate several with commas. Required. If you have set ADMIN_HOSTMASKS~2C the command must also come from that host.
-  hadd dccore.swm k.THEME 2077 choice 1 2076
+  hadd dccore.swm k.THEME 2073 choice 1 2072
   hadd dccore.swm pg.THEME 5
   hadd dccore.swm n.THEME Colour theme
   hadd dccore.swm ch.THEME classic midnight forest orchid plain
@@ -4176,88 +6068,144 @@ alias dccore.sw.data {
   hadd dccore.swm cl.THEME.4 orchid
   hadd dccore.swm cl.THEME.5 plain
   hadd dccore.swm h.THEME The colour scheme for everything the bot says in the channel - the advert~2C the notices~2C the search results. Pick one you like; it is how people tell your bot apart from the others.
-  hadd dccore.swm k.CUSTOM_THEME_BORDER 2081 colour 1 2080
+  hadd dccore.swm k.CUSTOM_THEME_BORDER 2077 colour 1 2076
   hadd dccore.swm pg.CUSTOM_THEME_BORDER 5
   hadd dccore.swm n.CUSTOM_THEME_BORDER Border colour
   hadd dccore.swm h.CUSTOM_THEME_BORDER Override one colour of the chosen theme: the block that frames each message. Leave unset to keep the theme's own colour.
-  hadd dccore.swm k.CUSTOM_THEME_SEPARATOR 2085 colour 1 2084
+  hadd dccore.swm k.CUSTOM_THEME_SEPARATOR 2081 colour 1 2080
   hadd dccore.swm pg.CUSTOM_THEME_SEPARATOR 5
   hadd dccore.swm n.CUSTOM_THEME_SEPARATOR Separator colour
   hadd dccore.swm h.CUSTOM_THEME_SEPARATOR Override one colour of the chosen theme: the block between the parts of a message.
-  hadd dccore.swm k.CUSTOM_THEME_TEXTBOX 2089 colour 1 2088
+  hadd dccore.swm k.CUSTOM_THEME_TEXTBOX 2085 colour 1 2084
   hadd dccore.swm pg.CUSTOM_THEME_TEXTBOX 5
   hadd dccore.swm n.CUSTOM_THEME_TEXTBOX Text box colour
   hadd dccore.swm h.CUSTOM_THEME_TEXTBOX Override one colour of the chosen theme: the background the text sits on.
-  hadd dccore.swm k.CUSTOM_THEME_VALUE 2093 colour 1 2092
+  hadd dccore.swm k.CUSTOM_THEME_VALUE 2089 colour 1 2088
   hadd dccore.swm pg.CUSTOM_THEME_VALUE 5
   hadd dccore.swm n.CUSTOM_THEME_VALUE Value colour
   hadd dccore.swm h.CUSTOM_THEME_VALUE Override one colour of the chosen theme: the numbers and names in a message~2C like a file count or a speed.
-  hadd dccore.swm k.CUSTOM_THEME_ALERT 2097 colour 1 2096
+  hadd dccore.swm k.CUSTOM_THEME_ALERT 2093 colour 1 2092
   hadd dccore.swm pg.CUSTOM_THEME_ALERT 5
   hadd dccore.swm n.CUSTOM_THEME_ALERT Alert colour
   hadd dccore.swm h.CUSTOM_THEME_ALERT Override one colour of the chosen theme: the parts meant to stand out.
-  hadd dccore.swm k.CUSTOM_THEME_ACCENT 2101 colour 1 2100
+  hadd dccore.swm k.CUSTOM_THEME_ACCENT 2097 colour 1 2096
   hadd dccore.swm pg.CUSTOM_THEME_ACCENT 5
   hadd dccore.swm n.CUSTOM_THEME_ACCENT Accent colour
   hadd dccore.swm h.CUSTOM_THEME_ACCENT Override one colour of the chosen theme: timestamps and secondary text.
-  hadd dccore.swm k.ANNOUNCE_INTERVAL 2105 int 1 2104
+  hadd dccore.swm k.ANNOUNCE_INTERVAL 2101 int 1 2100
   hadd dccore.swm pg.ANNOUNCE_INTERVAL 6
   hadd dccore.swm n.ANNOUNCE_INTERVAL Advert interval (seconds)
   hadd dccore.swm h.ANNOUNCE_INTERVAL How often the bot posts its advert in the channel~2C in seconds. 300 is every five minutes. 60 is the least it accepts - channels do not like a bot that advertises constantly.
-  hadd dccore.swm k.BROADCAST_SEARCH_CHANNEL 2109 str 1 2108
+  hadd dccore.swm k.BROADCAST_SEARCH_CHANNEL 2105 str 1 2104
   hadd dccore.swm pg.BROADCAST_SEARCH_CHANNEL 6
   hadd dccore.swm n.BROADCAST_SEARCH_CHANNEL Broadcast search channel
   hadd dccore.swm h.BROADCAST_SEARCH_CHANNEL The one channel used when you search all bots at once from the dashboard. Leave empty to use your first channel.
-  hadd dccore.swm k.BROADCAST_SEARCH_COOLDOWN 2113 int 1 2112
+  hadd dccore.swm k.BROADCAST_SEARCH_COOLDOWN 2109 int 1 2108
   hadd dccore.swm pg.BROADCAST_SEARCH_COOLDOWN 6
   hadd dccore.swm n.BROADCAST_SEARCH_COOLDOWN Broadcast search cooldown (seconds)
   hadd dccore.swm h.BROADCAST_SEARCH_COOLDOWN How many seconds must pass between two of those search-all-bots searches~2C to be polite to the other bots in the channel.
-  hadd dccore.swm k.MSG_DELAY 2117 float 1 2116
+  hadd dccore.swm k.MSG_DELAY 2113 float 1 2112
   hadd dccore.swm pg.MSG_DELAY 6
   hadd dccore.swm n.MSG_DELAY Message delay (seconds)
   hadd dccore.swm h.MSG_DELAY How many seconds the bot waits between the lines it sends to the server. Protects you from being disconnected for flooding. 5 is safe on Undernet; lower is faster but riskier.
-  hadd dccore.swm k.DEBUG_MSG_DELAY 2121 float 1 2120
+  hadd dccore.swm k.DEBUG_MSG_DELAY 2117 float 1 2116
   hadd dccore.swm pg.DEBUG_MSG_DELAY 6
   hadd dccore.swm n.DEBUG_MSG_DELAY Debug message delay (seconds)
-  hadd dccore.swm h.DEBUG_MSG_DELAY How long to wait between lines to your debug channel. Never less than MSG_DELAY - every line the bot sends shares one clock~2C and a smaller number here has no effect. Set it higher than MSG_DELAY to slow the debug channel down further; 0 means the same as MSG_DELAY.
-  hadd dccore.swm k.MAX_DCC_SLOTS 2125 int 1 2124
-  hadd dccore.swm pg.MAX_DCC_SLOTS 7
-  hadd dccore.swm n.MAX_DCC_SLOTS Max simultaneous sends
-  hadd dccore.swm h.MAX_DCC_SLOTS How many files the bot sends at the same time. Everyone else waits in the queue. 3 is a good number for a home connection; raise it only if your upload speed can take it.
-  hadd dccore.swm k.MAX_USER_QUEUE 2129 int 1 2128
-  hadd dccore.swm pg.MAX_USER_QUEUE 7
-  hadd dccore.swm n.MAX_USER_QUEUE Max queue per user
-  hadd dccore.swm h.MAX_USER_QUEUE The most files one person can have waiting in their queue at once.
-  hadd dccore.swm k.MAX_GLOBAL_QUEUE 2133 int 1 2132
-  hadd dccore.swm pg.MAX_GLOBAL_QUEUE 7
-  hadd dccore.swm n.MAX_GLOBAL_QUEUE Max global queue
-  hadd dccore.swm h.MAX_GLOBAL_QUEUE The most files that can be waiting across everybody's queues put together.
-  hadd dccore.swm k.MAX_SEARCH_RESULTS 2137 int 1 2136
-  hadd dccore.swm pg.MAX_SEARCH_RESULTS 7
-  hadd dccore.swm n.MAX_SEARCH_RESULTS Max search results
-  hadd dccore.swm h.MAX_SEARCH_RESULTS How many matching files are sent back to somebody who searches with @find. Each result is one line to that person.
-  hadd dccore.swm k.SEARCH_SHOW_FOLDER 2141 bool 1 2141
-  hadd dccore.swm pg.SEARCH_SHOW_FOLDER 7
-  hadd dccore.swm n.SEARCH_SHOW_FOLDER Name the folder in search replies
-  hadd dccore.swm h.SEARCH_SHOW_FOLDER In the reply to an @find~2C name each result's folder on a line of its own above its files~2C e.g. From: D:\MEDIA\Rock\Some Band\1999 - Some Album. One extra line per folder~2C not per file; the result lines stay exactly as they are. Off by default: every line is paced~2C so it slows the reply.
-  hadd dccore.swm k.SEARCH_FOLDER_MAX_CHARS 2145 int 1 2144
-  hadd dccore.swm pg.SEARCH_FOLDER_MAX_CHARS 7
-  hadd dccore.swm n.SEARCH_FOLDER_MAX_CHARS Longest folder shown (characters)
-  hadd dccore.swm h.SEARCH_FOLDER_MAX_CHARS The longest folder a From: line shows~2C in characters~2C so the line does not wrap. A longer one is cut from the left and starts with ...~2C keeping its end~2C where the album name is. At least 10.
-  hadd dccore.swm k.PAUSE_ON_UPDATE 2149 bool 1 2149
-  hadd dccore.swm pg.PAUSE_ON_UPDATE 7
-  hadd dccore.swm n.PAUSE_ON_UPDATE Pause sharing during !update
-  hadd dccore.swm h.PAUSE_ON_UPDATE While a rebuilt list is being swapped in - a few seconds at the end of !update - refuse searches and file requests. The rest of the rebuild~2C they are answered from the current list~2C which stays complete until the swap.
-  hadd dccore.swm k.PAUSE_FOR_WHOLE_UPDATE 2153 bool 1 2153
-  hadd dccore.swm pg.PAUSE_FOR_WHOLE_UPDATE 7
-  hadd dccore.swm n.PAUSE_FOR_WHOLE_UPDATE Pause for the whole rebuild
-  hadd dccore.swm h.PAUSE_FOR_WHOLE_UPDATE The old behaviour: refuse searches and file requests for the whole rebuild~2C not only while the new list is swapped in. Only needs Pause sharing during !update on too.
-  hadd dccore.swm k.REHASH_TRANSFER_WAIT 2157 int 1 2156
-  hadd dccore.swm pg.REHASH_TRANSFER_WAIT 7
-  hadd dccore.swm n.REHASH_TRANSFER_WAIT Seconds a rehash waits for transfers to finish
-  hadd dccore.swm h.REHASH_TRANSFER_WAIT When you rehash (reload settings)~2C how many seconds the bot waits for running transfers to finish first before reloading anyway. 0 reloads straight away.
-  hadd dccore.swm k.DCC_BLOCK_SIZE 2161 choice 1 2160
-  hadd dccore.swm pg.DCC_BLOCK_SIZE 8
+  hadd dccore.swm h.DEBUG_MSG_DELAY How long to wait between lines to your debug channel. Never less than MSG_DELAY - every line the bot sends shares one clock~2C and a smaller number here has no effect.
+  hadd dccore.swm k.LIST_BASE_NAME 2121 str 1 2120
+  hadd dccore.swm pg.LIST_BASE_NAME 9
+  hadd dccore.swm n.LIST_BASE_NAME List base name
+  hadd dccore.swm h.LIST_BASE_NAME The name your list files start with (for example DCCore-2026-09-18.txt). Normally the same as the bot's nickname~2C which is what happens if you leave it alone. Letters~2C digits and - _ . ~5B ~5D ~7B ~7D ^ ~60 only~2C so it is a file name on every system.
+  hadd dccore.swm k.LIST_FORMAT 2125 choice 1 2124
+  hadd dccore.swm pg.LIST_FORMAT 9
+  hadd dccore.swm n.LIST_FORMAT List delivery format
+  hadd dccore.swm ch.LIST_FORMAT txt zip rar
+  hadd dccore.swm cl.LIST_FORMAT.1 txt
+  hadd dccore.swm cl.LIST_FORMAT.2 zip
+  hadd dccore.swm cl.LIST_FORMAT.3 rar
+  hadd dccore.swm h.LIST_FORMAT How the list is sent to somebody who asks for it: as a plain .txt~2C packed as .zip~2C or packed as .rar. Zip is what most people can open. Rar needs the rar program installed.
+  hadd dccore.swm k.LIST_IGNORED_EXTENSIONS 2129 list 1 2128
+  hadd dccore.swm pg.LIST_IGNORED_EXTENSIONS 9
+  hadd dccore.swm n.LIST_IGNORED_EXTENSIONS File types to leave out of the list
+  hadd dccore.swm h.LIST_IGNORED_EXTENSIONS File types to leave out of your list~2C separated by commas (for example .db~2C .ini). Everything else under your shared folders is listed and can be downloaded~2C so keep private files out of those folders.
+  hadd dccore.swm k.SEPARATE_VIDEO_LIST 2133 bool 1 2133
+  hadd dccore.swm pg.SEPARATE_VIDEO_LIST 9
+  hadd dccore.swm n.SEPARATE_VIDEO_LIST Separate film and series list
+  hadd dccore.swm h.SEPARATE_VIDEO_LIST Put films and series in their own list file~2C separate from the music~2C instead of one list with everything mixed. Both files are sent together when somebody asks for your list.
+  hadd dccore.swm k.LIST_VIDEO_EXTENSIONS 2137 list 1 2136
+  hadd dccore.swm pg.LIST_VIDEO_EXTENSIONS 9
+  hadd dccore.swm n.LIST_VIDEO_EXTENSIONS File types that go in the film list
+  hadd dccore.swm h.LIST_VIDEO_EXTENSIONS Which file types count as video and go in the film list (when the separate film list is on). Separated by commas.
+  hadd dccore.swm k.LIST_VIDEO_COMPANION_EXTENSIONS 2141 list 1 2140
+  hadd dccore.swm pg.LIST_VIDEO_COMPANION_EXTENSIONS 9
+  hadd dccore.swm n.LIST_VIDEO_COMPANION_EXTENSIONS File types that follow a film into its list (subtitles~2C .nfo~2C .sfv)
+  hadd dccore.swm h.LIST_VIDEO_COMPANION_EXTENSIONS File types that belong to a film and should go in the film list with it - subtitles~2C .nfo~2C .sfv - when they are in the same folder as a video. In a folder with no video (an album) they stay with the music.
+  hadd dccore.swm k.RAR_ENABLED 2145 bool 1 2145
+  hadd dccore.swm pg.RAR_ENABLED 9
+  hadd dccore.swm n.RAR_ENABLED Enable !rar folder packing
+  hadd dccore.swm h.RAR_ENABLED Let people request a whole folder packed as one .rar file (with !rar). Turn off if you do not have the rar program or do not want the bot packing folders. Single-file downloads work either way.
+  hadd dccore.swm k.RAR_EXTENSIONS 2149 list 1 2148
+  hadd dccore.swm pg.RAR_EXTENSIONS 9
+  hadd dccore.swm n.RAR_EXTENSIONS File types a folder needs to be !rar-packable
+  hadd dccore.swm h.RAR_EXTENSIONS A folder can be requested as a .rar only if it contains one of these file types~2C directly or in its disc folders (CD1~2C Disc 2). The default is music formats~2C so albums can be packed but a folder with one big film cannot.
+  hadd dccore.swm k.RAR_BINARY 2153 str 1 2152
+  hadd dccore.swm pg.RAR_BINARY 9
+  hadd dccore.swm n.RAR_BINARY RAR binary path
+  hadd dccore.swm h.RAR_BINARY Where the rar program is on this machine. Leave empty and the bot finds it by itself (on the PATH~2C or in WinRAR's folder on Windows). It also opens a list another bot sends as .rar; without it such a list is refused.
+  hadd dccore.swm k.MAX_RAR_FOLDER_SIZE 2157 int 1048576 2156
+  hadd dccore.swm pg.MAX_RAR_FOLDER_SIZE 9
+  hadd dccore.swm n.MAX_RAR_FOLDER_SIZE Largest folder !rar will pack (0 = no limit) (MB)
+  hadd dccore.swm h.MAX_RAR_FOLDER_SIZE The biggest folder the bot will pack as a .rar~2C in bytes. Stops somebody asking for a folder of hundreds of gigabytes. 10 GB fits any album or box set; 0 means no limit.
+  hadd dccore.swm k.RAR_TIMEOUT 2161 int 1 2160
+  hadd dccore.swm pg.RAR_TIMEOUT 9
+  hadd dccore.swm n.RAR_TIMEOUT RAR pack timeout (seconds)
+  hadd dccore.swm h.RAR_TIMEOUT How many seconds a folder may take to pack before the bot gives up on it.
+  hadd dccore.swm k.LIST_HEADER_FILE 2165 str 1 2164
+  hadd dccore.swm pg.LIST_HEADER_FILE 9
+  hadd dccore.swm n.LIST_HEADER_FILE List banner file
+  hadd dccore.swm h.LIST_HEADER_FILE A text file whose contents are printed at the top of your list - a greeting~2C your channel name~2C some ASCII art. If the file does not exist~2C nothing is added.
+  hadd dccore.swm k.LIST_HEADER_MAX_BYTES 2169 int 1024 2168
+  hadd dccore.swm pg.LIST_HEADER_MAX_BYTES 9
+  hadd dccore.swm n.LIST_HEADER_MAX_BYTES List banner size limit (KB)
+  hadd dccore.swm h.LIST_HEADER_MAX_BYTES The most of that file that will be used~2C in bytes~2C so a wrong file cannot bloat every list.
+  hadd dccore.swm k.LIST_SHOW_AUDIO_INFO 2173 bool 1 2173
+  hadd dccore.swm pg.LIST_SHOW_AUDIO_INFO 9
+  hadd dccore.swm n.LIST_SHOW_AUDIO_INFO Length and quality in the list
+  hadd dccore.swm h.LIST_SHOW_AUDIO_INFO Add each MP3 and FLAC file's length and quality after its size in your list~2C e.g. 10.3MB 4m31s 320/44.1/JS. Every audio file is read once~2C in the background after the list is published; searches and downloads pause only for the seconds the lengths take to swap in.
+  hadd dccore.swm k.LIST_REBUILD_SCHEDULE 2177 str 1 2176
+  hadd dccore.swm pg.LIST_REBUILD_SCHEDULE 10
+  hadd dccore.swm n.LIST_REBUILD_SCHEDULE Rebuild the list automatically
+  hadd dccore.swm h.LIST_REBUILD_SCHEDULE Rebuild the list by itself~2C the same way !update does. Write daily 04:00~2C weekly sun 04:00~2C monthly 1 03:30 or every 12h (hours since the last rebuild~2C including yours). Empty: only when you ask. The bot's own clock; if it was off at that time~2C it rebuilds when it starts again.
+  hadd dccore.swm k.LIST_UPDATE_TIMEOUT 2181 int 1 2180
+  hadd dccore.swm pg.LIST_UPDATE_TIMEOUT 10
+  hadd dccore.swm n.LIST_UPDATE_TIMEOUT List rebuild hard cap (seconds~2C 0 = none)
+  hadd dccore.swm h.LIST_UPDATE_TIMEOUT A hard limit in seconds on how long a list rebuild may run. 0 means no limit~2C which is the right choice: a huge library can genuinely take hours~2C and the setting below already catches a rebuild that has stopped doing anything.
+  hadd dccore.swm k.LIST_UPDATE_STALL_SECONDS 2185 int 1 2184
+  hadd dccore.swm pg.LIST_UPDATE_STALL_SECONDS 10
+  hadd dccore.swm n.LIST_UPDATE_STALL_SECONDS Give up if a rebuild reports nothing for (seconds)
+  hadd dccore.swm h.LIST_UPDATE_STALL_SECONDS If a list rebuild reports no progress for this many seconds~2C it is treated as stuck and stopped. 15 minutes is generous on purpose so a slow network drive is not cut off. A silent background audio reading is stopped the same way~2C keeping what it read.
+  hadd dccore.swm k.LIST_AUDIO_INFO_MINUTES 2189 int 1 2188
+  hadd dccore.swm pg.LIST_AUDIO_INFO_MINUTES 10
+  hadd dccore.swm n.LIST_AUDIO_INFO_MINUTES Time limit for reading audio files (no longer used)
+  hadd dccore.swm h.LIST_AUDIO_INFO_MINUTES No longer used. Audio files are now read after the list is published~2C in the background and with no time limit~2C so nothing waits for them. Kept only so an older settings file still loads.
+  hadd dccore.swm k.LIST_AUDIO_INFO_THREADS 2193 int 1 2192
+  hadd dccore.swm pg.LIST_AUDIO_INFO_THREADS 10
+  hadd dccore.swm n.LIST_AUDIO_INFO_THREADS Audio files read at once
+  hadd dccore.swm h.LIST_AUDIO_INFO_THREADS How many audio files are read at once for their length and quality. On a network drive most of the time is waiting~2C so this is 64 by default; lower it only if a slow or small setup does not benefit. The reading says the rate it got~2C to compare. 1 to 128.
+  hadd dccore.swm k.LIST_SCAN_THREADS 2197 int 1 2196
+  hadd dccore.swm pg.LIST_SCAN_THREADS 10
+  hadd dccore.swm n.LIST_SCAN_THREADS Folders scanned at once
+  hadd dccore.swm h.LIST_SCAN_THREADS How many folders are listed at once while the list is rebuilt. On a network drive most of the time is waiting~2C so more at once makes every rebuild shorter. With Pause for the whole rebuild on~2C searches wait while it runs. 1 lists one folder at a time. 1 to 64.
+  hadd dccore.swm k.MAX_UPLOAD_KB 2201 int 1 2200
+  hadd dccore.swm pg.MAX_UPLOAD_KB 11
+  hadd dccore.swm n.MAX_UPLOAD_KB Max upload speed (KB/s~2C 0 = no limit)
+  hadd dccore.swm h.MAX_UPLOAD_KB The most all your sends together may use~2C in KB/s~2C so sharing leaves room on your line. Shared: three sends under 600 get about 200 each~2C and the others speed up when one ends. A change applies at once~2C to sends already running too. 0 is no limit.
+  hadd dccore.swm k.MAX_DOWNLOAD_KB 2205 int 1 2204
+  hadd dccore.swm pg.MAX_DOWNLOAD_KB 11
+  hadd dccore.swm n.MAX_DOWNLOAD_KB Max download speed (KB/s~2C 0 = no limit)
+  hadd dccore.swm h.MAX_DOWNLOAD_KB The most everything the bot fetches may use together~2C in KB/s: list fetches~2C automatic grabs~2C files and folders from other bots. Waiting on this limit does not count toward the fetch timeouts~2C so a big list is not cut off for being slow.
+  hadd dccore.swm k.DCC_BLOCK_SIZE 2209 choice 1 2208
+  hadd dccore.swm pg.DCC_BLOCK_SIZE 11
   hadd dccore.swm n.DCC_BLOCK_SIZE Packet size
   hadd dccore.swm ch.DCC_BLOCK_SIZE 4096 8192 16384 32768 65536 131072 262144
   hadd dccore.swm cl.DCC_BLOCK_SIZE.1 4 KB
@@ -4267,447 +6215,423 @@ alias dccore.sw.data {
   hadd dccore.swm cl.DCC_BLOCK_SIZE.5 64 KB
   hadd dccore.swm cl.DCC_BLOCK_SIZE.6 128 KB
   hadd dccore.swm cl.DCC_BLOCK_SIZE.7 256 KB
-  hadd dccore.swm h.DCC_BLOCK_SIZE How much the bot sends at once~2C in bytes. The default~2C 64 KB~2C suits most bots. 128 or 256 KB use less CPU and suit a fast seedbox~2C but Speed now and the advert's Speed: then move a block at a time~2C so slow sends read 0 or jump~2C and a stalled receiver is dropped after a minute per 64 KB.
-  hadd dccore.swm k.DCC_SEND_BUFFER 2165 int 1024 2164
-  hadd dccore.swm pg.DCC_SEND_BUFFER 8
+  hadd dccore.swm h.DCC_BLOCK_SIZE How much the bot sends at once~2C in bytes. The default~2C 64 KB~2C suits most bots.
+  hadd dccore.swm k.DCC_SEND_BUFFER 2213 int 1024 2212
+  hadd dccore.swm pg.DCC_SEND_BUFFER 11
   hadd dccore.swm n.DCC_SEND_BUFFER Socket send buffer (0 = the default for your platform) (KB)
   hadd dccore.swm h.DCC_SEND_BUFFER How much data the operating system may hold in flight for one send~2C in bytes. 0 uses the platform default: 4 MB on Windows~2C which would otherwise hold only 64 KB~2C and the system's own tuning on Linux and macOS - right for nearly every connection.
-  hadd dccore.swm k.DCC_PORT_START 2169 int 1 2168
-  hadd dccore.swm pg.DCC_PORT_START 8
+  hadd dccore.swm k.DCC_PORT_START 2217 int 1 2216
+  hadd dccore.swm pg.DCC_PORT_START 11
   hadd dccore.swm n.DCC_PORT_START DCC port range start
   hadd dccore.swm h.DCC_PORT_START The first port the bot listens on when sending a file. If you are behind a router~2C forward this whole range (start to end) to the machine running the bot~2C or nobody can download from you.
-  hadd dccore.swm k.DCC_PORT_END 2173 int 1 2172
-  hadd dccore.swm pg.DCC_PORT_END 8
+  hadd dccore.swm k.DCC_PORT_END 2221 int 1 2220
+  hadd dccore.swm pg.DCC_PORT_END 11
   hadd dccore.swm n.DCC_PORT_END DCC port range end
   hadd dccore.swm h.DCC_PORT_END The last port of that range. Sends~2C downloads from other bots and a listen-mode admin console all take their ports from it~2C so keep at least as many ports as your send slots and fetch slots together~2C plus one.
-  hadd dccore.swm k.DCC_ACCEPT_TIMEOUT 2177 int 1 2176
-  hadd dccore.swm pg.DCC_ACCEPT_TIMEOUT 8
+  hadd dccore.swm k.DCC_ACCEPT_TIMEOUT 2225 int 1 2224
+  hadd dccore.swm pg.DCC_ACCEPT_TIMEOUT 11
   hadd dccore.swm n.DCC_ACCEPT_TIMEOUT Wait for the receiver to connect (seconds)
   hadd dccore.swm h.DCC_ACCEPT_TIMEOUT How many seconds the bot waits for someone to accept a file it has offered before withdrawing the offer and counting one failed attempt. A person who has to click Accept in a dialog often needs more than the default 30.
-  hadd dccore.swm k.MAX_SEND_FAILS 2181 int 1 2180
-  hadd dccore.swm pg.MAX_SEND_FAILS 8
+  hadd dccore.swm k.MAX_SEND_FAILS 2229 int 1 2228
+  hadd dccore.swm pg.MAX_SEND_FAILS 11
   hadd dccore.swm n.MAX_SEND_FAILS Max send failures
   hadd dccore.swm h.MAX_SEND_FAILS How many times the bot retries sending one queued file if the download does not connect or fails~2C before dropping it from the queue and telling the person.
-  hadd dccore.swm k.FILE_DIRECTORY 2185 str 1 2184
-  hadd dccore.swm pg.FILE_DIRECTORY 9
-  hadd dccore.swm n.FILE_DIRECTORY Music directory (used only when no folders are set)
-  hadd dccore.swm h.FILE_DIRECTORY The folder with the files you share. Used only if you have not added folders on the Library page - if you have~2C those are used instead and this is ignored.
-  hadd dccore.swm k.LIST_BASE_NAME 2189 str 1 2188
-  hadd dccore.swm pg.LIST_BASE_NAME 9
-  hadd dccore.swm n.LIST_BASE_NAME List base name
-  hadd dccore.swm h.LIST_BASE_NAME The name your list files start with (for example DCCore-2026-09-18.txt). Normally the same as the bot's nickname~2C which is what happens if you leave it alone. Letters~2C digits and - _ . ~5B ~5D ~7B ~7D ^ ~60 only~2C so it is a file name on every system.
-  hadd dccore.swm k.LIST_FORMAT 2193 choice 1 2192
-  hadd dccore.swm pg.LIST_FORMAT 9
-  hadd dccore.swm n.LIST_FORMAT List delivery format
-  hadd dccore.swm ch.LIST_FORMAT txt zip rar
-  hadd dccore.swm cl.LIST_FORMAT.1 txt
-  hadd dccore.swm cl.LIST_FORMAT.2 zip
-  hadd dccore.swm cl.LIST_FORMAT.3 rar
-  hadd dccore.swm h.LIST_FORMAT How the list is sent to somebody who asks for it: as a plain .txt~2C packed as .zip~2C or packed as .rar. Zip is what most people can open. Rar needs the rar program installed.
-  hadd dccore.swm k.LIST_IGNORED_EXTENSIONS 2197 list 1 2196
-  hadd dccore.swm pg.LIST_IGNORED_EXTENSIONS 9
-  hadd dccore.swm n.LIST_IGNORED_EXTENSIONS File types to leave out of the list
-  hadd dccore.swm h.LIST_IGNORED_EXTENSIONS File types to leave out of your list~2C separated by commas (for example .db~2C .ini). Everything else under your shared folders is listed and can be downloaded~2C so keep private files out of those folders.
-  hadd dccore.swm k.SEPARATE_VIDEO_LIST 2201 bool 1 2201
-  hadd dccore.swm pg.SEPARATE_VIDEO_LIST 9
-  hadd dccore.swm n.SEPARATE_VIDEO_LIST Publish film and series as a separate list
-  hadd dccore.swm h.SEPARATE_VIDEO_LIST Put films and series in their own list file~2C separate from the music~2C instead of one list with everything mixed. Both files are sent together when somebody asks for your list.
-  hadd dccore.swm k.LIST_VIDEO_EXTENSIONS 2205 list 1 2204
-  hadd dccore.swm pg.LIST_VIDEO_EXTENSIONS 9
-  hadd dccore.swm n.LIST_VIDEO_EXTENSIONS File types that go in the film list
-  hadd dccore.swm h.LIST_VIDEO_EXTENSIONS Which file types count as video and go in the film list (when the separate film list is on). Separated by commas.
-  hadd dccore.swm k.LIST_VIDEO_COMPANION_EXTENSIONS 2209 list 1 2208
-  hadd dccore.swm pg.LIST_VIDEO_COMPANION_EXTENSIONS 9
-  hadd dccore.swm n.LIST_VIDEO_COMPANION_EXTENSIONS File types that follow a film into its list (subtitles~2C .nfo~2C .sfv)
-  hadd dccore.swm h.LIST_VIDEO_COMPANION_EXTENSIONS File types that belong to a film and should go in the film list with it - subtitles~2C .nfo~2C .sfv - when they are in the same folder as a video. In a folder with no video (an album) they stay with the music.
-  hadd dccore.swm k.RAR_EXTENSIONS 2213 list 1 2212
-  hadd dccore.swm pg.RAR_EXTENSIONS 9
-  hadd dccore.swm n.RAR_EXTENSIONS File types a folder needs to be !rar-packable
-  hadd dccore.swm h.RAR_EXTENSIONS A folder can be requested as a .rar only if it contains one of these file types~2C directly or in its disc folders (CD1~2C Disc 2). The default is music formats~2C so albums can be packed but a folder with one big film cannot.
-  hadd dccore.swm k.RAR_BINARY 2217 str 1 2216
-  hadd dccore.swm pg.RAR_BINARY 9
-  hadd dccore.swm n.RAR_BINARY RAR binary path
-  hadd dccore.swm h.RAR_BINARY Where the rar program is on this machine. Leave empty and the bot finds it by itself (on the PATH~2C or in WinRAR's folder on Windows). It also opens a list another bot sends as .rar; without it such a list is refused.
-  hadd dccore.swm k.MAX_RAR_FOLDER_SIZE 2221 int 1048576 2220
-  hadd dccore.swm pg.MAX_RAR_FOLDER_SIZE 9
-  hadd dccore.swm n.MAX_RAR_FOLDER_SIZE Largest folder !rar will pack (0 = no limit) (MB)
-  hadd dccore.swm h.MAX_RAR_FOLDER_SIZE The biggest folder the bot will pack as a .rar~2C in bytes. Stops somebody asking for a folder of hundreds of gigabytes. 10 GB fits any album or box set; 0 means no limit.
-  hadd dccore.swm k.RAR_TIMEOUT 2225 int 1 2224
-  hadd dccore.swm pg.RAR_TIMEOUT 9
-  hadd dccore.swm n.RAR_TIMEOUT RAR pack timeout (seconds)
-  hadd dccore.swm h.RAR_TIMEOUT How many seconds a folder may take to pack before the bot gives up on it.
-  hadd dccore.swm k.LIST_HEADER_FILE 2229 str 1 2228
-  hadd dccore.swm pg.LIST_HEADER_FILE 9
-  hadd dccore.swm n.LIST_HEADER_FILE List banner file
-  hadd dccore.swm h.LIST_HEADER_FILE A text file whose contents are printed at the top of your list - a greeting~2C your channel name~2C some ASCII art. If the file does not exist~2C nothing is added.
-  hadd dccore.swm k.LIST_HEADER_MAX_BYTES 2233 int 1024 2232
-  hadd dccore.swm pg.LIST_HEADER_MAX_BYTES 9
-  hadd dccore.swm n.LIST_HEADER_MAX_BYTES List banner size limit (KB)
-  hadd dccore.swm h.LIST_HEADER_MAX_BYTES The most of that file that will be used~2C in bytes~2C so a wrong file cannot bloat every list.
-  hadd dccore.swm k.LIST_SHOW_AUDIO_INFO 2237 bool 1 2237
-  hadd dccore.swm pg.LIST_SHOW_AUDIO_INFO 9
-  hadd dccore.swm n.LIST_SHOW_AUDIO_INFO Length and quality in the list
-  hadd dccore.swm h.LIST_SHOW_AUDIO_INFO Add each MP3 and FLAC file's length and quality after its size in your list~2C e.g. 10.3MB 4m31s 320/44.1/JS. Every audio file is read once~2C in the background after the list is published; searches and downloads pause only for the seconds the lengths take to swap in.
-  hadd dccore.swm k.LIST_REBUILD_SCHEDULE 2241 str 1 2240
-  hadd dccore.swm pg.LIST_REBUILD_SCHEDULE 11
-  hadd dccore.swm n.LIST_REBUILD_SCHEDULE Rebuild the list automatically
-  hadd dccore.swm h.LIST_REBUILD_SCHEDULE Rebuild the list by itself~2C the same way !update does. Write daily 04:00~2C weekly sun 04:00~2C monthly 1 03:30 or every 12h (hours since the last rebuild~2C including yours). Empty: only when you ask. The bot's own clock; if it was off at that time~2C it rebuilds when it starts again.
-  hadd dccore.swm k.LIST_UPDATE_TIMEOUT 2245 int 1 2244
-  hadd dccore.swm pg.LIST_UPDATE_TIMEOUT 11
-  hadd dccore.swm n.LIST_UPDATE_TIMEOUT List rebuild hard cap (seconds~2C 0 = none)
-  hadd dccore.swm h.LIST_UPDATE_TIMEOUT A hard limit in seconds on how long a list rebuild may run. 0 means no limit~2C which is the right choice: a huge library can genuinely take hours~2C and the setting below already catches a rebuild that has stopped doing anything.
-  hadd dccore.swm k.LIST_UPDATE_STALL_SECONDS 2249 int 1 2248
-  hadd dccore.swm pg.LIST_UPDATE_STALL_SECONDS 11
-  hadd dccore.swm n.LIST_UPDATE_STALL_SECONDS Give up if a rebuild reports nothing for (seconds)
-  hadd dccore.swm h.LIST_UPDATE_STALL_SECONDS If a list rebuild reports no progress for this many seconds~2C it is treated as stuck and stopped. 15 minutes is generous on purpose so a slow network drive is not cut off. A silent background audio reading is stopped the same way~2C keeping what it read.
-  hadd dccore.swm k.LIST_AUDIO_INFO_MINUTES 2253 int 1 2252
-  hadd dccore.swm pg.LIST_AUDIO_INFO_MINUTES 11
-  hadd dccore.swm n.LIST_AUDIO_INFO_MINUTES Time limit for reading audio files (no longer used)
-  hadd dccore.swm h.LIST_AUDIO_INFO_MINUTES No longer used. Audio files are now read after the list is published~2C in the background and with no time limit~2C so nothing waits for them. Kept only so an older settings file still loads.
-  hadd dccore.swm k.LIST_AUDIO_INFO_THREADS 2257 int 1 2256
-  hadd dccore.swm pg.LIST_AUDIO_INFO_THREADS 11
-  hadd dccore.swm n.LIST_AUDIO_INFO_THREADS Audio files read at once
-  hadd dccore.swm h.LIST_AUDIO_INFO_THREADS How many audio files are read at once for their length and quality. On a network drive most of the time is waiting~2C so this is 64 by default; lower it only if a slow or small setup does not benefit. The reading says the rate it got~2C to compare. 1 to 128.
-  hadd dccore.swm k.LIST_SCAN_THREADS 2261 int 1 2260
-  hadd dccore.swm pg.LIST_SCAN_THREADS 11
-  hadd dccore.swm n.LIST_SCAN_THREADS Folders scanned at once
-  hadd dccore.swm h.LIST_SCAN_THREADS How many folders are listed at once while the list is rebuilt. On a network drive most of the time is waiting~2C so more at once makes every rebuild shorter. With Pause for the whole rebuild on~2C searches wait while it runs. 1 lists one folder at a time. 1 to 64.
-  hadd dccore.swm k.AUTO_GRAB_LISTS 2265 bool 1 2265
-  hadd dccore.swm pg.AUTO_GRAB_LISTS 12
+  hadd dccore.swm k.DAILY_SEND_FAILS_LIMIT 2233 int 1 2232
+  hadd dccore.swm pg.DAILY_SEND_FAILS_LIMIT 11
+  hadd dccore.swm n.DAILY_SEND_FAILS_LIMIT Failed sends in a day before a nick is paused (0 = off)
+  hadd dccore.swm h.DAILY_SEND_FAILS_LIMIT 0 means off.
+  hadd dccore.swm k.MAX_DCC_SLOTS 2237 int 1 2236
+  hadd dccore.swm pg.MAX_DCC_SLOTS 12
+  hadd dccore.swm n.MAX_DCC_SLOTS Max simultaneous sends
+  hadd dccore.swm h.MAX_DCC_SLOTS How many files the bot sends at the same time. Everyone else waits in the queue. 3 is a good number for a home connection; raise it only if your upload speed can take it.
+  hadd dccore.swm k.LARGE_FILE_MB 2241 int 1 2240
+  hadd dccore.swm pg.LARGE_FILE_MB 12
+  hadd dccore.swm n.LARGE_FILE_MB One large file from (MB~2C 0 = off)
+  hadd dccore.swm h.LARGE_FILE_MB Files of at least this many MB count as large~2C and only one is sent at a time~2C so a few huge downloads cannot hold every slot for hours. Someone whose next file is large keeps their place and waits; the slot goes to the next in line.
+  hadd dccore.swm k.SLOW_SEND_MIN_KB 2245 int 1 2244
+  hadd dccore.swm pg.SLOW_SEND_MIN_KB 12
+  hadd dccore.swm n.SLOW_SEND_MIN_KB Stop sends slower than (KB/s~2C 0 = off)
+  hadd dccore.swm h.SLOW_SEND_MIN_KB Only while every slot is taken and someone is waiting. 0 means off. The slowest send~2C under this many KB/s over its last minute while another send manages it~2C is stopped for the next in line. A queued file stays queued to resume; one sent without waiting is dropped.
+  hadd dccore.swm k.MAX_USER_QUEUE 2249 int 1 2248
+  hadd dccore.swm pg.MAX_USER_QUEUE 12
+  hadd dccore.swm n.MAX_USER_QUEUE Max queue per user
+  hadd dccore.swm h.MAX_USER_QUEUE The most files one person can have waiting in their queue at once.
+  hadd dccore.swm k.MAX_GLOBAL_QUEUE 2253 int 1 2252
+  hadd dccore.swm pg.MAX_GLOBAL_QUEUE 12
+  hadd dccore.swm n.MAX_GLOBAL_QUEUE Max global queue
+  hadd dccore.swm h.MAX_GLOBAL_QUEUE The most files that can be waiting across everybody's queues put together.
+  hadd dccore.swm k.MAX_SEARCH_RESULTS 2257 int 1 2256
+  hadd dccore.swm pg.MAX_SEARCH_RESULTS 12
+  hadd dccore.swm n.MAX_SEARCH_RESULTS Max search results
+  hadd dccore.swm h.MAX_SEARCH_RESULTS How many matching files are sent back to somebody who searches with @find. Each result is one line to that person.
+  hadd dccore.swm k.SEARCH_SHOW_FOLDER 2261 bool 1 2261
+  hadd dccore.swm pg.SEARCH_SHOW_FOLDER 12
+  hadd dccore.swm n.SEARCH_SHOW_FOLDER Name the folder in search replies
+  hadd dccore.swm h.SEARCH_SHOW_FOLDER In the reply to an @find~2C name each result's folder on a line of its own above its files~2C e.g. From: D:\MEDIA\Rock\Some Band\1999 - Some Album. One extra line per folder~2C not per file; the result lines stay exactly as they are.
+  hadd dccore.swm k.SEARCH_FOLDER_MAX_CHARS 2265 int 1 2264
+  hadd dccore.swm pg.SEARCH_FOLDER_MAX_CHARS 12
+  hadd dccore.swm n.SEARCH_FOLDER_MAX_CHARS Longest folder shown (characters)
+  hadd dccore.swm h.SEARCH_FOLDER_MAX_CHARS The longest folder a From: line shows~2C in characters~2C so the line does not wrap. A longer one is cut from the left and starts with ...~2C keeping its end~2C where the album name is. At least 10.
+  hadd dccore.swm k.PAUSE_ON_UPDATE 2269 bool 1 2269
+  hadd dccore.swm pg.PAUSE_ON_UPDATE 12
+  hadd dccore.swm n.PAUSE_ON_UPDATE Pause sharing during !update
+  hadd dccore.swm h.PAUSE_ON_UPDATE While a rebuilt list is being swapped in - a few seconds at the end of !update - refuse searches and file requests. The rest of the rebuild~2C they are answered from the current list~2C which stays complete until the swap.
+  hadd dccore.swm k.PAUSE_FOR_WHOLE_UPDATE 2273 bool 1 2273
+  hadd dccore.swm pg.PAUSE_FOR_WHOLE_UPDATE 12
+  hadd dccore.swm n.PAUSE_FOR_WHOLE_UPDATE Pause for the whole rebuild
+  hadd dccore.swm h.PAUSE_FOR_WHOLE_UPDATE The old behaviour: refuse searches and file requests for the whole rebuild~2C not only while the new list is swapped in. Only needs Pause sharing during !update on too.
+  hadd dccore.swm k.REHASH_TRANSFER_WAIT 2277 int 1 2276
+  hadd dccore.swm pg.REHASH_TRANSFER_WAIT 12
+  hadd dccore.swm n.REHASH_TRANSFER_WAIT Seconds a rehash waits for transfers to finish
+  hadd dccore.swm h.REHASH_TRANSFER_WAIT When you rehash (reload settings)~2C how many seconds the bot waits for running transfers to finish first before reloading anyway. 0 reloads straight away.
+  hadd dccore.swm k.AUTO_GRAB_LISTS 2281 bool 1 2281
+  hadd dccore.swm pg.AUTO_GRAB_LISTS 13
   hadd dccore.swm n.AUTO_GRAB_LISTS Grab the lists of bots you have no list from
-  hadd dccore.swm h.AUTO_GRAB_LISTS Fetch the list of each bot that advertises one you do not have~2C one at a time: after a random wait~2C not if someone else just asked that bot~2C and at most 3 tries per bot. A list you remove is not fetched again. Off by default: it uses other bots' bandwidth without you asking.
-  hadd dccore.swm k.AUTO_GRAB_EVERY_MINUTES 2269 int 1 2268
-  hadd dccore.swm pg.AUTO_GRAB_EVERY_MINUTES 12
+  hadd dccore.swm h.AUTO_GRAB_LISTS Fetch the list of each bot that advertises one you do not have~2C one at a time: after a random wait~2C not if someone else just asked that bot~2C and at most 3 tries per bot. A list you remove is not fetched again.
+  hadd dccore.swm k.AUTO_GRAB_EVERY_MINUTES 2285 int 1 2284
+  hadd dccore.swm pg.AUTO_GRAB_EVERY_MINUTES 13
   hadd dccore.swm n.AUTO_GRAB_EVERY_MINUTES Minutes between automatic grabs
   hadd dccore.swm h.AUTO_GRAB_EVERY_MINUTES The least time between two automatic list grabs~2C in minutes.
-  hadd dccore.swm k.AUTO_GRAB_MIN_FILES 2273 int 1 2272
-  hadd dccore.swm pg.AUTO_GRAB_MIN_FILES 12
+  hadd dccore.swm k.AUTO_GRAB_MIN_FILES 2289 int 1 2288
+  hadd dccore.swm pg.AUTO_GRAB_MIN_FILES 13
   hadd dccore.swm n.AUTO_GRAB_MIN_FILES Skip bots with fewer files than
   hadd dccore.swm h.AUTO_GRAB_MIN_FILES Do not grab the list of a bot that advertises fewer files than this. 0 grabs any size.
-  hadd dccore.swm k.AUTO_GRAB_MIN_SPEED_KB 2277 int 1 2276
-  hadd dccore.swm pg.AUTO_GRAB_MIN_SPEED_KB 12
+  hadd dccore.swm k.AUTO_GRAB_MIN_SPEED_KB 2293 int 1 2292
+  hadd dccore.swm pg.AUTO_GRAB_MIN_SPEED_KB 13
   hadd dccore.swm n.AUTO_GRAB_MIN_SPEED_KB Skip bots slower than (KB/s)
   hadd dccore.swm h.AUTO_GRAB_MIN_SPEED_KB Do not grab the list of a bot that advertises a speed below this~2C in KB/s. A bot that shows no speed is not skipped. 0 turns this off.
-  hadd dccore.swm k.AUTO_DISCOVER_CHANNEL_LISTS 2281 bool 1 2281
-  hadd dccore.swm pg.AUTO_DISCOVER_CHANNEL_LISTS 12
+  hadd dccore.swm k.AUTO_DISCOVER_CHANNEL_LISTS 2297 bool 1 2297
+  hadd dccore.swm pg.AUTO_DISCOVER_CHANNEL_LISTS 13
   hadd dccore.swm n.AUTO_DISCOVER_CHANNEL_LISTS Discover a bot's other channel-bound lists
   hadd dccore.swm h.AUTO_DISCOVER_CHANNEL_LISTS Watch bots you already hold a list from for a second~2C genuinely different list bound to another of your channels~2C and fetch and hold that one too - never instead of the first. Only acts once the difference has held steady for the time below.
-  hadd dccore.swm k.MULTI_CHANNEL_LIST_STABLE_SECONDS 2285 int 1 2284
-  hadd dccore.swm pg.MULTI_CHANNEL_LIST_STABLE_SECONDS 12
+  hadd dccore.swm k.MULTI_CHANNEL_LIST_STABLE_SECONDS 2301 int 1 2300
+  hadd dccore.swm pg.MULTI_CHANNEL_LIST_STABLE_SECONDS 13
   hadd dccore.swm n.MULTI_CHANNEL_LIST_STABLE_SECONDS Hold stable this long first (seconds)
   hadd dccore.swm h.MULTI_CHANNEL_LIST_STABLE_SECONDS How long~2C in seconds~2C a bot's channels must show a stable~2C differing file count or list date before the setting above acts on it. A bot mid-scan in one channel when its advert goes out should not be mistaken for a second list.
-  hadd dccore.swm k.MAX_FETCH_SLOTS 2289 int 1 2288
-  hadd dccore.swm pg.MAX_FETCH_SLOTS 13
+  hadd dccore.swm k.MAX_FETCH_SLOTS 2305 int 1 2304
+  hadd dccore.swm pg.MAX_FETCH_SLOTS 14
   hadd dccore.swm n.MAX_FETCH_SLOTS Max fetch slots
   hadd dccore.swm h.MAX_FETCH_SLOTS How many downloads FROM other bots you run at the same time. Separate from your own send slots~2C so your downloading never takes slots away from people downloading from you.
-  hadd dccore.swm k.AUTO_REFETCH_LISTS 2293 bool 1 2293
-  hadd dccore.swm pg.AUTO_REFETCH_LISTS 13
-  hadd dccore.swm n.AUTO_REFETCH_LISTS Re-fetch a held list when its bot advertises a new one
+  hadd dccore.swm k.AUTO_REFETCH_LISTS 2309 bool 1 2309
+  hadd dccore.swm pg.AUTO_REFETCH_LISTS 14
+  hadd dccore.swm n.AUTO_REFETCH_LISTS Re-fetch when a bot has a new list
   hadd dccore.swm h.AUTO_REFETCH_LISTS When another bot advertises that its list has changed~2C fetch the new list automatically. A list from a bot whose advert shows no date is fetched again once it is 14 days old. Off by default because it uses the other bot's bandwidth without you asking each time.
-  hadd dccore.swm k.AUTO_REFETCH_INTERVAL_HOURS 2297 int 1 2296
-  hadd dccore.swm pg.AUTO_REFETCH_INTERVAL_HOURS 13
+  hadd dccore.swm k.AUTO_REFETCH_INTERVAL_HOURS 2313 int 1 2312
+  hadd dccore.swm pg.AUTO_REFETCH_INTERVAL_HOURS 14
   hadd dccore.swm n.AUTO_REFETCH_INTERVAL_HOURS Least time between re-fetches of one bot (hours)
   hadd dccore.swm h.AUTO_REFETCH_INTERVAL_HOURS The least time between two automatic asks for the same bot's list~2C in hours. Counted from the last list that arrived or the last time the bot was asked~2C so a bot that rebuilds hourly - or does not answer - is not asked every hour.
-  hadd dccore.swm k.AUTO_REFETCH_MAX_PER_RUN 2301 int 1 2300
-  hadd dccore.swm pg.AUTO_REFETCH_MAX_PER_RUN 13
+  hadd dccore.swm k.AUTO_REFETCH_MAX_PER_RUN 2317 int 1 2316
+  hadd dccore.swm pg.AUTO_REFETCH_MAX_PER_RUN 14
   hadd dccore.swm n.AUTO_REFETCH_MAX_PER_RUN Most lists to re-fetch in one sweep
   hadd dccore.swm h.AUTO_REFETCH_MAX_PER_RUN The most lists to re-fetch in one go. If many are out of date at once~2C the rest are picked up on later rounds~2C oldest first.
-  hadd dccore.swm k.FETCH_OFFER_TIMEOUT 2305 int 1 2304
-  hadd dccore.swm pg.FETCH_OFFER_TIMEOUT 13
+  hadd dccore.swm k.FETCH_OFFER_TIMEOUT 2321 int 1 2320
+  hadd dccore.swm pg.FETCH_OFFER_TIMEOUT 14
   hadd dccore.swm n.FETCH_OFFER_TIMEOUT Wait for a reply to a fetch request (seconds)
   hadd dccore.swm h.FETCH_OFFER_TIMEOUT When you request a file from another bot~2C how many seconds to wait for it to offer the file before giving up.
-  hadd dccore.swm k.FETCH_TRANSFER_TIMEOUT 2309 int 1 2308
-  hadd dccore.swm pg.FETCH_TRANSFER_TIMEOUT 13
+  hadd dccore.swm k.FETCH_TRANSFER_TIMEOUT 2325 int 1 2324
+  hadd dccore.swm pg.FETCH_TRANSFER_TIMEOUT 14
   hadd dccore.swm n.FETCH_TRANSFER_TIMEOUT Fetch transfer timeout (seconds)
   hadd dccore.swm h.FETCH_TRANSFER_TIMEOUT The longest a file download from another bot may take in total~2C in seconds~2C before it is abandoned.
-  hadd dccore.swm k.FETCH_FOLDER_OFFER_TIMEOUT 2313 int 1 2312
-  hadd dccore.swm pg.FETCH_FOLDER_OFFER_TIMEOUT 13
+  hadd dccore.swm k.FETCH_FOLDER_OFFER_TIMEOUT 2329 int 1 2328
+  hadd dccore.swm pg.FETCH_FOLDER_OFFER_TIMEOUT 14
   hadd dccore.swm n.FETCH_FOLDER_OFFER_TIMEOUT Wait for a reply to a folder (.rar) request (seconds)
   hadd dccore.swm h.FETCH_FOLDER_OFFER_TIMEOUT When you request a whole folder (.rar) from another bot~2C how many seconds to wait for its offer. Much longer than for a single file~2C because the other bot has to pack the folder first.
-  hadd dccore.swm k.FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED 2317 int 1 2316
-  hadd dccore.swm pg.FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED 13
+  hadd dccore.swm k.FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED 2333 int 1 2332
+  hadd dccore.swm pg.FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED 14
   hadd dccore.swm n.FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED ...from a bot that publishes no .rar list (seconds)
   hadd dccore.swm h.FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED The same wait~2C but for a bot that does not publish a folder list and probably cannot pack at all - shorter~2C so a slot is not held for half an hour waiting for nothing.
-  hadd dccore.swm k.FETCH_FOLDER_TRANSFER_TIMEOUT 2321 int 1 2320
-  hadd dccore.swm pg.FETCH_FOLDER_TRANSFER_TIMEOUT 13
+  hadd dccore.swm k.FETCH_FOLDER_TRANSFER_TIMEOUT 2337 int 1 2336
+  hadd dccore.swm pg.FETCH_FOLDER_TRANSFER_TIMEOUT 14
   hadd dccore.swm n.FETCH_FOLDER_TRANSFER_TIMEOUT Folder (.rar) fetch transfer timeout (seconds)
   hadd dccore.swm h.FETCH_FOLDER_TRANSFER_TIMEOUT The longest a folder (.rar) download from another bot may take in total~2C in seconds. Larger than the single-file limit because a packed discography is much bigger.
-  hadd dccore.swm k.MAX_FETCH_FILE_SIZE 2325 int 1048576 2324
-  hadd dccore.swm pg.MAX_FETCH_FILE_SIZE 13
+  hadd dccore.swm k.MAX_FETCH_FILE_SIZE 2341 int 1048576 2340
+  hadd dccore.swm pg.MAX_FETCH_FILE_SIZE 14
   hadd dccore.swm n.MAX_FETCH_FILE_SIZE Max fetch file size (MB)
   hadd dccore.swm h.MAX_FETCH_FILE_SIZE The biggest single file you will accept from another bot~2C in bytes. Anything larger is refused before the download starts. 0 means no limit - except that a fetched list still may not unpack to more than 8 lists of the biggest size allowed~2C so a booby-trapped list cannot fill your disk.
-  hadd dccore.swm k.MAX_FETCH_FOLDER_FILE_SIZE 2329 int 1048576 2328
-  hadd dccore.swm pg.MAX_FETCH_FOLDER_FILE_SIZE 13
+  hadd dccore.swm k.MAX_FETCH_FOLDER_FILE_SIZE 2345 int 1048576 2344
+  hadd dccore.swm pg.MAX_FETCH_FOLDER_FILE_SIZE 14
   hadd dccore.swm n.MAX_FETCH_FOLDER_FILE_SIZE Max folder (.rar) fetch size (MB)
   hadd dccore.swm h.MAX_FETCH_FOLDER_FILE_SIZE The biggest packed folder (.rar) you will accept from another bot~2C in bytes. 0 means no limit.
-  hadd dccore.swm k.MAX_FETCH_LIST_FILE_SIZE 2333 int 1048576 2332
-  hadd dccore.swm pg.MAX_FETCH_LIST_FILE_SIZE 13
+  hadd dccore.swm k.MAX_FETCH_LIST_FILE_SIZE 2349 int 1048576 2348
+  hadd dccore.swm pg.MAX_FETCH_LIST_FILE_SIZE 14
   hadd dccore.swm n.MAX_FETCH_LIST_FILE_SIZE Max fetched master-list zip size (MB)
   hadd dccore.swm h.MAX_FETCH_LIST_FILE_SIZE The biggest list archive you will accept from another bot~2C in bytes. A real list is a few megabytes; this stops a bad offer sending you something huge. 0 means no limit.
-  hadd dccore.swm k.MAX_LIST_TEXT_SIZE 2337 int 1048576 2336
-  hadd dccore.swm pg.MAX_LIST_TEXT_SIZE 13
+  hadd dccore.swm k.MAX_LIST_TEXT_SIZE 2353 int 1048576 2352
+  hadd dccore.swm pg.MAX_LIST_TEXT_SIZE 14
   hadd dccore.swm n.MAX_LIST_TEXT_SIZE Largest list text accepted from a peer (MB)
   hadd dccore.swm h.MAX_LIST_TEXT_SIZE The biggest unpacked list you will read from another bot~2C in bytes. Every line of it is kept in memory~2C so this is a memory limit. 0 uses the default.
-  hadd dccore.swm k.FETCH_HISTORY_DAYS 2341 int 1 2340
-  hadd dccore.swm pg.FETCH_HISTORY_DAYS 13
+  hadd dccore.swm k.FETCH_HISTORY_DAYS 2357 int 1 2356
+  hadd dccore.swm pg.FETCH_HISTORY_DAYS 14
   hadd dccore.swm n.FETCH_HISTORY_DAYS Keep finished downloads for (days)
   hadd dccore.swm h.FETCH_HISTORY_DAYS How many days a finished download from another bot stays in the Downloads table. The downloaded file itself is kept regardless.
-  hadd dccore.swm k.FETCH_HISTORY_MAX_ROWS 2345 int 1 2344
-  hadd dccore.swm pg.FETCH_HISTORY_MAX_ROWS 13
+  hadd dccore.swm k.FETCH_HISTORY_MAX_ROWS 2361 int 1 2360
+  hadd dccore.swm pg.FETCH_HISTORY_MAX_ROWS 14
   hadd dccore.swm n.FETCH_HISTORY_MAX_ROWS Maximum finished downloads kept
   hadd dccore.swm h.FETCH_HISTORY_MAX_ROWS The most finished downloads kept in that table~2C whatever their age.
-  hadd dccore.swm k.FETCH_MAX_PER_BOT 2349 int 1 2348
-  hadd dccore.swm pg.FETCH_MAX_PER_BOT 14
+  hadd dccore.swm k.FETCH_MAX_PER_BOT 2365 int 1 2364
+  hadd dccore.swm pg.FETCH_MAX_PER_BOT 15
   hadd dccore.swm n.FETCH_MAX_PER_BOT Files asked of one bot at once
   hadd dccore.swm h.FETCH_MAX_PER_BOT How many files to ask one bot for at once. The next one is asked when one arrives. Servers allow each person only a few; asking for more gets "queue full". 0 means no limit.
-  hadd dccore.swm k.FETCH_QUEUED_TIMEOUT 2353 int 1 2352
-  hadd dccore.swm pg.FETCH_QUEUED_TIMEOUT 14
+  hadd dccore.swm k.FETCH_QUEUED_TIMEOUT 2369 int 1 2368
+  hadd dccore.swm pg.FETCH_QUEUED_TIMEOUT 15
   hadd dccore.swm n.FETCH_QUEUED_TIMEOUT Wait for a queued request (s)
   hadd dccore.swm h.FETCH_QUEUED_TIMEOUT When another bot puts your request in its queue~2C how long to wait for your turn before giving up. Busy servers take hours. 0 waits for ever.
-  hadd dccore.swm k.FETCH_BOT_MAX_FAILS 2357 int 1 2356
-  hadd dccore.swm pg.FETCH_BOT_MAX_FAILS 14
+  hadd dccore.swm k.FETCH_BOT_MAX_FAILS 2373 int 1 2372
+  hadd dccore.swm pg.FETCH_BOT_MAX_FAILS 15
   hadd dccore.swm n.FETCH_BOT_MAX_FAILS Failed requests in a row that pause a bot
-  hadd dccore.swm h.FETCH_BOT_MAX_FAILS How many of your requests to one bot may fail in a row - no answer~2C a connection that could not be made~2C a download that broke off - before that bot is paused for a while. A bot saying it does not have the file~2C or you cancelling~2C does not count; a finished download starts the count again.
-  hadd dccore.swm k.FETCH_BOT_COOLDOWN_MINUTES 2361 int 1 2360
-  hadd dccore.swm pg.FETCH_BOT_COOLDOWN_MINUTES 14
+  hadd dccore.swm h.FETCH_BOT_MAX_FAILS How many of your requests to one bot may fail in a row - no answer~2C a connection that could not be made~2C a download that broke off - before that bot is paused for a while.
+  hadd dccore.swm k.FETCH_BOT_COOLDOWN_MINUTES 2377 int 1 2376
+  hadd dccore.swm pg.FETCH_BOT_COOLDOWN_MINUTES 15
   hadd dccore.swm n.FETCH_BOT_COOLDOWN_MINUTES Minutes a failing bot stays paused
   hadd dccore.swm h.FETCH_BOT_COOLDOWN_MINUTES How many minutes such a bot stays paused. Its requests wait~2C and go out by themselves when the time is up - also after a restart. The Downloads page shows until when~2C with a Resume now button. 0 turns the pause off.
-  hadd dccore.swm k.MAX_REQUESTS 2365 int 1 2364
-  hadd dccore.swm pg.MAX_REQUESTS 15
+  hadd dccore.swm k.LIST_REQUEST_TAG 2381 str 1 2380
+  hadd dccore.swm pg.LIST_REQUEST_TAG 15
+  hadd dccore.swm n.LIST_REQUEST_TAG Tag on your list requests
+  hadd dccore.swm h.LIST_REQUEST_TAG A short tag added after your list requests~2C the way AutoQ adds ::AutoQ::~2C so a channel can see what is fetching. It is sent only to other DCCore bots~2C which always accept it; other bots get the plain request~2C because many answer only that exact line.
+  hadd dccore.swm k.MAX_REQUESTS 2385 int 1 2384
+  hadd dccore.swm pg.MAX_REQUESTS 16
   hadd dccore.swm n.MAX_REQUESTS Max commands per window
   hadd dccore.swm h.MAX_REQUESTS How many commands - searches~2C queue checks and the like - one person may send within the time window below before they are muted. File requests are not counted: a pasted list is taken one by one~2C up to the queue limits.
-  hadd dccore.swm k.REQUEST_WINDOW 2369 int 1 2368
-  hadd dccore.swm pg.REQUEST_WINDOW 15
+  hadd dccore.swm k.REQUEST_WINDOW 2389 int 1 2388
+  hadd dccore.swm pg.REQUEST_WINDOW 16
   hadd dccore.swm n.REQUEST_WINDOW Request window (seconds)
   hadd dccore.swm h.REQUEST_WINDOW The length of that time window~2C in seconds.
-  hadd dccore.swm k.MUTE_TIME 2373 int 1 2372
-  hadd dccore.swm pg.MUTE_TIME 15
+  hadd dccore.swm k.MUTE_TIME 2393 int 1 2392
+  hadd dccore.swm pg.MUTE_TIME 16
   hadd dccore.swm n.MUTE_TIME Mute duration (seconds)
   hadd dccore.swm h.MUTE_TIME How many seconds somebody is ignored after their first flood.
-  hadd dccore.swm k.FLOOD_BAN_SECONDS 2377 int 1 2376
-  hadd dccore.swm pg.FLOOD_BAN_SECONDS 15
+  hadd dccore.swm k.FLOOD_BAN_SECONDS 2397 int 1 2396
+  hadd dccore.swm pg.FLOOD_BAN_SECONDS 16
   hadd dccore.swm n.FLOOD_BAN_SECONDS Ban after flooding while muted (seconds)
   hadd dccore.swm h.FLOOD_BAN_SECONDS How many seconds somebody is banned if they keep flooding while already muted.
-  hadd dccore.swm k.PRIVATE_MESSAGE_COOLDOWN_SECONDS 2381 int 1 2380
-  hadd dccore.swm pg.PRIVATE_MESSAGE_COOLDOWN_SECONDS 17
+  hadd dccore.swm k.PRIVATE_MESSAGE_COOLDOWN_SECONDS 2401 int 1 2400
+  hadd dccore.swm pg.PRIVATE_MESSAGE_COOLDOWN_SECONDS 18
   hadd dccore.swm n.PRIVATE_MESSAGE_COOLDOWN_SECONDS Record one private message per sender every (seconds)
   hadd dccore.swm h.PRIVATE_MESSAGE_COOLDOWN_SECONDS After recording a message from somebody~2C ignore further messages from them for this many seconds~2C so one person cannot fill the page.
-  hadd dccore.swm k.PRIVATE_MESSAGE_DECLINE_TEXT 2385 str 1 2384
-  hadd dccore.swm pg.PRIVATE_MESSAGE_DECLINE_TEXT 17
+  hadd dccore.swm k.PRIVATE_MESSAGE_DECLINE_TEXT 2405 str 1 2404
+  hadd dccore.swm pg.PRIVATE_MESSAGE_DECLINE_TEXT 18
   hadd dccore.swm n.PRIVATE_MESSAGE_DECLINE_TEXT That reply's wording (~25admin becomes the admin nick)
   hadd dccore.swm h.PRIVATE_MESSAGE_DECLINE_TEXT The one reply sent when private messages are turned off. ~25admin is replaced by your admin nick. Leave blank to send nothing at all.
-  hadd dccore.swm k.PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS 2389 int 1 2388
-  hadd dccore.swm pg.PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS 17
+  hadd dccore.swm k.PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS 2409 int 1 2408
+  hadd dccore.swm pg.PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS 18
   hadd dccore.swm n.PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS Reply to the same sender once every (seconds)
   hadd dccore.swm h.PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS How many seconds before the same person can get that reply again. One day by default - the reply is there so they learn where to go~2C not to repeat itself.
-  hadd dccore.swm k.PRIVATE_MESSAGE_DECLINE_BURST 2393 int 1 2392
-  hadd dccore.swm pg.PRIVATE_MESSAGE_DECLINE_BURST 17
+  hadd dccore.swm k.PRIVATE_MESSAGE_DECLINE_BURST 2413 int 1 2412
+  hadd dccore.swm pg.PRIVATE_MESSAGE_DECLINE_BURST 18
   hadd dccore.swm n.PRIVATE_MESSAGE_DECLINE_BURST Most replies to send in one burst window
   hadd dccore.swm h.PRIVATE_MESSAGE_DECLINE_BURST The most of those replies to send in one burst window~2C across everybody. Stops a wave of messages from turning into a wave of replies that delays the transfers people are waiting on.
-  hadd dccore.swm k.PRIVATE_MESSAGE_DECLINE_BURST_SECONDS 2397 int 1 2396
-  hadd dccore.swm pg.PRIVATE_MESSAGE_DECLINE_BURST_SECONDS 17
+  hadd dccore.swm k.PRIVATE_MESSAGE_DECLINE_BURST_SECONDS 2417 int 1 2416
+  hadd dccore.swm pg.PRIVATE_MESSAGE_DECLINE_BURST_SECONDS 18
   hadd dccore.swm n.PRIVATE_MESSAGE_DECLINE_BURST_SECONDS How long that burst window is (seconds)
   hadd dccore.swm h.PRIVATE_MESSAGE_DECLINE_BURST_SECONDS The length of that burst window~2C in seconds.
-  hadd dccore.swm k.ADMIN_HOSTMASKS 2401 list 1 2400
-  hadd dccore.swm pg.ADMIN_HOSTMASKS 18
+  hadd dccore.swm k.ADMIN_HOSTMASKS 2421 list 1 2420
+  hadd dccore.swm pg.ADMIN_HOSTMASKS 19
   hadd dccore.swm n.ADMIN_HOSTMASKS Admin hostmasks
   hadd dccore.swm h.ADMIN_HOSTMASKS Who may open the admin console over DCC chat~2C by host. On Undernet~2C log in to X with mode +x and use your yourname.users.undernet.org host - only you can have it. Empty means the console is off. Keep this in admin_config.py rather than here.
-  hadd dccore.swm k.ADMIN_CHAT_MODE 2405 choice 1 2404
-  hadd dccore.swm pg.ADMIN_CHAT_MODE 18
+  hadd dccore.swm k.ADMIN_CHAT_MODE 2425 choice 1 2424
+  hadd dccore.swm pg.ADMIN_CHAT_MODE 19
   hadd dccore.swm n.ADMIN_CHAT_MODE DCC chat connection mode
   hadd dccore.swm ch.ADMIN_CHAT_MODE auto listen connect
   hadd dccore.swm cl.ADMIN_CHAT_MODE.1 auto
   hadd dccore.swm cl.ADMIN_CHAT_MODE.2 listen
   hadd dccore.swm cl.ADMIN_CHAT_MODE.3 connect
   hadd dccore.swm h.ADMIN_CHAT_MODE How the admin console's DCC chat is connected. Auto is right for most people. Choose Listen if you are behind a VPN or a router that does not forward ports~2C so the bot waits for you instead of trying to reach you.
-  hadd dccore.swm k.ADMIN_CHANNEL_COMMANDS 2409 bool 1 2409
-  hadd dccore.swm pg.ADMIN_CHANNEL_COMMANDS 18
+  hadd dccore.swm k.ADMIN_CHANNEL_COMMANDS 2429 bool 1 2429
+  hadd dccore.swm pg.ADMIN_CHANNEL_COMMANDS 19
   hadd dccore.swm n.ADMIN_CHANNEL_COMMANDS Allow admin commands in channel
   hadd dccore.swm h.ADMIN_CHANNEL_COMMANDS Let the admin commands (!ban~2C !rehash~2C !update...) also work when you type them in the channel or a private message~2C not only in the console. With ADMIN_HOSTMASKS set they need your host as well as your nick; without it a stolen nick can run them~2C so turn this off.
-  hadd dccore.swm k.ADMIN_CHAT_COLOURS 2413 bool 1 2413
-  hadd dccore.swm pg.ADMIN_CHAT_COLOURS 18
+  hadd dccore.swm k.ADMIN_CHAT_COLOURS 2433 bool 1 2433
+  hadd dccore.swm pg.ADMIN_CHAT_COLOURS 19
   hadd dccore.swm n.ADMIN_CHAT_COLOURS Colour the tags in the admin DCC chat
   hadd dccore.swm h.ADMIN_CHAT_COLOURS Colour the ~5BSENT~5D~2C ~5BFAIL~5D~2C ~5BREQUEST~5D tags in the admin DCC chat the same way they are coloured in the debug channel~2C using your theme. Turn off if your client shows the colour codes as junk.
-  hadd dccore.swm k.WEBUI_HOST 2417 str 1 2416
-  hadd dccore.swm pg.WEBUI_HOST 19
+  hadd dccore.swm k.WEBUI_HOST 2437 str 1 2436
+  hadd dccore.swm pg.WEBUI_HOST 20
   hadd dccore.swm n.WEBUI_HOST Host
   hadd dccore.swm h.WEBUI_HOST Which addresses the dashboard listens on. 127.0.0.1 means only this computer can open it. 0.0.0.0 makes it reachable from other devices on your home network - never forward it to the internet~2C the connection is not encrypted.
-  hadd dccore.swm k.WEBUI_PORT 2421 int 1 2420
-  hadd dccore.swm pg.WEBUI_PORT 19
+  hadd dccore.swm k.WEBUI_PORT 2441 int 1 2440
+  hadd dccore.swm pg.WEBUI_PORT 20
   hadd dccore.swm n.WEBUI_PORT Port
   hadd dccore.swm h.WEBUI_PORT The dashboard's port. Open http://127.0.0.1:8420 (or whatever you set) in your browser.
-  hadd dccore.swm k.WEBUI_ALLOWED_HOSTS 2425 list 1 2424
-  hadd dccore.swm pg.WEBUI_ALLOWED_HOSTS 19
+  hadd dccore.swm k.WEBUI_ALLOWED_HOSTS 2445 list 1 2444
+  hadd dccore.swm pg.WEBUI_ALLOWED_HOSTS 20
   hadd dccore.swm n.WEBUI_ALLOWED_HOSTS Other names the dashboard answers to
   hadd dccore.swm h.WEBUI_ALLOWED_HOSTS Other names you open the dashboard by~2C separated by commas: a router's name for this computer~2C a reverse proxy~2C a VPN name. An IP address~2C localhost and this computer's own name always work; other names are refused. A single * turns the check off.
-  hadd dccore.swm k.WEBUI_CONSOLE_ENABLED 2429 tri 1 2428
-  hadd dccore.swm pg.WEBUI_CONSOLE_ENABLED 19
+  hadd dccore.swm k.WEBUI_CONSOLE_ENABLED 2449 tri 1 2448
+  hadd dccore.swm pg.WEBUI_CONSOLE_ENABLED 20
   hadd dccore.swm n.WEBUI_CONSOLE_ENABLED Enable the Console page (remote admin)
   hadd dccore.swm h.WEBUI_CONSOLE_ENABLED Show the Console page in the dashboard~2C which can run admin commands. Unset means on while the dashboard is reachable only from this computer~2C off otherwise - because on a network the dashboard is protected by the password alone.
-  hadd dccore.swm k.WEBUI_OPEN_BROWSER 2433 bool 1 2433
-  hadd dccore.swm pg.WEBUI_OPEN_BROWSER 19
+  hadd dccore.swm k.WEBUI_OPEN_BROWSER 2453 bool 1 2453
+  hadd dccore.swm pg.WEBUI_OPEN_BROWSER 20
   hadd dccore.swm n.WEBUI_OPEN_BROWSER Open the dashboard in a browser at startup
   hadd dccore.swm h.WEBUI_OPEN_BROWSER Open the dashboard in your browser automatically when the bot starts. Only happens when the dashboard is limited to this computer.
-  hadd dccore.swm k.WEBUI_FOLDER_BROWSER_ENABLED 2437 bool 1 2437
-  hadd dccore.swm pg.WEBUI_FOLDER_BROWSER_ENABLED 19
+  hadd dccore.swm k.WEBUI_FOLDER_BROWSER_ENABLED 2457 bool 1 2457
+  hadd dccore.swm pg.WEBUI_FOLDER_BROWSER_ENABLED 20
   hadd dccore.swm n.WEBUI_FOLDER_BROWSER_ENABLED Folder picker on the Settings page
   hadd dccore.swm h.WEBUI_FOLDER_BROWSER_ENABLED Show a folder picker on the Library page instead of typing paths. Off by default because it lets a logged-in dashboard user see the names of folders on this machine.
-  hadd dccore.swm k.CONSOLE_SHOW_REQUESTS 2441 bool 1 2441
-  hadd dccore.swm pg.CONSOLE_SHOW_REQUESTS 20
+  hadd dccore.swm k.CONSOLE_SHOW_REQUESTS 2461 bool 1 2461
+  hadd dccore.swm pg.CONSOLE_SHOW_REQUESTS 21
   hadd dccore.swm n.CONSOLE_SHOW_REQUESTS Show requests (who asked for what)
   hadd dccore.swm h.CONSOLE_SHOW_REQUESTS Show in the console who asked for which file.
-  hadd dccore.swm k.CONSOLE_SHOW_QUEUE 2445 bool 1 2445
-  hadd dccore.swm pg.CONSOLE_SHOW_QUEUE 20
+  hadd dccore.swm k.CONSOLE_SHOW_QUEUE 2465 bool 1 2465
+  hadd dccore.swm pg.CONSOLE_SHOW_QUEUE 21
   hadd dccore.swm n.CONSOLE_SHOW_QUEUE Show queue positions
   hadd dccore.swm h.CONSOLE_SHOW_QUEUE Show in the console when a request goes into somebody's queue~2C and at which position.
-  hadd dccore.swm k.CONSOLE_SHOW_SENDS 2449 bool 1 2449
-  hadd dccore.swm pg.CONSOLE_SHOW_SENDS 20
+  hadd dccore.swm k.CONSOLE_SHOW_SENDS 2469 bool 1 2469
+  hadd dccore.swm pg.CONSOLE_SHOW_SENDS 21
   hadd dccore.swm n.CONSOLE_SHOW_SENDS Show transfers starting~2C resuming and completing
   hadd dccore.swm h.CONSOLE_SHOW_SENDS Show in the console when a transfer starts~2C resumes and completes.
-  hadd dccore.swm k.CONSOLE_SHOW_FAILURES 2453 bool 1 2453
-  hadd dccore.swm pg.CONSOLE_SHOW_FAILURES 20
+  hadd dccore.swm k.CONSOLE_SHOW_FAILURES 2473 bool 1 2473
+  hadd dccore.swm pg.CONSOLE_SHOW_FAILURES 21
   hadd dccore.swm n.CONSOLE_SHOW_FAILURES Show failed transfers
   hadd dccore.swm h.CONSOLE_SHOW_FAILURES Show in the console when a transfer fails~2C and why.
-  hadd dccore.swm k.CONSOLE_SHOW_SEARCHES 2457 bool 1 2457
-  hadd dccore.swm pg.CONSOLE_SHOW_SEARCHES 20
+  hadd dccore.swm k.CONSOLE_SHOW_SEARCHES 2477 bool 1 2477
+  hadd dccore.swm pg.CONSOLE_SHOW_SEARCHES 21
   hadd dccore.swm n.CONSOLE_SHOW_SEARCHES Show searches and their result counts
   hadd dccore.swm h.CONSOLE_SHOW_SEARCHES Show in the console who searched for what~2C and how many results they got.
-  hadd dccore.swm k.DEBUG_CHANNEL_FEED 2461 bool 1 2461
-  hadd dccore.swm pg.DEBUG_CHANNEL_FEED 20
+  hadd dccore.swm k.DEBUG_CHANNEL_FEED 2481 bool 1 2481
+  hadd dccore.swm pg.DEBUG_CHANNEL_FEED 21
   hadd dccore.swm n.DEBUG_CHANNEL_FEED Also send requests~2C queue positions~2C starts and searches to the IRC debug channel
   hadd dccore.swm h.DEBUG_CHANNEL_FEED Also send requests~2C queue positions~2C transfer starts and searches to your IRC debug channel. Off by default: every line to a channel takes a turn in the same queue as the adverts and replies people are waiting for. Finished and failed transfers go there regardless.
-  hadd dccore.swm k.DEBUG_MODE 2465 bool 1 2465
+  hadd dccore.swm k.DEBUG_MODE 2485 bool 1 2485
   hadd dccore.swm pg.DEBUG_MODE 22
   hadd dccore.swm n.DEBUG_MODE Debug mode
   hadd dccore.swm h.DEBUG_MODE Print every raw line the bot sends to the server in its own window. Very noisy - only for tracking down a connection problem.
-  hadd dccore.swm k.DEBUG_TO_CHANNEL 2469 bool 1 2469
+  hadd dccore.swm k.DEBUG_TO_CHANNEL 2489 bool 1 2489
   hadd dccore.swm pg.DEBUG_TO_CHANNEL 22
   hadd dccore.swm n.DEBUG_TO_CHANNEL Send debug lines to channel
   hadd dccore.swm h.DEBUG_TO_CHANNEL Send the bot's running report (transfers~2C joins~2C bans~2C problems) to your debug channel.
-  hadd dccore.swm k.DEBUG_TO_CONSOLE 2473 bool 1 2473
+  hadd dccore.swm k.DEBUG_TO_CONSOLE 2493 bool 1 2493
   hadd dccore.swm pg.DEBUG_TO_CONSOLE 22
   hadd dccore.swm n.DEBUG_TO_CONSOLE Send debug lines to admin console
   hadd dccore.swm h.DEBUG_TO_CONSOLE Send that same report to the admin console and the dashboard's Console page.
-  hadd dccore.swm k.CONSOLE_TIMESTAMP_FORMAT 2477 str 1 2476
+  hadd dccore.swm k.CONSOLE_TIMESTAMP_FORMAT 2497 str 1 2496
   hadd dccore.swm pg.CONSOLE_TIMESTAMP_FORMAT 22
   hadd dccore.swm n.CONSOLE_TIMESTAMP_FORMAT Time prefix on every console line (strftime; blank = none)
   hadd dccore.swm h.CONSOLE_TIMESTAMP_FORMAT The time shown at the start of every line in the bot's window. ~25H:~25M:~25S is hours:minutes:seconds; use ~25Y-~25m-~25d ~25H:~25M:~25S to include the date; leave blank for no time.
-  hadd dccore.swm k.CONSOLE_LOG_FILE 2481 str 1 2480
+  hadd dccore.swm k.CONSOLE_LOG_FILE 2501 str 1 2500
   hadd dccore.swm pg.CONSOLE_LOG_FILE 22
   hadd dccore.swm n.CONSOLE_LOG_FILE Log file (blank = none)
   hadd dccore.swm h.CONSOLE_LOG_FILE Everything the bot's window shows is also saved here~2C with the date on every line~2C so it is still there after the window is closed. Leave blank for no log file.
-  hadd dccore.swm k.CONSOLE_LOG_MAX_MB 2485 int 1 2484
+  hadd dccore.swm k.CONSOLE_LOG_MAX_MB 2505 int 1 2504
   hadd dccore.swm pg.CONSOLE_LOG_MAX_MB 22
   hadd dccore.swm n.CONSOLE_LOG_MAX_MB Start a new log file at (MB)
   hadd dccore.swm h.CONSOLE_LOG_MAX_MB When the log file reaches this size it is renamed dccore.log.1 and a new one is started.
-  hadd dccore.swm k.CONSOLE_LOG_KEEP 2489 int 1 2488
+  hadd dccore.swm k.CONSOLE_LOG_KEEP 2509 int 1 2508
   hadd dccore.swm pg.CONSOLE_LOG_KEEP 22
   hadd dccore.swm n.CONSOLE_LOG_KEEP Old log files to keep
   hadd dccore.swm h.CONSOLE_LOG_KEEP How many of those older log files are kept before the oldest is deleted.
-  hadd dccore.swm k.BOT_WINDOW 2493 choice 1 2492
+  hadd dccore.swm k.BOT_WINDOW 2513 choice 1 2512
   hadd dccore.swm pg.BOT_WINDOW 22
   hadd dccore.swm n.BOT_WINDOW The bot's window on Windows (normal~2C minimised~2C hidden)
   hadd dccore.swm ch.BOT_WINDOW normal minimised hidden
   hadd dccore.swm cl.BOT_WINDOW.1 normal
   hadd dccore.swm cl.BOT_WINDOW.2 minimised
   hadd dccore.swm cl.BOT_WINDOW.3 hidden
-  hadd dccore.swm h.BOT_WINDOW How the bot runs on Windows when start-dccore.bat starts it: in its window (normal)~2C minimised to the taskbar~2C or with no window (hidden)~2C its output then in the log file. Stop a hidden bot with start-dccore.bat stop~2C Tools > Stop the bot or shutdown now in the admin console.
-  hadd dccore.swm k.PROJECT_URL 2497 str 1 2496
+  hadd dccore.swm h.BOT_WINDOW How the bot runs on Windows when start-dccore.bat starts it: in its window (normal)~2C minimised to the taskbar~2C or with no window (hidden)~2C its output then in the log file.
+  hadd dccore.swm k.PROJECT_URL 2517 str 1 2516
   hadd dccore.swm pg.PROJECT_URL 22
   hadd dccore.swm n.PROJECT_URL Project URL
   hadd dccore.swm h.PROJECT_URL Where DCCore comes from. Shown at the top of your list and in the reply to a version request.
-  hadd dccore.swm k.TMP_ZIP_DIR 2501 str 1 2500
+  hadd dccore.swm k.TMP_ZIP_DIR 2521 str 1 2520
   hadd dccore.swm pg.TMP_ZIP_DIR 23
   hadd dccore.swm n.TMP_ZIP_DIR Temp archive directory
   hadd dccore.swm h.TMP_ZIP_DIR Where packed folders and list archives are built before sending. Cleaned up after each transfer.
-  hadd dccore.swm k.LOCAL_LIST_DIR 2505 str 1 2504
+  hadd dccore.swm k.LOCAL_LIST_DIR 2525 str 1 2524
   hadd dccore.swm pg.LOCAL_LIST_DIR 23
   hadd dccore.swm n.LOCAL_LIST_DIR Master list directory
   hadd dccore.swm h.LOCAL_LIST_DIR Where your published list files are kept.
-  hadd dccore.swm k.FETCHED_FILES_DIR 2509 str 1 2508
+  hadd dccore.swm k.FETCHED_FILES_DIR 2529 str 1 2528
   hadd dccore.swm pg.FETCHED_FILES_DIR 23
   hadd dccore.swm n.FETCHED_FILES_DIR Fetched files directory
   hadd dccore.swm h.FETCHED_FILES_DIR Where files you download from other bots are saved. Kept separate from your shared folders so they are not offered to others.
-  hadd dccore.swm k.LIBRARY_FOLDERS_FILE 2513 str 1 2512
+  hadd dccore.swm k.LIBRARY_FOLDERS_FILE 2533 str 1 2532
   hadd dccore.swm pg.LIBRARY_FOLDERS_FILE 23
   hadd dccore.swm n.LIBRARY_FOLDERS_FILE Served folders file
   hadd dccore.swm h.LIBRARY_FOLDERS_FILE Where the folders you added on the Library page are saved.
-  hadd dccore.swm k.LISTS_FILE 2517 str 1 2516
+  hadd dccore.swm k.LISTS_FILE 2537 str 1 2536
   hadd dccore.swm pg.LISTS_FILE 23
   hadd dccore.swm n.LISTS_FILE Served lists file
   hadd dccore.swm h.LISTS_FILE Where your list definitions are saved~2C if you serve more than one list.
-  hadd dccore.swm k.BANS_FILE 2521 str 1 2520
+  hadd dccore.swm k.BANS_FILE 2541 str 1 2540
   hadd dccore.swm pg.BANS_FILE 23
   hadd dccore.swm n.BANS_FILE Bans file
   hadd dccore.swm h.BANS_FILE Where timed bans are saved.
-  hadd dccore.swm k.HARD_BANS_FILE 2525 str 1 2524
+  hadd dccore.swm k.HARD_BANS_FILE 2545 str 1 2544
   hadd dccore.swm pg.HARD_BANS_FILE 23
   hadd dccore.swm n.HARD_BANS_FILE Hard bans file
   hadd dccore.swm h.HARD_BANS_FILE Where permanent bans (from !ban) are saved.
-  hadd dccore.swm k.STATS_FILE 2529 str 1 2528
+  hadd dccore.swm k.STATS_FILE 2549 str 1 2548
   hadd dccore.swm pg.STATS_FILE 23
   hadd dccore.swm n.STATS_FILE Stats file
   hadd dccore.swm h.STATS_FILE Where the lifetime totals~2C the speed record and the daily figures are saved.
-  hadd dccore.swm k.KNOWN_BOTS_FILE 2533 str 1 2532
+  hadd dccore.swm k.KNOWN_BOTS_FILE 2553 str 1 2552
   hadd dccore.swm pg.KNOWN_BOTS_FILE 23
   hadd dccore.swm n.KNOWN_BOTS_FILE Known bots file
   hadd dccore.swm h.KNOWN_BOTS_FILE Where the bot remembers the other bots it has seen advertising.
-  hadd dccore.swm k.FETCHED_BOT_LISTS_FILE 2537 str 1 2536
+  hadd dccore.swm k.FETCHED_BOT_LISTS_FILE 2557 str 1 2556
   hadd dccore.swm pg.FETCHED_BOT_LISTS_FILE 23
   hadd dccore.swm n.FETCHED_BOT_LISTS_FILE Fetched bot lists file
   hadd dccore.swm h.FETCHED_BOT_LISTS_FILE Where the bot remembers which other bots' lists it holds.
-  hadd dccore.swm k.LIST_INDEX_FILE 2541 str 1 2540
+  hadd dccore.swm k.LIST_INDEX_FILE 2561 str 1 2560
   hadd dccore.swm pg.LIST_INDEX_FILE 23
   hadd dccore.swm n.LIST_INDEX_FILE Cross-list search index
   hadd dccore.swm h.LIST_INDEX_FILE The search index over every list you have fetched from other bots. Can be large. Safe to delete with the bot stopped: the next start builds it again from the lists on disk~2C which takes a while with big lists.
-  hadd dccore.swm k.LIST_AUDIO_INFO_CACHE 2545 str 1 2544
+  hadd dccore.swm k.LIST_AUDIO_INFO_CACHE 2565 str 1 2564
   hadd dccore.swm pg.LIST_AUDIO_INFO_CACHE 23
   hadd dccore.swm n.LIST_AUDIO_INFO_CACHE Audio info cache
   hadd dccore.swm h.LIST_AUDIO_INFO_CACHE Where the length and quality read from your audio files are kept between rebuilds. Safe to delete; the next rebuild reads every file again.
-  hadd dccore.swm k.FETCH_HISTORY_FILE 2549 str 1 2548
+  hadd dccore.swm k.FETCH_HISTORY_FILE 2569 str 1 2568
   hadd dccore.swm pg.FETCH_HISTORY_FILE 23
   hadd dccore.swm n.FETCH_HISTORY_FILE Fetch history file
   hadd dccore.swm h.FETCH_HISTORY_FILE Where finished downloads from other bots are recorded for the Downloads page.
-  hadd dccore.swm k.DOWNLOAD_COUNTS_FILE 2553 str 1 2552
+  hadd dccore.swm k.DOWNLOAD_COUNTS_FILE 2573 str 1 2572
   hadd dccore.swm pg.DOWNLOAD_COUNTS_FILE 23
   hadd dccore.swm n.DOWNLOAD_COUNTS_FILE Download counts file
   hadd dccore.swm h.DOWNLOAD_COUNTS_FILE Where the count of how often each file was sent is kept~2C for the Most downloaded table: a database beside it ending in .db.
-  hadd dccore.swm k.TRANSFER_LOG_FILE 2557 str 1 2556
+  hadd dccore.swm k.TRANSFER_LOG_FILE 2577 str 1 2576
   hadd dccore.swm pg.TRANSFER_LOG_FILE 23
   hadd dccore.swm n.TRANSFER_LOG_FILE Transfer record file
-  hadd dccore.swm h.TRANSFER_LOG_FILE Where a record of every transfer that ends - completed~2C failed or cancelled - is kept: what it was~2C its size~2C its speed~2C how long it waited in the queue~2C and the nick it went to or came from (no host~2C no channel). Shown on the Stats page~2C where a nick can be forgotten. Empty turns it off.
-  hadd dccore.swm k.LIST_SIZE_FILE 2561 str 1 2560
+  hadd dccore.swm h.TRANSFER_LOG_FILE Where a record of every transfer that ends - completed~2C failed or cancelled - is kept: what it was~2C its size~2C its speed~2C how long it waited in the queue~2C and the nick it went to or came from (no host~2C no channel). Shown on the Stats page~2C where a nick can be forgotten.
+  hadd dccore.swm k.LIST_SIZE_FILE 2581 str 1 2580
   hadd dccore.swm pg.LIST_SIZE_FILE 23
   hadd dccore.swm n.LIST_SIZE_FILE List size file
   hadd dccore.swm h.LIST_SIZE_FILE The name of the small file written beside your list holding the library's total size~2C as shown in the advert.
-  hadd dccore.swm k.LIST_RAWBYTES_FILE 2565 str 1 2564
+  hadd dccore.swm k.LIST_RAWBYTES_FILE 2585 str 1 2584
   hadd dccore.swm pg.LIST_RAWBYTES_FILE 23
   hadd dccore.swm n.LIST_RAWBYTES_FILE List raw bytes file
   hadd dccore.swm h.LIST_RAWBYTES_FILE The name of the small file beside your list holding the exact byte total.
-  hadd dccore.swm k.LIST_PROGRESS_FILE 2569 str 1 2568
+  hadd dccore.swm k.LIST_PROGRESS_FILE 2589 str 1 2588
   hadd dccore.swm pg.LIST_PROGRESS_FILE 23
   hadd dccore.swm n.LIST_PROGRESS_FILE List rebuild progress file
   hadd dccore.swm h.LIST_PROGRESS_FILE Where a running list rebuild reports its progress for the dashboard.
-  hadd dccore.swm k.ADMIN_TOKENS_FILE 2573 str 1 2572
+  hadd dccore.swm k.ADMIN_TOKENS_FILE 2593 str 1 2592
   hadd dccore.swm pg.ADMIN_TOKENS_FILE 23
   hadd dccore.swm n.ADMIN_TOKENS_FILE Paired console scripts file
   hadd dccore.swm h.ADMIN_TOKENS_FILE Where the login tokens of scripts paired with the admin console are kept (hashed~2C like the password). Made by the console's pair command; remove one with unpair.
-  hadd dccore.swm k.ON_CONNECT_FILE 2577 str 1 2576
+  hadd dccore.swm k.ON_CONNECT_FILE 2597 str 1 2596
   hadd dccore.swm pg.ON_CONNECT_FILE 23
   hadd dccore.swm n.ON_CONNECT_FILE On-connect commands file
   hadd dccore.swm h.ON_CONNECT_FILE Where the commands sent on connect (such as your X login) are saved.
-  hadd dccore.swm k.NOTICES_FILE 2581 str 1 2580
+  hadd dccore.swm k.NOTICES_FILE 2601 str 1 2600
   hadd dccore.swm pg.NOTICES_FILE 23
   hadd dccore.swm n.NOTICES_FILE Operator notices file
   hadd dccore.swm h.NOTICES_FILE Where the notices shown on the dashboard - a lost connection~2C a kick or a refused join~2C a failed list rebuild - are saved.
-  hadd dccore.swm k.PRIVATE_MESSAGES_FILE 2585 str 1 2584
+  hadd dccore.swm k.PRIVATE_MESSAGES_FILE 2605 str 1 2604
   hadd dccore.swm pg.PRIVATE_MESSAGES_FILE 23
   hadd dccore.swm n.PRIVATE_MESSAGES_FILE Private messages file
   hadd dccore.swm h.PRIVATE_MESSAGES_FILE Where private messages to the bot are saved.
-  hadd dccore.swm k.DCC_QUEUE_FILE 2589 str 1 2588
+  hadd dccore.swm k.DCC_QUEUE_FILE 2609 str 1 2608
   hadd dccore.swm pg.DCC_QUEUE_FILE 23
   hadd dccore.swm n.DCC_QUEUE_FILE DCC queue file
   hadd dccore.swm h.DCC_QUEUE_FILE Where the per-user send queue is saved. The single-instance lock lives beside it.
+  hadd dccore.swm k.CHAT_HISTORY_DAYS 2641 int 1 2640
+  hadd dccore.swm pg.CHAT_HISTORY_DAYS 27
+  hadd dccore.swm n.CHAT_HISTORY_DAYS Keep for (days)
+  hadd dccore.swm h.CHAT_HISTORY_DAYS How many days dccore.mrc keeps DCCore Chat's history on your PC: whole months are deleted once they ended more than this many days ago. 0 keeps everything. The bot sends this to the script; a script that never had it deletes nothing.
+  hadd dccore.swm k.CHAT_HISTORY_MAX_MB 2645 int 1 2644
+  hadd dccore.swm pg.CHAT_HISTORY_MAX_MB 27
+  hadd dccore.swm n.CHAT_HISTORY_MAX_MB At most (MB)
+  hadd dccore.swm h.CHAT_HISTORY_MAX_MB How big DCCore Chat's history folder on your PC may grow~2C in MB: past it~2C the oldest months are deleted first~2C never the month running. 0 is no limit.
   hadd dccore.swm i.2000 SERVER
   hadd dccore.swm i.2001 SERVER
   hadd dccore.swm i.2004 PORT
@@ -4726,286 +6650,306 @@ alias dccore.sw.data {
   hadd dccore.swm i.2037 @auto
   hadd dccore.swm i.2041 SEARCH_ENABLED
   hadd dccore.swm i.2045 ANNOUNCE_TRANSFERS
-  hadd dccore.swm i.2049 RAR_ENABLED
-  hadd dccore.swm i.2053 PRIVATE_MESSAGES_ENABLED
-  hadd dccore.swm i.2057 WEBUI_ENABLED
-  hadd dccore.swm i.2061 CTCP_VERSION_REPLY
-  hadd dccore.swm i.2065 CHECK_FOR_UPDATES
-  hadd dccore.swm i.2068 DEBUG_CHANNEL
-  hadd dccore.swm i.2069 DEBUG_CHANNEL
+  hadd dccore.swm i.2049 PRIVATE_MESSAGES_ENABLED
+  hadd dccore.swm i.2053 WEBUI_ENABLED
+  hadd dccore.swm i.2057 CTCP_VERSION_REPLY
+  hadd dccore.swm i.2061 CHECK_FOR_UPDATES
+  hadd dccore.swm i.2064 DEBUG_CHANNEL
+  hadd dccore.swm i.2065 DEBUG_CHANNEL
   hadd dccore.swm i.1520 CHANNEL
-  hadd dccore.swm i.2072 ADMIN_NICK
-  hadd dccore.swm i.2073 ADMIN_NICK
-  hadd dccore.swm i.2076 THEME
-  hadd dccore.swm i.2077 THEME
-  hadd dccore.swm i.2080 CUSTOM_THEME_BORDER
-  hadd dccore.swm i.2081 CUSTOM_THEME_BORDER
-  hadd dccore.swm i.2082 CUSTOM_THEME_BORDER
-  hadd dccore.swm i.2084 CUSTOM_THEME_SEPARATOR
-  hadd dccore.swm i.2085 CUSTOM_THEME_SEPARATOR
-  hadd dccore.swm i.2086 CUSTOM_THEME_SEPARATOR
-  hadd dccore.swm i.2088 CUSTOM_THEME_TEXTBOX
-  hadd dccore.swm i.2089 CUSTOM_THEME_TEXTBOX
-  hadd dccore.swm i.2090 CUSTOM_THEME_TEXTBOX
-  hadd dccore.swm i.2092 CUSTOM_THEME_VALUE
-  hadd dccore.swm i.2093 CUSTOM_THEME_VALUE
-  hadd dccore.swm i.2094 CUSTOM_THEME_VALUE
-  hadd dccore.swm i.2096 CUSTOM_THEME_ALERT
-  hadd dccore.swm i.2097 CUSTOM_THEME_ALERT
-  hadd dccore.swm i.2098 CUSTOM_THEME_ALERT
-  hadd dccore.swm i.2100 CUSTOM_THEME_ACCENT
-  hadd dccore.swm i.2101 CUSTOM_THEME_ACCENT
-  hadd dccore.swm i.2102 CUSTOM_THEME_ACCENT
-  hadd dccore.swm i.2104 ANNOUNCE_INTERVAL
-  hadd dccore.swm i.2105 ANNOUNCE_INTERVAL
-  hadd dccore.swm i.2108 BROADCAST_SEARCH_CHANNEL
-  hadd dccore.swm i.2109 BROADCAST_SEARCH_CHANNEL
-  hadd dccore.swm i.2112 BROADCAST_SEARCH_COOLDOWN
-  hadd dccore.swm i.2113 BROADCAST_SEARCH_COOLDOWN
-  hadd dccore.swm i.2116 MSG_DELAY
-  hadd dccore.swm i.2117 MSG_DELAY
-  hadd dccore.swm i.2120 DEBUG_MSG_DELAY
-  hadd dccore.swm i.2121 DEBUG_MSG_DELAY
-  hadd dccore.swm i.2124 MAX_DCC_SLOTS
-  hadd dccore.swm i.2125 MAX_DCC_SLOTS
-  hadd dccore.swm i.2128 MAX_USER_QUEUE
-  hadd dccore.swm i.2129 MAX_USER_QUEUE
-  hadd dccore.swm i.2132 MAX_GLOBAL_QUEUE
-  hadd dccore.swm i.2133 MAX_GLOBAL_QUEUE
-  hadd dccore.swm i.2136 MAX_SEARCH_RESULTS
-  hadd dccore.swm i.2137 MAX_SEARCH_RESULTS
-  hadd dccore.swm i.2141 SEARCH_SHOW_FOLDER
-  hadd dccore.swm i.2144 SEARCH_FOLDER_MAX_CHARS
-  hadd dccore.swm i.2145 SEARCH_FOLDER_MAX_CHARS
-  hadd dccore.swm i.2149 PAUSE_ON_UPDATE
-  hadd dccore.swm i.2153 PAUSE_FOR_WHOLE_UPDATE
-  hadd dccore.swm i.2156 REHASH_TRANSFER_WAIT
-  hadd dccore.swm i.2157 REHASH_TRANSFER_WAIT
-  hadd dccore.swm i.2160 DCC_BLOCK_SIZE
-  hadd dccore.swm i.2161 DCC_BLOCK_SIZE
-  hadd dccore.swm i.2164 DCC_SEND_BUFFER
-  hadd dccore.swm i.2165 DCC_SEND_BUFFER
-  hadd dccore.swm i.2168 DCC_PORT_START
-  hadd dccore.swm i.2169 DCC_PORT_START
-  hadd dccore.swm i.2172 DCC_PORT_END
-  hadd dccore.swm i.2173 DCC_PORT_END
-  hadd dccore.swm i.2176 DCC_ACCEPT_TIMEOUT
-  hadd dccore.swm i.2177 DCC_ACCEPT_TIMEOUT
-  hadd dccore.swm i.2180 MAX_SEND_FAILS
-  hadd dccore.swm i.2181 MAX_SEND_FAILS
-  hadd dccore.swm i.2184 FILE_DIRECTORY
-  hadd dccore.swm i.2185 FILE_DIRECTORY
-  hadd dccore.swm i.2186 FILE_DIRECTORY
-  hadd dccore.swm i.2188 LIST_BASE_NAME
-  hadd dccore.swm i.2189 LIST_BASE_NAME
-  hadd dccore.swm i.2192 LIST_FORMAT
-  hadd dccore.swm i.2193 LIST_FORMAT
-  hadd dccore.swm i.2196 LIST_IGNORED_EXTENSIONS
-  hadd dccore.swm i.2197 LIST_IGNORED_EXTENSIONS
-  hadd dccore.swm i.2201 SEPARATE_VIDEO_LIST
-  hadd dccore.swm i.2204 LIST_VIDEO_EXTENSIONS
-  hadd dccore.swm i.2205 LIST_VIDEO_EXTENSIONS
-  hadd dccore.swm i.2208 LIST_VIDEO_COMPANION_EXTENSIONS
-  hadd dccore.swm i.2209 LIST_VIDEO_COMPANION_EXTENSIONS
-  hadd dccore.swm i.2212 RAR_EXTENSIONS
-  hadd dccore.swm i.2213 RAR_EXTENSIONS
-  hadd dccore.swm i.2216 RAR_BINARY
-  hadd dccore.swm i.2217 RAR_BINARY
-  hadd dccore.swm i.2218 RAR_BINARY
-  hadd dccore.swm i.2220 MAX_RAR_FOLDER_SIZE
-  hadd dccore.swm i.2221 MAX_RAR_FOLDER_SIZE
-  hadd dccore.swm i.2224 RAR_TIMEOUT
-  hadd dccore.swm i.2225 RAR_TIMEOUT
-  hadd dccore.swm i.2228 LIST_HEADER_FILE
-  hadd dccore.swm i.2229 LIST_HEADER_FILE
-  hadd dccore.swm i.2230 LIST_HEADER_FILE
-  hadd dccore.swm i.2232 LIST_HEADER_MAX_BYTES
-  hadd dccore.swm i.2233 LIST_HEADER_MAX_BYTES
-  hadd dccore.swm i.2237 LIST_SHOW_AUDIO_INFO
-  hadd dccore.swm i.2240 LIST_REBUILD_SCHEDULE
-  hadd dccore.swm i.2241 LIST_REBUILD_SCHEDULE
-  hadd dccore.swm i.2244 LIST_UPDATE_TIMEOUT
-  hadd dccore.swm i.2245 LIST_UPDATE_TIMEOUT
-  hadd dccore.swm i.2248 LIST_UPDATE_STALL_SECONDS
-  hadd dccore.swm i.2249 LIST_UPDATE_STALL_SECONDS
-  hadd dccore.swm i.2252 LIST_AUDIO_INFO_MINUTES
-  hadd dccore.swm i.2253 LIST_AUDIO_INFO_MINUTES
-  hadd dccore.swm i.2256 LIST_AUDIO_INFO_THREADS
-  hadd dccore.swm i.2257 LIST_AUDIO_INFO_THREADS
-  hadd dccore.swm i.2260 LIST_SCAN_THREADS
-  hadd dccore.swm i.2261 LIST_SCAN_THREADS
-  hadd dccore.swm i.2265 AUTO_GRAB_LISTS
-  hadd dccore.swm i.2268 AUTO_GRAB_EVERY_MINUTES
-  hadd dccore.swm i.2269 AUTO_GRAB_EVERY_MINUTES
-  hadd dccore.swm i.2272 AUTO_GRAB_MIN_FILES
-  hadd dccore.swm i.2273 AUTO_GRAB_MIN_FILES
-  hadd dccore.swm i.2276 AUTO_GRAB_MIN_SPEED_KB
-  hadd dccore.swm i.2277 AUTO_GRAB_MIN_SPEED_KB
-  hadd dccore.swm i.2281 AUTO_DISCOVER_CHANNEL_LISTS
-  hadd dccore.swm i.2284 MULTI_CHANNEL_LIST_STABLE_SECONDS
-  hadd dccore.swm i.2285 MULTI_CHANNEL_LIST_STABLE_SECONDS
-  hadd dccore.swm i.2288 MAX_FETCH_SLOTS
-  hadd dccore.swm i.2289 MAX_FETCH_SLOTS
-  hadd dccore.swm i.2293 AUTO_REFETCH_LISTS
-  hadd dccore.swm i.2296 AUTO_REFETCH_INTERVAL_HOURS
-  hadd dccore.swm i.2297 AUTO_REFETCH_INTERVAL_HOURS
-  hadd dccore.swm i.2300 AUTO_REFETCH_MAX_PER_RUN
-  hadd dccore.swm i.2301 AUTO_REFETCH_MAX_PER_RUN
-  hadd dccore.swm i.2304 FETCH_OFFER_TIMEOUT
-  hadd dccore.swm i.2305 FETCH_OFFER_TIMEOUT
-  hadd dccore.swm i.2308 FETCH_TRANSFER_TIMEOUT
-  hadd dccore.swm i.2309 FETCH_TRANSFER_TIMEOUT
-  hadd dccore.swm i.2312 FETCH_FOLDER_OFFER_TIMEOUT
-  hadd dccore.swm i.2313 FETCH_FOLDER_OFFER_TIMEOUT
-  hadd dccore.swm i.2316 FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED
-  hadd dccore.swm i.2317 FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED
-  hadd dccore.swm i.2320 FETCH_FOLDER_TRANSFER_TIMEOUT
-  hadd dccore.swm i.2321 FETCH_FOLDER_TRANSFER_TIMEOUT
-  hadd dccore.swm i.2324 MAX_FETCH_FILE_SIZE
-  hadd dccore.swm i.2325 MAX_FETCH_FILE_SIZE
-  hadd dccore.swm i.2328 MAX_FETCH_FOLDER_FILE_SIZE
-  hadd dccore.swm i.2329 MAX_FETCH_FOLDER_FILE_SIZE
-  hadd dccore.swm i.2332 MAX_FETCH_LIST_FILE_SIZE
-  hadd dccore.swm i.2333 MAX_FETCH_LIST_FILE_SIZE
-  hadd dccore.swm i.2336 MAX_LIST_TEXT_SIZE
-  hadd dccore.swm i.2337 MAX_LIST_TEXT_SIZE
-  hadd dccore.swm i.2340 FETCH_HISTORY_DAYS
-  hadd dccore.swm i.2341 FETCH_HISTORY_DAYS
-  hadd dccore.swm i.2344 FETCH_HISTORY_MAX_ROWS
-  hadd dccore.swm i.2345 FETCH_HISTORY_MAX_ROWS
-  hadd dccore.swm i.2348 FETCH_MAX_PER_BOT
-  hadd dccore.swm i.2349 FETCH_MAX_PER_BOT
-  hadd dccore.swm i.2352 FETCH_QUEUED_TIMEOUT
-  hadd dccore.swm i.2353 FETCH_QUEUED_TIMEOUT
-  hadd dccore.swm i.2356 FETCH_BOT_MAX_FAILS
-  hadd dccore.swm i.2357 FETCH_BOT_MAX_FAILS
-  hadd dccore.swm i.2360 FETCH_BOT_COOLDOWN_MINUTES
-  hadd dccore.swm i.2361 FETCH_BOT_COOLDOWN_MINUTES
-  hadd dccore.swm i.2364 MAX_REQUESTS
-  hadd dccore.swm i.2365 MAX_REQUESTS
-  hadd dccore.swm i.2368 REQUEST_WINDOW
-  hadd dccore.swm i.2369 REQUEST_WINDOW
-  hadd dccore.swm i.2372 MUTE_TIME
-  hadd dccore.swm i.2373 MUTE_TIME
-  hadd dccore.swm i.2376 FLOOD_BAN_SECONDS
-  hadd dccore.swm i.2377 FLOOD_BAN_SECONDS
-  hadd dccore.swm i.2380 PRIVATE_MESSAGE_COOLDOWN_SECONDS
-  hadd dccore.swm i.2381 PRIVATE_MESSAGE_COOLDOWN_SECONDS
-  hadd dccore.swm i.2384 PRIVATE_MESSAGE_DECLINE_TEXT
-  hadd dccore.swm i.2385 PRIVATE_MESSAGE_DECLINE_TEXT
-  hadd dccore.swm i.2388 PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS
-  hadd dccore.swm i.2389 PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS
-  hadd dccore.swm i.2392 PRIVATE_MESSAGE_DECLINE_BURST
-  hadd dccore.swm i.2393 PRIVATE_MESSAGE_DECLINE_BURST
-  hadd dccore.swm i.2396 PRIVATE_MESSAGE_DECLINE_BURST_SECONDS
-  hadd dccore.swm i.2397 PRIVATE_MESSAGE_DECLINE_BURST_SECONDS
-  hadd dccore.swm i.2400 ADMIN_HOSTMASKS
-  hadd dccore.swm i.2401 ADMIN_HOSTMASKS
-  hadd dccore.swm i.2404 ADMIN_CHAT_MODE
-  hadd dccore.swm i.2405 ADMIN_CHAT_MODE
-  hadd dccore.swm i.2409 ADMIN_CHANNEL_COMMANDS
-  hadd dccore.swm i.2413 ADMIN_CHAT_COLOURS
-  hadd dccore.swm i.2416 WEBUI_HOST
-  hadd dccore.swm i.2417 WEBUI_HOST
-  hadd dccore.swm i.2420 WEBUI_PORT
-  hadd dccore.swm i.2421 WEBUI_PORT
-  hadd dccore.swm i.2424 WEBUI_ALLOWED_HOSTS
-  hadd dccore.swm i.2425 WEBUI_ALLOWED_HOSTS
-  hadd dccore.swm i.2428 WEBUI_CONSOLE_ENABLED
-  hadd dccore.swm i.2429 WEBUI_CONSOLE_ENABLED
-  hadd dccore.swm i.2433 WEBUI_OPEN_BROWSER
-  hadd dccore.swm i.2437 WEBUI_FOLDER_BROWSER_ENABLED
-  hadd dccore.swm i.2441 CONSOLE_SHOW_REQUESTS
-  hadd dccore.swm i.2445 CONSOLE_SHOW_QUEUE
-  hadd dccore.swm i.2449 CONSOLE_SHOW_SENDS
-  hadd dccore.swm i.2453 CONSOLE_SHOW_FAILURES
-  hadd dccore.swm i.2457 CONSOLE_SHOW_SEARCHES
-  hadd dccore.swm i.2461 DEBUG_CHANNEL_FEED
-  hadd dccore.swm i.2465 DEBUG_MODE
-  hadd dccore.swm i.2469 DEBUG_TO_CHANNEL
-  hadd dccore.swm i.2473 DEBUG_TO_CONSOLE
-  hadd dccore.swm i.2476 CONSOLE_TIMESTAMP_FORMAT
-  hadd dccore.swm i.2477 CONSOLE_TIMESTAMP_FORMAT
-  hadd dccore.swm i.2480 CONSOLE_LOG_FILE
-  hadd dccore.swm i.2481 CONSOLE_LOG_FILE
-  hadd dccore.swm i.2482 CONSOLE_LOG_FILE
-  hadd dccore.swm i.2484 CONSOLE_LOG_MAX_MB
-  hadd dccore.swm i.2485 CONSOLE_LOG_MAX_MB
-  hadd dccore.swm i.2488 CONSOLE_LOG_KEEP
-  hadd dccore.swm i.2489 CONSOLE_LOG_KEEP
-  hadd dccore.swm i.2492 BOT_WINDOW
-  hadd dccore.swm i.2493 BOT_WINDOW
-  hadd dccore.swm i.2496 PROJECT_URL
-  hadd dccore.swm i.2497 PROJECT_URL
-  hadd dccore.swm i.2500 TMP_ZIP_DIR
-  hadd dccore.swm i.2501 TMP_ZIP_DIR
-  hadd dccore.swm i.2502 TMP_ZIP_DIR
-  hadd dccore.swm i.2504 LOCAL_LIST_DIR
-  hadd dccore.swm i.2505 LOCAL_LIST_DIR
-  hadd dccore.swm i.2506 LOCAL_LIST_DIR
-  hadd dccore.swm i.2508 FETCHED_FILES_DIR
-  hadd dccore.swm i.2509 FETCHED_FILES_DIR
-  hadd dccore.swm i.2510 FETCHED_FILES_DIR
-  hadd dccore.swm i.2512 LIBRARY_FOLDERS_FILE
-  hadd dccore.swm i.2513 LIBRARY_FOLDERS_FILE
-  hadd dccore.swm i.2514 LIBRARY_FOLDERS_FILE
-  hadd dccore.swm i.2516 LISTS_FILE
-  hadd dccore.swm i.2517 LISTS_FILE
-  hadd dccore.swm i.2518 LISTS_FILE
-  hadd dccore.swm i.2520 BANS_FILE
-  hadd dccore.swm i.2521 BANS_FILE
-  hadd dccore.swm i.2522 BANS_FILE
-  hadd dccore.swm i.2524 HARD_BANS_FILE
-  hadd dccore.swm i.2525 HARD_BANS_FILE
-  hadd dccore.swm i.2526 HARD_BANS_FILE
-  hadd dccore.swm i.2528 STATS_FILE
-  hadd dccore.swm i.2529 STATS_FILE
-  hadd dccore.swm i.2530 STATS_FILE
-  hadd dccore.swm i.2532 KNOWN_BOTS_FILE
-  hadd dccore.swm i.2533 KNOWN_BOTS_FILE
-  hadd dccore.swm i.2534 KNOWN_BOTS_FILE
-  hadd dccore.swm i.2536 FETCHED_BOT_LISTS_FILE
-  hadd dccore.swm i.2537 FETCHED_BOT_LISTS_FILE
-  hadd dccore.swm i.2538 FETCHED_BOT_LISTS_FILE
-  hadd dccore.swm i.2540 LIST_INDEX_FILE
-  hadd dccore.swm i.2541 LIST_INDEX_FILE
-  hadd dccore.swm i.2542 LIST_INDEX_FILE
-  hadd dccore.swm i.2544 LIST_AUDIO_INFO_CACHE
-  hadd dccore.swm i.2545 LIST_AUDIO_INFO_CACHE
-  hadd dccore.swm i.2546 LIST_AUDIO_INFO_CACHE
-  hadd dccore.swm i.2548 FETCH_HISTORY_FILE
-  hadd dccore.swm i.2549 FETCH_HISTORY_FILE
-  hadd dccore.swm i.2550 FETCH_HISTORY_FILE
-  hadd dccore.swm i.2552 DOWNLOAD_COUNTS_FILE
-  hadd dccore.swm i.2553 DOWNLOAD_COUNTS_FILE
-  hadd dccore.swm i.2554 DOWNLOAD_COUNTS_FILE
-  hadd dccore.swm i.2556 TRANSFER_LOG_FILE
-  hadd dccore.swm i.2557 TRANSFER_LOG_FILE
-  hadd dccore.swm i.2558 TRANSFER_LOG_FILE
-  hadd dccore.swm i.2560 LIST_SIZE_FILE
-  hadd dccore.swm i.2561 LIST_SIZE_FILE
-  hadd dccore.swm i.2562 LIST_SIZE_FILE
-  hadd dccore.swm i.2564 LIST_RAWBYTES_FILE
-  hadd dccore.swm i.2565 LIST_RAWBYTES_FILE
-  hadd dccore.swm i.2566 LIST_RAWBYTES_FILE
-  hadd dccore.swm i.2568 LIST_PROGRESS_FILE
-  hadd dccore.swm i.2569 LIST_PROGRESS_FILE
-  hadd dccore.swm i.2570 LIST_PROGRESS_FILE
-  hadd dccore.swm i.2572 ADMIN_TOKENS_FILE
-  hadd dccore.swm i.2573 ADMIN_TOKENS_FILE
-  hadd dccore.swm i.2574 ADMIN_TOKENS_FILE
-  hadd dccore.swm i.2576 ON_CONNECT_FILE
-  hadd dccore.swm i.2577 ON_CONNECT_FILE
-  hadd dccore.swm i.2578 ON_CONNECT_FILE
-  hadd dccore.swm i.2580 NOTICES_FILE
-  hadd dccore.swm i.2581 NOTICES_FILE
-  hadd dccore.swm i.2582 NOTICES_FILE
-  hadd dccore.swm i.2584 PRIVATE_MESSAGES_FILE
-  hadd dccore.swm i.2585 PRIVATE_MESSAGES_FILE
-  hadd dccore.swm i.2586 PRIVATE_MESSAGES_FILE
-  hadd dccore.swm i.2588 DCC_QUEUE_FILE
-  hadd dccore.swm i.2589 DCC_QUEUE_FILE
-  hadd dccore.swm i.2590 DCC_QUEUE_FILE
+  hadd dccore.swm i.2068 ADMIN_NICK
+  hadd dccore.swm i.2069 ADMIN_NICK
+  hadd dccore.swm i.2072 THEME
+  hadd dccore.swm i.2073 THEME
+  hadd dccore.swm i.2076 CUSTOM_THEME_BORDER
+  hadd dccore.swm i.2077 CUSTOM_THEME_BORDER
+  hadd dccore.swm i.2078 CUSTOM_THEME_BORDER
+  hadd dccore.swm i.2080 CUSTOM_THEME_SEPARATOR
+  hadd dccore.swm i.2081 CUSTOM_THEME_SEPARATOR
+  hadd dccore.swm i.2082 CUSTOM_THEME_SEPARATOR
+  hadd dccore.swm i.2084 CUSTOM_THEME_TEXTBOX
+  hadd dccore.swm i.2085 CUSTOM_THEME_TEXTBOX
+  hadd dccore.swm i.2086 CUSTOM_THEME_TEXTBOX
+  hadd dccore.swm i.2088 CUSTOM_THEME_VALUE
+  hadd dccore.swm i.2089 CUSTOM_THEME_VALUE
+  hadd dccore.swm i.2090 CUSTOM_THEME_VALUE
+  hadd dccore.swm i.2092 CUSTOM_THEME_ALERT
+  hadd dccore.swm i.2093 CUSTOM_THEME_ALERT
+  hadd dccore.swm i.2094 CUSTOM_THEME_ALERT
+  hadd dccore.swm i.2096 CUSTOM_THEME_ACCENT
+  hadd dccore.swm i.2097 CUSTOM_THEME_ACCENT
+  hadd dccore.swm i.2098 CUSTOM_THEME_ACCENT
+  hadd dccore.swm i.2100 ANNOUNCE_INTERVAL
+  hadd dccore.swm i.2101 ANNOUNCE_INTERVAL
+  hadd dccore.swm i.2104 BROADCAST_SEARCH_CHANNEL
+  hadd dccore.swm i.2105 BROADCAST_SEARCH_CHANNEL
+  hadd dccore.swm i.2108 BROADCAST_SEARCH_COOLDOWN
+  hadd dccore.swm i.2109 BROADCAST_SEARCH_COOLDOWN
+  hadd dccore.swm i.2112 MSG_DELAY
+  hadd dccore.swm i.2113 MSG_DELAY
+  hadd dccore.swm i.2116 DEBUG_MSG_DELAY
+  hadd dccore.swm i.2117 DEBUG_MSG_DELAY
+  hadd dccore.swm i.2120 LIST_BASE_NAME
+  hadd dccore.swm i.2121 LIST_BASE_NAME
+  hadd dccore.swm i.2124 LIST_FORMAT
+  hadd dccore.swm i.2125 LIST_FORMAT
+  hadd dccore.swm i.2128 LIST_IGNORED_EXTENSIONS
+  hadd dccore.swm i.2129 LIST_IGNORED_EXTENSIONS
+  hadd dccore.swm i.2133 SEPARATE_VIDEO_LIST
+  hadd dccore.swm i.2136 LIST_VIDEO_EXTENSIONS
+  hadd dccore.swm i.2137 LIST_VIDEO_EXTENSIONS
+  hadd dccore.swm i.2140 LIST_VIDEO_COMPANION_EXTENSIONS
+  hadd dccore.swm i.2141 LIST_VIDEO_COMPANION_EXTENSIONS
+  hadd dccore.swm i.2145 RAR_ENABLED
+  hadd dccore.swm i.2148 RAR_EXTENSIONS
+  hadd dccore.swm i.2149 RAR_EXTENSIONS
+  hadd dccore.swm i.2152 RAR_BINARY
+  hadd dccore.swm i.2153 RAR_BINARY
+  hadd dccore.swm i.2154 RAR_BINARY
+  hadd dccore.swm i.2156 MAX_RAR_FOLDER_SIZE
+  hadd dccore.swm i.2157 MAX_RAR_FOLDER_SIZE
+  hadd dccore.swm i.2160 RAR_TIMEOUT
+  hadd dccore.swm i.2161 RAR_TIMEOUT
+  hadd dccore.swm i.2164 LIST_HEADER_FILE
+  hadd dccore.swm i.2165 LIST_HEADER_FILE
+  hadd dccore.swm i.2166 LIST_HEADER_FILE
+  hadd dccore.swm i.2168 LIST_HEADER_MAX_BYTES
+  hadd dccore.swm i.2169 LIST_HEADER_MAX_BYTES
+  hadd dccore.swm i.2173 LIST_SHOW_AUDIO_INFO
+  hadd dccore.swm i.2176 LIST_REBUILD_SCHEDULE
+  hadd dccore.swm i.2177 LIST_REBUILD_SCHEDULE
+  hadd dccore.swm i.2180 LIST_UPDATE_TIMEOUT
+  hadd dccore.swm i.2181 LIST_UPDATE_TIMEOUT
+  hadd dccore.swm i.2184 LIST_UPDATE_STALL_SECONDS
+  hadd dccore.swm i.2185 LIST_UPDATE_STALL_SECONDS
+  hadd dccore.swm i.2188 LIST_AUDIO_INFO_MINUTES
+  hadd dccore.swm i.2189 LIST_AUDIO_INFO_MINUTES
+  hadd dccore.swm i.2192 LIST_AUDIO_INFO_THREADS
+  hadd dccore.swm i.2193 LIST_AUDIO_INFO_THREADS
+  hadd dccore.swm i.2196 LIST_SCAN_THREADS
+  hadd dccore.swm i.2197 LIST_SCAN_THREADS
+  hadd dccore.swm i.2200 MAX_UPLOAD_KB
+  hadd dccore.swm i.2201 MAX_UPLOAD_KB
+  hadd dccore.swm i.2204 MAX_DOWNLOAD_KB
+  hadd dccore.swm i.2205 MAX_DOWNLOAD_KB
+  hadd dccore.swm i.2208 DCC_BLOCK_SIZE
+  hadd dccore.swm i.2209 DCC_BLOCK_SIZE
+  hadd dccore.swm i.2212 DCC_SEND_BUFFER
+  hadd dccore.swm i.2213 DCC_SEND_BUFFER
+  hadd dccore.swm i.2216 DCC_PORT_START
+  hadd dccore.swm i.2217 DCC_PORT_START
+  hadd dccore.swm i.2220 DCC_PORT_END
+  hadd dccore.swm i.2221 DCC_PORT_END
+  hadd dccore.swm i.2224 DCC_ACCEPT_TIMEOUT
+  hadd dccore.swm i.2225 DCC_ACCEPT_TIMEOUT
+  hadd dccore.swm i.2228 MAX_SEND_FAILS
+  hadd dccore.swm i.2229 MAX_SEND_FAILS
+  hadd dccore.swm i.2232 DAILY_SEND_FAILS_LIMIT
+  hadd dccore.swm i.2233 DAILY_SEND_FAILS_LIMIT
+  hadd dccore.swm i.2236 MAX_DCC_SLOTS
+  hadd dccore.swm i.2237 MAX_DCC_SLOTS
+  hadd dccore.swm i.2240 LARGE_FILE_MB
+  hadd dccore.swm i.2241 LARGE_FILE_MB
+  hadd dccore.swm i.2244 SLOW_SEND_MIN_KB
+  hadd dccore.swm i.2245 SLOW_SEND_MIN_KB
+  hadd dccore.swm i.2248 MAX_USER_QUEUE
+  hadd dccore.swm i.2249 MAX_USER_QUEUE
+  hadd dccore.swm i.2252 MAX_GLOBAL_QUEUE
+  hadd dccore.swm i.2253 MAX_GLOBAL_QUEUE
+  hadd dccore.swm i.2256 MAX_SEARCH_RESULTS
+  hadd dccore.swm i.2257 MAX_SEARCH_RESULTS
+  hadd dccore.swm i.2261 SEARCH_SHOW_FOLDER
+  hadd dccore.swm i.2264 SEARCH_FOLDER_MAX_CHARS
+  hadd dccore.swm i.2265 SEARCH_FOLDER_MAX_CHARS
+  hadd dccore.swm i.2269 PAUSE_ON_UPDATE
+  hadd dccore.swm i.2273 PAUSE_FOR_WHOLE_UPDATE
+  hadd dccore.swm i.2276 REHASH_TRANSFER_WAIT
+  hadd dccore.swm i.2277 REHASH_TRANSFER_WAIT
+  hadd dccore.swm i.2281 AUTO_GRAB_LISTS
+  hadd dccore.swm i.2284 AUTO_GRAB_EVERY_MINUTES
+  hadd dccore.swm i.2285 AUTO_GRAB_EVERY_MINUTES
+  hadd dccore.swm i.2288 AUTO_GRAB_MIN_FILES
+  hadd dccore.swm i.2289 AUTO_GRAB_MIN_FILES
+  hadd dccore.swm i.2292 AUTO_GRAB_MIN_SPEED_KB
+  hadd dccore.swm i.2293 AUTO_GRAB_MIN_SPEED_KB
+  hadd dccore.swm i.2297 AUTO_DISCOVER_CHANNEL_LISTS
+  hadd dccore.swm i.2300 MULTI_CHANNEL_LIST_STABLE_SECONDS
+  hadd dccore.swm i.2301 MULTI_CHANNEL_LIST_STABLE_SECONDS
+  hadd dccore.swm i.2304 MAX_FETCH_SLOTS
+  hadd dccore.swm i.2305 MAX_FETCH_SLOTS
+  hadd dccore.swm i.2309 AUTO_REFETCH_LISTS
+  hadd dccore.swm i.2312 AUTO_REFETCH_INTERVAL_HOURS
+  hadd dccore.swm i.2313 AUTO_REFETCH_INTERVAL_HOURS
+  hadd dccore.swm i.2316 AUTO_REFETCH_MAX_PER_RUN
+  hadd dccore.swm i.2317 AUTO_REFETCH_MAX_PER_RUN
+  hadd dccore.swm i.2320 FETCH_OFFER_TIMEOUT
+  hadd dccore.swm i.2321 FETCH_OFFER_TIMEOUT
+  hadd dccore.swm i.2324 FETCH_TRANSFER_TIMEOUT
+  hadd dccore.swm i.2325 FETCH_TRANSFER_TIMEOUT
+  hadd dccore.swm i.2328 FETCH_FOLDER_OFFER_TIMEOUT
+  hadd dccore.swm i.2329 FETCH_FOLDER_OFFER_TIMEOUT
+  hadd dccore.swm i.2332 FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED
+  hadd dccore.swm i.2333 FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED
+  hadd dccore.swm i.2336 FETCH_FOLDER_TRANSFER_TIMEOUT
+  hadd dccore.swm i.2337 FETCH_FOLDER_TRANSFER_TIMEOUT
+  hadd dccore.swm i.2340 MAX_FETCH_FILE_SIZE
+  hadd dccore.swm i.2341 MAX_FETCH_FILE_SIZE
+  hadd dccore.swm i.2344 MAX_FETCH_FOLDER_FILE_SIZE
+  hadd dccore.swm i.2345 MAX_FETCH_FOLDER_FILE_SIZE
+  hadd dccore.swm i.2348 MAX_FETCH_LIST_FILE_SIZE
+  hadd dccore.swm i.2349 MAX_FETCH_LIST_FILE_SIZE
+  hadd dccore.swm i.2352 MAX_LIST_TEXT_SIZE
+  hadd dccore.swm i.2353 MAX_LIST_TEXT_SIZE
+  hadd dccore.swm i.2356 FETCH_HISTORY_DAYS
+  hadd dccore.swm i.2357 FETCH_HISTORY_DAYS
+  hadd dccore.swm i.2360 FETCH_HISTORY_MAX_ROWS
+  hadd dccore.swm i.2361 FETCH_HISTORY_MAX_ROWS
+  hadd dccore.swm i.2364 FETCH_MAX_PER_BOT
+  hadd dccore.swm i.2365 FETCH_MAX_PER_BOT
+  hadd dccore.swm i.2368 FETCH_QUEUED_TIMEOUT
+  hadd dccore.swm i.2369 FETCH_QUEUED_TIMEOUT
+  hadd dccore.swm i.2372 FETCH_BOT_MAX_FAILS
+  hadd dccore.swm i.2373 FETCH_BOT_MAX_FAILS
+  hadd dccore.swm i.2376 FETCH_BOT_COOLDOWN_MINUTES
+  hadd dccore.swm i.2377 FETCH_BOT_COOLDOWN_MINUTES
+  hadd dccore.swm i.2380 LIST_REQUEST_TAG
+  hadd dccore.swm i.2381 LIST_REQUEST_TAG
+  hadd dccore.swm i.2384 MAX_REQUESTS
+  hadd dccore.swm i.2385 MAX_REQUESTS
+  hadd dccore.swm i.2388 REQUEST_WINDOW
+  hadd dccore.swm i.2389 REQUEST_WINDOW
+  hadd dccore.swm i.2392 MUTE_TIME
+  hadd dccore.swm i.2393 MUTE_TIME
+  hadd dccore.swm i.2396 FLOOD_BAN_SECONDS
+  hadd dccore.swm i.2397 FLOOD_BAN_SECONDS
+  hadd dccore.swm i.2400 PRIVATE_MESSAGE_COOLDOWN_SECONDS
+  hadd dccore.swm i.2401 PRIVATE_MESSAGE_COOLDOWN_SECONDS
+  hadd dccore.swm i.2404 PRIVATE_MESSAGE_DECLINE_TEXT
+  hadd dccore.swm i.2405 PRIVATE_MESSAGE_DECLINE_TEXT
+  hadd dccore.swm i.2408 PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS
+  hadd dccore.swm i.2409 PRIVATE_MESSAGE_DECLINE_INTERVAL_SECONDS
+  hadd dccore.swm i.2412 PRIVATE_MESSAGE_DECLINE_BURST
+  hadd dccore.swm i.2413 PRIVATE_MESSAGE_DECLINE_BURST
+  hadd dccore.swm i.2416 PRIVATE_MESSAGE_DECLINE_BURST_SECONDS
+  hadd dccore.swm i.2417 PRIVATE_MESSAGE_DECLINE_BURST_SECONDS
+  hadd dccore.swm i.2420 ADMIN_HOSTMASKS
+  hadd dccore.swm i.2421 ADMIN_HOSTMASKS
+  hadd dccore.swm i.2424 ADMIN_CHAT_MODE
+  hadd dccore.swm i.2425 ADMIN_CHAT_MODE
+  hadd dccore.swm i.2429 ADMIN_CHANNEL_COMMANDS
+  hadd dccore.swm i.2433 ADMIN_CHAT_COLOURS
+  hadd dccore.swm i.2436 WEBUI_HOST
+  hadd dccore.swm i.2437 WEBUI_HOST
+  hadd dccore.swm i.2440 WEBUI_PORT
+  hadd dccore.swm i.2441 WEBUI_PORT
+  hadd dccore.swm i.2444 WEBUI_ALLOWED_HOSTS
+  hadd dccore.swm i.2445 WEBUI_ALLOWED_HOSTS
+  hadd dccore.swm i.2448 WEBUI_CONSOLE_ENABLED
+  hadd dccore.swm i.2449 WEBUI_CONSOLE_ENABLED
+  hadd dccore.swm i.2453 WEBUI_OPEN_BROWSER
+  hadd dccore.swm i.2457 WEBUI_FOLDER_BROWSER_ENABLED
+  hadd dccore.swm i.2461 CONSOLE_SHOW_REQUESTS
+  hadd dccore.swm i.2465 CONSOLE_SHOW_QUEUE
+  hadd dccore.swm i.2469 CONSOLE_SHOW_SENDS
+  hadd dccore.swm i.2473 CONSOLE_SHOW_FAILURES
+  hadd dccore.swm i.2477 CONSOLE_SHOW_SEARCHES
+  hadd dccore.swm i.2481 DEBUG_CHANNEL_FEED
+  hadd dccore.swm i.2485 DEBUG_MODE
+  hadd dccore.swm i.2489 DEBUG_TO_CHANNEL
+  hadd dccore.swm i.2493 DEBUG_TO_CONSOLE
+  hadd dccore.swm i.2496 CONSOLE_TIMESTAMP_FORMAT
+  hadd dccore.swm i.2497 CONSOLE_TIMESTAMP_FORMAT
+  hadd dccore.swm i.2500 CONSOLE_LOG_FILE
+  hadd dccore.swm i.2501 CONSOLE_LOG_FILE
+  hadd dccore.swm i.2502 CONSOLE_LOG_FILE
+  hadd dccore.swm i.2504 CONSOLE_LOG_MAX_MB
+  hadd dccore.swm i.2505 CONSOLE_LOG_MAX_MB
+  hadd dccore.swm i.2508 CONSOLE_LOG_KEEP
+  hadd dccore.swm i.2509 CONSOLE_LOG_KEEP
+  hadd dccore.swm i.2512 BOT_WINDOW
+  hadd dccore.swm i.2513 BOT_WINDOW
+  hadd dccore.swm i.2516 PROJECT_URL
+  hadd dccore.swm i.2517 PROJECT_URL
+  hadd dccore.swm i.2520 TMP_ZIP_DIR
+  hadd dccore.swm i.2521 TMP_ZIP_DIR
+  hadd dccore.swm i.2522 TMP_ZIP_DIR
+  hadd dccore.swm i.2524 LOCAL_LIST_DIR
+  hadd dccore.swm i.2525 LOCAL_LIST_DIR
+  hadd dccore.swm i.2526 LOCAL_LIST_DIR
+  hadd dccore.swm i.2528 FETCHED_FILES_DIR
+  hadd dccore.swm i.2529 FETCHED_FILES_DIR
+  hadd dccore.swm i.2530 FETCHED_FILES_DIR
+  hadd dccore.swm i.2532 LIBRARY_FOLDERS_FILE
+  hadd dccore.swm i.2533 LIBRARY_FOLDERS_FILE
+  hadd dccore.swm i.2534 LIBRARY_FOLDERS_FILE
+  hadd dccore.swm i.2536 LISTS_FILE
+  hadd dccore.swm i.2537 LISTS_FILE
+  hadd dccore.swm i.2538 LISTS_FILE
+  hadd dccore.swm i.2540 BANS_FILE
+  hadd dccore.swm i.2541 BANS_FILE
+  hadd dccore.swm i.2542 BANS_FILE
+  hadd dccore.swm i.2544 HARD_BANS_FILE
+  hadd dccore.swm i.2545 HARD_BANS_FILE
+  hadd dccore.swm i.2546 HARD_BANS_FILE
+  hadd dccore.swm i.2548 STATS_FILE
+  hadd dccore.swm i.2549 STATS_FILE
+  hadd dccore.swm i.2550 STATS_FILE
+  hadd dccore.swm i.2552 KNOWN_BOTS_FILE
+  hadd dccore.swm i.2553 KNOWN_BOTS_FILE
+  hadd dccore.swm i.2554 KNOWN_BOTS_FILE
+  hadd dccore.swm i.2556 FETCHED_BOT_LISTS_FILE
+  hadd dccore.swm i.2557 FETCHED_BOT_LISTS_FILE
+  hadd dccore.swm i.2558 FETCHED_BOT_LISTS_FILE
+  hadd dccore.swm i.2560 LIST_INDEX_FILE
+  hadd dccore.swm i.2561 LIST_INDEX_FILE
+  hadd dccore.swm i.2562 LIST_INDEX_FILE
+  hadd dccore.swm i.2564 LIST_AUDIO_INFO_CACHE
+  hadd dccore.swm i.2565 LIST_AUDIO_INFO_CACHE
+  hadd dccore.swm i.2566 LIST_AUDIO_INFO_CACHE
+  hadd dccore.swm i.2568 FETCH_HISTORY_FILE
+  hadd dccore.swm i.2569 FETCH_HISTORY_FILE
+  hadd dccore.swm i.2570 FETCH_HISTORY_FILE
+  hadd dccore.swm i.2572 DOWNLOAD_COUNTS_FILE
+  hadd dccore.swm i.2573 DOWNLOAD_COUNTS_FILE
+  hadd dccore.swm i.2574 DOWNLOAD_COUNTS_FILE
+  hadd dccore.swm i.2576 TRANSFER_LOG_FILE
+  hadd dccore.swm i.2577 TRANSFER_LOG_FILE
+  hadd dccore.swm i.2578 TRANSFER_LOG_FILE
+  hadd dccore.swm i.2580 LIST_SIZE_FILE
+  hadd dccore.swm i.2581 LIST_SIZE_FILE
+  hadd dccore.swm i.2582 LIST_SIZE_FILE
+  hadd dccore.swm i.2584 LIST_RAWBYTES_FILE
+  hadd dccore.swm i.2585 LIST_RAWBYTES_FILE
+  hadd dccore.swm i.2586 LIST_RAWBYTES_FILE
+  hadd dccore.swm i.2588 LIST_PROGRESS_FILE
+  hadd dccore.swm i.2589 LIST_PROGRESS_FILE
+  hadd dccore.swm i.2590 LIST_PROGRESS_FILE
+  hadd dccore.swm i.2592 ADMIN_TOKENS_FILE
+  hadd dccore.swm i.2593 ADMIN_TOKENS_FILE
+  hadd dccore.swm i.2594 ADMIN_TOKENS_FILE
+  hadd dccore.swm i.2596 ON_CONNECT_FILE
+  hadd dccore.swm i.2597 ON_CONNECT_FILE
+  hadd dccore.swm i.2598 ON_CONNECT_FILE
+  hadd dccore.swm i.2600 NOTICES_FILE
+  hadd dccore.swm i.2601 NOTICES_FILE
+  hadd dccore.swm i.2602 NOTICES_FILE
+  hadd dccore.swm i.2604 PRIVATE_MESSAGES_FILE
+  hadd dccore.swm i.2605 PRIVATE_MESSAGES_FILE
+  hadd dccore.swm i.2606 PRIVATE_MESSAGES_FILE
+  hadd dccore.swm i.2608 DCC_QUEUE_FILE
+  hadd dccore.swm i.2609 DCC_QUEUE_FILE
+  hadd dccore.swm i.2610 DCC_QUEUE_FILE
+  hadd dccore.swm i.2613 @panel
+  hadd dccore.swm i.2617 @titlebar
+  hadd dccore.swm i.2621 @separate
+  hadd dccore.swm i.2625 @beep
+  hadd dccore.swm i.2629 @nodcx
+  hadd dccore.swm i.2633 @chat.all
+  hadd dccore.swm i.2637 @chat.popup
+  hadd dccore.swm i.2640 CHAT_HISTORY_DAYS
+  hadd dccore.swm i.2641 CHAT_HISTORY_DAYS
+  hadd dccore.swm i.2644 CHAT_HISTORY_MAX_MB
+  hadd dccore.swm i.2645 CHAT_HISTORY_MAX_MB
   hadd dccore.swm lo.start.main 2025
   hadd dccore.swm h.@start.main This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
   hadd dccore.swm lo.start.chat 2029
@@ -5014,43 +6958,57 @@ alias dccore.sw.data {
   hadd dccore.swm h.@start.downloads This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
   hadd dccore.swm lo.auto 2037
   hadd dccore.swm h.@auto This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
-  hadd dccore.swm locals start.main start.chat start.downloads auto
-  hadd dccore.swm br.2186 dir FILE_DIRECTORY
-  hadd dccore.swm br.2218 file RAR_BINARY
-  hadd dccore.swm br.2230 file LIST_HEADER_FILE
-  hadd dccore.swm br.2482 file CONSOLE_LOG_FILE
-  hadd dccore.swm br.2502 dir TMP_ZIP_DIR
-  hadd dccore.swm br.2506 dir LOCAL_LIST_DIR
-  hadd dccore.swm br.2510 dir FETCHED_FILES_DIR
-  hadd dccore.swm br.2514 file LIBRARY_FOLDERS_FILE
-  hadd dccore.swm br.2518 file LISTS_FILE
-  hadd dccore.swm br.2522 file BANS_FILE
-  hadd dccore.swm br.2526 file HARD_BANS_FILE
-  hadd dccore.swm br.2530 file STATS_FILE
-  hadd dccore.swm br.2534 file KNOWN_BOTS_FILE
-  hadd dccore.swm br.2538 file FETCHED_BOT_LISTS_FILE
-  hadd dccore.swm br.2542 file LIST_INDEX_FILE
-  hadd dccore.swm br.2546 file LIST_AUDIO_INFO_CACHE
-  hadd dccore.swm br.2550 file FETCH_HISTORY_FILE
-  hadd dccore.swm br.2554 file DOWNLOAD_COUNTS_FILE
-  hadd dccore.swm br.2558 file TRANSFER_LOG_FILE
-  hadd dccore.swm br.2562 file LIST_SIZE_FILE
-  hadd dccore.swm br.2566 file LIST_RAWBYTES_FILE
-  hadd dccore.swm br.2570 file LIST_PROGRESS_FILE
-  hadd dccore.swm br.2574 file ADMIN_TOKENS_FILE
-  hadd dccore.swm br.2578 file ON_CONNECT_FILE
-  hadd dccore.swm br.2582 file NOTICES_FILE
-  hadd dccore.swm br.2586 file PRIVATE_MESSAGES_FILE
-  hadd dccore.swm br.2590 file DCC_QUEUE_FILE
-  hadd dccore.swm bot.n 5
-  hadd dccore.swm bot.1 2001,2005,2009,2013,2017,2021,1500,1501,1502,1503,1504,1505,1506,2041,2045,2049,2053,2057,2061,2065,2069,1520,1521,1522,1523,2073,2077,1610,1611,2081,2082,2085,2086,2089,2090,2093,2094,2097,2098,2101,2102,2105,2109,2113,2117,2121,2125,2129,2133,2137
-  hadd dccore.swm bot.2 2141,2145,2149,2153,2157,2161,2165,2169,2173,2177,2181,2185,2186,2189,2193,2197,2201,2205,2209,2213,2217,2218,2221,2225,2229,2230,2233,2237,1540,1541,1542,1543,1544,1545,1546,1547,1548,1549,1550,1551,1552,1553,1554,1555,1556,1557,2241,2245,2249,2253
-  hadd dccore.swm bot.3 2257,2261,2265,2269,2273,2277,2281,2285,2289,2293,2297,2301,2305,2309,2313,2317,2321,2325,2329,2333,2337,2341,2345,2349,2353,2357,2361,2365,2369,2373,2377,1580,1581,1582,1583,1584,1585,1586,1587,1595,1596,1597,1598,2381,2385,2389,2393,2397,2401,2405
-  hadd dccore.swm bot.4 2409,2413,2417,2421,2425,2429,2433,2437,2441,2445,2449,2453,2457,2461,2465,2469,2473,2477,2481,2482,2485,2489,2493,2497,2501,2502,2505,2506,2509,2510,2513,2514,2517,2518,2521,2522,2525,2526,2529,2530,2533,2534,2537,2538,2541,2542,2545,2546,2549,2550
-  hadd dccore.swm bot.5 2553,2554,2557,2558,2561,2562,2565,2566,2569,2570,2573,2574,2577,2578,2581,2582,2585,2586,2589,2590
+  hadd dccore.swm lo.panel 2613
+  hadd dccore.swm h.@panel This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
+  hadd dccore.swm lo.titlebar 2617
+  hadd dccore.swm h.@titlebar This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
+  hadd dccore.swm lo.separate 2621
+  hadd dccore.swm h.@separate This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
+  hadd dccore.swm lo.beep 2625
+  hadd dccore.swm h.@beep This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
+  hadd dccore.swm lo.nodcx 2629
+  hadd dccore.swm h.@nodcx This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
+  hadd dccore.swm lo.chat.all 2633
+  hadd dccore.swm h.@chat.all This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
+  hadd dccore.swm lo.chat.popup 2637
+  hadd dccore.swm h.@chat.popup This mIRC's own setting~2C kept in dccore.ini beside the script - not the bot's. Saved by Apply or OK.
+  hadd dccore.swm locals start.main start.chat start.downloads auto panel titlebar separate beep nodcx chat.all chat.popup
+  hadd dccore.swm br.2154 file RAR_BINARY
+  hadd dccore.swm br.2166 file LIST_HEADER_FILE
+  hadd dccore.swm br.2502 file CONSOLE_LOG_FILE
+  hadd dccore.swm br.2522 dir TMP_ZIP_DIR
+  hadd dccore.swm br.2526 dir LOCAL_LIST_DIR
+  hadd dccore.swm br.2530 dir FETCHED_FILES_DIR
+  hadd dccore.swm br.2534 file LIBRARY_FOLDERS_FILE
+  hadd dccore.swm br.2538 file LISTS_FILE
+  hadd dccore.swm br.2542 file BANS_FILE
+  hadd dccore.swm br.2546 file HARD_BANS_FILE
+  hadd dccore.swm br.2550 file STATS_FILE
+  hadd dccore.swm br.2554 file KNOWN_BOTS_FILE
+  hadd dccore.swm br.2558 file FETCHED_BOT_LISTS_FILE
+  hadd dccore.swm br.2562 file LIST_INDEX_FILE
+  hadd dccore.swm br.2566 file LIST_AUDIO_INFO_CACHE
+  hadd dccore.swm br.2570 file FETCH_HISTORY_FILE
+  hadd dccore.swm br.2574 file DOWNLOAD_COUNTS_FILE
+  hadd dccore.swm br.2578 file TRANSFER_LOG_FILE
+  hadd dccore.swm br.2582 file LIST_SIZE_FILE
+  hadd dccore.swm br.2586 file LIST_RAWBYTES_FILE
+  hadd dccore.swm br.2590 file LIST_PROGRESS_FILE
+  hadd dccore.swm br.2594 file ADMIN_TOKENS_FILE
+  hadd dccore.swm br.2598 file ON_CONNECT_FILE
+  hadd dccore.swm br.2602 file NOTICES_FILE
+  hadd dccore.swm br.2606 file PRIVATE_MESSAGES_FILE
+  hadd dccore.swm br.2610 file DCC_QUEUE_FILE
+  hadd dccore.swm bot.n 6
+  hadd dccore.swm bot.1 2001,2005,2009,2013,2017,2021,1500,1501,1502,1503,1506,1505,2041,2045,2049,2053,2057,2061,2065,1520,1521,1522,1523,2069,2073,1610,1611,2077,2078,2081,2082,2085,2086,2089,2090,2093,2094,2097,2098,2101,2105,2109,2113,2117,1540,1551,1554,1555,1557,1700
+  hadd dccore.swm bot.2 1701,1702,1703,1704,1705,1706,1707,1708,1709,1710,1711,1712,1713,1714,1715,1716,1717,1718,1719,1720,1721,1722,1723,1724,1725,1726,1727,1728,1729,1730,1731,1732,1733,1734,1735,1736,1737,1738,1739,1740,1741,1742,1743,1744,1745,1746,1747,1748,1749,1750
+  hadd dccore.swm bot.3 1751,1752,1753,1754,1755,1756,1757,1758,1759,1774,1770,1771,1772,1773,1567,1568,2121,2125,2129,2133,2137,2141,2145,2149,2153,2154,2157,2161,2165,2166,2169,2173,2177,2181,2185,2189,2193,2197,2201,2205,2209,2213,2217,2221,2225,2229,2233,2237,2241,2245
+  hadd dccore.swm bot.4 2249,2253,2257,2261,2265,2269,2273,2277,2281,2285,2289,2293,2297,2301,2305,2309,2313,2317,2321,2325,2329,2333,2337,2341,2345,2349,2353,2357,2361,2365,2369,2373,2377,2381,2385,2389,2393,2397,1580,1583,1584,1585,1586,1587,1581,1582,1595,1597,1598,1596
+  hadd dccore.swm bot.5 2401,2405,2409,2413,2417,2421,2425,2429,2433,2437,2441,2445,2449,2453,2457,2461,2465,2469,2473,2477,2481,2485,2489,2493,2497,2501,2502,2505,2509,2513,2517,2521,2522,2525,2526,2529,2530,2533,2534,2537,2538,2541,2542,2545,2546,2549,2550,2553,2554,2557
+  hadd dccore.swm bot.6 2558,2561,2562,2565,2566,2569,2570,2573,2574,2577,2578,2581,2582,2585,2586,2589,2590,2593,2594,2597,2598,2601,2602,2605,2606,2609,2610,2641,2645
   hadd dccore.swm confirm TMP_ZIP_DIR LOCAL_LIST_DIR FETCHED_FILES_DIR LIBRARY_FOLDERS_FILE LISTS_FILE BANS_FILE HARD_BANS_FILE STATS_FILE KNOWN_BOTS_FILE FETCHED_BOT_LISTS_FILE LIST_INDEX_FILE LIST_AUDIO_INFO_CACHE FETCH_HISTORY_FILE DOWNLOAD_COUNTS_FILE TRANSFER_LOG_FILE LIST_SIZE_FILE LIST_RAWBYTES_FILE LIST_PROGRESS_FILE ADMIN_TOKENS_FILE ON_CONNECT_FILE NOTICES_FILE PRIVATE_MESSAGES_FILE DCC_QUEUE_FILE
   hadd dccore.swm t.1500 Sent once the server has registered the bot~2C before it joins: one command per line~2C exactly as typed into a client. ~25nick~25 is the nickname the server gave it.
-  hadd dccore.swm t.2384 That reply's wording (~25admin becomes the admin nick)
+  hadd dccore.swm t.2404 That reply's wording (~25admin becomes the admin nick)
   hadd dccore.swm colours 00 white~2C01 black~2C02 blue~2C03 green~2C04 red~2C05 maroon~2C06 purple~2C07 orange~2C08 yellow~2C09 light green~2C10 cyan~2C11 light cyan~2C12 royal blue~2C13 pink~2C14 grey~2C15 light grey
   hadd dccore.swm themedefault Theme default
   hadd dccore.swm keepprevious Keep previous
@@ -5099,6 +7057,51 @@ alias dccore.sw.data {
 ;
 ;  The tag is neutral so that a script that is not DCCore's can speak it too.
 ;  It cannot change once people use it.
+;
+;  History (#1393). The bot keeps nothing on disk; THIS script does. It is
+;  ON by default - for an operator who only updated the script too - until
+;  "Keep a history file" is unticked in the window's right-click menu, and
+;  the window says where it keeps it when it opens. Every chat line the
+;  window draws - private conversations included; not the bot's own
+;  remarks, not the script's grey lines - goes into mIRC's LOG folder
+;  ($logdir, which can be outside the mIRC folder), in DCCore-Chat\:
+;    #channel\YYYY-MM.log  a folder per channel, a file per month, "@nick\"
+;                        for a private conversation, every-channel\ for your
+;                        own line said with `chat *` in several channels at
+;                        once - "yyyy-mm-dd HH:nn:ss channel nick text",
+;                        plain text; whole months are deleted by the
+;                        history's limits (#1401, below)
+;    recent.txt          the last lines of all of them together, as
+;                        "<id> <channel> <nick> own|other <text>", cut back
+;                        to the last 200 once it passes 400
+;  When the window opens, the last 200 lines of recent.txt are drawn in grey,
+;  under "Earlier", by the same rules as a live line: channels listened on,
+;  private lines and your own. They are not written again and not counted
+;  as unread, and chat.last moves past them, so the bot's own replay after
+;  HELLO cannot draw any of them a second time - but never past the clock
+;  (an id more than five minutes ahead of $ctime): one line from a bot whose
+;  clock ran ahead, or from before the PC's clock was put back, would
+;  otherwise hold chat.last above every line to come, and the window would
+;  draw and keep nothing more. Such a line is still drawn. Turning the
+;  history off stops the writing and the replay; the files stay, until the
+;  limits remove them.
+;
+;  Limits (#1401). How long and how much is kept are the BOT's settings,
+;  CHAT_HISTORY_DAYS and CHAT_HISTORY_MAX_MB - on its dashboard under
+;  Settings -> Private messages, and on the control panel's mIRC side -
+;  sent as DCCORE CHATHIST <days> <max_mb> after HELLO and when they change.
+;  The last values are kept in dccore.ini, so they hold before the next
+;  connection too; until a bot has sent them nothing is deleted, and 0 is
+;  no limit. They delete whole month files: every month that ended more
+;  than the days ago, then, while the folder is over the size, the oldest
+;  months - never the month running. recent.txt is not touched.
+;
+;  Unread (#1393). A line from another bot drawn while the window is not
+;  the active one - or while mIRC itself is in the background - counts in
+;  the title ("3 unread") until you are back in the window. Its switchbar
+;  button is lit as for any new line, and with "Flash on a new line" ticked
+;  /flash makes mIRC flash in the taskbar - which it does only while mIRC
+;  is in the background.
 
 alias dccore.chat.tag { return $+($chr(91),ServersChat,$chr(93)) }
 alias dccore.chat.win { return @DCCore-Chat }
@@ -5127,8 +7130,11 @@ alias dccore.chat.window {
   if ($dccore.opt(font)) { font $dccore.chat.win $dccore.fontsize Lucida Console }
   dccore.chat.title
   dccore.chat.sys Public: everyone in the channel reads what is typed here, with or without this script.
+  if ($dccore.opt(chat.history)) { dccore.chat.sys What this window shows, private conversations too, is kept in $dccore.chat.hist.dir - right-click to stop keeping a history. }
   dccore.chat.sys What you type is said by $iif($dccore.bot,$dccore.bot,your bot) in the channels where it has seen other DCCore bots. Right-click to send to one channel instead, and to choose the ones to listen on.
   dccore.chat.sys Double-click a bot in the list on the right (or right-click it) to message it privately instead.
+  dccore.chat.hist.replay
+  dccore.chat.hist.daily
   dccore.chat.peers.redraw
 }
 alias dccore.chat.title {
@@ -5142,17 +7148,23 @@ alias dccore.chat.title {
   var %target = $iif(%auto,$dccore.st(chat.replyto),%to)
   var %where = $iif(%target != $null,%target,every channel with other DCCore bots)
   var %priv = $iif((%target != $null) && ($left(%target,1) !isin $+($chr(35),&+!)),1,0)
-  titlebar $dccore.chat.win DCCore Chat $dccore.dot public $dccore.dot typing sends $iif(%priv,privately to,to) %where $iif(!$dccore.chat.relaying,$dccore.dot not connected to the bot)
+  ; The lines from other bots drawn while the window was not active (#1393).
+  titlebar $dccore.chat.win DCCore Chat $dccore.dot public $dccore.dot typing sends $iif(%priv,privately to,to) %where $iif(!$dccore.chat.relaying,$dccore.dot not connected to the bot) $iif($dccore.st(chat.unread) > 0,$dccore.dot $dccore.st(chat.unread) unread)
 }
 alias dccore.chat.sys {
   dccore.chat.window
   echo 14 -i2 $dccore.chat.win $1-
 }
+; A chat line's text as the window draws it: past 400 characters, the first
+; 397 and "...". The live line and the replayed one both.
+alias dccore.chat.cut {
+  if ($len($1-) > 400) { return $left($1-,397) $+ ... }
+  return $1-
+}
 ; One chat line: $1 channel, $2 nick, $3 own or other, $4 time, $5- text.
 alias dccore.chat.show {
   dccore.chat.window quiet
-  var %text = $5-
-  if ($len(%text) > 400) { var %text = $left(%text,397) $+ ... }
+  var %text = $dccore.chat.cut($5-)
   var %who = $+($chr(3),$iif($3 == own,$dccore.col(console),$dccore.col(name)),$chr(2),$2,$chr(15))
   var %line = $+($chr(3),14,$4,$chr(160),$1,$chr(15)) %who %text
   if ($version >= 7) { echo -mi2 $dccore.chat.win %line }
@@ -5163,6 +7175,11 @@ alias dccore.chat.show {
 ; the bot's own remark (somebody hidden for flooding).
 alias dccore.chat.feed {
   if ($1 !isnum) { return }
+  ; The first line of a session: the history file's newest id counts as
+  ; drawn (#1393), so a line the bot replays after HELLO that the window will
+  ; also replay from the file - when this line is what opens it - is drawn
+  ; and written once.
+  if ($dccore.st(chat.last) !isnum) { dccore.chat.hist.floor }
   if ($dccore.st(chat.last) isnum) && ($1 <= $dccore.st(chat.last)) { return }
   hadd dccore.live chat.last $1
   ; Somebody else's line names where the conversation is: typing with no
@@ -5190,7 +7207,13 @@ alias dccore.chat.feed {
   if ($3 != $dccore.bot) && ($left($2,1) != @) && (!$dccore.chat.listens($2)) { return }
   if (!$window($dccore.chat.win)) && (!$dccore.opt(chat.popup)) { return }
   if ($3 == *) { dccore.chat.sys $2 $strip($4-) | return }
-  dccore.chat.show $iif($2 == -,*,$2) $3 $iif($3 == $dccore.bot,own,other) $asctime($int($calc($1 / 1000)),HH:nn) $strip($4-)
+  var %kind = $iif($3 == $dccore.bot,own,other)
+  dccore.chat.show $iif($2 == -,*,$2) $3 %kind $asctime($int($calc($1 / 1000)),HH:nn) $strip($4-)
+  ; Drawn: into the history file, after the window has replayed the file
+  ; (so not twice), then counted as unread - last, as /flash is the one
+  ; step here that touches something outside the script (#1393).
+  dccore.chat.hist.add $1 $2 $3 %kind $strip($4-)
+  if (%kind == other) { dccore.chat.unread.add }
 }
 ; A CHANNELS line: the channels the bot is in, which are the ones it chats in.
 alias dccore.chat.channels {
@@ -5255,10 +7278,27 @@ alias dccore.chat.say {
   dccore.send chat %to %text
 }
 on *:INPUT:@DCCore-Chat: {
+  ; Typing here is reading here, should on ACTIVE below not have fired.
+  dccore.chat.unread.clear
   if ($left($1,1) == /) && ($left($1,2) != //) { return }
   dccore.chat.say $1-
   halt
 }
+; The window activated: everything in it has been seen (#1393). Any window,
+; with $active checked here, rather than the window's name as the event's
+; target: it holds whether mIRC matches that target against the window
+; being activated or the one being left. An mIRC without on ACTIVE clears
+; the count on the first line typed in the window instead (on INPUT above).
+;
+; mIRC runs only the FIRST matching event of a kind in one script file, and
+; this one matches every window: anything else this file ever does on
+; ACTIVE has to go into this handler, never into a second on ACTIVE below.
+on *:ACTIVE:*: { if ($active == $dccore.chat.win) { dccore.chat.unread.clear } }
+; mIRC back in the foreground with the chat window the active one: the
+; count of what arrived while it was in the background goes (#1393). The
+; same as on ACTIVE: the only on APPACTIVE this file may have.
+on *:APPACTIVE: { if ($appactive) && ($active == $dccore.chat.win) { dccore.chat.unread.clear } }
+on *:CLOSE:@DCCore-Chat: { if ($dccore.st(chat.unread) != $null) { hdel dccore.live chat.unread } }
 
 ; Choosing channels, from the window's right-click menu. Picking where to
 ; send also listens there: a channel you talk into and cannot hear back
@@ -5329,19 +7369,289 @@ alias dccore.chat.pickpeer {
 
 menu @DCCore-Chat {
   dclick:dccore.chat.pickpeer $1
-  $iif(!$dccore.st(chat.chans),(connect to the bot to see its channels)):dccore connect
-  Send to
+  $iif(!$dccore.st(chat.chans),$dccore.mi(connect) (connect to the bot to see its channels)):dccore connect
+  $dccore.mi(chat) Send to
   .$iif((!$dccore.opt(chat.to)) || ($dccore.opt(chat.to) == *),$style(1)) Every channel with other DCCore bots:dccore.chat.to.all
   .-
   .$submenu($dccore.chat.sendrow($1))
-  Listen on
+  $dccore.mi(hash) Listen on
   .$submenu($dccore.chat.listenrow($1))
   $iif($dccore.opt(chat.all),$style(1)) Listen on all the bot's channels:dccore.chat.all
-  $iif($sline($dccore.chat.win,1),Message this bot privately):dccore.chat.pickpeer $sline($dccore.chat.win,1).ln
+  $iif($sline($dccore.chat.win,1),$dccore.mi(mail) Message this bot privately):dccore.chat.pickpeer $sline($dccore.chat.win,1).ln
   -
-  Clear window:clear $dccore.chat.win
-  Options...:dccore.options
-  Settings...:dccore.settings
+  $iif($dccore.opt(chat.history),$style(1)) Keep a history file:dccore.chat.hist.toggle
+  $iif($dccore.opt(chat.flash),$style(1)) Flash on a new line:dccore.chat.flash.toggle
+  $dccore.mi(folder) Open the history folder:dccore.chat.hist.open
+  -
+  $dccore.mi(clear) Clear window:clear $dccore.chat.win
+  $dccore.mi(settings) Control Panel...:dccore.settings
+}
+
+; ---- History and unread (#1393) ---------------------------------------
+
+; The folder, in mIRC's own log folder ($logdir, which ends with "\"), and
+; the files in it. A line's file (#1401): $1 its channel as the bot sent it,
+; $2 its id - a folder per channel, a file per month ("2026-10.log"), so the
+; history's limits delete whole months (dccore.chat.hist.prune) instead of
+; rewriting a file that only grows. A channel's folder is its name made
+; safe for a file name ($mkfn); a private conversation's is its "@<nick>"
+; channel the same way - the "@" also keeps a nick such as CON or NUL from
+; naming a Windows device; and your own line said in several channels at
+; once ("-") goes to every-channel. Paths are quoted ($qt) wherever a
+; command takes one.
+alias dccore.chat.hist.dir { return $+($logdir,DCCore-Chat) }
+alias dccore.chat.hist.recent { return $+($dccore.chat.hist.dir,\recent.txt) }
+alias dccore.chat.hist.file {
+  var %who = $iif($1 == -,every-channel,$mkfn($1))
+  return $+($dccore.chat.hist.dir,\,%who,\,$asctime($int($calc($2 / 1000)),yyyy-mm),.log)
+}
+; How many lines of recent.txt the window replays. The file is cut back to
+; that many once it holds twice as many.
+alias dccore.chat.hist.keep { return 200 }
+; The hidden window the trim and the replay load recent.txt into.
+alias dccore.chat.hist.buf { return @dccore.chat.buf }
+; The newest id the file may raise chat.last to: five minutes past the
+; clock. One further ahead - from a bot whose clock ran fast, or from before
+; this PC's clock was put back - would hold chat.last above every line to
+; come, and the window would draw and keep nothing more.
+alias dccore.chat.hist.clock { return $calc(($ctime + 300) * 1000) }
+
+; The folder, made when it is missing - and mIRC's log folder before it,
+; which is only there once something has been logged. $true when it is there.
+alias dccore.chat.hist.mkdir {
+  var %d = $dccore.chat.hist.dir
+  if ($isdir(%d)) { return $true }
+  if (!$isdir($logdir)) { mkdir $qt($left($logdir,-1)) }
+  mkdir $qt(%d)
+  return $isdir(%d)
+  :error
+  reseterror
+  return $false
+}
+
+; A line the window drew: $1 its id, $2 its channel as the bot sent it, $3
+; the nick, $4 own or other, $5- the text. Nothing while the history is off.
+; A file that cannot be written loses the line, and nothing else: the
+; error stops here, not in the feed.
+alias dccore.chat.hist.add {
+  if (!$dccore.opt(chat.history)) { return }
+  if (!$dccore.chat.hist.mkdir) { return }
+  var %f = $dccore.chat.hist.file($2,$1)
+  if (!$isdir($nofile(%f))) { mkdir $qt($left($nofile(%f),-1)) }
+  write $qt(%f) $asctime($int($calc($1 / 1000)),yyyy-mm-dd HH:nn:ss) $iif($2 == -,*,$2) $3 $strip($5-)
+  var %r = $dccore.chat.hist.recent
+  write $qt(%r) $1 $2 $3 $4 $strip($5-)
+  if ($lines(%r) > $calc(2 * $dccore.chat.hist.keep)) { dccore.chat.hist.trim }
+  return
+  :error
+  reseterror
+}
+
+; recent.txt cut back to its last lines, through a hidden window: /loadbuf N
+; loads the LAST N lines of a file, and /savebuf writes them back over it.
+alias dccore.chat.hist.trim {
+  var %r = $dccore.chat.hist.recent
+  var %w = $dccore.chat.hist.buf
+  if ($window(%w)) { window -c %w }
+  window -h %w
+  loadbuf $dccore.chat.hist.keep %w $qt(%r)
+  savebuf %w $qt(%r)
+  window -c %w
+}
+
+; The last lines of recent.txt, drawn in grey when the window opens, by the
+; rules a live line is drawn by (dccore.chat.feed): a channel listened on, a
+; private line, your own. Drawn with a plain echo - never written again,
+; never counted as unread, and no -m, so the button is not lit for them.
+; chat.last moves to the newest id read, so the bot's own replay after HELLO
+; cannot draw one of them a second time - but not past the clock
+; (dccore.chat.hist.clock): a line from the future is drawn, and moves nothing.
+alias dccore.chat.hist.replay {
+  if (!$dccore.opt(chat.history)) { return }
+  var %r = $dccore.chat.hist.recent
+  if (!$isfile(%r)) { return }
+  var %w = $dccore.chat.hist.buf
+  if ($window(%w)) { window -c %w }
+  window -h %w
+  loadbuf $dccore.chat.hist.keep %w $qt(%r)
+  var %top = $dccore.st(chat.last)
+  var %clock = $dccore.chat.hist.clock
+  var %shown = 0
+  var %i = 1
+  while (%i <= $line(%w,0)) {
+    tokenize 32 $line(%w,%i)
+    if ($1 isnum) && ($4 != $null) {
+      if ($1 <= %clock) && ((%top !isnum) || ($1 > %top)) { var %top = $1 }
+      if ($4 == own) || ($left($2,1) == @) || ($dccore.chat.listens($2)) {
+        if (!%shown) { dccore.chat.sys Earlier, from the history file: | var %shown = 1 }
+        echo 14 -i2 $dccore.chat.win $+($dccore.chat.hist.when($1),$chr(160),$iif($2 == -,*,$2)) $3 $dccore.chat.cut($5-)
+      }
+    }
+    inc %i
+  }
+  window -c %w
+  if (%shown) { dccore.chat.sys End of the history file. }
+  if (%top isnum) { hadd dccore.live chat.last %top }
+  return
+  :error
+  reseterror
+  if ($window($dccore.chat.hist.buf)) { window -c $dccore.chat.hist.buf }
+}
+; A replayed line's time, from its id: the time alone for today, the date
+; and the time before that.
+alias dccore.chat.hist.when {
+  var %t = $int($calc($1 / 1000))
+  if ($asctime(%t,yyyymmdd) == $asctime($ctime,yyyymmdd)) { return $asctime(%t,HH:nn) }
+  return $asctime(%t,yyyy-mm-dd HH:nn)
+}
+; The newest id in recent.txt, for the first CHAT line of a session: that
+; line was drawn, and written, in an earlier one. Not one from the future
+; (dccore.chat.hist.clock).
+alias dccore.chat.hist.floor {
+  if (!$dccore.opt(chat.history)) { return }
+  var %r = $dccore.chat.hist.recent
+  if (!$isfile(%r)) { return }
+  var %n = $lines(%r)
+  if (%n < 1) { return }
+  var %id = $gettok($read(%r,nt,%n),1,32)
+  if (%id isnum) && (%id <= $dccore.chat.hist.clock) { hadd dccore.live chat.last %id }
+  return
+  :error
+  reseterror
+}
+
+; A line from another bot, drawn while the window is not the active one -
+; or while it is, with mIRC itself in the background, where $active stays
+; the window you left: counted in the title, and with "Flash on a new line"
+; ticked /flash, which flashes mIRC in the taskbar only while mIRC is in
+; the background. The switchbar button is lit by the line itself
+; (dccore.chat.show's echo -m), as before.
+alias dccore.chat.unread.add {
+  if ($active == $dccore.chat.win) && ($appactive) { return }
+  hinc dccore.live chat.unread
+  dccore.chat.title
+  if ($dccore.opt(chat.flash)) { flash $dccore.chat.win DCCore Chat $dccore.dot $dccore.st(chat.unread) unread }
+}
+alias dccore.chat.unread.clear {
+  if ($dccore.st(chat.unread) == $null) { return }
+  hdel dccore.live chat.unread
+  dccore.chat.title
+}
+
+; The right-click menu's three.
+; ---- The history's limits (#1401) -------------------------------------
+
+; DCCORE CHATHIST <days> <max_mb>, the bot's CHAT_HISTORY_DAYS and
+; CHAT_HISTORY_MAX_MB: kept in dccore.ini, and acted on at once when they
+; changed. Anything but two whole numbers of 0 or more is ignored.
+alias dccore.chat.hist.limits {
+  if ($1 !isnum) || ($2 !isnum) { return }
+  var %days = $int($1)
+  var %mb = $int($2)
+  if (%days < 0) || (%mb < 0) { return }
+  if (%days == $dccore.opt(chat.hist.days)) && (%mb == $dccore.opt(chat.hist.mb)) { return }
+  hadd dccore chat.hist.days %days
+  hadd dccore chat.hist.mb %mb
+  dccore.save
+  dccore.chat.hist.prune
+}
+; Once a day at most, when the chat window opens: the limits applied. The
+; day is marked whatever the pass finds - no limits yet, no folder - so the
+; window opens without it again until tomorrow.
+alias dccore.chat.hist.daily {
+  if ($dccore.st(chat.pruned) == $asctime($ctime,yyyymmdd)) { return }
+  hadd dccore.live chat.pruned $asctime($ctime,yyyymmdd)
+  dccore.chat.hist.prune
+}
+; The month files that are over the limits, deleted: every month that ended
+; more than the days ago - a month before the one the limit falls in ended
+; before it - then, while the folder is over the size, the oldest months,
+; never the month running. Only files named for a month ("2026-10.log") in
+; the history folder and its channel folders are looked at; recent.txt and
+; anything else there is not touched. Nothing at all before a bot has sent
+; the limits, or while both are 0. A file that cannot be deleted stops this
+; pass, and the next one tries again.
+alias dccore.chat.hist.prune {
+  var %days = $dccore.opt(chat.hist.days)
+  var %mb = $dccore.opt(chat.hist.mb)
+  if (%days !isnum) { var %days = 0 }
+  if (%mb !isnum) { var %mb = 0 }
+  if (%days <= 0) && (%mb <= 0) { return }
+  var %dir = $dccore.chat.hist.dir
+  if (!$isdir(%dir)) { return }
+  if ($hget(dccore.chathist)) { hfree dccore.chathist }
+  hmake dccore.chathist 100
+  hadd dccore.chathist n 0
+  noop $findfile(%dir,????-??.log,0,2,dccore.chat.hist.seen $1-)
+  var %months = $null
+  var %total = 0
+  var %i = 1
+  while (%i <= $hget(dccore.chathist,n)) {
+    var %row = $hget(dccore.chathist,f $+ %i)
+    var %total = $calc(%total + $gettok(%row,2,32))
+    var %months = $addtok(%months,$gettok(%row,1,32),32)
+    inc %i
+  }
+  var %months = $sorttok(%months,32,n)
+  if (%days > 0) {
+    var %cut = $asctime($calc($ctime - %days * 86400),yyyymm)
+    var %j = 1
+    while (%j <= $numtok(%months,32)) {
+      if ($gettok(%months,%j,32) < %cut) { var %total = $calc(%total - $dccore.chat.hist.drop($gettok(%months,%j,32))) }
+      inc %j
+    }
+  }
+  if (%mb > 0) {
+    var %max = $calc(%mb * 1048576)
+    var %now = $asctime($ctime,yyyymm)
+    var %j = 1
+    while (%total > %max) && (%j <= $numtok(%months,32)) && ($gettok(%months,%j,32) < %now) {
+      var %total = $calc(%total - $dccore.chat.hist.drop($gettok(%months,%j,32)))
+      inc %j
+    }
+  }
+  hfree dccore.chathist
+  return
+  :error
+  reseterror
+  if ($hget(dccore.chathist)) { hfree dccore.chathist }
+}
+; A file $findfile found, kept as "<yyyymm> <bytes> <path>" when its name is
+; a month's; anything else in the folder is passed over.
+alias dccore.chat.hist.seen {
+  var %name = $nopath($1-)
+  var %m = $remove(%name,-,.log)
+  if ($len(%name) != 11) || (%m !isnum) { return }
+  hinc dccore.chathist n
+  hadd dccore.chathist f $+ $hget(dccore.chathist,n) %m $file($1-).size $1-
+}
+; Month $1 (yyyymm) deleted, every channel's file of it: the bytes it held.
+alias dccore.chat.hist.drop {
+  var %freed = 0
+  var %i = 1
+  while (%i <= $hget(dccore.chathist,n)) {
+    var %row = $hget(dccore.chathist,f $+ %i)
+    if ($gettok(%row,1,32) == $1) {
+      .remove $qt($gettok(%row,3-,32))
+      var %freed = $calc(%freed + $gettok(%row,2,32))
+      hdel dccore.chathist f $+ %i
+    }
+    inc %i
+  }
+  return %freed
+}
+
+alias dccore.chat.hist.toggle {
+  dccore.set chat.history $iif($dccore.opt(chat.history),0,1)
+  dccore.chat.sys $iif($dccore.opt(chat.history),Keeping a history file in $dccore.chat.hist.dir $+ .,No longer keeping a history file: nothing more is written to it and nothing is replayed. The files already written stay, until the history's limits remove them.)
+}
+alias dccore.chat.flash.toggle {
+  dccore.set chat.flash $iif($dccore.opt(chat.flash),0,1)
+  dccore.chat.sys $iif($dccore.opt(chat.flash),mIRC flashes in the taskbar for a new line while it is in the background.,mIRC no longer flashes in the taskbar for a new line. The unread count in the title and the lit button stay.)
+}
+alias dccore.chat.hist.open {
+  if (!$dccore.chat.hist.mkdir) { dccore.chat.sys Could not make the history folder $dccore.chat.hist.dir $+ . | return }
+  run $qt($dccore.chat.hist.dir)
 }
 
 ; A PEERS line: the DCCore bots WHO found in one channel, right now - kept

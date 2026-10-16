@@ -52,7 +52,7 @@ GROUPS = (
             ("Connection", (
                 {"local": "auto", "label": "Reconnect and log in to the bot by itself when it comes back"},
             )),
-            ("Sharing & search", ("SEARCH_ENABLED", "ANNOUNCE_TRANSFERS", "RAR_ENABLED")),
+            ("Sharing & search", ("SEARCH_ENABLED", "ANNOUNCE_TRANSFERS")),
             ("Messaging & dashboard", ("PRIVATE_MESSAGES_ENABLED", "WEBUI_ENABLED", "CTCP_VERSION_REPLY")),
             ("Updates", ("CHECK_FOR_UPDATES",)),
         )),
@@ -64,8 +64,8 @@ GROUPS = (
             )),
             ("Serving channels", (
                 {"note": "Which channels the bot joins and sits in. What each one serves - which list, "
-                         "which folders, Normal, Silent or Request only - is set per list under "
-                         "Sharing > Lists & channels."},
+                         "which folders, Normal, Silent or Request only - is set under Sharing > Lists "
+                         "and Channel bindings."},
                 {"widget": "channels", "keys": ["CHANNEL"]},
             )),
         )),
@@ -97,39 +97,54 @@ GROUPS = (
         )),
     )),
     ("Sharing", (
+        ("Lists", (
+            ("", (
+                {"note": "What each list shares: a name, its folders, and whether it is primary (it "
+                         "answers a private message, and any channel bound to none). Add list and Edit "
+                         "open a window for one list; Apply sends the whole set to the bot."},
+            )),
+            ("Lists", ({"widget": "srvlists"},)),
+        )),
+        ("Channel bindings", (
+            ("", (
+                {"note": "Which list answers in each channel, and that channel's mode. A change in a "
+                         "menu is kept at once; Apply sends the set to the bot."},
+            )),
+            ("Channel bindings", ({"widget": "srvchans"},)),
+            ("", ({"widget": "srvsaveb"},)),
+        )),
+        ("List settings", (
+            ("Library", ("LIST_BASE_NAME", "LIST_FORMAT", "LIST_IGNORED_EXTENSIONS")),
+            ("Film & series", ({"key": "SEPARATE_VIDEO_LIST", "label": "Separate film and series list"},
+                               "LIST_VIDEO_EXTENSIONS", "LIST_VIDEO_COMPANION_EXTENSIONS")),
+            ("!rar packing", ("RAR_ENABLED", "RAR_EXTENSIONS", "RAR_BINARY", "MAX_RAR_FOLDER_SIZE", "RAR_TIMEOUT")),
+            ("List banner", ("LIST_HEADER_FILE", "LIST_HEADER_MAX_BYTES", "LIST_SHOW_AUDIO_INFO")),
+        )),
+        ("Rebuild", (
+            ("Automatic rebuild", ("LIST_REBUILD_SCHEDULE", "LIST_UPDATE_TIMEOUT",
+                                   "LIST_UPDATE_STALL_SECONDS")),
+            ("Performance", ("LIST_AUDIO_INFO_MINUTES", "LIST_AUDIO_INFO_THREADS", "LIST_SCAN_THREADS")),
+        )),
+        ("Transfers", (
+            ("Speed limits", (
+                {"note": "Upload is your sends to people; download is everything the bot fetches. "
+                         "Each is one limit shared by all transfers that way."},
+                "MAX_UPLOAD_KB", "MAX_DOWNLOAD_KB",
+            )),
+            ("Buffers & packet size", ("DCC_BLOCK_SIZE", "DCC_SEND_BUFFER")),
+            ("Ports & reliability", ("DCC_PORT_START", "DCC_PORT_END", "DCC_ACCEPT_TIMEOUT",
+                                     "MAX_SEND_FAILS", "DAILY_SEND_FAILS_LIMIT")),
+        )),
         ("Search", (
-            ("Sending", ("MAX_DCC_SLOTS", "MAX_USER_QUEUE", "MAX_GLOBAL_QUEUE")),
+            ("Sending", ("MAX_DCC_SLOTS",
+                         {"key": "LARGE_FILE_MB", "label": "One large file from (MB, 0 = off)"},
+                         "SLOW_SEND_MIN_KB", "MAX_USER_QUEUE", "MAX_GLOBAL_QUEUE")),
             ("Search (@find)", (
                 {"note": "How much the bot says back once it answers (the on/off switch is under "
                          "General > General Settings)."},
                 "MAX_SEARCH_RESULTS", "SEARCH_SHOW_FOLDER", "SEARCH_FOLDER_MAX_CHARS",
             )),
             ("During a rebuild", ("PAUSE_ON_UPDATE", "PAUSE_FOR_WHOLE_UPDATE", "REHASH_TRANSFER_WAIT")),
-        )),
-        ("Transfers", (
-            ("Buffers & packet size", ("DCC_BLOCK_SIZE", "DCC_SEND_BUFFER")),
-            ("Ports & reliability", ("DCC_PORT_START", "DCC_PORT_END", "DCC_ACCEPT_TIMEOUT",
-                                     "MAX_SEND_FAILS")),
-        )),
-        ("Your list", (
-            ("Library", ("FILE_DIRECTORY", "LIST_BASE_NAME", "LIST_FORMAT", "LIST_IGNORED_EXTENSIONS")),
-            ("Film & series", ("SEPARATE_VIDEO_LIST", "LIST_VIDEO_EXTENSIONS",
-                               "LIST_VIDEO_COMPANION_EXTENSIONS")),
-            ("!rar packing", ("RAR_EXTENSIONS", "RAR_BINARY", "MAX_RAR_FOLDER_SIZE", "RAR_TIMEOUT")),
-            ("List banner", ("LIST_HEADER_FILE", "LIST_HEADER_MAX_BYTES", "LIST_SHOW_AUDIO_INFO")),
-        )),
-        ("Lists & channels", (
-            ("", (
-                {"note": "What each list shares: a name, its folders, and whether it is primary (it "
-                         "answers a private message, and any channel bound to none). Then which list "
-                         "answers in each channel, and that channel's mode."},
-                {"widget": "served"},
-            )),
-        )),
-        ("Rebuild", (
-            ("Automatic rebuild", ("LIST_REBUILD_SCHEDULE", "LIST_UPDATE_TIMEOUT",
-                                   "LIST_UPDATE_STALL_SECONDS")),
-            ("Performance", ("LIST_AUDIO_INFO_MINUTES", "LIST_AUDIO_INFO_THREADS", "LIST_SCAN_THREADS")),
         )),
     )),
     ("Downloads", (
@@ -139,8 +154,9 @@ GROUPS = (
             ("Discover lists", ("AUTO_DISCOVER_CHANNEL_LISTS", "MULTI_CHANNEL_LIST_STABLE_SECONDS")),
         )),
         ("Fetch tuning", (
-            ("Slots & re-fetch", ("MAX_FETCH_SLOTS", "AUTO_REFETCH_LISTS", "AUTO_REFETCH_INTERVAL_HOURS",
-                                  "AUTO_REFETCH_MAX_PER_RUN")),
+            ("Slots & re-fetch", ("MAX_FETCH_SLOTS",
+                                  {"key": "AUTO_REFETCH_LISTS", "label": "Re-fetch when a bot has a new list"},
+                                  "AUTO_REFETCH_INTERVAL_HOURS", "AUTO_REFETCH_MAX_PER_RUN")),
             ("Timeouts", ("FETCH_OFFER_TIMEOUT", "FETCH_TRANSFER_TIMEOUT", "FETCH_FOLDER_OFFER_TIMEOUT",
                           "FETCH_FOLDER_OFFER_TIMEOUT_UNADVERTISED", "FETCH_FOLDER_TRANSFER_TIMEOUT")),
             ("Size limits", ("MAX_FETCH_FILE_SIZE", "MAX_FETCH_FOLDER_FILE_SIZE", "MAX_FETCH_LIST_FILE_SIZE",
@@ -150,6 +166,7 @@ GROUPS = (
         ("Queue", (
             ("Fetch queue", ("FETCH_MAX_PER_BOT", "FETCH_QUEUED_TIMEOUT", "FETCH_BOT_MAX_FAILS",
                              "FETCH_BOT_COOLDOWN_MINUTES")),
+            ("List requests", ("LIST_REQUEST_TAG",)),
         )),
     )),
     ("Security", (
@@ -189,9 +206,6 @@ GROUPS = (
                                        "CONSOLE_SHOW_FAILURES", "CONSOLE_SHOW_SEARCHES")),
             ("Debug channel", ("DEBUG_CHANNEL_FEED",)),
         )),
-        ("This mIRC window", (
-            ("", ({"widget": "mircwin"},)),
-        )),
     )),
     ("Advanced", (
         ("Debug & logging", (
@@ -212,6 +226,65 @@ GROUPS = (
                                      "PRIVATE_MESSAGES_FILE", "DCC_QUEUE_FILE")),
         )),
     )),
+    # This mIRC's own settings (dccore.ini), in the same window and form as
+    # the bot's: what was the Options dialog. The locals are saved by Apply
+    # like every other; the widgets by dccore.sw.opt.save. The last group:
+    # with DCX it is the window's mIRC side, entered from the start page,
+    # with no tab strip - its pages are the list.
+    ("mIRC", (
+        ("@DCCore window", (
+            ("Show in @DCCore", ({"widget": "showin"},)),
+            ("Colours", (
+                {"note": "Search text is the term searched for. Each of the three can be the same as "
+                         "its line; Search text can be the same as File names, and Nicks can be per "
+                         "nick, a colour of its own from the name."},
+                {"widget": "showcolours"},
+            )),
+        )),
+        ("Window", (
+            ("Window", (
+                {"local": "panel", "label": "Side panel: slots, queue and totals"},
+                {"local": "titlebar", "label": "Slots, queue and speed in the title bar"},
+                {"local": "separate", "label": "Console replies in a separate window"},
+                {"local": "beep", "label": "Beep on a failed transfer"},
+                {"widget": "winlook"},
+            )),
+            ("Theme", (
+                {"note": "Dark colours for the script's windows - the control panel, the list window, the "
+                         "download queues - and an icon beside each of the script's menu items and pages. "
+                         "Follow mIRC takes mIRC's own dark mode (7.79 and later). The control panel takes a "
+                         "change the next time it opens; /dccore theme says what applies and why."},
+                {"widget": "theme"},
+            )),
+            ("Settings window", (
+                {"note": "Drawn with DCX (scripts\\mirc\\dcx) when this mIRC can load it, with mIRC's own "
+                         "controls when not - /dccore dcx says which and why. Takes effect the next time "
+                         "the window opens."},
+                {"local": "nodcx", "label": "Use the built-in settings window, not DCX"},
+            )),
+        )),
+        ("Connection", (
+            ("Bot", (
+                {"note": "The bot this mIRC is paired with. Reconnecting and logging in by itself when it "
+                         "comes back is under General > General Settings."},
+                {"widget": "botlink"},
+            )),
+        )),
+        ("Chat", (
+            ("DCCore Chat (public)", (
+                {"local": "chat.all", "label": "Listen on every channel the bot is in, not only the ticked ones"},
+                {"local": "chat.popup", "label": "Open the chat window when a line arrives"},
+            )),
+            # The bot's settings (#1401), here because they limit files on this
+            # PC: the bot sends them to the script as DCCORE CHATHIST.
+            ("History", (
+                {"note": "Whole months of the history file are deleted: those that ended longer ago than "
+                         "the days, then the oldest while the folder is over the size. 0 is no limit."},
+                {"key": "CHAT_HISTORY_DAYS", "label": "Keep for (days)"},
+                {"key": "CHAT_HISTORY_MAX_MB", "label": "At most (MB)"},
+            )),
+        )),
+    )),
 )
 
 # Settings the window does not show, and why. Every other key of
@@ -225,7 +298,7 @@ EXCLUDED = {
 # The settings whose value is a path on the BOT's machine, and whether it is a
 # folder or a file: they get a "..." browse button, enabled only when the
 # console connection is local (the bot runs on this PC).
-FOLDER_KEYS = ("FILE_DIRECTORY", "TMP_ZIP_DIR", "LOCAL_LIST_DIR", "FETCHED_FILES_DIR")
+FOLDER_KEYS = ("TMP_ZIP_DIR", "LOCAL_LIST_DIR", "FETCHED_FILES_DIR")
 FILE_KEYS = ("RAR_BINARY", "LIST_HEADER_FILE", "CONSOLE_LOG_FILE", "LIBRARY_FOLDERS_FILE", "LISTS_FILE",
              "BANS_FILE", "HARD_BANS_FILE", "STATS_FILE", "KNOWN_BOTS_FILE", "FETCHED_BOT_LISTS_FILE",
              "LIST_INDEX_FILE", "LIST_AUDIO_INFO_CACHE", "FETCH_HISTORY_FILE", "DOWNLOAD_COUNTS_FILE",

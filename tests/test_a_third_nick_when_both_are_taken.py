@@ -24,7 +24,6 @@ scripted socket, no network, stopped on the reconnect path.
 import contextlib
 import io
 import os
-import re
 import socket
 import sys
 import threading
@@ -262,35 +261,65 @@ class RegistrationWalksTheLadder(DrivesOneRegistration):
         self.assertEqual(nicks, ["NICK SomeBot"])
 
 
-class OnceRegisteredTheOldRuleStands(unittest.TestCase):
+class _RecordingSocket:
+    def __init__(self):
+        self.sent = []
+
+    def sendall(self, payload):
+        self.sent.append(payload.decode("utf-8", "replace").strip())
+
+
+class OnceRegisteredTheOldRuleStands(DCCoreTestCase):
     """A registered bot that is refused a NICK keeps the name it has - the
     ladder is for registration only. (Until #635 the refused branch re-sent
     the alternate; it now sends nothing, since the server still calls the
-    bot by the name it had.) The branch lives in irc_loop(), so this reads
-    the text."""
+    bot by the name it had.) The branch used to live in irc_loop() and was
+    tested by reading its text; since #1287 it is answer_nick_refusal(),
+    called here for real."""
 
-    def handler(self):
-        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
-            code = handle.read()
-        return code.split("refused_nick = parse_nick_refusal(line)", 1)[1][:3000]
+    def setUp(self):
+        super().setUp()
+        self.set_config(NICKNAME="SomeBot", ALT_NICKNAME="SomeBot_")
+        config.ORIGINAL_NICK = "SomeBot"
+        self.addCleanup(setattr, config, "ORIGINAL_NICK", "DCCore")
+        self.sock = _RecordingSocket()
+
+    def answer(self, line, registered, refusals):
+        with contextlib.redirect_stdout(io.StringIO()) as said:
+            count = irc.answer_nick_refusal(line, self.sock, registered, refusals)
+        return count, said.getvalue()
 
     def test_the_ladder_is_taken_only_while_registering(self):
-        block = self.handler()
-        ladder = block.split("if not joined:", 1)[1].split("elif ", 1)[0]
+        count, _said = self.answer(server("433", "SomeBot"), False, 0)
+        self.assertEqual((count, self.sock.sent, config.NICKNAME), (1, ["NICK SomeBot_"], "SomeBot_"))
 
-        self.assertIn("fallback_nick(main_nick, nick_refusals)", ladder)
+        count, _said = self.answer(server("433", "SomeBot_"), False, count)
+        self.assertEqual((count, self.sock.sent[-1], config.NICKNAME), (2, "NICK SomeBot_1", "SomeBot_1"))
 
     def test_and_a_registered_bot_does_not_climb_it(self):
-        block = self.handler()
-        after_ladder = block.index("[NICK LADDER] The server refused")
-        start = block.index(" " * 24 + "else:", after_ladder)
-        # Up to the first line back at the handler's own indent (20 spaces).
-        dedent = re.search(r"\n {20}\S", block[start:])
-        registered = block[start:start + dedent.start()]
-        self.assertIn("keeps {config.NICKNAME}", registered, "not the branch this expects")
+        config.NICKNAME = "SomeBot_"
+        count, said = self.answer(server("433", "SomeBot", target="SomeBot_"), True, 3)
 
-        self.assertNotIn("fallback_nick(", registered)
-        self.assertNotIn("sendall(", registered, "a refused NICK must not be answered with another NICK")
+        self.assertEqual(count, 3, "a refusal once registered is not a rung")
+        self.assertEqual(self.sock.sent, [], "a refused NICK must not be answered with another NICK")
+        self.assertEqual(config.NICKNAME, "SomeBot_")
+        self.assertIn("the bot keeps SomeBot_", said)
+
+    def test_at_the_end_of_the_ladder_nothing_is_sent(self):
+        last = irc.NICK_FALLBACK_LIMIT
+        self.assertIsNone(irc.fallback_nick("SomeBot", last + 1), "not the end this expects")
+        count, said = self.answer(server("433", "SomeBot_9"), False, last)
+
+        self.assertEqual(count, last + 1)
+        self.assertEqual(self.sock.sent, [])
+        self.assertEqual(config.NICKNAME, "SomeBot")
+        self.assertIn("no more names to try", said)
+
+    def test_a_437_for_a_channel_is_not_a_refused_nick(self):
+        for registered in (False, True):
+            with self.subTest(registered=registered):
+                count, said = self.answer(server("437", "#somechannel", "SomeBot"), registered, 2)
+                self.assertEqual((count, self.sock.sent, said), (2, [], ""))
 
 
 if __name__ == "__main__":

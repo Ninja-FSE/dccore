@@ -28,11 +28,13 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+import announce  # noqa: E402
 import commands  # noqa: E402
 import defaults as config  # noqa: E402
 import irc  # noqa: E402
 
 from tests.support import DCCoreTestCase  # noqa: E402
+from tests.test_the_welcome_on_its_own import WelcomeHarness  # noqa: E402
 
 # One IRC line is 512 bytes including the trailing CRLF.
 IRC_LINE_BYTES = 512
@@ -228,39 +230,51 @@ class AChannelThatNeverLetUsIn(DCCoreTestCase):
         self.assertIn("#beta", irc.gave_up_on())
 
 
-class TheWatchdogSaysSoWhereItIsRead(unittest.TestCase):
+class TheWatchdogSaysSoWhereItIsRead(WelcomeHarness):
+    """activation_watchdog(), called (#1306) - it was read out of irc.py while
+    it was a closure over irc_loop()."""
 
-    def watchdog_body(self):
-        with io.open(os.path.join(REPO_ROOT, "src", "irc.py"), encoding="utf-8") as handle:
-            code = handle.read()
-        body = code.split("def activation_watchdog(", 1)[1].split("while True:", 1)[0]
-        return re.sub(chr(35) + "[^" + chr(10) + "]*", "", body)
+    def setUp(self):
+        super().setUp()
+        self.set_config(CHANNEL="#alpha,#beta", DEBUG_CHANNEL="#thedebug")
+        self.notices = []
+        self.patch(announce, "send_debug",
+                   lambda msg_text, category="INFO", notice=None: self.notices.append((notice, msg_text)))
+        self.conn.joined = True
+        self.conn.channels_confirmed.add("#alpha")
+
+    def watch(self):
+        return self.quietly(irc.activation_watchdog, self.conn)[1]
 
     def test_what_never_confirmed_is_retried_rather_than_only_printed(self):
         """The set was already exactly right and was only ever printed."""
-        self.assertIn("note_join_unconfirmed(", self.watchdog_body())
+        self.watch()
+
+        self.assertEqual(config.kicked_channels["#beta"]["reason"], "never confirmed")
+        self.assertIn("#beta", irc.channels_to_rejoin())
 
     def test_it_reaches_the_dashboard_and_not_only_the_debug_channel(self):
         """send_debug() writes to the debug channel, which when a truncated
         JOIN is the cause is routinely one of the channels that went missing.
         The message about losing channels cannot be delivered only to one of
         them."""
-        body = self.watchdog_body()
-        call = body.split("never confirmed via NAMES", 1)
+        self.watch()
 
-        self.assertEqual(len(call), 2, "the watchdog message has moved")
-        self.assertIn('notice="error"', call[1][:400],
-                      "the only operator-facing copy of this still goes to a "
-                      "channel the fault may have removed us from")
+        sent = [(notice, text) for notice, text in self.notices if "never confirmed via NAMES" in text]
+        self.assertEqual(len(sent), 1, self.notices)
+        self.assertEqual(sent[0][0], "error",
+                         "the only operator-facing copy of this still goes to a "
+                         "channel the fault may have removed us from")
 
     def test_the_missing_set_includes_the_debug_channel(self):
         """target_channels is CHANNEL only, and deliberately so - activation
         must not wait on the debug channel. But "what never confirmed" is a
         different question from "may we start advertising"."""
-        body = self.watchdog_body()
+        said = self.watch()
 
-        self.assertIn("missing = channels_we_should_be_in_set() - channels_confirmed",
-                      body)
+        self.assertIn("#thedebug", said)
+        self.assertIn("#thedebug", irc.channels_to_rejoin())
+        self.assertEqual(self.started(irc.delayed_activate), [(self.conn,)])
 
     def test_activation_still_does_not_wait_on_the_debug_channel(self):
         """The other half. One broken debug channel must not silence every

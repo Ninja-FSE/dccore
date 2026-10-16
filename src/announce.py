@@ -157,6 +157,8 @@ def _debug_drain_worker(my_id):
                 max(config.MSG_DELAY, getattr(config, 'DEBUG_MSG_DELAY', 0)))
             try:
                 irc_sock.sendall(msg.encode("utf-8", errors="ignore"))
+                # Its target and lane, for a refusal (#1386).
+                runtime.note_paced_line(msg, "debug")
             except Exception as send_err:
                 print(f"[DEBUG SEND ERROR] Could not write debug line: {send_err}")
         except Exception as drain_err:
@@ -993,6 +995,35 @@ def send_dcc_error(user, error_type, channel=None):
     if oserve:
         oserve.queue_message(user, msg)
 
+def send_fails_paused_text(fails, removed=0):
+    """What a nick paused by DAILY_SEND_FAILS_LIMIT (#1389) is told: when it
+    is paused (`removed` is how many queued files went with it) and when a
+    later request is refused."""
+    times = "once" if fails == 1 else f"{fails} times"
+    text = f"Your downloads failed {times} today, so requests from you are paused until midnight"
+    if removed:
+        text += (", and the 1 file left in your queue was removed" if removed == 1
+                 else f", and the {removed} files left in your queue were removed")
+    return text + ". Check that your client accepts DCC sends."
+
+
+def send_fails_paused_notice(user, fails, channel=None):
+    """Refuse a request from a nick paused by DAILY_SEND_FAILS_LIMIT (#1389).
+
+    The request gets this notice and nothing else. Said once per
+    QUEUE_FULL_REPEAT_SECONDS, like the full-queue refusals: an AutoQ paste
+    of thirty rows is thirty requests, and a notice for each would spend
+    the bot's paced line on telling one nick the same thing thirty times.
+    """
+    oserve = sys.modules.get('oserve')
+    if not notices_allowed(user, channel):
+        return
+    if _already_told_queue_full(user, "send_fails_paused"):
+        return
+    if oserve:
+        oserve.queue_message(user, f"NOTICE {user} :{config.C_BOLD}{send_fails_paused_text(fails)}{config.C_RESET}\r\n")
+
+
 def send_dcc_already_queued_notice(user, file_name, position, channel=None):
     """Tell a nick that what it asked for is already in its own queue (#1077),
     or, with no position, that it is already being sent to them (#1086).
@@ -1087,6 +1118,7 @@ NOTICE_EVENTS = (
     ("a list rebuild failed",           "commands.py", "External update_list.py failed",   "error"),
     ("a list rebuild stalled",          "commands.py", "The library it",                    "error"),
     ("a list rebuild timed out",        "commands.py", "Script execution timed out",       "error"),
+    ("a list rebuild could not start",  "commands.py", "List update FAILED to start",      "error"),
     ("the audio reading failed",        "commands.py", "The background audio reading failed or went silent", "error"),
     ("activated with channels missing", "irc.py",      "channel(s) never confirmed via NAMES", "error"),
     ("rejoined after a kick",           "irc.py",      "Rejoined {back.group(1)}",         "warning"),

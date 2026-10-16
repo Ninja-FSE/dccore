@@ -290,6 +290,14 @@ def startup(setup_page=None):
         _commands_orphan.stop_orphaned_reading()
     except Exception as orphan_err:
         print(f"[AUDIO-INFO] Could not look for a reading left running: {orphan_err}")
+    # And a rebuild it started (#1365), told apart from a terminal's by the
+    # token in the list lock: it would stop by itself once that bot's pid is
+    # gone, but a pid is soon reused.
+    try:
+        import commands as _commands_orphan
+        _commands_orphan.stop_orphaned_rebuild()
+    except Exception as orphan_err:
+        print(f"[LIST-GEN] Could not look for a rebuild left running: {orphan_err}")
 
     # The hard backstop for #170's RFC: scripts/setup_check.py's pre-flight
     # report is a friendlier, EARLIER warning an operator can choose to run
@@ -479,9 +487,12 @@ def startup(setup_page=None):
         # one start that pays in full is the first after an upgrade that
         # rebuilt the index for its prefix index and folder ids (#1130,
         # #1135): every held list is indexed again here, once.
+        #
+        # On a thread of its own since #1296: that one start kept the bot off
+        # IRC for about ten minutes. The dashboard's filter waits for it.
         try:
             import list_index
-            list_index.backfill_missing(config.fetched_bot_lists)
+            list_index.backfill_in_background(config.fetched_bot_lists)
         except Exception as err:
             print(f"[STARTUP] Could not check the search index ({err}); the "
                   f"dashboard's cross-list filter may be incomplete until the "
@@ -730,8 +741,16 @@ def _shut_down():
             _announce_flush.flush_private_messages()
         except Exception:
             pass
-        # A background audio reading (#1182) is the rebuild's own process
-        # and would outlive the bot: asked to stop, it saves what it read.
+        # A rebuild (#1356) and a background audio reading (#1182) run in
+        # update_list.py's own process and would outlive the bot. Asked to
+        # stop, a rebuild publishes nothing and a reading saves what it read.
+        # Each in its own try (#1365): a rebuild that could not be asked must
+        # not leave the reading running.
+        try:
+            import commands as _commands_stop
+            _commands_stop.stop_rebuild(wait=10.0)
+        except Exception:
+            pass
         try:
             import commands as _commands_stop
             _commands_stop.stop_audio_reading(wait=10.0)

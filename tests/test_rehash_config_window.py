@@ -332,7 +332,8 @@ class TheDashboardReadsUnderTheLock(unittest.TestCase):
     machine."""
 
     def test_build_settings_payload_takes_the_reload_lock(self):
-        with io.open(os.path.join(REPO_ROOT, "src", "webserver.py"),
+        # web_settings.py since #1320, step 5 of splitting webserver.py.
+        with io.open(os.path.join(REPO_ROOT, "src", "web_settings.py"),
                      encoding="utf-8") as handle:
             source = handle.read()
 
@@ -962,7 +963,8 @@ class TheSocketSendBuffer(DCCoreTestCase):
             code = handle.read()
 
         self.assertIn("block = dcc_block_size()", code)
-        self.assertIn("f.read(block)", code)
+        # Under a speed cap (#1352) a chunk is smaller, never larger than this.
+        self.assertIn("f.read(speed_cap.chunk_size(speed_cap.UPLOAD, block))", code)
         self.assertNotIn("f.read(65536)", code,
                          "the send loop still has the number hardcoded")
 

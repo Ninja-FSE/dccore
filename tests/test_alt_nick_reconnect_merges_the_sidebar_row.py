@@ -384,8 +384,8 @@ class TheHandlersActuallyCallTheseFunctions(unittest.TestCase):
             return f.read()
 
     def test_the_part_branch_calls_it_only_after_actually_removing_someone(self):
-        block = self.source().split('elif is_user_event(line, "PART"):', 1)[1]
-        block = block.split("# Anchored", 1)[0]
+        # The handlers' bodies are functions since #1330.
+        block = self.source().split("def answer_part(", 1)[1].split(chr(10) + "def ", 1)[0]
 
         self.assertIn("note_observed_departure(", block)
         # Inside the "actually found and removed them" branch, not merely
@@ -395,15 +395,13 @@ class TheHandlersActuallyCallTheseFunctions(unittest.TestCase):
         self.assertIn("note_observed_departure(", removal_and_after[:300])
 
     def test_the_quit_branch_calls_it_only_when_something_was_actually_removed(self):
-        block = self.source().split('elif is_user_event(line, "QUIT"):', 1)[1]
-        block = block.split("# Cross-bot search broadcast capture", 1)[0]
+        block = self.source().split("def answer_quit(", 1)[1].split(chr(10) + "def ", 1)[0]
 
         self.assertIn("note_observed_departure(", block)
         self.assertIn("if quit_chan is not None:", block)
 
     def test_the_join_branch_calls_the_reconnect_check(self):
-        block = self.source().split('elif is_user_event(line, "JOIN")', 1)[1]
-        block = block.split("# Anchored: as JOIN", 1)[0]
+        block = self.source().split("def answer_join(", 1)[1].split(chr(10) + "def ", 1)[0]
 
         self.assertIn("note_possible_reconnect(", block)
 

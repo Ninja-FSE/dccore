@@ -190,8 +190,9 @@ class ABackslashIsNotASeparator(unittest.TestCase):
         rows of one directory share one string object instead of holding a
         separate equal copy each, and the relpath/join calls go from one per
         file to one per directory. Asserted by INDENTATION, because that is
-        what "which loop is it in" means here - twelve spaces is the
-        per-directory body, twenty is the per-file one.
+        what "which loop is it in" means here - sixteen spaces is the
+        per-directory body, twenty-four is the per-file one (twelve and
+        twenty until #1365 put the walk inside a try, closed in its finally).
 
         relative_folder() since #1138: relpath()'s answer, sliced off the
         string where that cannot differ - see
@@ -199,7 +200,7 @@ class ABackslashIsNotASeparator(unittest.TestCase):
         code = code_only("update_list.py")
         statement = "rel_dir = relative_folder(root, scan_root)"
 
-        self.assertIn(chr(10) + " " * 12 + statement + chr(10), code,
+        self.assertIn(chr(10) + " " * 16 + statement + chr(10), code,
                       "the relative path is not computed in the per-directory "
                       "loop")
         self.assertEqual(code.count(statement), 1,

@@ -185,10 +185,15 @@ def library_report(config, ok, warn, fail, detail):
         # report a healthy library and then publish a list that does not
         # match it - which is the shape of the defect that made this a
         # setting at all.
+        #
+        # Resolved once (#1295): ignored_extensions() now reads the primary
+        # list's own exclusions from lists.json, and asking it per file would
+        # read that file once per file in the library.
         total = 0
+        ignored = update_list.ignored_extensions()
         for folder in folders:
             for _root, _dirs, files in os.walk(folder.path):
-                total += sum(1 for f in files if update_list.is_listed_file(f))
+                total += sum(1 for f in files if update_list.is_listed_file(f, ignored))
                 if total > 5000:
                     return total
         return total

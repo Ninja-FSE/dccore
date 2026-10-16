@@ -73,6 +73,10 @@ STRIPPED_AT_EXPORT_ONLY = {
                     "test_a_filename_your_code_page_cannot_spell.py names "
                     "it in a list shared with commands.py/dcc.py/"
                     "update_list.py, which do ship",
+    "function_coverage.py": "dev-only tooling, stripped at extraction "
+                            "(docs/PUBLIC-REPO-WORKFLOW.md, step 2); "
+                            "test_uncovered_daemon_functions.py loads it to test "
+                            "it, and skips that in an export (#1409)",
 }
 
 

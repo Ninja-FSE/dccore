@@ -2,7 +2,8 @@
 
 Once a day the bot asks the public repository's latest release -
 GET https://api.github.com/repos/<owner>/<name>/releases/latest, the repository
-taken from PROJECT_URL - and compares its tag with SCRIPT_VERSION. One
+taken from PROJECT_URL, the repository's own address or its project page
+(#1407) - and compares its tag with SCRIPT_VERSION. One
 unauthenticated request a day, far below GitHub's limit of 60 an hour. The
 request tells GitHub this machine's address and that it runs DCCore; nothing
 about the bot, its library or its channels is sent.
@@ -50,11 +51,27 @@ class CheckFailed(Exception):
     """Why a check could not be completed, worded for the operator."""
 
 
+# The two addresses a repository is known by: its own, and its project page
+# (#1407). PROJECT_URL names the page by default, so people who ask the bot
+# where it comes from land on it; the repository the update check asks is
+# read back out of the same address rather than kept in a second setting.
+_REPOSITORY_URL = re.compile(r"https?://github\.com/([^/\s]+)/([^/\s#?]+?)(?:\.git)?/?$")
+_PAGES_URL = re.compile(r"https?://([A-Za-z0-9-]+)\.github\.io/([^/\s#?]+)/?$")
+
+
 def repository(project_url=None):
-    """'owner/name' from a github.com URL (PROJECT_URL by default), or None."""
-    url = project_url if project_url is not None else getattr(config, "PROJECT_URL", "")
-    match = re.match(r"https?://github\.com/([^/\s]+)/([^/\s#?]+?)(?:\.git)?/?$", str(url or "").strip())
-    return f"{match.group(1)}/{match.group(2)}" if match else None
+    """'owner/name' from PROJECT_URL (by default), or None.
+
+    Either the repository's address, https://github.com/<owner>/<name>, or
+    its GitHub Pages project page, https://<owner>.github.io/<name>/. A user
+    or organisation site (https://<owner>.github.io/ alone) names no
+    repository, and neither does any other address."""
+    url = str((project_url if project_url is not None else getattr(config, "PROJECT_URL", "")) or "").strip()
+    for pattern in (_REPOSITORY_URL, _PAGES_URL):
+        match = pattern.match(url)
+        if match:
+            return f"{match.group(1)}/{match.group(2)}"
+    return None
 
 
 def running_version(text=None):

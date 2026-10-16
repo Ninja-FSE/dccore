@@ -370,6 +370,187 @@ def fallback_nick(main_nick, attempt):
     return None
 
 
+def answer_nick_refusal(line, sock, registered, refusals):
+    """The server refused a NICK (432, 433 or 437 - irc_loop() guards on
+    the numerics). Returns the count of refusals on this connection, which
+    the loop keeps: it starts at 0 for every connection on purpose, since a
+    reconnect starts again from the configured name and the ghosts may be
+    gone by then.
+
+    Was a block inside irc_loop() until #1287, the first step of splitting
+    that loop (docs/FUTURE.md). Moved unchanged: `registered` is the loop's
+    `joined`, `sock` its socket.
+
+    parse_nick_refusal() reads WHICH name was refused and steps aside for a
+    437 that names a channel.
+    """
+    refused_nick = parse_nick_refusal(line)
+    main_nick = getattr(config, 'ORIGINAL_NICK', 'DCCore')
+    if refused_nick is None:
+        return refusals
+    if not registered:
+        # STILL REGISTERING (#633): every refusal moves on to the next name,
+        # not just the first. With both configured names held by ghosts the
+        # bot used to go quiet here until the server closed the link, and do
+        # the same again ten seconds later. 437 lands here too - a nick delay
+        # is a ghost by another number.
+        refusals += 1
+        next_nick = fallback_nick(main_nick, refusals)
+        if next_nick is None:
+            print(f"[NICK LADDER] {refused_nick} was refused too, and there are no more names to try. Waiting for the server.")
+        else:
+            print(f"[NICK LADDER] The server refused {refused_nick}. Trying: {next_nick}")
+            sock.sendall(f"NICK {next_nick}\r\n".encode("utf-8", errors="ignore"))
+            config.NICKNAME = next_nick
+        return refusals
+    # Registered, and a NICK the bot sent - the reclaim of its main nick, a
+    # rehash rename - was refused: taken (433), too soon (438), held back
+    # after a split (437). The bot still has the name it had, and
+    # config.NICKNAME still says so because nothing assigned it at the send
+    # (#635). Nothing to resend: the old reply here re-sent NICK <alt> to a
+    # server that already called us that.
+    print(f"[LIVE NICK COLLISION] The server refused {refused_nick}; the bot keeps {config.NICKNAME}.")
+    return refusals
+
+
+# TARGET CHANGE TOO FAST (#1386). ircu's 439 says how long to wait ("Please
+# wait 8 seconds."); 707 (hybrid, ratbox, charybdis) and a 439 without a
+# number do not, and get the default - about what ircu asks for when it
+# names a time. The cap keeps a malformed or hostile number from silencing
+# the bot for long. Fixed numbers rather than settings: the server sets the
+# wait, and these only stand in for it.
+TARGET_CHANGE_HOLD_DEFAULT = 10.0
+TARGET_CHANGE_HOLD_MAX = 120.0
+
+_TARGET_CHANGE_LINE = re.compile(
+    r"^:\S+\s+(439|707)\s+(\S+)\s+([^:\s]\S*)(?:\s+(.*))?$")
+_TARGET_CHANGE_WAIT = re.compile(r"\bwait\s+(\d+)\s+sec", re.IGNORECASE)
+
+
+def _parse_target_change(line):
+    """(target, seconds to hold) from a 439 or 707 addressed to the bot, or
+    None for any other line. The target is the parameter after our nick."""
+    match = _TARGET_CHANGE_LINE.match(line.rstrip("\r\n"))
+    if match is None:
+        return None
+    code, to_nick, target, text = match.groups()
+    if irc_lower(to_nick) != irc_lower(getattr(config, "NICKNAME", "")):
+        return None
+    seconds = TARGET_CHANGE_HOLD_DEFAULT
+    if code == "439":
+        wait = _TARGET_CHANGE_WAIT.search(text or "")
+        if wait:
+            seconds = float(wait.group(1))
+    return target, min(seconds, TARGET_CHANGE_HOLD_MAX)
+
+
+def _owner_is_silenced(owner):
+    """Whether `owner` (a send_queue key) is banned or muted right now. A
+    mute or ban drops the user's pending replies (security.is_flooding()),
+    so a refused one must not come back through the put-back (#1386)."""
+    key = str(owner or "").strip().lower()
+    if security.ban_seconds_left(key) > 0:
+        return True
+    return config.muted_until.get(key, 0) > time.time()
+
+
+def _put_back_refused_line(entry):
+    """Put a refused line back at the front of the lane it was sent from,
+    marked as sent again (#1386). Returns whether it was.
+
+    The VIP and standard lanes are changed under send_queue_lock, which
+    queue_mgr._resent_line_first() takes to send a put-back line first."""
+    lane = entry.get("lane")
+    line = runtime.ResentLine(entry["line"])
+    if lane == "standard" and entry.get("owner"):
+        with runtime.send_queue_lock:
+            config.send_queue.setdefault(entry["owner"], []).insert(0, line)
+        return True
+    if lane == "vip":
+        with runtime.send_queue_lock:
+            config.vip_queue.insert(0, line)
+        return True
+    if lane == "fetch":
+        import dcc_fetch
+        return dcc_fetch._put_back_refused_request(line)
+    if lane == "debug":
+        import announce
+        announce._debug_queue.appendleft(line)
+        return True
+    return False
+
+
+def _answer_target_change(line):
+    """The server dropped a message: target change too fast (439 or 707 -
+    irc_loop() guards on the numerics). Hold every paced lane for the time
+    the server asked for, and put the dropped line back at the front of its
+    lane, once. Returns the seconds held, or None if the line was not one."""
+    parsed = _parse_target_change(line)
+    if parsed is None:
+        return None
+    target, seconds = parsed
+    runtime.outbound_pacer.hold_for(seconds)
+    entry = runtime.take_paced_line(target, fold=irc_lower)
+    if entry is None:
+        outcome = "nothing to resend."
+    elif entry["resent"]:
+        outcome = "it was already sent again once, so it is dropped."
+    elif entry.get("lane") == "standard" and _owner_is_silenced(entry.get("owner")):
+        outcome = "nothing to resend: its user is muted or banned now."
+    elif _put_back_refused_line(entry):
+        outcome = "then sending it again."
+    else:
+        outcome = "nothing to resend."
+    print(f"[QUEUE] The server refused a message to {target}: target changes "
+          f"too fast. Holding paced output for {seconds:g} s, {outcome}")
+    return seconds
+
+
+# The least time between two asks for the main nick, in seconds.
+NICK_RECLAIM_GAP_SECONDS = 30.0
+
+
+def reclaim_main_nick(line, sock, now=None):
+    """Somebody quit or changed nick (irc_loop() guards on the QUIT/NICK
+    event). If it was the client holding the bot's main nick, and the bot is
+    not on its main nick, ask for the main nick back. Returns True if it asked.
+
+    QUIT AND NICK, NOT PART, AND AT MOST ONCE PER NICK_RECLAIM_GAP_SECONDS.
+    A PART releases no nick, so the server refused every ask it caused - and
+    each was a NICK written straight to the socket, outside the outbound
+    pacer. Whoever held the bot's main nick could PART and JOIN all the
+    channels it shares with the bot, one line each way, and draw one unpaced
+    NICK per channel per round, past the server's flood limit. The gap
+    bounds what is left: a holder that quits and comes straight back costs
+    one NICK per gap, however often it does it.
+
+    Was a block inside irc_loop() until #1291, step 2 of splitting that loop
+    (docs/FUTURE.md). Moved unchanged.
+
+    The quitter is read from the line's prefix, never from the text: a QUIT
+    reason is free text, and searching the whole line for ":<mainnick>!"
+    let anybody forge a reclaim.
+    """
+    main_nick = getattr(config, 'ORIGINAL_NICK', 'DCCore')
+    if str(config.NICKNAME).lower() == main_nick.lower():
+        return False
+    if event_source_nick(line) != main_nick.lower():
+        return False
+    now = time.time() if now is None else now
+    last = runtime.nick_reclaim_asked_at
+    if last is not None and 0 <= now - last < NICK_RECLAIM_GAP_SECONDS:
+        return False
+    runtime.nick_reclaim_asked_at = now
+    print(f"[NICK RECOVERY] The main nick {main_nick} is free. Reclaiming it now...")
+    try:
+        # Asked for, not yet held: config.NICKNAME follows the server's NICK
+        # event (#635).
+        sock.sendall(f"NICK {main_nick}\r\n".encode("utf-8", errors="ignore"))
+    except Exception as recovery_err:
+        print(f"[NICK RECOVERY ERROR] Could not reclaim the nick: {recovery_err}")
+    return True
+
+
 def numeric_target(line):
     """The nick a server numeric is addressed to, or None.
 
@@ -3211,6 +3392,1092 @@ def ctcp_version_reply(user):
     return f"NOTICE {user} :\x01VERSION {detail}\x01\r\n"
 
 
+# Seconds after the JOIN before activation_watchdog() gives up on the
+# channels that have not confirmed (issue #9). Was a local of irc_loop().
+ACTIVATION_TIMEOUT = 20.0
+
+
+class Connection:
+    """One connection's state, shared with the threads it starts (#1306).
+
+    delayed_join(), activation_watchdog() and delayed_activate() were
+    closures over irc_loop()'s frame, which every reconnect rebinds: a
+    watchdog from a dead connection, waking 20 s later, read the NEXT
+    connection's `joined`, which is why the connect-failure paths had to
+    reset it. Each connection now has its own object and each thread reads
+    the one it was started for. The epoch check stays the staleness guard.
+    """
+
+    def __init__(self, sock, epoch):
+        self.sock = sock
+        self.epoch = epoch
+        self.joined = False             # 001 (or 376) seen
+        self.channels_confirmed = set()  # 366 seen for these
+        self.target_channels = set()     # CHANNEL's, which activation waits on
+
+
+def answer_welcome(line, conn):
+    """The server's 001 (or a 376 with no 001 before it): `conn` is
+    registered. Adopt the name the 001 gives, look at the DCC address again,
+    and start delayed_join(). irc_loop() guards on `not conn.joined` and the
+    numerics.
+
+    The body of that branch in irc_loop() until #1306, step 3 of splitting
+    the loop (docs/FUTURE.md).
+    """
+    if is_server_numeric(line, "001"):
+        adopt_registered_nick(line)
+    conn.joined = True
+    print(f"[INFO] Connected to the server. Waiting 5 seconds to settle before JOIN...")
+    # The DCC address, looked at again for this
+    # connection (#1271): the network is plainly up now,
+    # and the drop that preceded it may have been the
+    # ISP handing out a new address. Off the read thread
+    # - the lookup can take five seconds.
+    if not str(getattr(config, "MY_IP_OR_DOCK", "") or "").strip():
+        threading.Thread(target=refresh_dcc_address,
+                         daemon=True).start()
+
+
+    # Normalised, not raw: a space after a comma turns the
+    # rest of the list into a channel key and joins only the
+    # first - see join_batches(), which inherits that from
+    # configured_channels() stripping every entry.
+    #
+    # The DEBUG CHANNEL is in here too (#510). It used to be
+    # a second JOIN command sent after this one with no gap,
+    # which made it the most exposed line in the burst.
+    threading.Thread(target=delayed_join,
+                     args=(conn, channels_we_should_be_in()),
+                     daemon=True).start()
+
+
+def delayed_join(conn, channels):
+    """Five seconds after the welcome: the on-connect commands, then JOIN for
+    `channels` in batches, then the activation watchdog and the on-connect
+    check. Started by answer_welcome(); `conn` is the connection it is for.
+
+    A closure inside irc_loop() until #1306, which took the socket and bound
+    the epoch as a default argument (#1066 - read later, the epoch would be
+    the next connection's). Both are read off `conn` now.
+    """
+    socket_conn, epoch = conn.sock, conn.epoch
+    time.sleep(5)
+    # ON-CONNECT COMMANDS, BEFORE THE JOIN. The order is
+    # the point, not a preference: on Undernet, logging
+    # in to X takes +x, and +x replaces the host every
+    # person in the channel sees. Joining first puts the
+    # real host in front of everybody already sitting
+    # there, and no later mode change takes it back.
+    #
+    # So: auth, mode, THEN join. Anything that fails
+    # here is logged and the join happens anyway - a bot
+    # that will not join because one optional line was
+    # refused is worse off than one that joined without
+    # its usermode.
+    try:
+        import on_connect
+
+        commands, gap = on_connect.load()
+        if commands:
+            # COMMAND WORDS ONLY, never the arguments.
+            # These lines hold an X password, and
+            # send_debug() writes to a CHANNEL -
+            # printing one there hands it to everybody
+            # watching.
+            shown = ", ".join(on_connect.redacted(commands))
+            print(f"[CONNECT] Sending {len(commands)} "
+                  f"on-connect command(s): {shown}")
+        for index, command in enumerate(commands):
+            if index:
+                time.sleep(gap)
+            # normalize() first: translates the one
+            # client shorthand (msg -> PRIVMSG) that
+            # does not match its own wire form, so
+            # the dashboard's "exactly as you would
+            # type it into a client" is actually
+            # true for the X-login/NickServ line
+            # nearly every operator pastes in here.
+            line = on_connect.expand(
+                on_connect.normalize(command),
+                config.NICKNAME)
+            socket_conn.sendall(
+                (line + "\r\n").encode(
+                    "utf-8", errors="ignore"))
+        if commands:
+            # One more gap before the JOIN, so the last
+            # command gets the same chance to be acted
+            # on as the ones before it. A login sent
+            # immediately before a JOIN can still be in
+            # flight when the channel sees us.
+            time.sleep(gap)
+    except Exception as on_connect_err:
+        print(f"[CONNECT] On-connect commands failed "
+              f"({on_connect_err}); joining anyway.")
+    # Registered, and the commands are out: the
+    # dashboard's Resend may send them from here on,
+    # joined to the channel or not (#1085).
+    import on_connect
+    on_connect.mark_sent(epoch)
+    try:
+        # A FEW AT A TIME, NOT ALL AT ONCE (#510).
+        #
+        # This was one JOIN carrying every channel,
+        # followed by a second command for the debug
+        # channel with no gap at all. Reported live:
+        # fourteen configured channels, eleven joined,
+        # the missing ones being the tail of the line -
+        # and the debug channel, which was last of all.
+        # The server takes what it will and drops the
+        # rest, and nothing here noticed.
+        #
+        # The debug channel rides in the batching now
+        # rather than trailing it. It was the most
+        # exposed line in the burst and is the one
+        # whose loss costs the operator the message
+        # saying anything was lost.
+        wanted = channels
+        batches = join_batches(wanted)
+        for index, payload in enumerate(batches):
+            if index:
+                time.sleep(JOIN_BATCH_GAP)
+            socket_conn.sendall(
+                f"JOIN {payload}\r\n".encode(
+                    "utf-8", errors="ignore"))
+        debug_chan = str(getattr(config, 'DEBUG_CHANNEL', '') or '').strip()
+        if debug_chan:
+            print(f"[JOIN] Asked for {len(wanted)} channel(s) "
+                  f"in {len(batches)} batch(es), including the "
+                  f"debug channel {debug_chan}.")
+        else:
+            # The sentence is kept whole rather than
+            # wrapped mid-phrase: an operator greps
+            # their log for it, and so does
+            # tests/test_debug_channel_default.py.
+            print(f"[JOIN] Asked for {len(wanted)} channel(s) "
+                  f"in {len(batches)} batch(es). "
+                  f"No DEBUG_CHANNEL is set, so none was joined.")
+        # NEW (issue #9): start the watchdog HERE, right after the JOIN
+        # has actually been sent, so the timeout starts from the right moment.
+        threading.Thread(target=activation_watchdog, args=(conn,), daemon=True).start()
+        # And a look, now and then, that the on-connect
+        # commands took (#1066): in a net split the X
+        # login can go nowhere, and +x with it.
+        import on_connect
+        threading.Thread(target=on_connect.watch,
+                         args=(socket_conn, epoch),
+                         daemon=True).start()
+    except Exception as join_err:
+        print(f"[ERROR] Could not send JOIN: {join_err}")
+
+
+def activation_watchdog(conn):
+    """NEW (issue #9): forces activation after a reasonable wait, even if
+    some channels never answered the JOIN - banned, invite-only, misspelled.
+    Without this watchdog, two or more broken channels could silence ALL
+    advertising for the whole life of the connection, with no error at all."""
+    import announce
+    epoch = conn.epoch
+    time.sleep(ACTIVATION_TIMEOUT)
+    # Bail if this connection is gone. config.activation_triggered alone is not a
+    # staleness guard: the disconnect epilogue RESETS it, which re-armed exactly
+    # the threads it should have invalidated.
+    if config.connection_epoch != epoch:
+        print("[WATCHDOG] Connection changed before the timeout elapsed. Standing down.")
+        return
+    if conn.joined and not getattr(config, 'activation_triggered', False):
+        # THE WIDER SET (#510). target_channels is CHANNEL only, and
+        # deliberately so - activation must not wait on the debug
+        # channel, or one broken debug channel silences every advert.
+        # But "what never confirmed" is a different question from
+        # "may we start advertising", and answering it with the
+        # narrow set is why a debug channel lost to a truncated JOIN
+        # was not even in the list of things that went missing.
+        missing = channels_we_should_be_in_set() - conn.channels_confirmed
+        config.activation_triggered = True
+        if missing:
+            print(f"[WARNING] Activating the advert despite {len(missing)} unconfirmed channel(s): {', '.join(sorted(missing))}")
+            # TRIED AGAIN, not just reported (#510). This set is
+            # already exactly the right answer and was only ever
+            # printed; feeding it to the retry machinery gives a
+            # channel that never let us in the same bounded second
+            # chance a channel that threw us out has had since #191.
+            for unconfirmed in sorted(missing):
+                note_join_unconfirmed(unconfirmed)
+            try:
+                # notice="error", which send_debug() turns into a
+                # dashboard notice (#510). Without it the ONLY
+                # operator-facing copy of this went to the debug
+                # channel - which, when a truncated JOIN is the cause,
+                # is routinely one of the channels that went missing.
+                # The message about losing channels cannot be
+                # delivered only to one of them.
+                announce.send_debug(
+                    f"Activated after {int(ACTIVATION_TIMEOUT)}s with {config.C_BOLD}{len(missing)}{config.C_RESET} channel(s) never confirmed via NAMES: {', '.join(sorted(missing))}. Retrying them on the advert timer.",
+                    category="PART", notice="error")
+            except Exception as watchdog_debug_err:
+                print(f"[WARNING] Could not send the watchdog debug notice: {watchdog_debug_err}")
+        else:
+            print(f"[INFO] Watchdog: every channel confirmed just in time.")
+        threading.Thread(target=delayed_activate, args=(conn,), daemon=True).start()
+
+
+def delayed_activate(conn):
+    """Start advertising on `conn` once its channels are joined: five
+    seconds to settle, the channel-sync claim, the advert and the nick
+    monitor. Started by the 366 handler in irc_loop() or by
+    activation_watchdog(); does nothing for a connection that is gone.
+
+    A closure inside irc_loop() until #1306, with `sock` and `epoch` bound as
+    default arguments - the comment below gives the reason - and now read
+    off the connection it was started for.
+    """
+    sock, epoch = conn.sock, conn.epoch
+    # `sock` and `epoch` are bound as DEFAULT ARGUMENTS on purpose. Both were
+    # previously free variables resolved through irc_loop's frame, and that frame
+    # is rebound by every reconnect - so a thread from a dead connection read the
+    # CURRENT connection's values and published the wrong socket.
+    import sys
+    import time
+    import announce
+    import threading
+
+    if config.connection_epoch != epoch:
+        return
+
+    time.sleep(5)
+
+    # Re-check after sleeping: the connection can die inside this window.
+    if config.connection_epoch != epoch:
+        print("[ACTIVATE] Connection changed while settling. Abandoning stale activation.")
+        return
+
+    # Only claim channel sync if NAMES actually populated something -
+    # see claim_channel_sync(). When nothing has, the claim waits for
+    # the first NAMES of this connection instead of the next one.
+    if not claim_channel_sync(sock, epoch):
+        print("[ACTIVATE] No channel members known yet; advertising "
+              "without claiming channel sync until a channel's member "
+              "list arrives.")
+
+    oserve_mod = sys.modules.get('oserve')
+    if oserve_mod:
+        oserve_mod.bot_joined_channel = config.bot_joined_channel
+        oserve_mod.irc_connection = sock
+
+    announce.is_ready = True
+    if hasattr(announce, 'last_announce_time'):
+        announce.last_announce_time = time.time()
+
+    # Watches for the main nick to free up after a netsplit, and reclaims it
+    def background_nick_monitor(sock_inst):
+        main_nick = getattr(config, 'ORIGINAL_NICK', 'DCCore')
+        # Check every 10 seconds, for up to 5 minutes after JOIN
+        for _ in range(30):
+            if str(config.NICKNAME).lower() == main_nick.lower():
+                break  # Already on the main nick; stop watching
+
+            main_nick_active = False
+            with runtime.channel_users_lock():
+                if hasattr(config, 'channel_users') and isinstance(config.channel_users, dict):
+                    for chan_name, users_set in config.channel_users.items():
+                        if main_nick.lower() in [u.lower() for u in users_set]:
+                            main_nick_active = True
+                            break
+
+            if not main_nick_active:
+                print(f"\n[NICK RECOVERY] The ghost nick {main_nick} timed out. Changing nick...")
+                try:
+                    # Asked for, not yet held: config.NICKNAME
+                    # follows the server's NICK event (#635).
+                    sock_inst.sendall(f"NICK {main_nick}\r\n".encode("utf-8", errors="ignore"))
+                    break
+                except:
+                    break
+            time.sleep(10)
+
+    # Start the persistent timer in the background - with THIS activation's
+    # socket (#1306). This was `s`, irc_loop's current socket read through its
+    # frame: the stale-socket shape the comment at the top warns about.
+    threading.Thread(target=background_nick_monitor, args=(sock,), daemon=True).start()
+
+    print("[CONNECT FIX] Restarting the channel advert automatically...")
+    threading.Thread(target=announce.announce_worker, daemon=True).start()
+    config.announce_thread_alive = True
+
+
+def answer_nick_change(line):
+    """Someone changed their nick: follow it in the bot's own name, the channel
+    lists, the queues and the bot registry.
+
+    The body of that branch in irc_loop() until #1330, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    nick_match = re.match(r"^:([^!\s]+)!\S*\s+NICK\s+:?(\S+)", line)
+    if nick_match:
+        # Ours? Then this is the moment the bot's name
+        # changes - not when the NICK was sent (#635).
+        note_own_nick_change(nick_match.group(1),
+                             nick_match.group(2).strip())
+        # Everything this user owns, not just their
+        # outbound messages - see note_nick_change().
+        note_nick_change(nick_match.group(1),
+                         nick_match.group(2).strip())
+        # A known bot changing nick: its List Browser
+        # rows merge, on proof (#376).
+        renamed_ident = re.match(r"^:[^!\s]+!([^@\s]+)@", line)
+        note_bot_renamed(nick_match.group(1),
+                         nick_match.group(2).strip(),
+                         renamed_ident.group(1) if renamed_ident else None)
+        # A DCCore Chat peer that changes nick is found again
+        # under the new name by the next WHO: drop the old.
+        _forget_chat_peer(nick_match.group(1).lower())
+
+
+def answer_who_reply(line):
+    """A WHO reply (352): what it says about a bot's ident and about DCCore peers.
+
+    The body of that branch in irc_loop() until #1330, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    _note_chat_peers(line)
+    parts = line.split()
+    if len(parts) > 7:
+        target_nick = parts[7].lower()
+        # Bounded (#958 follow-up): DCCore Chat asks WHO
+        # for every channel every few minutes, so this
+        # sees every nick in every channel, and nothing
+        # ever removed one. Moved to the end on each
+        # sighting, so the oldest sighting goes first.
+        config.whois_status.pop(target_nick, None)
+        config.whois_status[target_nick] = True
+        while len(config.whois_status) > WHOIS_STATUS_MAX:
+            config.whois_status.pop(next(iter(config.whois_status)))
+
+
+def answer_names(line, sock):
+    """A NAMES line (353): learn who is in the channel, and thaw the queue of
+    anyone frozen who is still there - after a reconnect, the people already in
+    a channel come back by NAMES, not by JOIN.
+
+    The body of that branch in irc_loop() until #1330, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    # The RFC form, rather than "skip to the first #".
+    # A 353 is ":<server> 353 <nick> <symbol> <channel>
+    # :<names>", where <symbol> is one of = * @. Matching
+    # the channel as [#\w\-]+ meant a name containing "&"
+    # or "^" never parsed, so config.channel_users never
+    # learned who was in it - and the presence check above
+    # then refused to dispatch to anyone there. The symbol
+    # is optional here only because not every server sends
+    # one; restricting it to those three keeps it from
+    # swallowing a real channel name.
+    name_match = re.search(
+        r"^:\S+\s+353\s+\S+\s+(?:[=*@]\s+)?(\S+)\s+:(.+)$",
+        line)
+    if name_match and is_valid_irc_target(name_match.group(1)):
+        chan = channel_key(name_match.group(1))
+        names = [n.strip("@+~&%").lower() for n in name_match.group(2).split()]
+        # A merge, except for the first line after a
+        # kick - see learn_channel_names().
+        learn_channel_names(chan, names)
+
+        # -------------------------------------------------
+        # RECONNECT THAW - this is what saves the queues:
+        # After a reconnect, everyone already in the channel comes back via
+        # NAMES (353) and NOT via JOIN. Without this, their queues stayed
+        # frozen and were deleted by the 5-minute timer despite never leaving.
+        # -------------------------------------------------
+        # pop(), not del, and the list is rebuilt from what
+        # was actually removed. The thread started for each
+        # thawed user runs check_queue_and_send(), whose own
+        # freeze sweep deletes EVERY user it finds present in
+        # channel_users - which the 353 handler above has just
+        # populated with all of these names. So the first
+        # iteration's thread routinely deletes the keys later
+        # iterations are about to delete, and `del` raised
+        # KeyError on the IRC READ THREAD. That is caught far
+        # below by the message loop's `except Exception`, which
+        # closes the socket - a NAMES sync after a reconnect,
+        # with two or more frozen users, dropping the link it
+        # was sent to recover.
+        thawed_users = thaw_frozen_users(names)
+        for frozen_user in thawed_users:
+            files_in_q = len(config.dcc_queue.get(frozen_user, []))
+            print(f"[DCC RECONNECT THAW] {frozen_user} was still in {chan} at the NAMES sync. Thawing {files_in_q} file(s).")
+            threading.Thread(target=dcc.check_queue_and_send, args=(sock, frozen_user), daemon=True).start()
+
+        if thawed_users:
+            _note_reconnect_thaw(chan, len(thawed_users))
+
+
+def answer_join(line, sock):
+    """Someone else joined a channel the bot is in.
+
+    The body of that branch in irc_loop() until #1330, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    import announce
+    join_match = parse_join(line)
+    if join_match and is_valid_irc_target(join_match[1]):
+        joined_user = join_match[0]
+        joined_chan = join_match[1]
+        j_key = joined_user.lower()
+        j_chan = channel_key(joined_chan)
+
+        with runtime.channel_users_lock():
+            if j_chan not in config.channel_users:
+                config.channel_users[j_chan] = set()
+            config.channel_users[j_chan].add(j_key)
+
+        # #376: does this look like a nick we just saw leave,
+        # reconnecting under the ordinary collision suffix?
+        # Display only - see note_possible_reconnect()'s own
+        # docstring for the three things this checks.
+        note_possible_reconnect(joined_user)
+        # #376 option B: when this nick appeared.
+        note_join_seen(joined_user)
+        # DCCore Chat: a stranger joining might be a
+        # DCCore bot reconnecting - ask WHO for just this
+        # one nick rather than wait up to WHO_EVERY.
+        # Already-known peers are skipped inside
+        # note_join() itself.
+        _note_chat_join(joined_user, joined_chan)
+
+        # One pop, not `in` then `del`. Between the two, the
+        # freeze sweep in check_queue_and_send() - which runs
+        # on every dispatch thread and deletes every user it
+        # finds present in channel_users, set three lines
+        # above - can remove this key, and the `del` then
+        # raised KeyError on the IRC READ THREAD. Same class
+        # as the 353 thaw above, same consequence: the message
+        # loop's `except Exception` closes the socket.
+        if thaw_one_user(j_key):
+            print(f"[DCC REALTIME THAW] {joined_user} rejoined {joined_chan}. Thawing their queue.")
+            files_in_q = len(config.dcc_queue.get(j_key, [])) if hasattr(config, 'dcc_queue') else 0
+            announce.send_debug(f"User {config.C_BOLD}{joined_user}{config.C_RESET} returned to {joined_chan}, continuing queue of {config.C_BOLD}{files_in_q}{config.C_RESET} file(s)", category="JOIN")
+            threading.Thread(target=dcc.check_queue_and_send, args=(sock, joined_user), daemon=True).start()
+
+
+def answer_part(line):
+    """Someone left a channel the bot is in.
+
+    The body of that branch in irc_loop() until #1330, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    part_match = parse_part(line)
+    if part_match and is_valid_irc_target(part_match[1]):
+        p_user = part_match[0].lower()
+        p_chan = channel_key(part_match[1])
+        _forget_chat_peer(p_user, p_chan)
+        with runtime.channel_users_lock():
+            if p_chan in config.channel_users and p_user in config.channel_users[p_chan]:
+                config.channel_users[p_chan].remove(p_user)
+                # #376: OBSERVED, not inferred - we just
+                # found and removed them ourselves.
+                note_observed_departure(p_user, p_chan)
+
+
+def answer_quit(line):
+    """Someone quit IRC.
+
+    The body of that branch in irc_loop() until #1330, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    quit_match = re.search(r"^:([^!]+)!", line)
+    if quit_match:
+        q_user = quit_match.group(1).lower()
+        _forget_chat_peer(q_user)
+        with runtime.channel_users_lock():
+            quit_chan = None
+            for chan in config.channel_users:
+                if q_user in config.channel_users[chan]:
+                    config.channel_users[chan].remove(q_user)
+                    quit_chan = chan
+        # #376: OBSERVED, not inferred - outside the lock
+        # above like note_nick_change()'s own pattern, and
+        # only when we actually found them somewhere.
+        if quit_chan is not None:
+            note_observed_departure(q_user, quit_chan)
+
+
+def answer_end_of_names(line, conn):
+    """The end of a channel's member list (366): mark the channel confirmed, and
+    activate once every target channel is.
+
+    The body of that branch in irc_loop() until #1332, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    target_channels, channels_confirmed = conn.target_channels, conn.channels_confirmed
+    # FIXED (issue #9): parses WHICH channel the 366 line refers to instead
+    # of just counting them. Activates only once every real target channel
+    # is confirmed - the debug channel's 366 can no longer mask a broken
+    # huvudkanal.
+    # Anchored to the server prefix: the old unanchored search matched
+    # anywhere in the line, so a user could PRIVMSG " 366 x #chan" and
+    # forge a channel confirmation, activating the bot early.
+    # \S+ for the channel, not [#\w\-]+ - see
+    # is_valid_irc_target(). A channel with an "&" or a
+    # "^" in its name never had its 366 recognised, so it
+    # never counted as confirmed at startup.
+    m366 = re.match(r"^:\S+ 366 \S+ (\S+)", line)
+    if m366 and is_valid_irc_target(m366.group(1)):
+        confirmed_chan = channel_key(m366.group(1))
+        channels_confirmed.add(confirmed_chan)
+        print(f"[INFO] Received End of NAMES for {confirmed_chan} ({len(channels_confirmed & target_channels)}/{len(target_channels)} target channels confirmed)")
+
+    if target_channels.issubset(channels_confirmed):
+        config.activation_triggered = True
+        print(f"[INFO] All channels joined successfully! Waiting 5 seconds for settle...")
+        threading.Thread(target=delayed_activate, args=(conn,), daemon=True).start()
+        # DCCore Chat (#371 follow-up): NAMES (353/366)
+        # gives nicknames only, never a realname - so
+        # this is the earliest point a WHO round can
+        # actually find a peer. Without this, the first
+        # one waited for the keepalive or the advert
+        # thread, both minutes away. Not forced: a
+        # rehash-triggered rejoin still respects
+        # WHO_EVERY, so it does not re-ask right after a
+        # round that already ran.
+        _refresh_chat_peers()
+
+
+def answer_kick(kick_parsed):
+    """A KICK, parsed: of the bot itself, or of someone else, which is a departure.
+
+    The body of that branch in irc_loop() until #1332, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    import announce
+    kicker, kicked_chan, victim = kick_parsed
+    if victim.lower() == str(getattr(config, "CURRENT_NICK",
+                                     config.NICKNAME)).lower():
+        if note_kicked_from(kicked_chan, kicker):
+            announce.send_debug(
+                kicked_notice(kicked_chan, kicker),
+                category="PART", notice="warning")
+        else:
+            # Not coming back, so nothing will ever
+            # correct the member list - drop it.
+            forget_channel_members(kicked_chan)
+            print(f"[KICK] Removed from {kicked_chan}, which is "
+                  f"not in CHANNEL - not rejoining.")
+    else:
+        # Somebody else: the same departure a PART is
+        # (#629). Left in channel_users, they stayed
+        # "present" to dcc.py for the whole connection.
+        note_user_kicked(victim, kicked_chan)
+
+
+def answer_join_refusal(refusal):
+    """A JOIN the server refused, parsed: count it against the channel's retries
+    and say why.
+
+    The body of that branch in irc_loop() until #1332, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    import announce
+    refused_chan, numeric = refusal
+    count = note_join_refused(refused_chan)
+    if count:
+        limit = int(getattr(config, "REJOIN_ATTEMPTS", 3))
+        if numeric == JOIN_REFUSED_AT_THE_LIMIT:
+            announce.send_debug(
+                f"{refused_chan}: this server will not put "
+                f"the bot in any more channels ({numeric}). "
+                f"It is configured for more than the server "
+                f"allows - remove some from CHANNEL rather "
+                f"than waiting for this to clear.",
+                category="PART", notice="error")
+        elif numeric == JOIN_REFUSED_NEEDS_A_LOGIN:
+            # #632: the fix is a services login sent
+            # before the JOIN, so say that - and keep
+            # counting, so a login that never comes
+            # ends in "gave up" like any other refusal.
+            announce.send_debug(
+                f"{refused_chan} needs a registered nick "
+                f"({numeric}, channel mode +r): the bot must "
+                f"log in to services first. Put the login "
+                f"in Settings > On connect, or check that "
+                f"it is sent before the JOIN. "
+                f"Attempt {count}/{limit}.",
+                category="PART", notice="error")
+        elif count >= limit:
+            announce.send_debug(
+                f"Cannot rejoin {refused_chan} ({numeric}) - "
+                f"gave up after {count} attempt(s). It will not "
+                f"be tried again until you rehash.",
+                category="PART", notice="error")
+        else:
+            print(f"[REJOIN] {refused_chan} refused us "
+                  f"({numeric}), attempt {count}/{limit}.")
+    else:
+        # Not counted - note_join_refused() only counts for
+        # a channel already being retried, deliberately.
+        # Said out loud anyway (#510): a refusal at CONNECT
+        # time was discarded in silence, which is most of
+        # why serving eleven of fourteen channels looked
+        # like nothing had happened.
+        print(f"[JOIN] {refused_chan} refused us ({numeric}).")
+
+
+def answer_notice(notice_parsed):
+    """A NOTICE, parsed: what other bots and services tell the bot.
+
+    The body of that branch in irc_loop() until #1332, a step of splitting
+    the loop (docs/FUTURE.md). Moved unchanged; the guard stays in the loop.
+    """
+    notice_user, notice_target, notice_text = notice_parsed
+    notice_text = notice_text.strip()
+    if notice_user.lower() != config.NICKNAME.lower():
+        _capture_broadcast_search_reply(
+            notice_user, notice_target, notice_text)
+        if notice_target.lower() == config.NICKNAME.lower():
+            # A private NOTICE addressed to us, from
+            # another bot - how file servers answer a
+            # request: "queued at position 12", "I don't
+            # have that", "queue full", "!rar is disabled
+            # here" (#926, dcc_fetch.handle_bot_reply()).
+            # It only ever moves a request we sent to
+            # THAT bot, and nothing else.
+            import dcc_fetch
+            dcc_fetch.handle_bot_reply(notice_user, notice_text)
+
+
+def answer_ctcp(line, msg, user, target_chan, sock, oserve):
+    """A CTCP request, parsed out of a PRIVMSG: DCC CHAT, SEND and RESUME offers,
+    VERSION, and the QUE and REMOVE queue commands.
+
+    The body of that branch in answer_privmsg() until #1338, step 7 of
+    splitting irc_loop() (docs/FUTURE.md). Moved unchanged; the guard stays
+    where it was, and each `return` still ends the line's handling: nothing
+    followed the branch.
+    """
+    import commands
+    ctcp_cmd = msg.strip("\x01").strip().upper()
+    # Admin console. Only ever from a private message -
+    # a DCC CHAT offer addressed to a channel is
+    # meaningless, and accepting one would mean acting
+    # on a line every user in that channel can send.
+    if (ctcp_cmd.startswith("DCC CHAT ")
+            and target_chan.lower() == config.NICKNAME.lower()):
+        import adminchat
+        adminchat.handle_dcc_chat(
+            sock, line, user, msg.strip("\x01").strip())
+        return
+    # Cross-bot file fetch: a DCC SEND offer answering
+    # a fetch WE requested (see dcc_fetch.py). Private
+    # only, same reasoning as DCC CHAT above - a DCC
+    # SEND offer addressed to a channel is meaningless
+    # and would mean acting on a line any channel
+    # member could send. Admission control lives
+    # entirely inside handle_incoming_offer(): it only
+    # proceeds if this matches a row we ourselves
+    # marked 'offered' a moment ago, so an unsolicited
+    # offer from anyone is dropped there, not here.
+    if (ctcp_cmd.startswith("DCC SEND ")
+            and target_chan.lower() == config.NICKNAME.lower()):
+        import dcc_fetch
+        threading.Thread(
+            target=dcc_fetch.handle_incoming_offer,
+            args=(sock, user, msg.strip("\x01").strip()),
+            daemon=True).start()
+        return
+    # A receiver telling us it already holds part
+    # of the file we just offered, and asking us
+    # to send from there. It will not connect
+    # until we answer with a DCC ACCEPT - which
+    # is what "Requesting resume" sitting still
+    # in mIRC forever meant: the client keeping
+    # its side of a bargain we had never been
+    # able to answer.
+    #
+    # Private only, like the two branches above.
+    # The lookup is answered INLINE - it is one dict
+    # read and it must settle the resume position
+    # before the receiver can connect - but the
+    # ACCEPT itself is paced and waits up to
+    # MSG_DELAY for a slot, which on this thread
+    # stalled every PING and every other line
+    # (#577, #602). handle_resume_request(
+    # background=True) sends it from a short
+    # thread. Admission control is entirely
+    # inside handle_resume_request() - it matches
+    # on a port WE are listening on for this exact
+    # nick, so a stray or forged line finds
+    # nothing and is dropped there.
+    if (ctcp_cmd.startswith("DCC RESUME ")
+            and target_chan.lower() == config.NICKNAME.lower()):
+        dcc.handle_resume_request(
+            sock, user, msg.strip("\x01").strip(),
+            background=True)
+        return
+    if ctcp_cmd == "VERSION":
+        # Answered inline rather than on a thread:
+        # one send, nothing read from disk. Not
+        # answered DIRECTLY to the socket any more
+        # though (see the RAM-CHECK reply below
+        # for why that changed) - queued VIP so it
+        # still jumps ahead of an ordinary
+        # per-user backlog, and paced through
+        # runtime.outbound_pacer like every other
+        # outbound line (#406).
+        #
+        # VERSION is in the is_bot_command list
+        # above, so a flooding user's own query is
+        # dropped before reaching here - but many
+        # ordinary clients send exactly one CTCP
+        # VERSION unasked, on sight, the moment
+        # they see a new nick. A bot that just
+        # joined 14 channels can collect a dozen
+        # of those within a second or two, and an
+        # unpaced responder answering each the
+        # instant it arrived was a second way to
+        # flood the bot off - ordinary politeness
+        # from a dozen strangers, nobody
+        # misbehaving, and no per-user gate to
+        # catch it because it is a dozen different
+        # users asking once each.
+        version_reply = ctcp_version_reply(user)
+        if version_reply and oserve:
+            oserve.queue_message(user, version_reply, is_vip=True)
+        return
+    if ctcp_cmd == "QUE":
+        threading.Thread(target=commands.handle_queue_check, args=(sock, user, target_chan), daemon=True).start()
+        return
+    elif ctcp_cmd == "REMOVE":
+        threading.Thread(target=commands.handle_queue_remove, args=(sock, user, target_chan), daemon=True).start()
+        return
+    elif ctcp_cmd.startswith("REMOVE "):
+        threading.Thread(target=commands.handle_queue_remove_file,
+                         args=(sock, user, target_chan, msg.strip("\x01").strip()[7:].strip()),
+                         daemon=True).start()
+        return
+
+
+def answer_command(msg, msg_lower, user, user_host, target_chan, bot_aliases, sock, oserve):
+    """A PRIVMSG that is not CTCP: the @nick- commands, @find and @locator,
+    the list triggers and !list, the admin's !debugnames, !ping and channel
+    commands, and file requests.
+
+    The elif chain behind answer_privmsg()'s CTCP arm until #1342, step 8 of
+    splitting irc_loop() (docs/FUTURE.md). Moved unchanged; nothing followed
+    the chain, so each `return` still ends the line's handling, and an
+    exception still reaches answer_privmsg()'s `except`.
+    """
+    import commands
+    if is_list_request(msg, msg_lower):
+        threading.Thread(target=list.send_file_list, args=(sock, user, target_chan),
+                         daemon=True).start()
+    elif msg_lower == f"@{config.NICKNAME.lower()}-help":
+        threading.Thread(target=commands.handle_help_request, args=(sock, user, target_chan), daemon=True).start()
+        return
+    elif msg_lower == f"@{config.NICKNAME.lower()}-stats":
+        threading.Thread(target=commands.handle_stats_request, args=(sock, user, target_chan), daemon=True).start()
+        return
+    elif msg_lower == f"@{config.NICKNAME.lower()}-top":
+        threading.Thread(target=commands.handle_top_request, args=(sock, user, target_chan), daemon=True).start()
+        return
+    elif msg_lower == f"@{config.NICKNAME.lower()}-que":
+        threading.Thread(target=commands.handle_queue_check, args=(sock, user, target_chan), daemon=True).start()
+        return
+    elif msg_lower == f"@{config.NICKNAME.lower()}-remove":
+        threading.Thread(target=commands.handle_queue_remove, args=(sock, user, target_chan), daemon=True).start()
+        return
+    elif msg_lower.startswith(f"@{config.NICKNAME.lower()}-remove ") and msg[len(config.NICKNAME) + 9:].strip():
+        threading.Thread(target=commands.handle_queue_remove_file,
+                         args=(sock, user, target_chan, msg[len(config.NICKNAME) + 9:].strip()),
+                         daemon=True).start()
+        return
+    elif msg.startswith("@find ") or msg.startswith("@locator "):
+        parts = msg.split(" ", 1)
+        if len(parts) > 1:
+            # Formatting and control characters come
+            # off here, before the text is printed,
+            # logged or fed to the console (#670).
+            search_term = list.printable_text(parts[1]).strip()
+            if search_term:
+                threading.Thread(target=list.execute_search, args=(sock, user, search_term, target_chan), daemon=True).start()
+    elif msg_lower == "!list":
+        list.send_list_trigger_info(sock, user)
+    elif msg.lower() == "!debugnames":
+        # The operator's diagnostic, not a public command
+        # - see commands.diagnostics_are_for_the_admin().
+        # Silently: an answer or a log line per stranger
+        # is the noise this removes.
+        if not commands.diagnostics_are_for_the_admin(user, user_host):
+            return
+        with runtime.channel_users_lock():
+            have_count = hasattr(config, 'channel_users') and channel_key(target_chan) in config.channel_users
+            if have_count:
+                current_qty = len(config.channel_users[channel_key(target_chan)])
+        # Queued VIP and paced, not sent straight to the
+        # socket - same reasoning as the CTCP VERSION
+        # reply above (#406): a direct send here shares
+        # nothing with queue_mgr.py's or announce.py's
+        # own pacing, so however unlikely a flood of
+        # !debugnames is, this is one more line that
+        # could add to one without the shared clock
+        # knowing it happened.
+        if have_count:
+            ram_check = f"NOTICE {user} :[RAM-CHECK] Currently tracking {current_qty} user(s) live via 353-numeric in {target_chan}.\r\n"
+        else:
+            ram_check = f"NOTICE {user} :[RAM-CHECK] Critical: No 353 names loaded yet for {target_chan} in config structure.\r\n"
+        if oserve:
+            oserve.queue_message(user, ram_check, is_vip=True)
+    elif msg.lower() == "!ping":
+        # Same rule as !debugnames above: a stranger's
+        # !ping used to make every DCCore in the channel
+        # spend a paced line and report to its own admin.
+        if not commands.diagnostics_are_for_the_admin(user, user_host):
+            return
+        threading.Thread(target=commands.handle_ping_request, args=(sock, user, target_chan), daemon=True).start()
+    # Admin commands in channel. ADMIN_CHANNEL_COMMANDS retires these
+    # once the DCC console is trusted; the console reaches the same
+    # handlers with authorised=True. User commands are unaffected.
+    #
+    # #437: !ban/!unban used to be matched on the raw, case-sensitive
+    # `msg` while !rehash/!update/!clearqueue beside them already used
+    # msg_lower - so "!Ban" or "!BAN" failed this gate entirely. Admin
+    # commands are deliberately excluded from is_bot_command's metering,
+    # so a mistyped ban was not just refused: nothing ran, nothing was
+    # written to hard_bans.txt, and nothing was logged either - in
+    # channel it looked identical to an applied ban.
+    elif (getattr(config, 'ADMIN_CHANNEL_COMMANDS', True)
+          and (msg.lower() in ('!rehash', '!update')
+               or msg_lower.startswith('!ban ') or msg_lower.startswith('!unban ')
+               or msg_lower == '!clearqueue'
+               or msg_lower.startswith('!clearqueue '))):
+        if msg.lower() == "!rehash":
+            threading.Thread(target=commands.handle_rehash_request, args=(user, target_chan), kwargs={"user_host": user_host}, daemon=True).start()
+        elif msg_lower.startswith("!ban "):
+            threading.Thread(target=commands.handle_hard_ban_request, args=(user, target_chan, msg), kwargs={"user_host": user_host}, daemon=True).start()
+        elif msg_lower.startswith("!unban "):
+            threading.Thread(target=commands.handle_hard_unban_request, args=(user, target_chan, msg), kwargs={"user_host": user_host}, daemon=True).start()
+        elif msg.lower() == "!update":
+            threading.Thread(target=commands.handle_list_update_request, args=(user, target_chan), kwargs={"user_host": user_host}, daemon=True).start()
+        elif msg_lower == "!clearqueue" or msg_lower.startswith("!clearqueue "):
+            # commands.handle_admin_clear_queue was added in #16 but never
+            # wired into this dispatch chain, so the command had no caller
+            # anywhere and typing it did nothing at all. The handler does
+            # its own admin check.
+            threading.Thread(target=commands.handle_admin_clear_queue, args=(user, target_chan, msg), kwargs={"user_host": user_host}, daemon=True).start()
+    elif any(msg_lower.startswith(f"!{alias} ") for alias in bot_aliases):
+        # Split on the first space only, so "!DCCore !rar Artist/Album"
+        # still hands "!rar Artist/Album" to the download handler.
+        parts = msg.split(" ", 1)
+        if len(parts) > 1:
+            # As for a search (#670): what reaches the
+            # handler is what the terminal, the debug
+            # channel and the admin chat will show.
+            requested_file = list.printable_text(parts[1]).strip()
+            threading.Thread(target=dcc.handle_download_request,
+                            args=(sock, user, requested_file, target_chan),
+                            daemon=True).start()
+
+
+def answer_privmsg(line, privmsg_parsed, sock, oserve):
+    """A PRIVMSG, parsed: the flood gate, the chat and advert captures, CTCP,
+    and every channel and private-message command - the whole dispatch.
+
+    The body of irc_loop()'s `if privmsg_parsed:` until #1334, step 6 of
+    splitting the loop (docs/FUTURE.md). It was the last statement of the
+    loop's per-line `for`, so each `continue` that ended the line's handling
+    is a `return` here; nothing else changed. `oserve` is irc_loop()'s own
+    look-up of the module, passed in.
+    """
+    import announce
+    user, user_host, target_chan, msg = privmsg_parsed
+    # One of our channels under the server's spelling
+    # ("#music{1}" for a configured "#music[1]") is
+    # carried on in the configured one (#1271): the
+    # queue rows, the per-channel lists and the replies
+    # all look the channel up by what CHANNEL says.
+    target_chan = configured_spelling(target_chan) or target_chan
+    msg = msg.strip()
+    if user.lower() == config.NICKNAME.lower():
+        return
+
+    # Cross-bot search broadcast capture, PRIVMSG half (see
+    # the NOTICE branch above and _capture_broadcast_search_reply()'s
+    # own docstring). Placed before the ban check on
+    # purpose: a foreign bot answering a broadcast we asked
+    # for is not subject to OUR channel's ban list, and
+    # this never dispatches anything of its own for a ban
+    # to meaningfully gate.
+    _capture_broadcast_search_reply(user, target_chan, msg)
+
+    # Bot registry, same placement and the same reasoning:
+    # observational, dispatches nothing, and a foreign bot
+    # advertising in a channel we sit in is not subject to
+    # our ban list.
+    _capture_channel_advert(user, target_chan, msg)
+    # #376: a known bot's ident, memory only.
+    _capture_bot_ident(user, user_host)
+
+    # Someone else asking a bot for its list (#926): the
+    # automatic grab leaves that bot alone for a while.
+    _capture_list_ask(user, msg)
+
+    # DCCore Chat (#371): a tagged message from another
+    # DCCore bot, relayed to the operator's console.
+    _capture_chat_message(user, target_chan, msg, user_host)
+
+    # A private message from a bot we asked for a file
+    # (#926): some servers answer a request that way
+    # rather than by NOTICE (SDFind's queue position,
+    # BWI's "not found"). Not a CTCP - DCC SEND is those,
+    # and has its own path. Same placement and reasoning
+    # as the two above: observational, and only ever
+    # moves a request we sent to this sender.
+    if (target_chan.lower() == config.NICKNAME.lower()
+            and not msg.startswith("\x01")):
+        try:
+            import dcc_fetch
+            dcc_fetch.handle_bot_reply(user, msg)
+        except Exception as reply_err:
+            print(f"[FETCH] Could not read {user}'s reply: {reply_err}")
+
+    if not security.check_user_status(user, hostmask=user_host):
+        return
+
+    msg_lower = msg.lower()
+    bot_aliases = get_bot_aliases()
+    # FIXED (issue #35): the gate previously covered only 4 of the ~11
+    # dispatch paths below, so -que, -remove, both CTCP variants, !list,
+    # !debugnames and !ping could each spawn a thread or send a NOTICE
+    # for ANY user with no rate limit at all. Admin commands (!ban,
+    # !unban, !rehash, !update, !clearqueue) are deliberately left out:
+    # each self-checks against ADMIN_NICK in its own handler already, so
+    # gating them here would only meter the operator against themselves.
+    #
+    # FIXED (#219): a private CTCP DCC SEND - the cross-bot fetch reply
+    # path below - was not in this set either. Its own admission control
+    # only decides whether an OFFER is one we solicited; deciding that
+    # costs a thread and a fetch-queue scan per message regardless, and
+    # nothing bounded how many any single, non-banned user could send.
+    # Self-contained, like the QUE/REMOVE clause above it: this whole
+    # expression is lifted out of this file's source text and evaluated
+    # by tests/test_irc_dispatch.py, so a local computed outside it (a
+    # `ctcp_upper = ...` line before this block, tried first) is invisible
+    # to that harness and breaks it with a NameError.
+    is_bot_command = (
+        is_list_request(msg, msg_lower)
+        or msg_lower == f"@{config.NICKNAME.lower()}-help"
+        or msg_lower == f"@{config.NICKNAME.lower()}-stats"
+        or msg_lower == f"@{config.NICKNAME.lower()}-top"
+        or msg_lower == f"@{config.NICKNAME.lower()}-que"
+        or msg_lower == f"@{config.NICKNAME.lower()}-remove"
+        or msg_lower.startswith(f"@{config.NICKNAME.lower()}-remove ")
+        or msg.startswith("@find ")
+        or msg.startswith("@locator ")
+        or any(msg_lower.startswith(f"!{alias} ") for alias in bot_aliases)
+        or msg_lower in ("!list", "!debugnames", "!ping")
+        or (msg.startswith("\x01") and (msg.strip("\x01").strip().upper() in ("QUE", "REMOVE", "VERSION")
+                                            or msg.strip("\x01").strip().upper().startswith("REMOVE ")))
+        or (msg.startswith("\x01")
+            and msg.strip("\x01").strip().upper().startswith("DCC SEND ")
+            and target_chan.lower() == config.NICKNAME.lower())
+        # DCC RESUME, for the same reason #219 gives just
+        # above. It is cheaper than an offer - a dict
+        # lookup, no thread, no disk - but it answers with
+        # an outbound PRIVMSG, and an unthrottled
+        # responder is a standard way to make a bot flood
+        # ITSELF off the network. Being unmatched costs
+        # nothing, so being unthrottled costs everything.
+        or (msg.startswith("\x01")
+            and msg.strip("\x01").strip().upper().startswith("DCC RESUME ")
+            and target_chan.lower() == config.NICKNAME.lower())
+    )
+    # ASKING FOR FILES IS NOT FLOODING (#888). Its own
+    # expression, self-contained for the same reason the
+    # one above is - tests/test_irc_dispatch.py lifts
+    # each of them out of this file's source text and
+    # evaluates it, so neither may lean on a local
+    # computed outside itself.
+    #
+    # A user pasting fifteen rows from the list - one
+    # album, the ordinary way these lists are used - sent
+    # ten requests, was muted on the eleventh and BANNED
+    # FOR AN HOUR on the twelfth. Undernet's own paste
+    # pacing is the only reason that was rare rather than
+    # routine; any client or bouncer that sends faster
+    # turned asking for an album into a ban.
+    #
+    # So a file request never meters, never mutes, never
+    # escalates a mute into a ban, and is served during a
+    # mute earned by other commands. The operator's
+    # decision (#888): "i dont care if they paste a lot
+    # of lines at channel at once as long as the channel
+    # accepts it. bot should just add them to queue one
+    # by one as he requests."
+    #
+    # WHAT STILL BOUNDS IT, none of it the flood gate:
+    # the queue caps (MAX_USER_QUEUE per person,
+    # MAX_GLOBAL_QUEUE overall) are the real limit and
+    # refuse past it; the library lookup each request
+    # costs is bounded by #580/#886 (a few scans at a
+    # time, and three memories so a pasted album is one
+    # scan); packing is one at a time by the packer's own
+    # interlock; and the server's own flood control
+    # decides how fast the lines may arrive in the first
+    # place, which is what the operator is relying on.
+    #
+    # Bans are untouched: check_user_status() runs above
+    # and still refuses a banned user's requests. Every
+    # other trigger in is_bot_command - searches, -que,
+    # -remove, list requests, the CTCPs - is metered
+    # exactly as before.
+    is_file_request = (
+        names_a_file_request(msg_lower, bot_aliases)
+    )
+    if is_bot_command and not is_file_request and security.is_flooding(user):
+        return
+
+    # SOMEBODY SPOKE TO THE BOT AND IT WILL SAY NOTHING
+    # BACK. Recorded here and nowhere else, because this
+    # is the one point where everything is known: the
+    # message is private (a channel line is one the
+    # operator can already see), it is not a command, it
+    # is not a CTCP - which is a client talking to a
+    # client, not a person typing - and the sender has
+    # already passed the ban check above.
+    #
+    # Deliberately AFTER is_flooding() so a flood cannot
+    # fill the panel, and it still does not answer: see
+    # announce.record_private_message() for why silence
+    # stays the behaviour and only the record changes.
+    if (not is_bot_command
+            and target_chan.lower() == config.NICKNAME.lower()
+            and not msg.startswith("\x01")):
+        # ONE OR THE OTHER, never both. Recording it and
+        # replying are two different contracts with the
+        # person who messaged: one keeps it for the
+        # operator and says nothing, the other keeps
+        # nothing and says where to go instead.
+        if getattr(config, "PRIVATE_MESSAGES_ENABLED", True):
+            announce.record_private_message(user, msg)
+        else:
+            announce.decline_private_message(user)
+        return 
+
+    try:
+        import commands
+        import db
+        rotate_the_day_without_stopping_the_bot()
+
+        if msg.startswith("\x01") and msg.endswith("\x01"):
+            # answer_ctcp() since #1338.
+            answer_ctcp(line, msg, user, target_chan, sock, oserve)
+        else:
+            # answer_command() since #1342.
+            answer_command(msg, msg_lower, user, user_host, target_chan, bot_aliases, sock, oserve)
+
+    except Exception as cmd_err:
+        print(f"[ERROR] Error handling a bot command from {user}: {cmd_err}")
+
+
 def irc_loop():
     """The connection, PING/PONG, and every incoming PRIVMSG from Undernet."""
     global bot_joined_channel
@@ -3260,10 +4527,6 @@ def irc_loop():
             registration_failures += 1
             delay = reconnect_delay(registration_failures)
             print(f"[ERROR] Connection failed: {e}. Reconnecting in {delay:.0f} seconds...")
-            # `joined` lives in the irc_loop frame and is only reset after a SUCCESSFUL
-            # handshake, so a failed attempt used to leave it latched True from the
-            # previous connection - which is what let a stale watchdog pass its guard.
-            joined = False
             time.sleep(delay)
             continue
             
@@ -3303,7 +4566,6 @@ def irc_loop():
             try: s.close()
             except: pass
             _release_socket()
-            joined = False
             # BACKOFF: without a pause here the loop spun as fast as TCP could connect.
             # Undernet's connection throttle closes the link immediately when you come
             # back too fast, which gave tens of attempts a second and guaranteed we
@@ -3317,11 +4579,14 @@ def irc_loop():
         # a previous connection holds an older token and will bail out on its next check.
         config.connection_epoch += 1
         my_epoch = config.connection_epoch
+        # This connection's state, which the threads it starts read (#1306):
+        # their own, not whatever irc_loop's variables hold by the time they
+        # look.
+        conn = Connection(s, my_epoch)
 
         # Bytes - see take_complete_lines() for why this must not be str.
         buffer = b""
-        joined = False
-        # Reset per connection, like `joined` above and for the same reason: a
+        # Reset per connection, like `conn` above and for the same reason: a
         # reconnect to a different server may well have a different NICKLEN,
         # and the operator should be told again if it matters there too.
         announced_nicklen = False
@@ -3344,8 +4609,9 @@ def irc_loop():
         # never answered - and if two or more failed the threshold was never reached,
         # which silenced ALL advertising permanently, with no error message.
         target_channels = set(c.strip().lower() for c in config.CHANNEL.split(",") if c.strip())
-        channels_confirmed = set()
-        ACTIVATION_TIMEOUT = 20.0  # seconds after JOIN before giving up on the rest
+        # On the connection too (#1332): answer_end_of_names() reads it there.
+        conn.target_channels = target_channels
+        channels_confirmed = conn.channels_confirmed
         last_recv_time = time.time()
 
         # ---------------------------------------------------------------------
@@ -3373,128 +4639,10 @@ def irc_loop():
         # connection on a bot that may never disconnect at all.
         recent_lines = collections.deque(maxlen=RECENT_LINE_MEMORY)
 
-        # HOISTED (issue #9): delayed_activate lives here now, once, instead of being
-        # nested inside the 366 handler - so both the ordinary NAMES path AND
-        # the timeout watchdog below can trigger the same activation logic.
-        def delayed_activate(sock=s, epoch=my_epoch):
-            # `sock` and `epoch` are bound as DEFAULT ARGUMENTS on purpose. Both were
-            # previously free variables resolved through irc_loop's frame, and that frame
-            # is rebound by every reconnect - so a thread from a dead connection read the
-            # CURRENT connection's values and published the wrong socket.
-            import sys
-            import time
-            import announce
-            import threading
-
-            if config.connection_epoch != epoch:
-                return
-
-            time.sleep(5)
-
-            # Re-check after sleeping: the connection can die inside this window.
-            if config.connection_epoch != epoch:
-                print("[ACTIVATE] Connection changed while settling. Abandoning stale activation.")
-                return
-
-            # Only claim channel sync if NAMES actually populated something -
-            # see claim_channel_sync(). When nothing has, the claim waits for
-            # the first NAMES of this connection instead of the next one.
-            if not claim_channel_sync(sock, epoch):
-                print("[ACTIVATE] No channel members known yet; advertising "
-                      "without claiming channel sync until a channel's member "
-                      "list arrives.")
-
-            oserve_mod = sys.modules.get('oserve')
-            if oserve_mod:
-                oserve_mod.bot_joined_channel = config.bot_joined_channel
-                oserve_mod.irc_connection = sock
-                
-            announce.is_ready = True
-            if hasattr(announce, 'last_announce_time'):
-                announce.last_announce_time = time.time()
-                
-            # Watches for the main nick to free up after a netsplit, and reclaims it
-            def background_nick_monitor(sock_inst):
-                main_nick = getattr(config, 'ORIGINAL_NICK', 'DCCore')
-                # Check every 10 seconds, for up to 5 minutes after JOIN
-                for _ in range(30):
-                    if str(config.NICKNAME).lower() == main_nick.lower():
-                        break  # Already on the main nick; stop watching
-                        
-                    main_nick_active = False
-                    with runtime.channel_users_lock():
-                        if hasattr(config, 'channel_users') and isinstance(config.channel_users, dict):
-                            for chan_name, users_set in config.channel_users.items():
-                                if main_nick.lower() in [u.lower() for u in users_set]:
-                                    main_nick_active = True
-                                    break
-                                
-                    if not main_nick_active:
-                        print(f"\n[NICK RECOVERY] The ghost nick {main_nick} timed out. Changing nick...")
-                        try:
-                            # Asked for, not yet held: config.NICKNAME
-                            # follows the server's NICK event (#635).
-                            sock_inst.sendall(f"NICK {main_nick}\r\n".encode("utf-8", errors="ignore"))
-                            break
-                        except:
-                            break
-                    time.sleep(10)
-            
-            # Start the persistent timer in the background
-            threading.Thread(target=background_nick_monitor, args=(s,), daemon=True).start()
-                
-            print("[CONNECT FIX] Restarting the channel advert automatically...")
-            threading.Thread(target=announce.announce_worker, daemon=True).start()
-            config.announce_thread_alive = True
-
-        def activation_watchdog(epoch=my_epoch):
-            """NEW (issue #9): forces activation after a reasonable wait, even if
-            some channels never answered the JOIN - banned, invite-only, misspelled.
-            Without this watchdog, two or more broken channels could silence ALL
-            advertising for the whole life of the connection, with no error at all."""
-            time.sleep(ACTIVATION_TIMEOUT)
-            # Bail if this connection is gone. config.activation_triggered alone is not a
-            # staleness guard: the disconnect epilogue RESETS it, which re-armed exactly
-            # the threads it should have invalidated.
-            if config.connection_epoch != epoch:
-                print("[WATCHDOG] Connection changed before the timeout elapsed. Standing down.")
-                return
-            if joined and not getattr(config, 'activation_triggered', False):
-                # THE WIDER SET (#510). target_channels is CHANNEL only, and
-                # deliberately so - activation must not wait on the debug
-                # channel, or one broken debug channel silences every advert.
-                # But "what never confirmed" is a different question from
-                # "may we start advertising", and answering it with the
-                # narrow set is why a debug channel lost to a truncated JOIN
-                # was not even in the list of things that went missing.
-                missing = channels_we_should_be_in_set() - channels_confirmed
-                config.activation_triggered = True
-                if missing:
-                    print(f"[WARNING] Activating the advert despite {len(missing)} unconfirmed channel(s): {', '.join(sorted(missing))}")
-                    # TRIED AGAIN, not just reported (#510). This set is
-                    # already exactly the right answer and was only ever
-                    # printed; feeding it to the retry machinery gives a
-                    # channel that never let us in the same bounded second
-                    # chance a channel that threw us out has had since #191.
-                    for unconfirmed in sorted(missing):
-                        note_join_unconfirmed(unconfirmed)
-                    try:
-                        # notice="error", which send_debug() turns into a
-                        # dashboard notice (#510). Without it the ONLY
-                        # operator-facing copy of this went to the debug
-                        # channel - which, when a truncated JOIN is the cause,
-                        # is routinely one of the channels that went missing.
-                        # The message about losing channels cannot be
-                        # delivered only to one of them.
-                        announce.send_debug(
-                            f"Activated after {int(ACTIVATION_TIMEOUT)}s with {config.C_BOLD}{len(missing)}{config.C_RESET} channel(s) never confirmed via NAMES: {', '.join(sorted(missing))}. Retrying them on the advert timer.",
-                            category="PART", notice="error")
-                    except Exception as watchdog_debug_err:
-                        print(f"[WARNING] Could not send the watchdog debug notice: {watchdog_debug_err}")
-                else:
-                    print(f"[INFO] Watchdog: every channel confirmed just in time.")
-                threading.Thread(target=delayed_activate, daemon=True).start()
-
+        # The welcome, the JOIN, the watchdog and the activation run as
+        # answer_welcome(), delayed_join(), activation_watchdog() and
+        # delayed_activate(), each with `conn` (#1306). delayed_activate() is
+        # one function so the 366 handler and the watchdog share it (issue #9).
         while True:
             try:
                 try:
@@ -3688,40 +4836,15 @@ def irc_loop():
                     # the word PRIVMSG would have been discarded.
                     # The guard names the numerics so a forged line can be
                     # tested against it (tests/test_membership_events.py);
-                    # parse_nick_refusal() then reads WHICH name was refused
-                    # and steps aside for a 437 that names a channel.
+                    # answer_nick_refusal() does the rest (#1287).
                     if is_server_numeric(line, "433") or is_server_numeric(line, "432") or is_server_numeric(line, "437"):
-                        refused_nick = parse_nick_refusal(line)
-                        main_nick = getattr(config, 'ORIGINAL_NICK', 'DCCore')
-                        if refused_nick is None:
-                            pass
-                        elif not joined:
-                            # STILL REGISTERING (#633): every refusal moves
-                            # on to the next name, not just the first. With
-                            # both configured names held by ghosts the bot
-                            # used to go quiet here until the server closed
-                            # the link, and do the same again ten seconds
-                            # later. 437 lands here too - a nick delay is a
-                            # ghost by another number.
-                            nick_refusals += 1
-                            next_nick = fallback_nick(main_nick, nick_refusals)
-                            if next_nick is None:
-                                print(f"[NICK LADDER] {refused_nick} was refused too, and there are no more names to try. Waiting for the server.")
-                            else:
-                                print(f"[NICK LADDER] The server refused {refused_nick}. Trying: {next_nick}")
-                                s.sendall(f"NICK {next_nick}\r\n".encode("utf-8", errors="ignore"))
-                                config.NICKNAME = next_nick
-                        else:
-                            # Registered, and a NICK the bot sent - the
-                            # reclaim of its main nick, a rehash rename - was
-                            # refused: taken (433), too soon (438), held
-                            # back after a split (437). The bot still has the
-                            # name it had, and config.NICKNAME still says so
-                            # because nothing assigned it at the send (#635).
-                            # Nothing to resend: the old reply here re-sent
-                            # NICK <alt> to a server that already called us
-                            # that.
-                            print(f"[LIVE NICK COLLISION] The server refused {refused_nick}; the bot keeps {config.NICKNAME}.")
+                        nick_refusals = answer_nick_refusal(line, s, conn.joined, nick_refusals)
+
+                    # A message the server dropped: target change too fast
+                    # (#1386). Anchored, so channel text quoting the numeric
+                    # cannot hold the bot's output.
+                    if is_server_numeric(line, "439") or is_server_numeric(line, "707"):
+                        _answer_target_change(line)
 
                     # Reclaim the main nick the moment the other client releases it
                     # Anchored twice over. The old test matched " QUIT "/" PART " anywhere,
@@ -3729,155 +4852,16 @@ def irc_loop():
                     # text. Together with the 433 handler above that was a two-line flood:
                     # forge a 433 to push the bot onto its alt nick, forge a QUIT to pull it
                     # back, repeat. Two unpaced NICK commands per round, from channel text.
-                    if is_user_event(line, "QUIT") or is_user_event(line, "PART"):
-                        main_nick = getattr(config, 'ORIGINAL_NICK', 'DCCore')
-                        if str(config.NICKNAME).lower() != main_nick.lower():
-                            if event_source_nick(line) == main_nick.lower():
-                                print(f"[NICK RECOVERY] The main nick {main_nick} logged out. Reclaiming it now...")
-                                try:
-                                    # Asked for, not yet held: config.NICKNAME
-                                    # follows the server's NICK event (#635).
-                                    s.sendall(f"NICK {main_nick}\r\n".encode("utf-8", errors="ignore"))
-                                except Exception as recovery_err:
-                                    print(f"[NICK RECOVERY ERROR] Could not reclaim the nick: {recovery_err}")
+                    # reclaim_main_nick() does the rest (#1291). A PART frees no
+                    # nick, so it is no reason to ask; a NICK away from it does.
+                    if is_user_event(line, "QUIT") or is_user_event(line, "NICK"):
+                        reclaim_main_nick(line, s)
 
 
                     # Anchored: "001" in line matched any message containing those three
                     # digits anywhere, including a perfectly ordinary track request.
-                    if not joined and (is_server_numeric(line, "001") or is_server_numeric(line, "376")):
-                        if is_server_numeric(line, "001"):
-                            adopt_registered_nick(line)
-                        joined = True
-                        print(f"[INFO] Connected to the server. Waiting 5 seconds to settle before JOIN...")
-                        # The DCC address, looked at again for this
-                        # connection (#1271): the network is plainly up now,
-                        # and the drop that preceded it may have been the
-                        # ISP handing out a new address. Off the read thread
-                        # - the lookup can take five seconds.
-                        if not str(getattr(config, "MY_IP_OR_DOCK", "") or "").strip():
-                            threading.Thread(target=refresh_dcc_address,
-                                             daemon=True).start()
-                        
-                        def delayed_join(socket_conn, channels, epoch=my_epoch):
-                            time.sleep(5)
-                            # ON-CONNECT COMMANDS, BEFORE THE JOIN. The order is
-                            # the point, not a preference: on Undernet, logging
-                            # in to X takes +x, and +x replaces the host every
-                            # person in the channel sees. Joining first puts the
-                            # real host in front of everybody already sitting
-                            # there, and no later mode change takes it back.
-                            #
-                            # So: auth, mode, THEN join. Anything that fails
-                            # here is logged and the join happens anyway - a bot
-                            # that will not join because one optional line was
-                            # refused is worse off than one that joined without
-                            # its usermode.
-                            try:
-                                import on_connect
-
-                                commands, gap = on_connect.load()
-                                if commands:
-                                    # COMMAND WORDS ONLY, never the arguments.
-                                    # These lines hold an X password, and
-                                    # send_debug() writes to a CHANNEL -
-                                    # printing one there hands it to everybody
-                                    # watching.
-                                    shown = ", ".join(on_connect.redacted(commands))
-                                    print(f"[CONNECT] Sending {len(commands)} "
-                                          f"on-connect command(s): {shown}")
-                                for index, command in enumerate(commands):
-                                    if index:
-                                        time.sleep(gap)
-                                    # normalize() first: translates the one
-                                    # client shorthand (msg -> PRIVMSG) that
-                                    # does not match its own wire form, so
-                                    # the dashboard's "exactly as you would
-                                    # type it into a client" is actually
-                                    # true for the X-login/NickServ line
-                                    # nearly every operator pastes in here.
-                                    line = on_connect.expand(
-                                        on_connect.normalize(command),
-                                        config.NICKNAME)
-                                    socket_conn.sendall(
-                                        (line + "\r\n").encode(
-                                            "utf-8", errors="ignore"))
-                                if commands:
-                                    # One more gap before the JOIN, so the last
-                                    # command gets the same chance to be acted
-                                    # on as the ones before it. A login sent
-                                    # immediately before a JOIN can still be in
-                                    # flight when the channel sees us.
-                                    time.sleep(gap)
-                            except Exception as on_connect_err:
-                                print(f"[CONNECT] On-connect commands failed "
-                                      f"({on_connect_err}); joining anyway.")
-                            # Registered, and the commands are out: the
-                            # dashboard's Resend may send them from here on,
-                            # joined to the channel or not (#1085).
-                            import on_connect
-                            on_connect.mark_sent(epoch)
-                            try:
-                                # A FEW AT A TIME, NOT ALL AT ONCE (#510).
-                                #
-                                # This was one JOIN carrying every channel,
-                                # followed by a second command for the debug
-                                # channel with no gap at all. Reported live:
-                                # fourteen configured channels, eleven joined,
-                                # the missing ones being the tail of the line -
-                                # and the debug channel, which was last of all.
-                                # The server takes what it will and drops the
-                                # rest, and nothing here noticed.
-                                #
-                                # The debug channel rides in the batching now
-                                # rather than trailing it. It was the most
-                                # exposed line in the burst and is the one
-                                # whose loss costs the operator the message
-                                # saying anything was lost.
-                                wanted = channels
-                                batches = join_batches(wanted)
-                                for index, payload in enumerate(batches):
-                                    if index:
-                                        time.sleep(JOIN_BATCH_GAP)
-                                    socket_conn.sendall(
-                                        f"JOIN {payload}\r\n".encode(
-                                            "utf-8", errors="ignore"))
-                                debug_chan = str(getattr(config, 'DEBUG_CHANNEL', '') or '').strip()
-                                if debug_chan:
-                                    print(f"[JOIN] Asked for {len(wanted)} channel(s) "
-                                          f"in {len(batches)} batch(es), including the "
-                                          f"debug channel {debug_chan}.")
-                                else:
-                                    # The sentence is kept whole rather than
-                                    # wrapped mid-phrase: an operator greps
-                                    # their log for it, and so does
-                                    # tests/test_debug_channel_default.py.
-                                    print(f"[JOIN] Asked for {len(wanted)} channel(s) "
-                                          f"in {len(batches)} batch(es). "
-                                          f"No DEBUG_CHANNEL is set, so none was joined.")
-                                # NEW (issue #9): start the watchdog HERE, right after the JOIN
-                                # has actually been sent, so the timeout starts from the right moment.
-                                threading.Thread(target=activation_watchdog, daemon=True).start()
-                                # And a look, now and then, that the on-connect
-                                # commands took (#1066): in a net split the X
-                                # login can go nowhere, and +x with it.
-                                import on_connect
-                                threading.Thread(target=on_connect.watch,
-                                                 args=(socket_conn, epoch),
-                                                 daemon=True).start()
-                            except Exception as join_err:
-                                print(f"[ERROR] Could not send JOIN: {join_err}")
-                                
-                        # Normalised, not raw: a space after a comma turns the
-                        # rest of the list into a channel key and joins only the
-                        # first - see join_batches(), which inherits that from
-                        # configured_channels() stripping every entry.
-                        #
-                        # The DEBUG CHANNEL is in here too (#510). It used to be
-                        # a second JOIN command sent after this one with no gap,
-                        # which made it the most exposed line in the burst.
-                        threading.Thread(target=delayed_join,
-                                         args=(s, channels_we_should_be_in()),
-                                         daemon=True).start()
+                    if not conn.joined and (is_server_numeric(line, "001") or is_server_numeric(line, "376")):
+                        answer_welcome(line, conn)
 
                     # A JOIN that worked, whether it was the first one or
                     # a rejoin. Clearing here rather than in the branch below
@@ -3896,38 +4880,9 @@ def irc_loop():
                         if back and runtime.channel_sync_waiting == my_epoch:
                             claim_channel_sync(s, my_epoch, late=True)
 
-                    if joined and not getattr(config, 'activation_triggered', False) and " 366 " in line:
-                        # FIXED (issue #9): parses WHICH channel the 366 line refers to instead
-                        # of just counting them. Activates only once every real target channel
-                        # is confirmed - the debug channel's 366 can no longer mask a broken
-                        # huvudkanal.
-                        # Anchored to the server prefix: the old unanchored search matched
-                        # anywhere in the line, so a user could PRIVMSG " 366 x #chan" and
-                        # forge a channel confirmation, activating the bot early.
-                        # \S+ for the channel, not [#\w\-]+ - see
-                        # is_valid_irc_target(). A channel with an "&" or a
-                        # "^" in its name never had its 366 recognised, so it
-                        # never counted as confirmed at startup.
-                        m366 = re.match(r"^:\S+ 366 \S+ (\S+)", line)
-                        if m366 and is_valid_irc_target(m366.group(1)):
-                            confirmed_chan = channel_key(m366.group(1))
-                            channels_confirmed.add(confirmed_chan)
-                            print(f"[INFO] Received End of NAMES for {confirmed_chan} ({len(channels_confirmed & target_channels)}/{len(target_channels)} target channels confirmed)")
-                        
-                        if target_channels.issubset(channels_confirmed):
-                            config.activation_triggered = True
-                            print(f"[INFO] All channels joined successfully! Waiting 5 seconds for settle...")
-                            threading.Thread(target=delayed_activate, daemon=True).start()
-                            # DCCore Chat (#371 follow-up): NAMES (353/366)
-                            # gives nicknames only, never a realname - so
-                            # this is the earliest point a WHO round can
-                            # actually find a peer. Without this, the first
-                            # one waited for the keepalive or the advert
-                            # thread, both minutes away. Not forced: a
-                            # rehash-triggered rejoin still respects
-                            # WHO_EVERY, so it does not re-ask right after a
-                            # round that already ran.
-                            _refresh_chat_peers()
+                    if conn.joined and not getattr(config, 'activation_triggered', False) and " 366 " in line:
+                        # answer_end_of_names() since #1332.
+                        answer_end_of_names(line, conn)
 
 
 
@@ -3936,41 +4891,13 @@ def irc_loop():
                     # the victim - and the assignment below overwrites, so it destroyed
                     # whatever that victim had pending.
                     if is_user_event(line, "NICK"):
-                        nick_match = re.match(r"^:([^!\s]+)!\S*\s+NICK\s+:?(\S+)", line)
-                        if nick_match:
-                            # Ours? Then this is the moment the bot's name
-                            # changes - not when the NICK was sent (#635).
-                            note_own_nick_change(nick_match.group(1),
-                                                 nick_match.group(2).strip())
-                            # Everything this user owns, not just their
-                            # outbound messages - see note_nick_change().
-                            note_nick_change(nick_match.group(1),
-                                             nick_match.group(2).strip())
-                            # A known bot changing nick: its List Browser
-                            # rows merge, on proof (#376).
-                            renamed_ident = re.match(r"^:[^!\s]+!([^@\s]+)@", line)
-                            note_bot_renamed(nick_match.group(1),
-                                             nick_match.group(2).strip(),
-                                             renamed_ident.group(1) if renamed_ident else None)
-                            # A DCCore Chat peer that changes nick is found again
-                            # under the new name by the next WHO: drop the old.
-                            _forget_chat_peer(nick_match.group(1).lower())
+                        # answer_nick_change() since #1330.
+                        answer_nick_change(line)
                             
                     # Anchored: this writes straight into config.whois_status.
                     if is_server_numeric(line, "352"):
-                        _note_chat_peers(line)
-                        parts = line.split()
-                        if len(parts) > 7:
-                            target_nick = parts[7].lower()
-                            # Bounded (#958 follow-up): DCCore Chat asks WHO
-                            # for every channel every few minutes, so this
-                            # sees every nick in every channel, and nothing
-                            # ever removed one. Moved to the end on each
-                            # sighting, so the oldest sighting goes first.
-                            config.whois_status.pop(target_nick, None)
-                            config.whois_status[target_nick] = True
-                            while len(config.whois_status) > WHOIS_STATUS_MAX:
-                                config.whois_status.pop(next(iter(config.whois_status)))
+                        # answer_who_reply() since #1330.
+                        answer_who_reply(line)
                     # DCCore Chat (#371 follow-up): the WHO round refresh_peers()
                     # opened for this channel is done - reconcile who it actually
                     # found against who we thought was still there.
@@ -3980,134 +4907,30 @@ def irc_loop():
                     # proof a user is present when deciding whether to thaw a frozen queue
                     # and dispatch to them. A forged line injected fake presence.
                     if is_server_numeric(line, "353"):
-                        # The RFC form, rather than "skip to the first #".
-                        # A 353 is ":<server> 353 <nick> <symbol> <channel>
-                        # :<names>", where <symbol> is one of = * @. Matching
-                        # the channel as [#\w\-]+ meant a name containing "&"
-                        # or "^" never parsed, so config.channel_users never
-                        # learned who was in it - and the presence check above
-                        # then refused to dispatch to anyone there. The symbol
-                        # is optional here only because not every server sends
-                        # one; restricting it to those three keeps it from
-                        # swallowing a real channel name.
-                        name_match = re.search(
-                            r"^:\S+\s+353\s+\S+\s+(?:[=*@]\s+)?(\S+)\s+:(.+)$",
-                            line)
-                        if name_match and is_valid_irc_target(name_match.group(1)):
-                            chan = channel_key(name_match.group(1))
-                            names = [n.strip("@+~&%").lower() for n in name_match.group(2).split()]
-                            # A merge, except for the first line after a
-                            # kick - see learn_channel_names().
-                            learn_channel_names(chan, names)
-
-                            # -------------------------------------------------
-                            # RECONNECT THAW - this is what saves the queues:
-                            # After a reconnect, everyone already in the channel comes back via
-                            # NAMES (353) and NOT via JOIN. Without this, their queues stayed
-                            # frozen and were deleted by the 5-minute timer despite never leaving.
-                            # -------------------------------------------------
-                            # pop(), not del, and the list is rebuilt from what
-                            # was actually removed. The thread started for each
-                            # thawed user runs check_queue_and_send(), whose own
-                            # freeze sweep deletes EVERY user it finds present in
-                            # channel_users - which the 353 handler above has just
-                            # populated with all of these names. So the first
-                            # iteration's thread routinely deletes the keys later
-                            # iterations are about to delete, and `del` raised
-                            # KeyError on the IRC READ THREAD. That is caught far
-                            # below by the message loop's `except Exception`, which
-                            # closes the socket - a NAMES sync after a reconnect,
-                            # with two or more frozen users, dropping the link it
-                            # was sent to recover.
-                            thawed_users = thaw_frozen_users(names)
-                            for frozen_user in thawed_users:
-                                files_in_q = len(config.dcc_queue.get(frozen_user, []))
-                                print(f"[DCC RECONNECT THAW] {frozen_user} was still in {chan} at the NAMES sync. Thawing {files_in_q} file(s).")
-                                threading.Thread(target=dcc.check_queue_and_send, args=(s, frozen_user), daemon=True).start()
-
-                            if thawed_users:
-                                _note_reconnect_thaw(chan, len(thawed_users))
+                        # answer_names() since #1330.
+                        answer_names(line, s)
 
                     # Anchored: " JOIN " matched the word anywhere, so a PRIVMSG containing
                     # it thawed the speaker's own frozen queue on demand, and let them insert
                     # themselves into config.channel_users for a channel they are not in -
                     # which dcc.py reads as proof of presence before it dispatches.
                     elif is_user_event(line, "JOIN") and event_source_nick(line) != config.NICKNAME.lower():
-                        join_match = parse_join(line)
-                        if join_match and is_valid_irc_target(join_match[1]):
-                            joined_user = join_match[0]
-                            joined_chan = join_match[1]
-                            j_key = joined_user.lower()
-                            j_chan = channel_key(joined_chan)
-                            
-                            with runtime.channel_users_lock():
-                                if j_chan not in config.channel_users:
-                                    config.channel_users[j_chan] = set()
-                                config.channel_users[j_chan].add(j_key)
-
-                            # #376: does this look like a nick we just saw leave,
-                            # reconnecting under the ordinary collision suffix?
-                            # Display only - see note_possible_reconnect()'s own
-                            # docstring for the three things this checks.
-                            note_possible_reconnect(joined_user)
-                            # #376 option B: when this nick appeared.
-                            note_join_seen(joined_user)
-                            # DCCore Chat: a stranger joining might be a
-                            # DCCore bot reconnecting - ask WHO for just this
-                            # one nick rather than wait up to WHO_EVERY.
-                            # Already-known peers are skipped inside
-                            # note_join() itself.
-                            _note_chat_join(joined_user, joined_chan)
-
-                            # One pop, not `in` then `del`. Between the two, the
-                            # freeze sweep in check_queue_and_send() - which runs
-                            # on every dispatch thread and deletes every user it
-                            # finds present in channel_users, set three lines
-                            # above - can remove this key, and the `del` then
-                            # raised KeyError on the IRC READ THREAD. Same class
-                            # as the 353 thaw above, same consequence: the message
-                            # loop's `except Exception` closes the socket.
-                            if thaw_one_user(j_key):
-                                print(f"[DCC REALTIME THAW] {joined_user} rejoined {joined_chan}. Thawing their queue.")
-                                files_in_q = len(config.dcc_queue.get(j_key, [])) if hasattr(config, 'dcc_queue') else 0
-                                announce.send_debug(f"User {config.C_BOLD}{joined_user}{config.C_RESET} returned to {joined_chan}, continuing queue of {config.C_BOLD}{files_in_q}{config.C_RESET} file(s)", category="JOIN")
-                                threading.Thread(target=dcc.check_queue_and_send, args=(s, joined_user), daemon=True).start()
+                        # answer_join() since #1330.
+                        answer_join(line, s)
                                 
                     # Anchored: as JOIN. This one removes people from channel_users, which
                     # freezes their queue and starts the five-minute delete timer.
                     elif is_user_event(line, "PART"):
-                        part_match = parse_part(line)
-                        if part_match and is_valid_irc_target(part_match[1]):
-                            p_user = part_match[0].lower()
-                            p_chan = channel_key(part_match[1])
-                            _forget_chat_peer(p_user, p_chan)
-                            with runtime.channel_users_lock():
-                                if p_chan in config.channel_users and p_user in config.channel_users[p_chan]:
-                                    config.channel_users[p_chan].remove(p_user)
-                                    # #376: OBSERVED, not inferred - we just
-                                    # found and removed them ourselves.
-                                    note_observed_departure(p_user, p_chan)
+                        # answer_part() since #1330.
+                        answer_part(line)
 
                     # Anchored: the worst of the three, because it removes the user from
                     # EVERY channel at once. "@find QUIT PLAYING GAMES" is an ordinary
                     # search that silently cost the searcher their whole queue five minutes
                     # later.
                     elif is_user_event(line, "QUIT"):
-                        quit_match = re.search(r"^:([^!]+)!", line)
-                        if quit_match:
-                            q_user = quit_match.group(1).lower()
-                            _forget_chat_peer(q_user)
-                            with runtime.channel_users_lock():
-                                quit_chan = None
-                                for chan in config.channel_users:
-                                    if q_user in config.channel_users[chan]:
-                                        config.channel_users[chan].remove(q_user)
-                                        quit_chan = chan
-                            # #376: OBSERVED, not inferred - outside the lock
-                            # above like note_nick_change()'s own pattern, and
-                            # only when we actually found them somewhere.
-                            if quit_chan is not None:
-                                note_observed_departure(q_user, quit_chan)
+                        # answer_quit() since #1330.
+                        answer_quit(line)
 
                     # Cross-bot search broadcast capture, NOTICE half. NOTICE
                     # lines are not parsed anywhere else in this loop - many
@@ -4137,90 +4960,21 @@ def irc_loop():
                     # on a socket write.
                     kick_parsed = parse_kick(line)
                     if kick_parsed:
-                        kicker, kicked_chan, victim = kick_parsed
-                        if victim.lower() == str(getattr(config, "CURRENT_NICK",
-                                                         config.NICKNAME)).lower():
-                            if note_kicked_from(kicked_chan, kicker):
-                                announce.send_debug(
-                                    kicked_notice(kicked_chan, kicker),
-                                    category="PART", notice="warning")
-                            else:
-                                # Not coming back, so nothing will ever
-                                # correct the member list - drop it.
-                                forget_channel_members(kicked_chan)
-                                print(f"[KICK] Removed from {kicked_chan}, which is "
-                                      f"not in CHANNEL - not rejoining.")
-                        else:
-                            # Somebody else: the same departure a PART is
-                            # (#629). Left in channel_users, they stayed
-                            # "present" to dcc.py for the whole connection.
-                            note_user_kicked(victim, kicked_chan)
+                        # answer_kick() since #1332.
+                        answer_kick(kick_parsed)
 
                     # And the answer when it will not have us back. Counted
                     # only for a channel we are already trying to return to -
                     # see note_join_refused().
                     refusal = parse_join_refusal(line)
                     if refusal:
-                        refused_chan, numeric = refusal
-                        count = note_join_refused(refused_chan)
-                        if count:
-                            limit = int(getattr(config, "REJOIN_ATTEMPTS", 3))
-                            if numeric == JOIN_REFUSED_AT_THE_LIMIT:
-                                announce.send_debug(
-                                    f"{refused_chan}: this server will not put "
-                                    f"the bot in any more channels ({numeric}). "
-                                    f"It is configured for more than the server "
-                                    f"allows - remove some from CHANNEL rather "
-                                    f"than waiting for this to clear.",
-                                    category="PART", notice="error")
-                            elif numeric == JOIN_REFUSED_NEEDS_A_LOGIN:
-                                # #632: the fix is a services login sent
-                                # before the JOIN, so say that - and keep
-                                # counting, so a login that never comes
-                                # ends in "gave up" like any other refusal.
-                                announce.send_debug(
-                                    f"{refused_chan} needs a registered nick "
-                                    f"({numeric}, channel mode +r): the bot must "
-                                    f"log in to services first. Put the login "
-                                    f"in Settings > On connect, or check that "
-                                    f"it is sent before the JOIN. "
-                                    f"Attempt {count}/{limit}.",
-                                    category="PART", notice="error")
-                            elif count >= limit:
-                                announce.send_debug(
-                                    f"Cannot rejoin {refused_chan} ({numeric}) - "
-                                    f"gave up after {count} attempt(s). It will not "
-                                    f"be tried again until you rehash.",
-                                    category="PART", notice="error")
-                            else:
-                                print(f"[REJOIN] {refused_chan} refused us "
-                                      f"({numeric}), attempt {count}/{limit}.")
-                        else:
-                            # Not counted - note_join_refused() only counts for
-                            # a channel already being retried, deliberately.
-                            # Said out loud anyway (#510): a refusal at CONNECT
-                            # time was discarded in silence, which is most of
-                            # why serving eleven of fourteen channels looked
-                            # like nothing had happened.
-                            print(f"[JOIN] {refused_chan} refused us ({numeric}).")
+                        # answer_join_refusal() since #1332.
+                        answer_join_refusal(refusal)
 
                     notice_parsed = parse_notice(line)
                     if notice_parsed:
-                        notice_user, notice_target, notice_text = notice_parsed
-                        notice_text = notice_text.strip()
-                        if notice_user.lower() != config.NICKNAME.lower():
-                            _capture_broadcast_search_reply(
-                                notice_user, notice_target, notice_text)
-                            if notice_target.lower() == config.NICKNAME.lower():
-                                # A private NOTICE addressed to us, from
-                                # another bot - how file servers answer a
-                                # request: "queued at position 12", "I don't
-                                # have that", "queue full", "!rar is disabled
-                                # here" (#926, dcc_fetch.handle_bot_reply()).
-                                # It only ever moves a request we sent to
-                                # THAT bot, and nothing else.
-                                import dcc_fetch
-                                dcc_fetch.handle_bot_reply(notice_user, notice_text)
+                        # answer_notice() since #1332.
+                        answer_notice(notice_parsed)
 
                     # See parse_privmsg()'s own docstring (top of this file)
                     # for why the anchoring matters, and what user_host is
@@ -4228,396 +4982,8 @@ def irc_loop():
                     # matching, a few lines below).
                     privmsg_parsed = parse_privmsg(line)
                     if privmsg_parsed:
-                        user, user_host, target_chan, msg = privmsg_parsed
-                        # One of our channels under the server's spelling
-                        # ("#music{1}" for a configured "#music[1]") is
-                        # carried on in the configured one (#1271): the
-                        # queue rows, the per-channel lists and the replies
-                        # all look the channel up by what CHANNEL says.
-                        target_chan = configured_spelling(target_chan) or target_chan
-                        msg = msg.strip()
-                        if user.lower() == config.NICKNAME.lower():
-                            continue
-
-                        # Cross-bot search broadcast capture, PRIVMSG half (see
-                        # the NOTICE branch above and _capture_broadcast_search_reply()'s
-                        # own docstring). Placed before the ban check on
-                        # purpose: a foreign bot answering a broadcast we asked
-                        # for is not subject to OUR channel's ban list, and
-                        # this never dispatches anything of its own for a ban
-                        # to meaningfully gate.
-                        _capture_broadcast_search_reply(user, target_chan, msg)
-
-                        # Bot registry, same placement and the same reasoning:
-                        # observational, dispatches nothing, and a foreign bot
-                        # advertising in a channel we sit in is not subject to
-                        # our ban list.
-                        _capture_channel_advert(user, target_chan, msg)
-                        # #376: a known bot's ident, memory only.
-                        _capture_bot_ident(user, user_host)
-
-                        # Someone else asking a bot for its list (#926): the
-                        # automatic grab leaves that bot alone for a while.
-                        _capture_list_ask(user, msg)
-
-                        # DCCore Chat (#371): a tagged message from another
-                        # DCCore bot, relayed to the operator's console.
-                        _capture_chat_message(user, target_chan, msg, user_host)
-
-                        # A private message from a bot we asked for a file
-                        # (#926): some servers answer a request that way
-                        # rather than by NOTICE (SDFind's queue position,
-                        # BWI's "not found"). Not a CTCP - DCC SEND is those,
-                        # and has its own path. Same placement and reasoning
-                        # as the two above: observational, and only ever
-                        # moves a request we sent to this sender.
-                        if (target_chan.lower() == config.NICKNAME.lower()
-                                and not msg.startswith("\x01")):
-                            try:
-                                import dcc_fetch
-                                dcc_fetch.handle_bot_reply(user, msg)
-                            except Exception as reply_err:
-                                print(f"[FETCH] Could not read {user}'s reply: {reply_err}")
-
-                        if not security.check_user_status(user, hostmask=user_host):
-                            continue
-                            
-                        msg_lower = msg.lower()
-                        bot_aliases = get_bot_aliases()
-                        # FIXED (issue #35): the gate previously covered only 4 of the ~11
-                        # dispatch paths below, so -que, -remove, both CTCP variants, !list,
-                        # !debugnames and !ping could each spawn a thread or send a NOTICE
-                        # for ANY user with no rate limit at all. Admin commands (!ban,
-                        # !unban, !rehash, !update, !clearqueue) are deliberately left out:
-                        # each self-checks against ADMIN_NICK in its own handler already, so
-                        # gating them here would only meter the operator against themselves.
-                        #
-                        # FIXED (#219): a private CTCP DCC SEND - the cross-bot fetch reply
-                        # path below - was not in this set either. Its own admission control
-                        # only decides whether an OFFER is one we solicited; deciding that
-                        # costs a thread and a fetch-queue scan per message regardless, and
-                        # nothing bounded how many any single, non-banned user could send.
-                        # Self-contained, like the QUE/REMOVE clause above it: this whole
-                        # expression is lifted out of this file's source text and evaluated
-                        # by tests/test_irc_dispatch.py, so a local computed outside it (a
-                        # `ctcp_upper = ...` line before this block, tried first) is invisible
-                        # to that harness and breaks it with a NameError.
-                        is_bot_command = (
-                            is_list_request(msg, msg_lower)
-                            or msg_lower == f"@{config.NICKNAME.lower()}-help"
-                            or msg_lower == f"@{config.NICKNAME.lower()}-stats"
-                            or msg_lower == f"@{config.NICKNAME.lower()}-top"
-                            or msg_lower == f"@{config.NICKNAME.lower()}-que"
-                            or msg_lower == f"@{config.NICKNAME.lower()}-remove"
-                            or msg_lower.startswith(f"@{config.NICKNAME.lower()}-remove ")
-                            or msg.startswith("@find ")
-                            or msg.startswith("@locator ")
-                            or any(msg_lower.startswith(f"!{alias} ") for alias in bot_aliases)
-                            or msg_lower in ("!list", "!debugnames", "!ping")
-                            or (msg.startswith("\x01") and (msg.strip("\x01").strip().upper() in ("QUE", "REMOVE", "VERSION")
-                                                                or msg.strip("\x01").strip().upper().startswith("REMOVE ")))
-                            or (msg.startswith("\x01")
-                                and msg.strip("\x01").strip().upper().startswith("DCC SEND ")
-                                and target_chan.lower() == config.NICKNAME.lower())
-                            # DCC RESUME, for the same reason #219 gives just
-                            # above. It is cheaper than an offer - a dict
-                            # lookup, no thread, no disk - but it answers with
-                            # an outbound PRIVMSG, and an unthrottled
-                            # responder is a standard way to make a bot flood
-                            # ITSELF off the network. Being unmatched costs
-                            # nothing, so being unthrottled costs everything.
-                            or (msg.startswith("\x01")
-                                and msg.strip("\x01").strip().upper().startswith("DCC RESUME ")
-                                and target_chan.lower() == config.NICKNAME.lower())
-                        )
-                        # ASKING FOR FILES IS NOT FLOODING (#888). Its own
-                        # expression, self-contained for the same reason the
-                        # one above is - tests/test_irc_dispatch.py lifts
-                        # each of them out of this file's source text and
-                        # evaluates it, so neither may lean on a local
-                        # computed outside itself.
-                        #
-                        # A user pasting fifteen rows from the list - one
-                        # album, the ordinary way these lists are used - sent
-                        # ten requests, was muted on the eleventh and BANNED
-                        # FOR AN HOUR on the twelfth. Undernet's own paste
-                        # pacing is the only reason that was rare rather than
-                        # routine; any client or bouncer that sends faster
-                        # turned asking for an album into a ban.
-                        #
-                        # So a file request never meters, never mutes, never
-                        # escalates a mute into a ban, and is served during a
-                        # mute earned by other commands. The operator's
-                        # decision (#888): "i dont care if they paste a lot
-                        # of lines at channel at once as long as the channel
-                        # accepts it. bot should just add them to queue one
-                        # by one as he requests."
-                        #
-                        # WHAT STILL BOUNDS IT, none of it the flood gate:
-                        # the queue caps (MAX_USER_QUEUE per person,
-                        # MAX_GLOBAL_QUEUE overall) are the real limit and
-                        # refuse past it; the library lookup each request
-                        # costs is bounded by #580/#886 (a few scans at a
-                        # time, and three memories so a pasted album is one
-                        # scan); packing is one at a time by the packer's own
-                        # interlock; and the server's own flood control
-                        # decides how fast the lines may arrive in the first
-                        # place, which is what the operator is relying on.
-                        #
-                        # Bans are untouched: check_user_status() runs above
-                        # and still refuses a banned user's requests. Every
-                        # other trigger in is_bot_command - searches, -que,
-                        # -remove, list requests, the CTCPs - is metered
-                        # exactly as before.
-                        is_file_request = (
-                            names_a_file_request(msg_lower, bot_aliases)
-                        )
-                        if is_bot_command and not is_file_request and security.is_flooding(user):
-                            continue
-
-                        # SOMEBODY SPOKE TO THE BOT AND IT WILL SAY NOTHING
-                        # BACK. Recorded here and nowhere else, because this
-                        # is the one point where everything is known: the
-                        # message is private (a channel line is one the
-                        # operator can already see), it is not a command, it
-                        # is not a CTCP - which is a client talking to a
-                        # client, not a person typing - and the sender has
-                        # already passed the ban check above.
-                        #
-                        # Deliberately AFTER is_flooding() so a flood cannot
-                        # fill the panel, and it still does not answer: see
-                        # announce.record_private_message() for why silence
-                        # stays the behaviour and only the record changes.
-                        if (not is_bot_command
-                                and target_chan.lower() == config.NICKNAME.lower()
-                                and not msg.startswith("\x01")):
-                            # ONE OR THE OTHER, never both. Recording it and
-                            # replying are two different contracts with the
-                            # person who messaged: one keeps it for the
-                            # operator and says nothing, the other keeps
-                            # nothing and says where to go instead.
-                            if getattr(config, "PRIVATE_MESSAGES_ENABLED", True):
-                                announce.record_private_message(user, msg)
-                            else:
-                                announce.decline_private_message(user)
-                            continue 
-                            
-                        try:
-                            import commands
-                            import db
-                            rotate_the_day_without_stopping_the_bot()
-                            
-                            if msg.startswith("\x01") and msg.endswith("\x01"):
-                                ctcp_cmd = msg.strip("\x01").strip().upper()
-                                # Admin console. Only ever from a private message -
-                                # a DCC CHAT offer addressed to a channel is
-                                # meaningless, and accepting one would mean acting
-                                # on a line every user in that channel can send.
-                                if (ctcp_cmd.startswith("DCC CHAT ")
-                                        and target_chan.lower() == config.NICKNAME.lower()):
-                                    import adminchat
-                                    adminchat.handle_dcc_chat(
-                                        s, line, user, msg.strip("\x01").strip())
-                                    continue
-                                # Cross-bot file fetch: a DCC SEND offer answering
-                                # a fetch WE requested (see dcc_fetch.py). Private
-                                # only, same reasoning as DCC CHAT above - a DCC
-                                # SEND offer addressed to a channel is meaningless
-                                # and would mean acting on a line any channel
-                                # member could send. Admission control lives
-                                # entirely inside handle_incoming_offer(): it only
-                                # proceeds if this matches a row we ourselves
-                                # marked 'offered' a moment ago, so an unsolicited
-                                # offer from anyone is dropped there, not here.
-                                if (ctcp_cmd.startswith("DCC SEND ")
-                                        and target_chan.lower() == config.NICKNAME.lower()):
-                                    import dcc_fetch
-                                    threading.Thread(
-                                        target=dcc_fetch.handle_incoming_offer,
-                                        args=(s, user, msg.strip("\x01").strip()),
-                                        daemon=True).start()
-                                    continue
-                                # A receiver telling us it already holds part
-                                # of the file we just offered, and asking us
-                                # to send from there. It will not connect
-                                # until we answer with a DCC ACCEPT - which
-                                # is what "Requesting resume" sitting still
-                                # in mIRC forever meant: the client keeping
-                                # its side of a bargain we had never been
-                                # able to answer.
-                                #
-                                # Private only, like the two branches above.
-                                # The lookup is answered INLINE - it is one dict
-                                # read and it must settle the resume position
-                                # before the receiver can connect - but the
-                                # ACCEPT itself is paced and waits up to
-                                # MSG_DELAY for a slot, which on this thread
-                                # stalled every PING and every other line
-                                # (#577, #602). handle_resume_request(
-                                # background=True) sends it from a short
-                                # thread. Admission control is entirely
-                                # inside handle_resume_request() - it matches
-                                # on a port WE are listening on for this exact
-                                # nick, so a stray or forged line finds
-                                # nothing and is dropped there.
-                                if (ctcp_cmd.startswith("DCC RESUME ")
-                                        and target_chan.lower() == config.NICKNAME.lower()):
-                                    dcc.handle_resume_request(
-                                        s, user, msg.strip("\x01").strip(),
-                                        background=True)
-                                    continue
-                                if ctcp_cmd == "VERSION":
-                                    # Answered inline rather than on a thread:
-                                    # one send, nothing read from disk. Not
-                                    # answered DIRECTLY to the socket any more
-                                    # though (see the RAM-CHECK reply below
-                                    # for why that changed) - queued VIP so it
-                                    # still jumps ahead of an ordinary
-                                    # per-user backlog, and paced through
-                                    # runtime.outbound_pacer like every other
-                                    # outbound line (#406).
-                                    #
-                                    # VERSION is in the is_bot_command list
-                                    # above, so a flooding user's own query is
-                                    # dropped before reaching here - but many
-                                    # ordinary clients send exactly one CTCP
-                                    # VERSION unasked, on sight, the moment
-                                    # they see a new nick. A bot that just
-                                    # joined 14 channels can collect a dozen
-                                    # of those within a second or two, and an
-                                    # unpaced responder answering each the
-                                    # instant it arrived was a second way to
-                                    # flood the bot off - ordinary politeness
-                                    # from a dozen strangers, nobody
-                                    # misbehaving, and no per-user gate to
-                                    # catch it because it is a dozen different
-                                    # users asking once each.
-                                    version_reply = ctcp_version_reply(user)
-                                    if version_reply and oserve:
-                                        oserve.queue_message(user, version_reply, is_vip=True)
-                                    continue
-                                if ctcp_cmd == "QUE":
-                                    threading.Thread(target=commands.handle_queue_check, args=(s, user, target_chan), daemon=True).start()
-                                    continue
-                                elif ctcp_cmd == "REMOVE":
-                                    threading.Thread(target=commands.handle_queue_remove, args=(s, user, target_chan), daemon=True).start()
-                                    continue
-                                elif ctcp_cmd.startswith("REMOVE "):
-                                    threading.Thread(target=commands.handle_queue_remove_file,
-                                                     args=(s, user, target_chan, msg.strip("\x01").strip()[7:].strip()),
-                                                     daemon=True).start()
-                                    continue
-                            elif is_list_request(msg, msg_lower):
-                                threading.Thread(target=list.send_file_list, args=(s, user, target_chan),
-                                                 daemon=True).start()
-                            elif msg_lower == f"@{config.NICKNAME.lower()}-help":
-                                threading.Thread(target=commands.handle_help_request, args=(s, user, target_chan), daemon=True).start()
-                                continue
-                            elif msg_lower == f"@{config.NICKNAME.lower()}-stats":
-                                threading.Thread(target=commands.handle_stats_request, args=(s, user, target_chan), daemon=True).start()
-                                continue
-                            elif msg_lower == f"@{config.NICKNAME.lower()}-top":
-                                threading.Thread(target=commands.handle_top_request, args=(s, user, target_chan), daemon=True).start()
-                                continue
-                            elif msg_lower == f"@{config.NICKNAME.lower()}-que":
-                                threading.Thread(target=commands.handle_queue_check, args=(s, user, target_chan), daemon=True).start()
-                                continue
-                            elif msg_lower == f"@{config.NICKNAME.lower()}-remove":
-                                threading.Thread(target=commands.handle_queue_remove, args=(s, user, target_chan), daemon=True).start()
-                                continue
-                            elif msg_lower.startswith(f"@{config.NICKNAME.lower()}-remove ") and msg[len(config.NICKNAME) + 9:].strip():
-                                threading.Thread(target=commands.handle_queue_remove_file,
-                                                 args=(s, user, target_chan, msg[len(config.NICKNAME) + 9:].strip()),
-                                                 daemon=True).start()
-                                continue
-                            elif msg.startswith("@find ") or msg.startswith("@locator "):
-                                parts = msg.split(" ", 1)
-                                if len(parts) > 1:
-                                    # Formatting and control characters come
-                                    # off here, before the text is printed,
-                                    # logged or fed to the console (#670).
-                                    search_term = list.printable_text(parts[1]).strip()
-                                    if search_term:
-                                        threading.Thread(target=list.execute_search, args=(s, user, search_term, target_chan), daemon=True).start()
-                            elif msg_lower == "!list":
-                                list.send_list_trigger_info(s, user)
-                            elif msg.lower() == "!debugnames":
-                                # The operator's diagnostic, not a public command
-                                # - see commands.diagnostics_are_for_the_admin().
-                                # Silently: an answer or a log line per stranger
-                                # is the noise this removes.
-                                if not commands.diagnostics_are_for_the_admin(user, user_host):
-                                    continue
-                                with runtime.channel_users_lock():
-                                    have_count = hasattr(config, 'channel_users') and channel_key(target_chan) in config.channel_users
-                                    if have_count:
-                                        current_qty = len(config.channel_users[channel_key(target_chan)])
-                                # Queued VIP and paced, not sent straight to the
-                                # socket - same reasoning as the CTCP VERSION
-                                # reply above (#406): a direct send here shares
-                                # nothing with queue_mgr.py's or announce.py's
-                                # own pacing, so however unlikely a flood of
-                                # !debugnames is, this is one more line that
-                                # could add to one without the shared clock
-                                # knowing it happened.
-                                if have_count:
-                                    ram_check = f"NOTICE {user} :[RAM-CHECK] Currently tracking {current_qty} user(s) live via 353-numeric in {target_chan}.\r\n"
-                                else:
-                                    ram_check = f"NOTICE {user} :[RAM-CHECK] Critical: No 353 names loaded yet for {target_chan} in config structure.\r\n"
-                                if oserve:
-                                    oserve.queue_message(user, ram_check, is_vip=True)
-                            elif msg.lower() == "!ping":
-                                # Same rule as !debugnames above: a stranger's
-                                # !ping used to make every DCCore in the channel
-                                # spend a paced line and report to its own admin.
-                                if not commands.diagnostics_are_for_the_admin(user, user_host):
-                                    continue
-                                threading.Thread(target=commands.handle_ping_request, args=(s, user, target_chan), daemon=True).start()
-                            # Admin commands in channel. ADMIN_CHANNEL_COMMANDS retires these
-                            # once the DCC console is trusted; the console reaches the same
-                            # handlers with authorised=True. User commands are unaffected.
-                            #
-                            # #437: !ban/!unban used to be matched on the raw, case-sensitive
-                            # `msg` while !rehash/!update/!clearqueue beside them already used
-                            # msg_lower - so "!Ban" or "!BAN" failed this gate entirely. Admin
-                            # commands are deliberately excluded from is_bot_command's metering,
-                            # so a mistyped ban was not just refused: nothing ran, nothing was
-                            # written to hard_bans.txt, and nothing was logged either - in
-                            # channel it looked identical to an applied ban.
-                            elif (getattr(config, 'ADMIN_CHANNEL_COMMANDS', True)
-                                  and (msg.lower() in ('!rehash', '!update')
-                                       or msg_lower.startswith('!ban ') or msg_lower.startswith('!unban ')
-                                       or msg_lower == '!clearqueue'
-                                       or msg_lower.startswith('!clearqueue '))):
-                                if msg.lower() == "!rehash":
-                                    threading.Thread(target=commands.handle_rehash_request, args=(user, target_chan), kwargs={"user_host": user_host}, daemon=True).start()
-                                elif msg_lower.startswith("!ban "):
-                                    threading.Thread(target=commands.handle_hard_ban_request, args=(user, target_chan, msg), kwargs={"user_host": user_host}, daemon=True).start()
-                                elif msg_lower.startswith("!unban "):
-                                    threading.Thread(target=commands.handle_hard_unban_request, args=(user, target_chan, msg), kwargs={"user_host": user_host}, daemon=True).start()
-                                elif msg.lower() == "!update":
-                                    threading.Thread(target=commands.handle_list_update_request, args=(user, target_chan), kwargs={"user_host": user_host}, daemon=True).start()
-                                elif msg_lower == "!clearqueue" or msg_lower.startswith("!clearqueue "):
-                                    # commands.handle_admin_clear_queue was added in #16 but never
-                                    # wired into this dispatch chain, so the command had no caller
-                                    # anywhere and typing it did nothing at all. The handler does
-                                    # its own admin check.
-                                    threading.Thread(target=commands.handle_admin_clear_queue, args=(user, target_chan, msg), kwargs={"user_host": user_host}, daemon=True).start()
-                            elif any(msg_lower.startswith(f"!{alias} ") for alias in bot_aliases):
-                                # Split on the first space only, so "!DCCore !rar Artist/Album"
-                                # still hands "!rar Artist/Album" to the download handler.
-                                parts = msg.split(" ", 1)
-                                if len(parts) > 1:
-                                    # As for a search (#670): what reaches the
-                                    # handler is what the terminal, the debug
-                                    # channel and the admin chat will show.
-                                    requested_file = list.printable_text(parts[1]).strip()
-                                    threading.Thread(target=dcc.handle_download_request,
-                                                    args=(s, user, requested_file, target_chan),
-                                                    daemon=True).start()
-                                    
-                        except Exception as cmd_err:
-                            print(f"[ERROR] Error handling a bot command from {user}: {cmd_err}")
+                        # answer_privmsg() since #1334.
+                        answer_privmsg(line, privmsg_parsed, s, oserve)
 
             except Exception as inner_loop_err:
                 print(f"[IRC INTERNAL ERROR] Unexpected error inside the message loop: {inner_loop_err}")
@@ -4630,7 +4996,7 @@ def irc_loop():
         # A link that registered and then dropped comes back in ten seconds;
         # one that never got a 001 - refused, throttled, closed during the
         # handshake - waits longer each time (#663).
-        if joined:
+        if conn.joined:
             registration_failures = 0
         else:
             registration_failures += 1
@@ -4676,9 +5042,15 @@ def irc_loop():
         # failed send; this is the same decision at the other exit.
         stale_vip = len(getattr(config, 'vip_queue', ()) or ())
         if stale_vip:
-            del config.vip_queue[:]
+            # Under the lock queue_mgr._resent_line_first() swaps under (#1386).
+            with runtime.send_queue_lock:
+                del config.vip_queue[:]
             print(f"[CONNECT] Dropped {stale_vip} queued VIP line(s) from the dead connection.")
         # Not the fetch requests (#1044): their rows count a line gone from
         # the lane as sent, and timed out as "no response". They wait for
         # the next connection; an unsent line's row does not time out.
+        # The record of lines sent (#1386) goes with the connection: a
+        # refusal on the next one is never about a line sent on this one.
+        with runtime.recent_paced_lock:
+            runtime.recent_paced_lines.clear()
         time.sleep(reconnect_wait)
