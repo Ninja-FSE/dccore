@@ -25,7 +25,9 @@ What is held:
 - the Connection row is green "connected (...)", amber "connecting: <step>"
   for each dialling step, red "offline" otherwise - coloured before its
   text is written, and the colour kept for dccore.theme.dcxtexts, which
-  sets it again after giving every value the theme's colour;
+  sets it again after giving every value the theme's colour; its shade is
+  for the face the window was made with, not a theme switched since
+  (#1406);
 - a stale `in` is reset as on CHATCLOSE (the same keys) and the titles and
   the panel redrawn, with no timer, no redial and no message, and only when
   stale; dccore.sw.start does it before its footer test, so the footer and
@@ -508,14 +510,17 @@ LAYOUT = layout()
 CONNECTION = dict(LAYOUT["Bot"]["rows"])["Connection"]
 
 
-def page(state=None, chat=True, mode="structured", dark=False, bot=BOT, **extra):
+def page(state=None, chat=True, mode="structured", dark=False, bot=BOT, live_dark=None, **extra):
     """A Mirc whose start page has been filled once, from a session that
-    left the given state and figures behind."""
-    mirc = Mirc(real=PAGE, stubs={"dccore.theme.dialogsdark": lambda: "$true" if dark else "$false"})
+    left the given state and figures behind. `dark` is the theme the
+    window was made with (sw.s dark); `live_dark`, when given, is the
+    theme switched to while it is open."""
+    live = dark if live_dark is None else live_dark
+    mirc = Mirc(real=PAGE, stubs={"dccore.theme.dialogsdark": lambda: "$true" if live else "$false"})
     for key, value in generated_data().items():
         mirc.table("dccore.swm")[key.lower()] = value
     mirc.dialogs.add("dccore.set")
-    mirc.table("dccore.sws").update({"dcx": "1", "side": "0"})
+    mirc.table("dccore.sws").update({"dcx": "1", "side": "0", "dark": "1" if dark else "0"})
     if bot:
         mirc.table("dccore")["bot"] = bot
     if chat and bot:
@@ -698,6 +703,24 @@ class TheColourIsSetFirstAndKept(unittest.TestCase):
         mirc.call("dccore.sw.home.fill", [])
         self.assertNotEqual(mirc.table("dccore.sws")["home.ink"], on)
         self.assertEqual(rows(mirc, "Bot")["Connection"], DOT + " offline")
+
+
+class TheShadeIsThePanelsThemeNotTheLiveOne(unittest.TestCase):
+    """#1406: a theme switched while the panel is open applies when it next
+    opens, as for the rest of the panel; the next fill's shade is still the
+    one for the face the window was made with."""
+
+    def test_a_live_switch_does_not_change_the_shade(self):
+        for state, chat, _ink in TheColourIsSetFirstAndKept.CASES:
+            for dark in (False, True):
+                with self.subTest(state=state, chat=chat, dark=dark):
+                    switched = page(state, chat=chat, dark=dark, live_dark=not dark)
+                    self.assertEqual(ink_of(switched), ink_of(page(state, chat=chat, dark=dark)))
+                    self.assertNotEqual(ink_of(switched), ink_of(page(state, chat=chat, dark=not dark)))
+
+    def test_the_light_face_keeps_the_darker_red_after_a_switch_to_dark(self):
+        r, g, b = colour(ink_of(page("closed", dark=False, live_dark=True)).split()[-1])
+        self.assertEqual((r, g, b), (192, 0, 0))
 
 
 class TheDarkThemeSetsTheColourAgain(unittest.TestCase):

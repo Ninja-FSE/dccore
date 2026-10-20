@@ -46,9 +46,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from exported_tree import _this_is_an_export  # noqa: E402
 
-# Files that exist to be read by the two of us and must not reach the public
-# tree. Each needs an export-ignore rule in .gitattributes.
-INTERNAL = ("docs/UPDATES.md", "docs/PUBLIC-REPO-WORKFLOW.md")
+# Files written for working in the development repository, which must not
+# reach the release tree. (They are public there all the same: export-ignore
+# keeps a file out of the release and nothing more.) Each needs an
+# export-ignore rule in .gitattributes.
+INTERNAL = ("docs/UPDATES.md", "docs/PUBLIC-REPO-WORKFLOW.md", "docs/PROJECT-BOARD.md")
 
 
 def archive_members():

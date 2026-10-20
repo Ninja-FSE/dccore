@@ -18,6 +18,7 @@ naive local datetimes, as the code reads them.
 
 import os
 import sys
+import threading
 import unittest
 from datetime import datetime
 from unittest import mock
@@ -32,7 +33,8 @@ import runtime  # noqa: E402
 import settings_file  # noqa: E402
 import webserver  # noqa: E402
 
-from tests.support import DCCoreTestCase  # noqa: E402
+from tests.support import DCCoreTestCase, rehash_with_the_reload_stood_in  # noqa: E402
+from tests.test_startup import BootCase  # noqa: E402
 from tests.test_webserver import write_master_list  # noqa: E402
 
 
@@ -226,15 +228,76 @@ class TheWorker(DCCoreTestCase):
 
         self.assertEqual(order[:3], [("sleep", 60.0), ("tick",), ("sleep", 60.0)])
 
-    def test_boot_and_every_rehash_start_it(self):
-        """Read from the source - neither can be run whole in a test (the
-        same reason the automatic refresh's own wiring is read)."""
-        import io
-        with io.open(os.path.join(REPO_ROOT, "oserve.py"), encoding="utf-8") as handle:
-            self.assertIn("commands.ensure_rebuild_schedule_worker()", handle.read())
-        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
-            rehash = handle.read().split("def _handle_rehash_request(", 1)[1].split("\ndef ", 1)[0]
-        self.assertIn("if ensure_rebuild_schedule_worker():", rehash)
+    def rehash_watching_the_worker(self):
+        """A real rehash (tests.support.rehash_with_the_reload_stood_in), with
+        the worker's loop stood in for: the thread it would run in starts
+        and ends at once. Returns the starts seen (#1469)."""
+        ran = []
+        finished = threading.Event()
+
+        def worker(*_args, **_kwargs):
+            ran.append(threading.current_thread().name)
+            finished.set()
+        patch = mock.patch.object(commands, "rebuild_schedule_worker", worker)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        self.assertIs(rehash_with_the_reload_stood_in(self, lambda *_a, **_k: []), True)
+        if runtime.rebuild_schedule_started:     # a thread was started: let it run
+            finished.wait(5)
+        return ran
+
+    def test_every_rehash_starts_it(self):
+        """A schedule set from the dashboard reaches the running bot through
+        the rehash its save starts (#1469; this was read out of commands.py)."""
+        self.set_config(LIST_REBUILD_SCHEDULE="every 12h")
+
+        self.assertEqual(len(self.rehash_watching_the_worker()), 1,
+                         "the rehash did not start the rebuild schedule")
+        self.assertTrue(runtime.rebuild_schedule_started)
+
+    def test_control_a_rehash_with_no_schedule_starts_nothing(self):
+        self.set_config(LIST_REBUILD_SCHEDULE="")
+
+        self.assertEqual(self.rehash_watching_the_worker(), [])
+        self.assertFalse(runtime.rebuild_schedule_started)
+
+
+class TheBootStartsIt(BootCase):
+    """oserve.startup(), run for real by tests/test_startup.py's BootCase,
+    with the worker's loop stood in for: the thread it would run in starts
+    and ends at once (#1469; this was read out of oserve.py)."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, runtime, "rebuild_schedule_started", runtime.rebuild_schedule_started)
+        runtime.rebuild_schedule_started = False
+        self.ran = []
+        self.finished = threading.Event()
+
+        def worker(*_args, **_kwargs):
+            self.ran.append(1)
+            self.finished.set()
+        patch = mock.patch.object(commands, "rebuild_schedule_worker", worker)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_a_boot_with_a_schedule_starts_it(self):
+        self.set_config(LIST_REBUILD_SCHEDULE="every 12h")
+
+        self.boot()
+        self.finished.wait(5)
+
+        self.assertTrue(runtime.rebuild_schedule_started, "the boot did not start the rebuild schedule")
+        self.assertEqual(self.ran, [1])
+
+    def test_control_a_boot_with_no_schedule_starts_nothing(self):
+        self.set_config(LIST_REBUILD_SCHEDULE="")
+
+        self.boot()
+
+        self.assertFalse(runtime.rebuild_schedule_started)
+        self.assertEqual(self.ran, [])
 
 
 class WhereTheOperatorSeesIt(DCCoreTestCase):

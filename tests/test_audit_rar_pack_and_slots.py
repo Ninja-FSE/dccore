@@ -25,9 +25,12 @@ to fill with plain file sends, each of which re-checked correctly on its own
 way through. This was the one append that did not.
 """
 
+import io
 import os
 import sys
+import threading
 import unittest
+from unittest import mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -35,7 +38,11 @@ if REPO_ROOT not in sys.path:
 
 import dcc  # noqa: E402
 import defaults as config  # noqa: E402
+import platform_compat  # noqa: E402
+import runtime  # noqa: E402
 
+from tests import support  # noqa: E402
+from tests import test_path_security as security  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
 
 
@@ -105,80 +112,288 @@ class ARunningPackCountsAsBusy(DCCoreTestCase):
         self.assertEqual(seen, [True])
 
 
-class ThePackRechecksItsSlotBeforeTakingOne(DCCoreTestCase):
-    """Asserted on the source, deliberately.
+class _APackWithRarStoodIn(security.PathSecurityBase):
+    """The real dispatcher and packer, with a stand-in for the rar binary
+    that writes the archive and lets slots fill while it runs."""
 
-    Reaching the append means running `rar` for real against a real album -
-    the branch is a subprocess call deep inside a 500-line function - and the
-    defect is precisely whether a capacity test stands between the pack
-    finishing and the slot being taken.
-    """
+    def setUp(self):
+        super().setUp()
+        config.channel_users = {"#dccore-test": {"dave"}}
+        self.set_config(MAX_DCC_SLOTS=2, rar_inprogress=False, transfers_paused=False,
+                        bot_joined_channel=True)
+        os.makedirs(config.TMP_ZIP_DIR, exist_ok=True)
+        patch = mock.patch.object(dcc.time, "sleep", lambda *_a: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+        patch = mock.patch.object(platform_compat, "rar_command",
+                                  lambda configured=None: os.path.join(self.tree.root, "rar"))
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.addCleanup(setattr, runtime, "pack_owner", None)
+        self.addCleanup(setattr, runtime, "pack_job", None)
+        album = os.path.join(self.tree.music, "Some Artist", "Some Album")
+        os.makedirs(album, exist_ok=True)
+        with io.open(os.path.join(album, "01.flac"), "wb") as handle:
+            handle.write(b"\x00" * 1024)
+        self.row = {"file": "Some_Album.rar", "path": album, "channel": "#dccore-test",
+                    "user_raw": "dave", "is_unpacked_rar_folder": True, "is_temporary_zip": True}
+        self.slots_taken_while_rar_runs = 0
+        self.rar_runs = 0
+        self.while_rar_runs = lambda: None
 
-    def source(self):
-        """The packer first, then the wrapper that starts it: the packing has
-        been pack_folder_for_request() since #1300, and the interlocks it
-        hands back are still released in check_queue_and_send()'s
-        inline_rar_packer(). Section B's sweep, with its own slot check, has
-        been claim_next_in_line() since #1304."""
-        import inspect
+        class Packed:
+            returncode = 0
+            stdout = stderr = ""
 
-        return (inspect.getsource(dcc.pack_folder_for_request) + inspect.getsource(dcc.check_queue_and_send)
-                + inspect.getsource(dcc.claim_next_in_line))
+        def rar_that_writes(cmd, *a, **kw):
+            self.rar_runs += 1
+            with io.open([c for c in cmd if c.endswith(".rar")][0], "wb") as handle:
+                handle.write(b"Rar!")
+            self.while_rar_runs()
+            for n in range(self.slots_taken_while_rar_runs):
+                config.active_transfers.append({"user": "other%d" % n, "file": "X.flac", "bytes_sent": 0})
+            return Packed()
 
-    def test_the_append_is_guarded_by_a_capacity_test(self):
-        source = self.source()
+        support.fake_rar_runs(self, dcc.subprocess, rar_that_writes)
 
-        self.assertIn("room = len(config.active_transfers) < config.MAX_DCC_SLOTS",
-                      source)
-        self.assertIn("if room:", source)
+    def dispatch(self):
+        config.dcc_queue["dave"] = [self.row]
+        with security.quiet():
+            dcc.check_queue_and_send(self.sock, "dave")
+
+    def sends(self):
+        return [args[1] for name, args in security.InlineThread.dispatched if name == "start_dcc_send"]
+
+
+class ThePackRechecksItsSlotWhenRarIsDone(_APackWithRarStoodIn):
+    """The capacity test between the pack finishing and the slot being
+    taken, evaluated, with every slot filling while rar runs. (Was a search
+    of the source for the test's text, #1460.)"""
+
+    def test_slots_filled_while_rar_ran_are_not_overshot(self):
+        self.slots_taken_while_rar_runs = 2
+
+        self.dispatch()
+
+        self.assertEqual(len(config.active_transfers), 2, "the pack took a slot past MAX_DCC_SLOTS")
+        self.assertEqual(self.sends(), [])
+        self.assertEqual([r["file"] for r in config.dcc_queue["dave"]], ["Some_Album.rar"],
+                         "the archive no longer waits in the queue")
+        self.assertFalse(self.row["is_unpacked_rar_folder"], "the row does not name the archive")
+        self.assertFalse(config.rar_inprogress, "the interlock was not released")
+
+    def test_control_with_a_slot_left_the_archive_is_sent(self):
+        self.slots_taken_while_rar_runs = 1
+
+        self.dispatch()
+
+        self.assertEqual(self.sends(), ["dave"])
+        self.assertEqual(len(config.active_transfers), 2)
+
+
+class _HoldsCounted:
+    """dcc.queue_lock, still the real lock, numbering each hold of it, so a
+    test can tell whether two things happened inside one hold."""
+
+    def __init__(self, real):
+        self.real = real
+        self.holds = 0
+        self.owner = None
+
+    def acquire(self, *args, **kwargs):
+        got = self.real.acquire(*args, **kwargs)
+        if got:
+            self.holds += 1
+            self.owner = threading.get_ident()
+        return got
+
+    def release(self):
+        self.owner = None
+        self.real.release()
+
+    def locked(self):
+        return self.real.locked()
+
+    __enter__ = acquire
+
+    def __exit__(self, *_exc):
+        self.release()
+
+    def hold_of_this_thread(self):
+        return self.holds if self.owner == threading.get_ident() else None
+
+
+class _CountedTransfers(list):
+    """active_transfers that notes the hold of queue_lock each count and
+    each append happened in, once rar has run."""
+
+    def __init__(self, lock):
+        super().__init__()
+        self.lock = lock
+        self.watching = False
+        self.events = []
+
+    def __len__(self):
+        if self.watching:
+            self.events.append(("count", None, self.lock.hold_of_this_thread()))
+        return super().__len__()
+
+    def append(self, row):
+        if self.watching:
+            self.events.append(("append", row.get("file"), self.lock.hold_of_this_thread()))
+        super().append(row)
+
+
+class ThePackRechecksItsSlotBeforeTakingOne(_APackWithRarStoodIn):
+    """The rest of the pack's slot handling, driven through the dispatcher
+    and the packer rather than read out of dcc.py (#1469): the count and the
+    append are one hold of queue_lock, a refused pack lets go of the
+    interlocks and wakes the next pack, and the checks before a dispatch
+    still refuse a full house. Whether the interlocks are released ONCE is
+    tests/test_the_pack_interlocks_are_released_once.py."""
 
     def test_it_is_taken_under_the_queue_lock(self):
         """Two dispatch threads reaching this together would otherwise both
-        see room for the last slot."""
-        source = self.source()
-        after_check = source.split("the packed archive stays queued")[0]
+        see room for the last slot: the count that finds room and the append
+        that takes it must be one hold of queue_lock, with nothing between."""
+        lock = _HoldsCounted(dcc.queue_lock)
+        patch = mock.patch.object(dcc, "queue_lock", lock)
+        patch.start()
+        self.addCleanup(patch.stop)
+        transfers = _CountedTransfers(lock)
+        self.set_config(active_transfers=transfers)
 
-        self.assertIn("with queue_lock:", after_check)
+        def from_now_on():
+            transfers.watching = True
+        self.while_rar_runs = from_now_on
+        self.slots_taken_while_rar_runs = 1
 
-    def test_a_refused_pack_releases_the_interlock_it_holds(self):
+        self.dispatch()
+
+        self.assertEqual(self.sends(), ["dave"], "the control: the archive was not sent")
+        appends = [i for i, event in enumerate(transfers.events)
+                   if event[:2] == ("append", "Some_Album.rar")]
+        self.assertEqual(len(appends), 1, transfers.events)
+        _kind, _file, hold = transfers.events[appends[0]]
+        self.assertIsNotNone(hold, "the slot was taken outside queue_lock")
+        counts = [event for event in transfers.events[:appends[0]] if event[0] == "count"]
+        self.assertTrue(counts, "the slot was taken without counting the slots")
+        self.assertEqual(counts[-1][2], hold,
+                         "queue_lock was let go between the count that found room and "
+                         "the append that took it")
+
+    def test_a_refused_pack_releases_the_interlocks_it_holds(self):
         """Returning without clearing rar_inprogress would stop every future
-        pack for every user until the daemon restarted - the exact failure the
-        RAR_TIMEOUT comment above it warns about. The release is the
-        wrapper's finally, ONCE (#714): the refusal returns None to it rather
-        than releasing itself and being released again."""
-        source = self.source()
-        refusal = source.split("the packed archive stays queued")[1][:400]
+        pack for every user until the daemon restarted - the exact failure
+        the RAR_TIMEOUT comment warns about. Proved by the next pack going
+        through once a slot is free."""
+        self.slots_taken_while_rar_runs = 2
 
-        self.assertNotIn("config.rar_inprogress = False", refusal, "released twice")
-        self.assertIn("Released by the wrapper's finally, once", refusal)
-        finally_block = source.split("if not handed_off:", 1)[1][:600]
-        self.assertIn("config.rar_inprogress = False", finally_block)
-        self.assertIn("user_processing_lock", finally_block)
+        self.dispatch()
+
+        self.assertEqual(self.sends(), [])
+        self.assertFalse(config.rar_inprogress, "rar_inprogress stayed latched")
+        self.assertNotIn("dave", config.user_processing_lock)
+        self.assertIsNone(runtime.pack_owner)
+
+        config.active_transfers.clear()
+        self.slots_taken_while_rar_runs = 0
+        with security.quiet():
+            dcc.check_queue_and_send(self.sock, "dave")
+
+        self.assertEqual(self.sends(), ["dave"], "the next trigger could not send the archive")
 
     def test_a_refused_pack_lets_a_waiting_one_start(self):
         """redispatch_waiting_pack() is the only thing that revisits a user
         turned away at [RAR-HOLD]; without it they wait for a trigger that
-        never comes. It is the wrapper's finally that calls it, once - for
-        the nick the claim is held under now, which a rename may have changed
-        since the pack started (#1268)."""
-        source = self.source()
-        finally_block = source.split("if not handed_off:", 1)[1][:600]
+        never comes. Called once, for the nick the claim is held under now,
+        which a rename while rar ran has changed (#1268)."""
+        import irc
 
-        self.assertIn("redispatch_waiting_pack(irc_sock, just_finished=holder)", finally_block)
+        woken = []
+        real = dcc.redispatch_waiting_pack
 
-    def test_the_pre_dispatch_checks_are_all_still_there(self):
-        """Control on the control: this fix is about the ONE append that had
-        no check, not about replacing the checks that were already right.
+        def watched(irc_sock, just_finished=None):
+            woken.append((just_finished, config.rar_inprogress))
+            return real(irc_sock, just_finished=just_finished)
+        patch = mock.patch.object(dcc, "redispatch_waiting_pack", watched)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.while_rar_runs = lambda: irc.note_nick_change("dave", "dave_away")
+        self.slots_taken_while_rar_runs = 2
 
-        Three of them - the RAR branch before it starts packing, the plain
-        file path, and section B - all in the same form. The new one is a
-        fourth, in a different form, because it has to hold the lock across
-        the decision and the append."""
-        source = self.source()
+        self.dispatch()
 
-        self.assertEqual(
-            source.count("if len(config.active_transfers) >= config.MAX_DCC_SLOTS:"),
-            3)
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(woken, [("dave_away", False)],
+                         "the next pack was not woken once, for the renamed holder, "
+                         "with the packer free")
+        self.assertNotIn("dave_away", config.user_processing_lock)
+
+    def test_a_full_house_is_refused_before_rar_starts(self):
+        """The RAR branch's own check, before packing: no slot, no rar run,
+        no interlock claimed, and the folder stays queued."""
+        config.active_transfers.extend(
+            {"user": "other%d" % n, "file": "X.flac", "bytes_sent": 0} for n in range(2))
+
+        self.dispatch()
+
+        self.assertEqual(self.rar_runs, 0, "rar ran with every slot taken")
+        self.assertEqual(self.sends(), [])
+        self.assertFalse(config.rar_inprogress)
+        self.assertNotIn("dave", config.user_processing_lock)
+        self.assertEqual(config.dcc_queue["dave"], [self.row])
+
+    def queue_a_plain_file(self):
+        track = self.tree.tracks[0]
+        row = support.queue_row("dave", os.path.basename(track), path=track)
+        config.dcc_queue["dave"] = [row]
+        return row
+
+    def test_a_full_house_is_refused_for_a_plain_file(self):
+        """The plain-file path's check: the file is not sent and keeps its place."""
+        row = self.queue_a_plain_file()
+        config.active_transfers.extend(
+            {"user": "other%d" % n, "file": "X.flac", "bytes_sent": 0} for n in range(2))
+
+        with security.quiet():
+            dcc.check_queue_and_send(self.sock, "dave")
+
+        self.assertEqual(self.sends(), [])
+        self.assertEqual(len(config.active_transfers), 2)
+        self.assertEqual(config.dcc_queue["dave"], [row])
+
+    def test_control_a_plain_file_with_a_slot_left_is_sent(self):
+        self.queue_a_plain_file()
+        config.active_transfers.append({"user": "other0", "file": "X.flac", "bytes_sent": 0})
+
+        with security.quiet():
+            dcc.check_queue_and_send(self.sock, "dave")
+
+        self.assertEqual(self.sends(), ["dave"])
+
+    def test_a_full_house_is_refused_by_the_sweep(self):
+        """Section B's check, claim_next_in_line(): somebody waits, nobody
+        is claimed."""
+        self.queue_a_plain_file()
+        config.active_transfers.extend(
+            {"user": "other%d" % n, "file": "X.flac", "bytes_sent": 0} for n in range(2))
+
+        with security.quiet():
+            promoted, promoted_key, _wake, _absent = dcc.claim_next_in_line()
+
+        self.assertEqual((promoted, promoted_key), (None, None))
+        self.assertEqual(len(config.active_transfers), 2)
+        self.assertNotIn("dave", config.user_processing_lock)
+
+    def test_control_the_sweep_claims_with_a_slot_left(self):
+        self.queue_a_plain_file()
+        config.active_transfers.append({"user": "other0", "file": "X.flac", "bytes_sent": 0})
+
+        with security.quiet():
+            _promoted, promoted_key, _wake, _absent = dcc.claim_next_in_line()
+
+        self.assertEqual(promoted_key, "dave")
 
 
 if __name__ == "__main__":

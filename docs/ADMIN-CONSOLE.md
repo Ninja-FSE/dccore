@@ -210,7 +210,7 @@ Waiting for acknowledgement...
 DCC Chat connection established
 
 Welcome to DCCore
-DCCore v1.17.0 - platform=posix python=3.10 rar=/usr/bin/rar
+DCCore v1.18.0 - platform=posix python=3.10 rar=/usr/bin/rar
 
 Enter Your Password:
 ```
@@ -673,12 +673,29 @@ host the bot is known to have (`bothost`); otherwise the window says so and the
 script stops reconnecting until you `/dccore connect`. A script with no
 `bothost` yet learns the host the first time it is known, as for the token.
 
+"The login" above means one thing: the bot's `Entering DCC Chat Admin
+Interface`, read only once `Enter Your Password:` in the same chat has been
+answered - the script sent the token after this check, or you typed the
+password. A password counts as typed wherever you type it: in `@DCCore`, in
+`@DCCore-console`, with `/dccore raw` or with the menu's console command, and
+the line is never echoed (the windows show `********`). At the prompt the
+menu's box hides what you type. `/dccore raw <password>` is a command line, so
+it stays in mIRC's editbox history like any other: type the password on its own
+in either window instead. Typed on its own there, a password with runs of
+spaces or a space at either end arrives as typed (#1273); through
+`/dccore raw` or the menu, mIRC hands the script the line with those spaces
+closed up. The bot always asks first and logs in only after the
+answer. A login line in a chat whose prompt was not answered is ignored: the
+window says so, the chat is closed, and the script stops reconnecting until
+you `/dccore connect`. Until a login counts, no `DCCORE` line is read.
+
 What a token does **not** do is open the dashboard, or change the bot's
 settings. The web login checks the admin password hash and nothing else - the
 token store is never read there. In the console, a session that logged in
 with a token can read the settings, the served lists, the folders and the
 bans, and drive the feed and the queue commands as before; changing a
-setting, the lists, the folders or the on-connect commands, reading or
+setting (`checkupdates` and `consolefeed` with an argument among them, as
+`set`), the lists, the folders or the on-connect commands, reading or
 resending the on-connect commands (an X login among them holds a password),
 and pairing or revoking another script need the password, once per session:
 `unlock <password>` (see "Settings over the console"). A token paired
@@ -703,6 +720,17 @@ dashboard for fifteen minutes, again and again. If you reach the dashboard
 through a reverse proxy, the proxy must pass the `Host` header through
 unchanged (`proxy_set_header Host $host;` in nginx), or every login is refused
 with "This login was sent by another site".
+
+Three wrong passwords at the web login block the address they came from for
+fifteen minutes. Over IPv6 they are counted per /64 network: every device that
+shares a /64 shares the three. Wrong passwords from anywhere in one /48 also
+add up, and thirty of them block that whole /48 for fifteen minutes. A right
+password clears both counts. An IPv6 address that carries an IPv4 one
+(`::ffff:192.0.2.1` from a dual-stack socket, NAT64 `64:ff9b::192.0.2.1`, 6to4
+or Teredo) counts as that IPv4 address; a translator with a prefix of its own
+counts as an IPv6 network. Behind a reverse proxy every client
+counts as the proxy's address, since the proxy's is the address the dashboard
+sees.
 
 ```
 unpair                    list the paired clients and when they were paired
@@ -774,7 +802,9 @@ with a paired token - kept in clear text in `dccore.ini` - can read `settings`,
 `set` lines in a transaction, but is answered `DCCORE LOCKED <command>` for
 `setcommit`, a lone `set`, `served commit`, `folders commit`, `onconnect commit`,
 `onconnect resend`, the `onconnect` listing itself (an X login holds a
-password), `pair`, and `unpair` of anything but its own token - until
+password), `checkupdates on|off` and `consolefeed on|off` (each saves a
+setting; with no argument they only report it and stay allowed), `pair`, and
+`unpair` of anything but its own token - until
 `unlock <password>` succeeds once in that session. A refused commit leaves its
 transaction open, so the window can ask for the password, unlock, and send the
 commit again. The dashboard's own Console is behind the dashboard login, which
@@ -853,7 +883,7 @@ first field, and its last field is always a sentence to show.
 |---|---|---|
 | `DCCORE CAPS <name>:<version> ... machine:<name>` | `consolecaps` | today `settings:1 preview:1 served:1 folders:1 onconnect:1 banlist:1 unlock:1 library:1`, then `machine:` and this computer's name (spaces and colons as `-`), which a client compares with its own to know whether the bot is on the same machine - the console's address cannot tell, since a DCC chat to a bot on the same PC arrives from the public address. A bot without these commands answers `DCCORE OUT Unknown command: consolecaps. Type 'help'.` - say "update the bot" then. A version goes up when a field of that part moves; a part added later is a new name |
 | `DCCORE SETBEGIN <n>` / `DCCORE SETF <KEY> <type> <value>` / `DCCORE SETEND <n>` | `settings [<word>]` | one `SETF` per setting, in the Settings page's order; `type` is `str`, `int`, `float`, `bool` or `list`, the value last (empty: the line ends after the type - for `WEBUI_CONSOLE_ENABLED` that means "not set"). `ADMIN_PASSWORD_HASH` is never among them. Labels, help, units and choices are the dashboard's metadata, not sent here |
-| `DCCORE LOCKED <command> <sentence>` | any of the commands above that change something, on a session that logged in with a token and has not unlocked; and any command at all that a read-only token may not run ("Read-only tokens" above) | `command` is what was refused, one or two words (`setcommit`, `set`, `served commit`, `folders commit`, `onconnect commit`, `onconnect resend`, `onconnect`, `pair`, `unpair`; on a read-only session, the command word, `unlock` included); the sentence says to unlock, or on a read-only session that only the password can do this. Nothing was saved or run; an open transaction stays open |
+| `DCCORE LOCKED <command> <sentence>` | any of the commands above that change something, on a session that logged in with a token and has not unlocked; and any command at all that a read-only token may not run ("Read-only tokens" above) | `command` is what was refused, one or two words (`setcommit`, `set`, `served commit`, `folders commit`, `onconnect commit`, `onconnect resend`, `onconnect`, `checkupdates`, `consolefeed`, `pair`, `unpair`; on a read-only session, the command word, `unlock` included); the sentence says to unlock, or on a read-only session that only the password can do this. Nothing was saved or run; an open transaction stays open |
 | `DCCORE UNLOCKED` | `unlock <password>` | the session may change settings now (also the answer when it already could) |
 | `DCCORE UNLOCK error <message>` | `unlock` with a wrong password | still locked; the third wrong one closes the session instead |
 | `DCCORE SETOPEN <dropped>` | `setbegin` | `dropped`: changes buffered by a transaction that was still open, now gone (0 normally) |
@@ -862,7 +892,8 @@ first field, and its last field is always a sentence to show.
 | `DCCORE SETDONE error <message>` | | nothing was saved; the transaction is closed |
 | `DCCORE SETDONE confirm <question>` | | the commit clears `DEBUG_CHANNEL`, and the bot leaves that channel at once: ask, then send `setcommit confirm` (or `setabort`). A transaction from `setbegin` stays open meanwhile. After a lone `set` the question holds only until the next line: anything but `setcommit confirm` or `setabort` first ends it with `SETDONE aborted <n>`, and is then run as usual - so a later lone `set` saves at once, as it says |
 | `DCCORE SETDONE aborted <n>` | `setabort` | `n` buffered changes dropped |
-| `DCCORE SETAPPLIED` | after `SETDONE ok` with something written | the save's rehash has finished, so the new values are in effect - reload the page now, not at `SETDONE`: the rehash first waits up to `REHASH_TRANSFER_WAIT` for transfers, and until it reloads, `settings` still shows the old values. Always after the `SETDONE ok` it belongs to; none for a save that wrote nothing or failed |
+| `DCCORE SETAPPLIED` | after `SETDONE ok` with something written | the save's rehash has finished and its reload worked, so the new values are in effect - reload the page now, not at `SETDONE`: the rehash first waits up to `REHASH_TRANSFER_WAIT` for transfers, and until it reloads, `settings` still shows the old values. Always after the `SETDONE ok` it belongs to; none for a save that wrote nothing or failed, and none when the rehash failed (`SETAPPLYERR` instead) |
+| `DCCORE SETAPPLYERR <message>` | after `SETDONE ok` with something written, instead of `SETAPPLIED` | the save is in `settings.conf`, but the rehash that applies it failed (#1434) - an `admin_config.py` with a syntax error, for one - so the bot may not be running the saved values; the bot's log says why. Show the message, and do not say the settings are in effect. A line type of its own rather than a field of `SETAPPLIED`, so a script from before it, which reads every `SETAPPLIED` as success, shows it as a line it does not know instead. A plain console gets the same sentence, after "The settings were saved to settings.conf.", and so does the dashboard's Settings page after its own save (#1462) |
 | `DCCORE PVBEGIN 2` / `DCCORE PVLINE <advert\|notice> <line>` / `DCCORE PVEND 2` | `setpreview` | the sample advert and transfer notice, encoded like every other value - colour codes as `%03`, runs of spaces as `%20` - so a client decodes it and echoes it in colour. (mIRC collapses runs of spaces in a chat line, and a theme's frame is made of them.) |
 | `DCCORE SRVBEGIN <lists> <source> <max>` / `DCCORE SRVLIST <n> <primary> <name>` / `DCCORE SRVCHAN <n> <channel> <mode>` / `DCCORE SRVFOLDER <n> <label> <path>` / `DCCORE SRVEND <lists> <channels> <folders>` | `served` | per list, in order: its `SRVLIST` (`n` from 1, `primary` `1` or `0`, the name last), then a `SRVCHAN` per channel bound to it (`channel` a token, `mode` `normal`, `quiet` or `request_only`), then a `SRVFOLDER` per folder (`label` a token, the path last). `source` is `file` (`lists.json`) or `implied` (none: one list over the served folders - sending it back unchanged does not create the file). `max` is how many lists there may be. A list's own file types to leave out (#1295) are not in the snapshot; a `served` commit keeps them |
 | `DCCORE SRVOPEN <dropped>` | `served begin` | then `served list <n> <0\|1> <name>` (`n` the next number), `served chan <n> <channel> <mode>`, `served folder <n> <label> <path>`, and `served commit` or `served abort` |
@@ -891,8 +922,13 @@ it still works as a plain console, without the panel.
 
 ### First time
 
-Save the file anywhere (your mIRC folder is fine), with the `dcx` folder from
-`scripts/mirc/` beside it (see "DCX" below), and, in mIRC:
+Download **`dccore-mirc.zip`** from the latest release
+(<https://github.com/Ninja-FSE/dccore/releases/latest/download/dccore-mirc.zip>) and extract it
+into your mIRC folder (`//echo -a $mircdir` in mIRC says where that is): it
+holds `dccore.mrc` with the `dcx` and `dll` folders it loads beside it (see
+"DCX" and "Dark theme and icons" below), and a short README (#1412). From a
+copy of the repository, the same files are `scripts/mirc/dccore.mrc`,
+`scripts/mirc/dcx/` and `scripts/mirc/dll/` without `dll/src/`. Then, in mIRC:
 
 ```
 /load -rs dccore.mrc
@@ -1079,14 +1115,21 @@ tests DCX in this mIRC and writes what it found in `@DCCore`.
 - **The admin password, once per connection.** The script logs in with its
   paired token, which may read the settings but not change them. The first
   time a save needs it, the window asks for the admin password (masked), sends
-  `unlock` with it, and saves; the password is not kept, shown or logged. No
+  `unlock` with it, and saves; the password is not kept, shown or logged. The
+  **Console feed on** box is the exception: refused, it goes back to what the
+  bot has and the status line says so - type `unlock <password>` in `@DCCore`,
+  then Apply again. No
   password, or a wrong one, saves nothing and keeps your edits. The on-connect
   commands, which may hold a login, show only after **Unlock** beside them. A
   new connection starts locked again.
 - **After a save** the status line says *Applying...* until the bot has
   reloaded (it may first wait for transfers to finish), then *Saved and
-  applied*, and the page shows the bot's values. If the console reconnects
-  while you have changes not saved, they are kept: **Reload** discards them.
+  applied*, and the page shows the bot's values. If the reload fails - an
+  `admin_config.py` left with a syntax error, say - it says the settings were
+  saved to `settings.conf` but could not be applied, and `@DCCore` has the
+  bot's sentence; the bot's log says why. The page keeps what you saved, and
+  **Reload** shows what the bot is running. If the console reconnects while
+  you have changes not saved, they are kept: **Reload** discards them.
 - **Structured pages**: the on-connect commands on **IRC Server** (**Resend
   now** sends them again, **Unlock** shows them); **Lists**, a table with a row
   per list, where **Add list** and **Edit** open a window for one list's name,
@@ -1167,7 +1210,7 @@ theme the next time it opens; the other windows change at once.
 /dccore downloads            open @DCCore-Downloads: what the bot is fetching from other bots (needs 1.10)
 /dccore weburl [addr]        where the bot's dashboard is, for that window's menu
 /dccore status               ask the bot for its status
-/dccore consolefeed on|off   what this window shows beyond STATUS - requests, sends, searches...
+/dccore consolefeed on|off   what this window shows beyond STATUS - requests, sends, searches... (a token login: unlock <password> first)
 /dccore lists                the bots' lists we hold, and which have changed
 /dccore fetch [bot]          ask the bots whose lists changed, or one bot
 /dccore raw <command>        send any console command
@@ -1285,10 +1328,12 @@ is lost.
 ### Updating the script
 
 A newer bot may send a line with a field the loaded script does not know
-about. Save the new `dccore.mrc` over the old one, with the `dcx` and `dll`
-folders from `scripts/mirc/` beside it - the control panel draws with the
-first and the dark theme and icons come from the second; without them the
-script uses the plain settings window and light dialogs - then in mIRC:
+about. Extract the new `dccore-mirc.zip` over the old files, where
+`dccore.mrc` already is: it replaces the script and its `dcx` and `dll`
+folders - the control panel draws with the first and the dark theme and icons
+come from the second; without them the script uses the plain settings window
+and light dialogs - and has no `dccore.ini`, so your settings and the token
+stay as they are. Then in mIRC:
 
 ```
 /reload -rs dccore.mrc
@@ -1466,7 +1511,11 @@ block lives in memory only. The limit is per address, not per chat: a password i
 counted before it is checked, so chats opened side by side share the three, and a
 chat that was already open when the address was blocked is closed at its next
 attempt with "Too many failed password attempts from this address." An
-`unlock <password>` counts the same way, against the same three.
+`unlock <password>` counts the same way, against the same three. Only the
+admin password, at the prompt or in `unlock`, clears the count: a login with
+a paired token, full or read-only, is not counted as a wrong password, but it
+leaves the address's earlier wrong ones as they were, and a blocked address
+is refused with a token too.
 
 **Locked out entirely.**
 Edit `admin_config.py` and restart. While `ADMIN_CHANNEL_COMMANDS` is on (it

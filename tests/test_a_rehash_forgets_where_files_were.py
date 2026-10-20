@@ -29,7 +29,6 @@ A rebuild (!update) needs no such call: it changes the lists, not where
 the files are, and anything it does move fails the on-disk check.
 """
 
-import io
 import os
 import shutil
 import sys
@@ -42,6 +41,7 @@ if REPO_ROOT not in sys.path:
 import dcc  # noqa: E402
 import defaults as config  # noqa: E402
 
+from tests.support import rehash_with_the_reload_stood_in  # noqa: E402
 from tests.test_an_unknown_filename_does_not_scan_the_library_unbounded import LookupBase  # noqa: E402
 
 
@@ -115,32 +115,49 @@ class TheMemoriesAreReallyGone(LookupBase):
         self.assertEqual(dcc._lookup_misses, {})
 
 
-class TheRehashCallsIt(unittest.TestCase):
-    """handle_rehash_request() reloads half the daemon and cannot be run
-    here - see test_rehash_config_window.py, and the same reasoning as
-    test_a_rehash_keeps_the_interlocks_of_a_running_pack.py's own wiring
-    class. The wiring is read instead: the call is there, and it is after
-    the reload rather than before it, where the reload would undo it."""
+class TheRehashCallsIt(LookupBase):
+    """The real handle_rehash_request(), with only its module reload stood in
+    for (tests.support.rehash_with_the_reload_stood_in; this was read out of
+    commands.py, #1469): the memories are gone afterwards, and gone even when
+    requests arrive during the reload, which is why the forget comes after
+    it - forgotten before the reload, the requests that arrive during it
+    would refill them from the old configuration."""
 
-    def rehash(self):
-        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
-            return handle.read().split("def handle_rehash_request(", 1)[1]
+    def setUp(self):
+        super().setUp()
+        # A found track claims a slot whose send never runs here (the
+        # fixture's threads are recorded, not started), so the quiesce would
+        # wait out its whole bound for it.
+        self.set_config(REHASH_TRANSFER_WAIT=0)
+
+    def remember_something(self):
+        self.ask(os.path.basename(self.tree.tracks[0]))
+        self.ask("Nothing By This Name.flac")
+
+    def memories(self):
+        return dcc._lookup_hits, dcc._lookup_folders, dcc._lookup_misses
 
     def test_the_rehash_forgets_the_lookups(self):
-        self.assertIn("forget_library_lookups()", self.rehash())
+        self.remember_something()
+        self.assertTrue(all(self.memories()), "the control: nothing was remembered to drop")
+
+        self.assertIs(rehash_with_the_reload_stood_in(self, lambda *_a, **_k: []), True)
+
+        self.assertEqual(self.memories(), ({}, {}, {}))
 
     def test_and_does_so_after_the_reload(self):
-        body = self.rehash()
-        # Asserted here too, not just in the test above: index() below would
-        # otherwise raise ValueError and report this as an error rather than
-        # as the failure it is.
-        self.assertIn("forget_library_lookups()", body)
-        reload_at = body.index("\n        reload_modules_in_order()\n")
+        filled_during_the_reload = []
 
-        self.assertLess(reload_at, body.index("forget_library_lookups()"),
-                        "forgotten before the reload is forgotten too early: "
-                        "the requests that arrive during the reload would "
-                        "refill them from the old configuration")
+        def reload_while_requests_arrive(*_args, **_kwargs):
+            self.remember_something()
+            filled_during_the_reload.append(all(self.memories()))
+            return []
+
+        self.assertIs(rehash_with_the_reload_stood_in(self, reload_while_requests_arrive), True)
+
+        self.assertEqual(filled_during_the_reload, [True], "the control: the requests remembered nothing")
+        self.assertEqual(self.memories(), ({}, {}, {}),
+                         "what was learned during the reload outlived the rehash")
 
 
 if __name__ == "__main__":

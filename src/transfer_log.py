@@ -204,9 +204,10 @@ _INSERT_WITH_STATUS = ("INSERT INTO transfers (direction, nick, kind, ended_at, 
                        " size, bytes, seconds, speed, waited, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
 
 
-# How far before outcomes_began a row may be timed and still be one whose time
-# was taken just before the open that wrote the stamp (#1203).
-_STAMP_RACE_SECONDS = 2
+# How far before the call that wrote the outcomes_began stamp a row may be timed
+# and still be one whose time was taken just before it (#1203, #1417): the caller
+# reads the clock, then calls; a second may tick over in between.
+_STAMP_RACE_SECONDS = 1
 
 
 def _record(row):
@@ -216,6 +217,8 @@ def _record(row):
     if not path:
         return False
     insert = _INSERT_WITH_STATUS if len(row) == 12 else _INSERT
+    # Before the open that may stamp outcomes_began (#1417): see below.
+    called = int(time.time())
     try:
         with runtime.transfer_log_lock:
             conn = _connect(path, WRITE_TIMEOUT, repair=True)
@@ -227,11 +230,16 @@ def _record(row):
                 # first failure written after an upgrade fell before the stamp
                 # and out of every success rate (seen on Windows CI, where
                 # that first open is slow). Only such a row - timed a moment
-                # before this very open - is lifted to the stamp, by a second
-                # or two at most; a row that really is older (an import, a
-                # test's backdated row) keeps its time.
+                # before this very open - is lifted to the stamp; a row that
+                # really is older (an import, a test's backdated row) keeps its
+                # time. "Just before" was a fixed two seconds until #1417, and
+                # an open slower than that (a loaded Windows runner, an old
+                # file's migration) still lost the row: now it is a row timed
+                # in the second this call began, or the one before, when the
+                # stamp was written during the call - however long the open took.
                 began = conn.execute("SELECT MIN(at) FROM outcomes_began").fetchone()[0]
-                if began is not None and began - _STAMP_RACE_SECONDS <= row[3] < began:
+                if (began is not None and int(began) >= called
+                        and called - _STAMP_RACE_SECONDS <= row[3] < began):
                     row = row[:3] + (int(began),) + row[4:]
                 try:
                     with conn:

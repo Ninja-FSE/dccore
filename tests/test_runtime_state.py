@@ -305,9 +305,12 @@ class NothingRebindsARuntimeContainer(unittest.TestCase):
         # editing it.
         # WEBUI_ALLOWED_HOSTS likewise: the names the dashboard answers
         # to, a setting re-read on a rehash so an edit takes effect.
+        # ANNOUNCE_TRANSFERS_EXCLUDE too (#1444): the channels not told of a
+        # finished transfer, a setting an operator edits and rehashes.
         allowed = {"ADMIN_HOSTMASKS", "LIST_IGNORED_EXTENSIONS",
                    "LIST_VIDEO_EXTENSIONS", "LIST_VIDEO_COMPANION_EXTENSIONS",
-                   "RAR_EXTENSIONS", "WEBUI_ALLOWED_HOSTS"}
+                   "RAR_EXTENSIONS", "WEBUI_ALLOWED_HOSTS",
+                   "ANNOUNCE_TRANSFERS_EXCLUDE"}
 
         with io.open(os.path.join(REPO_ROOT, "src", "defaults.py"), encoding="utf-8") as handle:
             tree = parse_source(handle.read())

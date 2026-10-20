@@ -17,7 +17,7 @@ Two optional extras:
 | | |
 |---|---|
 | **Web dashboard** | needs Flask. Install it with **the same interpreter that runs the daemon**: `python3 -m pip install -r requirements-web.txt` on Linux, `py -3 -m pip install -r requirements-web.txt` on Windows. A bare `pip` follows whatever `python` resolves to, which on a machine with more than one Python is not necessarily the one the launcher picks — and the result is a dashboard that silently never starts. The bot itself starts fine without Flask and says so; `start-dccore` `check` now reports this before you get that far. |
-| **`!rar` album packing** | needs a `rar` binary on `PATH`. Without it, `!rar` refuses with a notice; ordinary transfers are unaffected. |
+| **`!rar` album packing** | needs a `rar` binary on `PATH`, RAR 5.50 or later (an older one cannot be told the list's character set, and every pack fails). Without it, `!rar` refuses with a notice; ordinary transfers are unaffected. |
 
 > **`pip` may not be installed yet.** Debian and Ubuntu package it separately from Python itself - `python3` does not pull in `python3-pip` - so a minimal install, and especially a fresh Proxmox LXC template, commonly has one without the other. If the command above says something like `No module named pip`, run `sudo apt install python3-pip` (or `python3 -m ensurepip --upgrade` where `apt` is not available) first. Only the web dashboard extra above needs pip at all - the daemon itself installs nothing.
 
@@ -129,6 +129,8 @@ Safe to run again later: every prompt shows what is already configured as its de
 
 Both are gitignored. `defaults.py` applies `admin_config.py` first and `settings.conf` second, so a value set in both takes the `settings.conf` one. The daemon says so at startup for every setting that `admin_config.py` sets to something `settings.conf` then overrides (`[CONFIG] settings.conf overrides WEBUI_HOST, which admin_config.py also sets ...`) — if an edit to `admin_config.py` seems to do nothing, that line is why.
 
+**A save starts a rehash, and says whether it worked.** Saving from the dashboard's Settings page, the admin console or the mIRC settings window writes `settings.conf` and then rehashes, which first waits up to `REHASH_TRANSFER_WAIT` seconds for running transfers. The Settings page says "Rehash started" at once, and when the rehash is done, whether the new settings are in effect. If the rehash failed - an `admin_config.py` with a syntax error, for one - all three say so in the same words: the settings were saved to `settings.conf`, but the bot may not be running the saved values, and its log says why. Fix that, then rehash.
+
 **One line `settings.conf` cannot read makes the whole file unreadable**, and every setting in it falls back to its default. The log names the file and the line (`[CONFIG] Could not read settings.conf, continuing with the built-in defaults: line 5 is not a setting: 'MAX_DCC_SLOTS 5' ...`), the setup check fails on it, and when the file held your nickname, channels or admin nick the bot refuses to start with that same line rather than offering the first-run setup again. `configure.py` says it too, before asking anything. Fix the line and start again.
 
 ### What must be set
@@ -142,14 +144,14 @@ Three things are deliberately *not* required:
 
 ### Values that are refused
 
-The Settings page, the admin console, `configure.py` and the browser setup all refuse these when you **save** one:
+The Settings page, the admin console, `configure.py` and the browser setup all refuse these when you **save** one, wherever they offer the setting (`configure.py` and the browser setup ask for only a few):
 
 - **`ANNOUNCE_INTERVAL`** below 60 seconds. There is no "0 = off" here: a 0 used to make the bot advert as fast as the channel would take it.
 - **`FILE_DIRECTORY`** that is not an existing folder (blank is fine - see above). A path in quotes is refused with the path to use instead.
-- **`CHANNEL`** entries that do not start with `#` (or `&`), or that hold a space - several channels are separated by commas. `DEBUG_CHANNEL` and `BROADCAST_SEARCH_CHANNEL` take one channel each.
+- **`CHANNEL`** entries that do not start with `#` (or `&`), or that hold a space - several channels are separated by commas. `DEBUG_CHANNEL` and `BROADCAST_SEARCH_CHANNEL` take one channel each. `ANNOUNCE_TRANSFERS_EXCLUDE` follows the same rule for each of its entries, and may be empty; it is set on the Settings page, in the admin console or in the mIRC settings window.
 - **`LIST_BASE_NAME`** with a character a file name cannot hold on every system, such as `|` or `\`. The refusal suggests the name to use (`DJ|Music` becomes `DJ_Music`), which is what the bot derives from a nickname like that anyway.
 
-A `settings.conf` written before these rules still **loads**, so a bot that ran before an update keeps running; the startup log names each value it had to change and its line. A `CHANNEL` list keeps its real channels and drops only the entries that are not (`#mychannel, jazz` joins `#mychannel`) - only a list with no channel in it at all is ignored. An `ANNOUNCE_INTERVAL` under 60 is used as 60. A `LIST_BASE_NAME` is kept as it is where this system can use it as a file name (a `|` on Linux or macOS), so the published list keeps its name, and sanitised where it cannot. A single `DEBUG_CHANNEL` or `BROADCAST_SEARCH_CHANNEL` that is not a channel is ignored, as before. Saving any of them again needs a value from the list above.
+A `settings.conf` written before these rules still **loads**, so a bot that ran before an update keeps running; the startup log names each value it had to change and its line. A `CHANNEL` list keeps its real channels and drops only the entries that are not (`#mychannel, jazz` joins `#mychannel`) - only a list with no channel in it at all is ignored. `ANNOUNCE_TRANSFERS_EXCLUDE` keeps its channels the same way. An `ANNOUNCE_INTERVAL` under 60 is used as 60. A `LIST_BASE_NAME` is kept as it is where this system can use it as a file name (a `|` on Linux or macOS), so the published list keeps its name, and sanitised where it cannot. A single `DEBUG_CHANNEL` or `BROADCAST_SEARCH_CHANNEL` that is not a channel is ignored, as before. Saving any of them again needs a value from the list above.
 
 With more than one list, the bot starts as long as any list has a folder it can read; a list whose folders are all missing (an unplugged drive) is named in a warning at startup and by the setup check, and its channels have nothing to serve until the drive is back.
 
@@ -255,8 +257,9 @@ the downloader removes with `@<bot>-remove`, does not count. Nor does a
 failure on the bot's side, such as a file that vanished from the library or
 a network share that stopped answering while it was read. Admins
 (`ADMIN_NICK`) are never paused. The count is kept in memory, so a restart
-forgives it. The console's `status` shows who is paused, and `unpause <nick>`
-lifts it at once. 0, the default, is off.
+forgives it; a nick change does not, since the count and the pause follow
+the new nick like the queue does. The console's `status` shows who is
+paused, and `unpause <nick>` lifts it at once. 0, the default, is off.
 
 A send nobody connected to is often the bot's own problem rather than the
 downloader's: a wrong address (`MY_IP_OR_DOCK`), a port forward the router
@@ -301,11 +304,14 @@ is not judged in its first minute.
 Slow has to be the downloader's fault, not your line's. Only the slowest
 send is stopped, and only while another of your sends is reaching that
 speed at the same time - proof your side can deliver. When your whole
-uplink is full, your disk is slow, or your **Max upload speed** is what
-holds the sends back, every send is slow and none is stopped. With one slot,
-or one send running, it never fires. Someone whose own send was stopped for
-its speed does not, while waiting, cost another slow send its slot, so two
-slow downloaders cannot keep trading it.
+uplink is full or your disk is slow, every send is slow and none is stopped.
+Your **Max upload speed** is shared between the sends, evenly among those
+that can use their share, so while it is full a send getting about its even
+share is not stopped; one well under it - on the downloader's slow link,
+while the other sends take the rest - is. With one slot, or one send
+running, it never fires. Someone whose own send was stopped for its speed
+does not, while waiting, cost another slow send its slot, so two slow
+downloaders cannot keep trading it.
 
 A stopped file that was waiting in the queue stays there: it counts as a
 failed try against **Max send failures** (`MAX_SEND_FAILS`), the person goes
@@ -326,6 +332,28 @@ asks - 10 seconds when it does not say, never more than 120 - and sends a
 dropped reply again, once. The bot's log shows a `[QUEUE]` line each time.
 There is nothing to set: if you see that line often, a larger `MSG_DELAY`
 makes it rarer.
+
+Joining a channel counts too, and Undernet remembers how many new targets
+a connection had left across a reconnect: a bot restarted after hours in many
+channels can be refused the last few JOINs. Each one gets a `[JOIN WAIT]`
+line saying when it is asked for again - just after the wait the server
+gave, one channel per wait - and the rest of the JOIN burst waits its turn
+behind it instead of being refused too (#1415). A channel the bot was kicked
+from keeps its slower rejoin, with the advert.
+
+### A channel that does not want the "sent" line
+
+With **Announce finished transfers in the channel** (`ANNOUNCE_TRANSFERS`)
+on, the bot posts a line in the channel each time a file has been sent.
+Where a channel does not allow that kind of message, list it in **Don't
+announce finished transfers in these channels** (`ANNOUNCE_TRANSFERS_EXCLUDE`,
+on the Settings page under *Advertising & search* or in the mIRC settings
+window under *General > Advertising*): channels separated by commas,
+each with its `#`, such as `#alpha, #beta`. Case does not matter. The advert
+still goes there; only the "sent" line does not. A channel's *Quiet* or
+*Request only* mode also stops the line, but stops the advert too. Empty,
+the default, announces in every channel. Your own debug line still records
+every send, as it does with the announcement off.
 
 ### Starting with the system
 
@@ -373,14 +401,14 @@ or `!update` from IRC, or the dashboard's **Update list** button. On a large lib
 
 Because everything is listed, **anything you leave in that directory is offered to anyone who asks.** It is the public face of the bot — keep out of it whatever should not leave.
 
-**The list is what the bot serves** (#1376). A request for a name the list does not have is answered "File not found" at once: the bot does not search the folders for it. A file you add is requestable after the next rebuild; run one (**Update list**, `!update`, or `update` at the console) to offer it straight away. A file type the list leaves out is not served either, even to someone who knows its exact name.
+**The list is what the bot serves** (#1376). A request for a name the list does not have is answered "File not found" at once: the bot does not search the folders for it. A file you add is requestable after the next rebuild; run one (**Update list**, `!update`, or `update` at the console) to offer it straight away. A file type the list leaves out is not served either, even to someone who knows its exact name - and not packed: a `!rar` archive holds only the files the list lists (in subfolders too, whatever the case of the extension), and a folder whose only packable files the list leaves out gets no `!rar` row and is not packed. That is `LIST_IGNORED_EXTENSIONS` and the list's own file types to leave out alike; each list's rule is its own, so a folder two lists share is packed by the rule of the list it was asked from.
 
 **A folder you rename, replace or delete while a rebuild runs is left out of that list** (#1383), and the log says so (`moved or removed during the scan`); the rebuild still publishes, and the next one lists whatever took its place. What does stop a rebuild is a configured folder (or the share it is on) going away mid-scan, or a folder the system cannot read for any other reason. Then the bot keeps serving the previous list and says `could not be read`; a folder that is merely denied to the bot's account is left out instead, and stays out until its permissions change. A separate drive mounted inside a configured folder and unmounted mid-scan is the exception: the configured folder itself is unchanged, so that drive's folders are left out of that list like renamed ones (Linux and macOS; on Windows the scan does not go into a drive mounted in a folder at all).
 
 Two settings decide how the result is split up:
 
 - **`SEPARATE_VIDEO_LIST`** — publishes film and series as their own list rather than mixing them in with the music. Both travel in the same archive people get by typing your bot's name, so there is no second command to learn. `LIST_VIDEO_EXTENSIONS` says which formats count, and `LIST_VIDEO_COMPANION_EXTENSIONS` (subtitles, `.nfo`, `.sfv`) says which files follow a film into its list when they sit in the same folder - so a release travels whole, while an album's `.nfo` stays with the album. Turn it off if your films and music are already in separate folders and you would rather split by folder.
-- **`RAR_EXTENSIONS`** — which formats make a folder packable with `!rar`. A folder needs one of these to get a row in the album list. Everything else stays listed and directly requestable; this only decides what can be packed. **`MAX_RAR_FOLDER_SIZE`** bounds how large a folder `!rar` will pack — 10 GB by default, which passes a large box set and refuses the folder somebody names hoping it is a library. Set it to 0 for no limit.
+- **`RAR_EXTENSIONS`** — which formats make a folder packable with `!rar`. A folder needs one of these to get a row in the album list. Everything else stays listed and directly requestable; this only decides what can be packed. **`MAX_RAR_FOLDER_SIZE`** bounds how large a folder `!rar` will pack — 10 GB by default, which passes a large box set and refuses the folder somebody names hoping it is a library. Set it to 0 for no limit. Archives are built in `TMP_ZIP_DIR`. A `!rar` waits in the queue, keeping its place, while that folder's disk has no room for its files with the same room to spare that fetching keeps free; a smaller folder that fits goes ahead meanwhile. Every `!rar` waits while as many packed archives as `MAX_DCC_SLOTS` already wait to be sent. Both carry on by themselves, and the log says `[RAR-HOLD]` while a pack waits. A folder too big for that disk altogether is refused once, with a notice.
 
 **`LIST_SHOW_AUDIO_INFO`** (off by default) adds each MP3 and FLAC file's length and quality after its size -
 `::INFO:: 10.3MB 4m31s 320/44.1/JS`, the way other servers' lists show it (`~245` is a VBR average). Every audio

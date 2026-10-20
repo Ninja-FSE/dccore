@@ -247,6 +247,23 @@ class AnOldRecord(DCCoreTestCase):
             self.assertTrue(transfer_log.record_unfinished(transfer_log.SENT, FAILED, "file", 100, 7))
         self.assertEqual(transfer_log.outcomes()["rows"], {("sent", "file"): {FAILED: 1}})
 
+    def test_the_first_row_counts_however_long_the_upgrade_takes(self):
+        """The same race with an open slower than a second or two - a loaded
+        Windows runner, an old file's migration (#1417). The row's time is
+        taken before the call, the stamp after five seconds of opening."""
+        start = int(time.time())
+        clock = itertools.chain([start + 0.9, start + 0.95], itertools.repeat(start + 5.5))
+        with mock.patch.object(transfer_log.time, "time", side_effect=lambda: next(clock)):
+            self.assertTrue(transfer_log.record_unfinished(transfer_log.SENT, FAILED, "file", 100, 7))
+        self.assertEqual(transfer_log.outcomes()["rows"], {("sent", "file"): {FAILED: 1}})
+
+    def test_a_backdated_row_is_not_lifted_to_the_stamp(self):
+        """Only a row timed just before the call that stamped is lifted: one
+        from a day ago keeps its time, and stays out of the rate."""
+        transfer_log._record(("sent", "somenick", "file", int(time.time() - DAY), None, None, 100, 7,
+                              None, None, None, FAILED))
+        self.assertEqual(transfer_log.outcomes()["rows"], {})
+
     def test_two_connections_opening_it_do_not_trip_over_each_other(self):
         first = transfer_log._open(config.TRANSFER_LOG_FILE, 2)
         second = transfer_log._open(config.TRANSFER_LOG_FILE, 2)
@@ -545,6 +562,26 @@ FAKE_RAR = r'''
 import os, sys, time
 target = [a for a in sys.argv if a.endswith(".rar")][0]
 release = os.environ.get("FAKE_RAR_RELEASE", "")
+# What this pack was asked for, kept beside the release file: the packer
+# lists the archive once it is made (#1376), and is answered with it.
+names_file = os.path.join(os.path.dirname(release), os.path.basename(target) + ".names")
+if sys.argv[1:2] == ["lb"]:
+    if os.path.exists(names_file):
+        with open(names_file, "rb") as kept:
+            sys.stdout.buffer.write(kept.read())
+    sys.exit(0)
+asked = []
+base = os.path.dirname(os.path.abspath(sys.argv[-1]))
+for arg in sys.argv:
+    if arg.startswith("-n@") and os.path.exists(arg[3:]):
+        # Gone already when a pack is cancelled before this process reads it.
+        with open(arg[3:], "rb") as listed:
+            for line in listed.read().decode("utf-8" if "-scfl" in sys.argv else "utf-16").split("\n"):
+                line = line[:-1] if line.endswith("\r") else line
+                if line:
+                    asked.append(os.path.relpath(line, base).replace(os.sep, "/"))
+with open(names_file, "wb") as kept:
+    kept.write("".join(name + "\n" for name in asked).encode("utf-8"))
 if os.environ.get("FAKE_RAR_EXIT"):
     sys.exit(int(os.environ["FAKE_RAR_EXIT"]))
 with open(target, "wb") as out:
@@ -591,7 +628,8 @@ class EveryPackEndingIsOneRow(DCCoreTestCase):
 
         def popen(cmd, *args, **kwargs):
             process = real_popen([sys.executable, script] + list(cmd[1:]), *args, **kwargs)
-            self.rars.append(process)
+            if cmd[1:2] != ["lb"]:
+                self.rars.append(process)
             return process
 
         for patch in (mock.patch.object(subprocess, "Popen", popen),
@@ -630,7 +668,11 @@ class EveryPackEndingIsOneRow(DCCoreTestCase):
     def ask(self):
         with contextlib.redirect_stdout(io.StringIO()):
             dcc.handle_download_request(RecordingSocket(), USER, "!rar " + self.ALBUM, CHANNEL)
-        self.wait_for(lambda: runtime.packer_thread is not None, "the packer to start")
+        # Started, or already over (#1417): a pack with no rar to run ends
+        # within one poll, and the packer clears runtime.packer_thread as it
+        # ends - waiting for the thread alone timed out on a fast runner.
+        self.wait_for(lambda: runtime.packer_thread is not None or self.album_rows(),
+                      "the packer to start")
 
     def album_rows(self):
         return rows("nick, kind, item_key, name, bytes, status")

@@ -26,7 +26,6 @@ import contextlib
 import io
 import json
 import os
-import socket
 import sys
 import tempfile
 import threading
@@ -203,24 +202,9 @@ class TheWakeInTheFinallyIsGuarded(unittest.TestCase):
                         "the release is what the guard protects; it comes after the wake")
 
 
-def loopback_is_usable():
-    """Bind and dial for real on the range THIS file's sends use."""
-    for port in range(ack.PORT_START, ack.PORT_END + 1):
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            listener.bind(("0.0.0.0", port))
-            listener.listen(1)
-            client = socket.create_connection(("127.0.0.1", port), timeout=2)
-            conn, _ = listener.accept()
-            conn.close()
-            client.close()
-            return True
-        except OSError:
-            continue
-        finally:
-            listener.close()
-    return False
+# Probed on the window THIS file's sends use - they are ack.ARealReceiver's -
+# not on the shared probe's own (#1469).
+loopback_is_usable = ack.loopback_is_usable
 
 
 USER = ack.USER

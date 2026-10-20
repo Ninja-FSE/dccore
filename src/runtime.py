@@ -85,6 +85,17 @@ pack_lock = threading.Lock()
 # !rehash reloads dcc.py while a pack runs.
 pack_owner = None
 
+# The folder packs waiting for room on the disk TMP_ZIP_DIR is on (#1376):
+# a tuple of {"row", "total", "needed", "free"}, one per queue row whose
+# files did not fit - dcc.py's pack_hold_reason(row) reads it, and that row
+# waits while other packs go ahead. A tuple, rebound under queue_lock, not a
+# list kept in place: nothing outside dcc.py holds on to it. And the watcher
+# that looks at held packs again (dcc._watch_held_packs()), while one runs,
+# so a second is not started. Here because a !rehash reloads dcc.py while a
+# pack waits, and the new copy must see both.
+pack_space_holds = ()
+pack_hold_watch = None
+
 # The stop-file watcher (#1065, stopping.py): one per process, kept here so a
 # !rehash cannot start a second.
 stop_watcher_thread = None
@@ -275,6 +286,57 @@ nick_reclaim_asked_at = None
 # rehash reloads, so a lock allocated there would be a new lock every time -
 # the founding reason this module exists.
 rehash_lock = threading.Lock()
+
+
+class SaveRehashOutcome:
+    """How the rehash the latest settings save started went (#1462).
+
+    A save writes settings.conf and starts a rehash on a thread of its own,
+    so its answer can only say "started". The dashboard's Settings page asks
+    here afterwards, by the number begin() gave the save, whether that rehash
+    reloaded the settings or failed (a syntax error in admin_config.py, say).
+
+    One record, not one per save: begin() moves it on to the newer save, and
+    a page waiting for an older number takes the newer one's answer. That
+    rehash started after both saves were written, so it read both. finish()
+    for an older number than the record's is dropped for the same reason -
+    the record already belongs to a rehash that read that save as well.
+
+    Here, not in web_settings.py, so a rehash does not forget the answer
+    while it reloads modules - this module is never reloaded.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._seq = 0              # the latest save's number; 0 = none yet
+        self._ok = None            # True/False once its rehash finished; None while it runs
+        self._finished_at = None   # time.time() when it finished
+
+    def begin(self):
+        """A save has been written and its rehash is about to start: its
+        number, one more than the last."""
+        with self._lock:
+            self._seq += 1
+            self._ok = None
+            self._finished_at = None
+            return self._seq
+
+    def finish(self, seq, ok):
+        """Record that save `seq`'s rehash finished; `ok` True only when it
+        reloaded. Ignored when a later save has begun since."""
+        with self._lock:
+            if seq != self._seq:
+                return
+            self._ok = ok is True
+            self._finished_at = time.time()
+
+    def snapshot(self):
+        """{"seq", "ok", "finished_at"}, read together."""
+        with self._lock:
+            return {"seq": self._seq, "ok": self._ok, "finished_at": self._finished_at}
+
+
+save_rehash = SaveRehashOutcome()
 
 
 # The cross-list search index's connection cache -----------------------------
@@ -559,6 +621,17 @@ private_messages_saver = None   # (thread, wake event) while one is waiting
 
 kicked_channels = {}
 kicked_channels_lock = threading.Lock()
+# Channels whose JOIN the server refused with "target change too fast" (439/707,
+# #1415): {channel_key: the time.time() it may be asked for again}. Under
+# kicked_channels_lock. join_wait_seconds is the last wait the server gave,
+# for the channels a cut-short JOIN burst left unasked.
+join_waits = {}
+join_wait_seconds = None
+# Channels the server echoed the bot's own JOIN to on this connection, less
+# the ones it was kicked from or parted since: the proof it is in them that a
+# NAMES reply is not (irc.note_own_join()). Under kicked_channels_lock, and
+# emptied with join_waits for each new connection.
+joined_channels = set()
 
 # config.send_queue's lock (#665, audit L1). The per-user text lanes are
 # written by every request, search and reply thread (oserve.queue_message)

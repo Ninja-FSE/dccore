@@ -195,16 +195,28 @@ _SECONDARY_ROOT_NAME = "_channels"
 # would be mistaken for some other directory's held copy.
 _HELD_SUFFIX = ".previous"
 
-# The tag a changed or reserved name carries: "-" and six hex digits of the
-# real name. A name that merely LOOKS tagged is tagged again, so no peer can
-# pick a nick that spells out another bot's tagged directory.
-_DIR_TAG_RE = re.compile(r"-[0-9a-f]{6}$", re.IGNORECASE)
+# The tag a changed or reserved name carries: "-" and sixteen hex digits (64
+# bits) of the real name, so that two names which clean to the same stem do
+# not also share a tag. It costs 17 characters of a path component, which a
+# nick or a channel name leaves ample room for.
+_DIR_TAG_DIGITS = 16
+# Directories were tagged with six digits before; migrate_held_list_
+# directories() moves a held list from that name to the longer one.
+_OLD_DIR_TAG_DIGITS = 6
+# A name that merely LOOKS tagged - in the current form or the older six-digit
+# one - is tagged again, so no nick spells out another bot's tagged directory,
+# nor one still on disk under the older name.
+_DIR_TAG_RE = re.compile(
+    rf"-(?:[0-9a-f]{{{_DIR_TAG_DIGITS}}}|[0-9a-f]{{{_OLD_DIR_TAG_DIGITS}}})$", re.IGNORECASE)
 
 
 def _name_digest(text):
-    """Six hex digits of `text`, lower-cased first: IRC compares nicks and
-    channels without case, and every caller lower-cases the directory."""
-    return hashlib.sha1(str(text).strip().lower().encode("utf-8", "replace")).hexdigest()[:6]
+    """_DIR_TAG_DIGITS hex digits of `text`, lower-cased first: IRC compares
+    nicks and channels without case, and every caller lower-cases the
+    directory. Also dcc_fetch.bot_folder_name()'s tag (#1438): a change here
+    renames every tagged per-bot fetch folder too."""
+    digest = hashlib.sha1(str(text).strip().lower().encode("utf-8", "replace")).hexdigest()
+    return digest[:_DIR_TAG_DIGITS]
 
 
 def _needs_dir_tag(name, real):
@@ -217,6 +229,9 @@ def _needs_dir_tag(name, real):
     either replaced the other's list. Only a name that came through unchanged
     is its own proof of uniqueness; any other is tagged with a digest of the
     real one, as list.list_slug() does for list names.
+
+    Also dcc_fetch.bot_folder_name() (#1438): what this tags, a per-bot fetch
+    folder tags too.
     """
     lowered = name.lower()
     return (name != real
@@ -2581,10 +2596,14 @@ def migrate_held_list_directories(log=print):
     Directory names became collision-free (_needs_dir_tag()): a nick or a
     channel whose name had to be changed to make a directory, or that names
     one of DCCore's own, now carries a short digest. An ordinary nick keeps
-    its directory and nothing here touches it. A list held from before still
-    has its files under the old name - every reader would go on finding them
-    there, but the next fetch extracts to the new one and a purge removes the
-    new one, so the old directory would be left behind for good.
+    its directory and nothing here touches it. The same move takes a list
+    from a directory tagged with the older six digits to the longer tag
+    (_DIR_TAG_DIGITS), its secondary channels' directories included.
+
+    A list held from before still has its files under the old name - every
+    reader would go on finding them there, but the next fetch extracts to the
+    new one and a purge removes the new one, so the old directory would be
+    left behind for good.
 
     So it is renamed, and the entry's paths are rewritten to match - but only
     when that is certainly safe. A directory is left where it is when another
@@ -2592,7 +2611,8 @@ def migrate_held_list_directories(log=print):
     directory, or when the new one already exists. That is the case the change
     is for: two bots that used to share one directory cannot both have it,
     and whichever does not own it under the new names gets its own at its
-    next fetch. Nothing is ever deleted here.
+    next fetch. Nothing is ever deleted here, but for a secondary list's old
+    bot folder once its last channel has moved out of it and it is empty.
     """
     base = os.path.abspath(getattr(config, "FETCHED_FILES_DIR", "./data/fetched"))
     lists_root = os.path.join(base, "lists")
@@ -2669,6 +2689,17 @@ def migrate_held_list_directories(log=print):
                 record["list_path"] = (platform_compat.long_path(moved_to)
                                        if stored.startswith(_LONG_PATH_PREFIX) else moved_to)
             list_mod.forget_folder_tables(under=current)
+            # A secondary list's old bot folder (lists/_channels/<old name>/)
+            # is empty once the last of its channels has moved out, and would
+            # stay behind for good. os.rmdir() removes only an empty folder.
+            old_parent = os.path.dirname(current)
+            channels_root = os.path.join(lists_root, _SECONDARY_ROOT_NAME)
+            if (_inside(old_parent, channels_root) and not _same_path(old_parent, channels_root)
+                    and not _same_path(old_parent, os.path.dirname(expected))):
+                try:
+                    os.rmdir(platform_compat.long_path(old_parent))
+                except OSError:
+                    pass
             rewritten.add(key)
             moved += 1
         if rewritten:

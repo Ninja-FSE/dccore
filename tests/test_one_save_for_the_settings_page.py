@@ -64,12 +64,17 @@ function refreshThemePreview() {}
 function loadSettings() {}
 function loadLists() { return Promise.resolve(); }
 function showSettingsStatus(node, text, isError) { shown.push({ text: text, error: !!isError }); }
+// #1462's wait for the rehash, which an accepted settings save starts: its own
+// tests are in test_the_dashboard_says_whether_a_save_took_effect.py. Without
+// it here the save threw inside its .then() and said "could not reach".
+const awaited = [];
+function awaitSettingsRehash(saved) { awaited.push(saved); }
 const window = { confirm: function () { return confirmAnswer; } };
 
 const NAMES = ["draftFolderShape", "draftListShape", "servedDraftUnsaved", "updateSettingsSaveBar",
                "saveFolders", "saveLists", "saveSettingsPage", "saveTheSettings"];
 const page = new Function("state", "el", "t", "postJson", "renderSettingsCategory", "refreshThemePreview",
-                          "loadSettings", "loadLists", "showSettingsStatus", "window",
+                          "loadSettings", "loadLists", "showSettingsStatus", "window", "awaitSettingsRehash",
   NAMES.map(function (name) { return fn("function " + name + "("); }).join("\n") +
   "\nreturn {" + NAMES.map(function (n) { return n + ": " + n; }).join(", ") + "};");
 
@@ -84,10 +89,11 @@ function fresh(extra) {
                           settingsBaseline: {}, settingsActiveCategory: "your-list" }, extra || {});
   posted = [];
   shown.length = 0;
+  awaited.length = 0;
   answers = { "/api/folders": OK_FOLDERS, "/api/settings": OK_SETTINGS,
               "/api/lists": { ok: true, status: 200, data: { lists: [], message: "Saved." } } };
   return page(state, el, t, postJson, renderSettingsCategory, refreshThemePreview,
-              loadSettings, loadLists, showSettingsStatus, window);
+              loadSettings, loadLists, showSettingsStatus, window, awaitSettingsRehash);
 }
 function settle() { return new Promise(function (resolve) { setTimeout(resolve, 0); }); }
 
@@ -118,7 +124,8 @@ function settle() { return new Promise(function (resolve) { setTimeout(resolve, 
   p = fresh({ foldersDraft: [SHELF], settingsDirty: { LIST_BASE_NAME: "Shelves" } });
   p.saveSettingsPage();
   await settle();
-  out.both = { posted: posted.slice(), dirtyAfter: state.settingsDirty };
+  out.both = { posted: posted.slice(), dirtyAfter: state.settingsDirty, shown: shown.slice(),
+               awaited: awaited.slice() };
 
   // A refused folder list stops the save before the settings.
   p = fresh({ foldersDraft: [], settingsDirty: { LIST_BASE_NAME: "Shelves" } });
@@ -135,7 +142,7 @@ function settle() { return new Promise(function (resolve) { setTimeout(resolve, 
               settingsDirty: { LIST_BASE_NAME: "Shelves" } });
   p.saveSettingsPage();
   await settle();
-  out.lists = { posted: posted.slice() };
+  out.lists = { posted: posted.slice(), shown: shown.slice(), awaited: awaited.slice() };
 
   // A refused list stops the save before the settings too.
   p = fresh({ listsSource: "file", lists: [{ name: "Main", primary: true, channels: [], folders: [SHELF] }],
@@ -200,6 +207,10 @@ class TheOneSave(unittest.TestCase):
         got = self.result["both"]
         self.assertEqual(got["posted"], ["/api/folders", "/api/settings"])
         self.assertEqual(got["dirtyAfter"], {})
+        # the settings save went through to its end: no error said, and it
+        # waits for the rehash it started
+        self.assertEqual([s for s in got["shown"] if s["error"]], [])
+        self.assertEqual(got["awaited"], [{"written": ["LIST_BASE_NAME"], "restart_required": []}])
 
     def test_a_refused_folder_list_keeps_the_settings_unsaved(self):
         got = self.result["refused"]
@@ -210,7 +221,10 @@ class TheOneSave(unittest.TestCase):
         self.assertFalse(got["disabledAfter"], "the operator can fix it and save again")
 
     def test_the_list_editor_is_saved_the_same_way(self):
-        self.assertEqual(self.result["lists"]["posted"], ["/api/lists", "/api/settings"])
+        got = self.result["lists"]
+        self.assertEqual(got["posted"], ["/api/lists", "/api/settings"])
+        self.assertEqual([s for s in got["shown"] if s["error"]], [])
+        self.assertEqual(len(got["awaited"]), 1)
 
     def test_a_refused_list_keeps_the_settings_unsaved(self):
         got = self.result["listsRefused"]

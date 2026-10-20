@@ -719,7 +719,7 @@ def _room_left_locked(queue, free, exclude=None):
     return free
 
 
-def _has_room(size, room):
+def has_room(size, room):
     """Whether a file of `size` fits in `room` and still leaves MIN_FREE_BYTES.
     Nothing to fit, or a disk that cannot be measured, is not held back - the
     write itself still fails safely."""
@@ -1720,7 +1720,7 @@ def check_fetch_queue():
             # A file already known not to fit waits until it does (#964),
             # weighed exactly as handle_incoming_offer() weighs the offer -
             # asked for sooner, its offer would only be held again.
-            if not why and not _has_room(row.get("needs_bytes"), room):
+            if not why and not has_room(row.get("needs_bytes"), room):
                 why = "disk-full"
             if not why and (row.get("retry_at") or 0) > now:
                 why = "retry"
@@ -2710,7 +2710,122 @@ def _fit_name_component(name, limit=MAX_NAME_BYTES):
     return _truncate_utf8(stem, limit - ext_bytes) + ext
 
 
-def _resolve_destination_path(request_id, raw_filename):
+def fetched_files_root():
+    """FETCHED_FILES_DIR, absolute: the folder every fetched file is under."""
+    return os.path.abspath(getattr(config, "FETCHED_FILES_DIR", "./data/fetched"))
+
+
+def fetched_dir_of(row):
+    """The folder `row`'s file is in (#1423): FETCHED_FILES_DIR, or the bot's
+    own folder inside it when the row was fetched with FETCHED_FILES_PER_BOT
+    on. None when the row names a folder that is not one inside
+    FETCHED_FILES_DIR - a hand-edited history file - so nothing is read or
+    deleted through it. Every reader of a row's file goes through here, so a
+    row fetched before the setting changed still finds its file.
+
+    Which folder strings are valid is decided by _fetched_folder_key() alone
+    (#1439), the same rule files_other_rows_hold_locked() compares by: a
+    folder it refuses (absolute, even one inside FETCHED_FILES_DIR, or with
+    a drive) is refused here too. A folder that key accepts normalises to
+    one plain component, and that normalised name is what is joined, so the
+    path is directly inside FETCHED_FILES_DIR by construction: "a/../bot"
+    never resolves through "a", and "bot/" carries no trailing separator.
+    dcc.is_safe_path() stays, for symlinks. The lexical dirname comparison
+    that used to sit beside it never matched a share root (#1440):
+    the child of \\\\server\\share has the parent \\\\server\\share\\, with
+    a separator normpath(root) does not have, so every fetch failed."""
+    root = fetched_files_root()
+    folder = (row or {}).get("fetched_folder")
+    if not folder:
+        return root
+    if _fetched_folder_key(folder) is None:
+        return None
+    path = os.path.join(root, os.path.normpath(str(folder)))
+    if not dcc.is_safe_path(root, path):
+        return None
+    return path
+
+
+def bot_folder_name(bot):
+    """`bot`'s nick as a folder name inside FETCHED_FILES_DIR (#1423), or None
+    when there is no nick at all. The same cleaning a fetched file's name
+    gets (_sanitize_offer_filename(): no separators, no "..", no control codes,
+    Windows' reserved device names made safe), and never a name DCCore itself
+    uses there (_RESERVED_FETCHED_NAMES - "lists" holds every fetched list).
+
+    A nick that cleans to nothing ("[]", "^|`") gets "bot (<digest>)", from
+    list_fetch's directory tag: its own folder rather than the top of
+    FETCHED_FILES_DIR. The space and the parentheses are not nick characters,
+    so no other nick's folder can have that name.
+
+    No folder name has a "." in it: one in the nick becomes "_". A fetched
+    file at the top of FETCHED_FILES_DIR is promoted to its plain name only
+    when that name has a dot (_promote_clean_filename()), so a file and a
+    bot's folder never want the same name there.
+
+    THE CLEANING IS NOT ONE-TO-ONE (#1438). It drops the nick characters a
+    file name cannot hold, []{}|^`, so "[Alfa]" and "Alfa" both cleaned to
+    "Alfa": two bots' files in one folder the operator reads as Alfa's. So a
+    name that is not its own proof of being unique - cleaned (a "." made "_"
+    included), cut short, reserved, or already looking tagged - carries "-"
+    and a digest of the real nick: the rule and the digest the list
+    directories use (list_fetch._needs_dir_tag(), _name_digest()), so the two
+    cannot drift apart. A nick that cleans to itself keeps exactly its name.
+    The digest is of the lower-cased nick: two spellings of one nick that
+    differ only in case still share a folder.
+
+    The tag is the nick's digest as the list directories use it
+    (list_fetch._name_digest(), list_fetch._DIR_TAG_DIGITS hex digits).
+
+    list_fetch is imported here, not at module top, as everywhere else in this
+    module (see _handle_completed_list_fetch())."""
+    import list_fetch
+    raw = str(bot or "").strip()
+    if not list_mod.strip_control_codes(raw).strip():
+        return None
+    cleaned = _sanitize_offer_filename(raw)
+    # Also the nick "fetched_file" itself, which the cleaning cannot tell
+    # from nothing, in any case: one nick, one folder.
+    if cleaned.casefold() == "fetched_file":
+        return f"bot ({list_fetch._name_digest(raw)})"
+    cleaned = cleaned.replace(".", "_")
+    fitted = _fit_name_component(cleaned)
+    if (list_fetch._needs_dir_tag(fitted, raw)
+            or fitted.casefold() in _RESERVED_FETCHED_NAMES):
+        tag = "-" + list_fetch._name_digest(raw)
+        fitted = _truncate_utf8(cleaned, MAX_NAME_BYTES - len(tag)) + tag
+    return fitted
+
+
+def _bot_folder_for_locked(queue, row):
+    """The folder `row` is fetched into (#1423): None with FETCHED_FILES_PER_BOT
+    off or for a list, otherwise its bot's folder. One bot, one folder: a nick
+    that differs only in case reuses the folder a row of the same bot already
+    has - read from the rows in memory, not from the disk, since this runs
+    under _fetch_lock(), which a slow mount must never hold. Caller holds it.
+
+    The FOLDER NAMES are compared, with str.lower() as _name_digest() and the
+    bot's identity fold case (#1438). casefold() went further than either: a
+    nick spelled with "ss" reused the folder of the same nick spelled with an
+    eszett, and one with a long s (U+017F) reused the folder of the one with
+    an "s" - two nicks in one folder, and no filesystem safety bought, since
+    NTFS keeps those names apart.
+    Comparing folder names, not nicks, also means a tagged name never reuses
+    an untagged folder some row has from before the tag."""
+    if not getattr(config, "FETCHED_FILES_PER_BOT", False) or row.get("request_type") == "list":
+        return None
+    name = bot_folder_name(row.get("bot"))
+    if name is None:
+        return None
+    key = name.lower()
+    for other in queue.values():
+        folder = other.get("fetched_folder")
+        if folder and other is not row and str(folder).lower() == key:
+            return str(folder)
+    return name
+
+
+def _resolve_destination_path(request_id, raw_filename, folder=None):
     """Build the on-disk path a completed fetch will be written to, or None
     if it fails the path-containment check. The request id is folded into
     the stored filename so two fetches that happen to share a cleaned
@@ -2724,11 +2839,13 @@ def _resolve_destination_path(request_id, raw_filename):
     "[Errno 22] Invalid argument" from open() - caught and reported as
     "transfer error", which names neither the length nor the name.
     """
-    dest_dir = os.path.abspath(getattr(config, "FETCHED_FILES_DIR", "./data/fetched"))
+    dest_dir = fetched_dir_of({"fetched_folder": folder})
+    if dest_dir is None:
+        return None, None
     clean_name = _sanitize_offer_filename(raw_filename)
     stored_name = _fit_name_component(f"{request_id}_{clean_name}")
     candidate = os.path.join(dest_dir, stored_name)
-    if not dcc.is_safe_path(dest_dir, candidate):
+    if not dcc.is_safe_path(fetched_files_root(), candidate):
         return None, None
     return dest_dir, stored_name
 
@@ -2766,6 +2883,55 @@ def names_one_file(directory, name, other):
         return False
 
 
+def _fetched_folder_key(folder):
+    """A row's `fetched_folder` as the key files_other_rows_hold_locked()
+    compares (#1439), worked out from the string alone - no filesystem call.
+    "" for FETCHED_FILES_DIR itself (no folder), the folder casefolded when
+    it is one plain component inside it, and None for one that climbs,
+    nests, is absolute or names a drive (a hand-edited history file). Such
+    a row matches nothing here, and fetched_dir_of() refuses its folder
+    through this same key, so nothing is read or deleted through it either:
+    it fails closed, as "../x" always did.
+    Casefolded on every platform: a name that differs only in case counts
+    as the same folder, which only ever keeps a file."""
+    if not folder:
+        return ""
+    key = os.path.normpath(str(folder))
+    if (key in (".", "..") or os.sep in key or "/" in key
+            or os.path.isabs(key) or os.path.splitdrive(key)[0]):
+        return None
+    return key.casefold()
+
+
+def _same_folder_form(path):
+    """`path` in the form two folders are compared in (#1440): normalised,
+    case-folded where the platform folds case, and with any trailing
+    separator stripped. A root keeps one after normpath and other folders
+    do not, and the dirname of a share root's child is "\\\\server\\share\\"
+    while normpath of the share root is "\\\\server\\share". Stripping both
+    sides alike keeps "/" and "C:\\" equal to their children's dirname too.
+    normpath has already turned any alternative separator into os.sep."""
+    return os.path.normcase(os.path.normpath(path)).rstrip(os.sep)
+
+
+def _directory_folder_key(directory):
+    """Which folder key (_fetched_folder_key()) `directory` is (#1439),
+    lexically: "" for FETCHED_FILES_DIR itself, a folder directly inside it
+    for that folder's name, and None for anywhere else, where no row's file
+    is. A trailing separator, mixed separators or (on Windows) case do not
+    change the answer, nor does a FETCHED_FILES_DIR that is a share root
+    (#1440, through _same_folder_form())."""
+    if not directory:
+        return None
+    here = os.path.normpath(os.path.abspath(str(directory)))
+    root = _same_folder_form(fetched_files_root())
+    if _same_folder_form(here) == root:
+        return ""
+    if _same_folder_form(os.path.dirname(here)) != root:
+        return None
+    return _fetched_folder_key(os.path.basename(here))
+
+
 def another_row_holds_file_locked(queue, directory, stored_name, row=None):
     """Whether a row other than `row` names `stored_name`'s file as its own
     (#1269). Caller holds _fetch_lock().
@@ -2785,9 +2951,17 @@ def files_other_rows_hold_locked(queue, directory, names, row=None):
     pass over the queue rather than one per name (a batch delete can carry
     hundreds, #1246). Caller holds _fetch_lock()."""
     held = {}
+    here = _directory_folder_key(directory)
+    if here is None:
+        return set()
     for other in queue.values():
         name = other.get("stored_filename") if other is not row else None
-        if name:
+        # Only a row whose file is in this same folder (#1423): the same
+        # name in two bots' folders is two files. Compared as folder
+        # strings, never through fetched_dir_of() (#1439): that resolves
+        # every row on disk, and this runs under _fetch_lock(), which a
+        # slow mount must never hold (see _bot_folder_for_locked()).
+        if name and _fetched_folder_key(other.get("fetched_folder")) == here:
             held.setdefault(str(name).casefold(), []).append(name)
     return {name for name in names
             if name and any(names_one_file(directory, name, other)
@@ -2809,7 +2983,7 @@ def _promote_clean_filename(dest_dir, stored_name, queue=None, row=None):
     downloading the zip and unzipping it on Windows produced a folder named
     after the ZIP FILE ITSELF (there is no folder recorded inside a plain
     list zip for Explorer to unpack "into", the way there would be for a
-    folder packed with rar's -ep1 - see dcc.py's own use of that flag), so
+    folder dcc.py packs, which keeps the folder by its own name), so
     the id rode all the way onto the operator's own disk.
 
     Never overwrites an existing file at the plain name - a fetch of the
@@ -2836,6 +3010,14 @@ def _promote_clean_filename(dest_dir, stored_name, queue=None, row=None):
     # file FETCHED_FILES_DIR/lists, and every list fetch from every bot then
     # failed to make its directory there until someone deleted it by hand.
     if plain_name.rstrip(" .").lower() in _RESERVED_FETCHED_NAMES:
+        return stored_name
+    # Nor, at the top of FETCHED_FILES_DIR, onto a plain name with no "." in
+    # it. That is where each bot's own folder goes (bot_folder_name(), with
+    # FETCHED_FILES_PER_BOT on), and a folder name never has a dot (a dot in
+    # the nick becomes "_" there). A file under such a name keeps its id and
+    # leaves the name to the folder. "The top" is _directory_folder_key()'s
+    # answer, so a trailing separator or a share root (#1440) is the top too.
+    if "." not in plain_name.rstrip(" .") and _directory_folder_key(dest_dir) == "":
         return stored_name
 
     old_path = os.path.join(dest_dir, stored_name)
@@ -2960,7 +3142,7 @@ def handle_incoming_offer(irc_sock, from_nick, ctcp_payload):
         # count as low, and the loop never ended. Now it waits, pending,
         # until what it declared fits with MIN_FREE_BYTES to spare.
         room = _room_left_locked(queue, _free_bytes(), exclude=request_id)
-        if not _has_room(offer["size"], room):
+        if not has_room(offer["size"], room):
             _hold_for_space(row, offer["size"],
                             f"needs {_mb(offer['size'])} free and {_mb(room)} is - "
                             f"asking again once there is space")
@@ -2993,7 +3175,15 @@ def handle_incoming_offer(irc_sock, from_nick, ctcp_payload):
                   f"all {max_slots} fetch slots are in use. It is asked for again once one is free.")
             return
 
-        dest_dir, stored_name = _resolve_destination_path(request_id, offer["filename"])
+        # Into the bot's own folder with FETCHED_FILES_PER_BOT on (#1423),
+        # remembered on the row so its file is found again whatever the
+        # setting says later. A row asked for again with part of its file
+        # already on disk (a restart, #926) keeps the folder that part is in,
+        # so resuming finds it even if the setting changed in between.
+        if not (row.get("stored_filename") and "fetched_folder" in row):
+            row["fetched_folder"] = _bot_folder_for_locked(queue, row)
+        dest_dir, stored_name = _resolve_destination_path(request_id, offer["filename"],
+                                                          row["fetched_folder"])
         if stored_name is None:
             _mark_failed_locked(row, "unsafe destination path")
             print(f"[FETCH] Rejected offer from {from_nick}: sanitised filename escaped FETCHED_FILES_DIR.")
@@ -3276,8 +3466,8 @@ def _handle_completed_list_fetch(row, zip_path):
     live: an operator downloaded one of these zips to their own machine and
     unzipped it, and the request id ended up in the resulting filename too
     - there is no folder recorded inside a plain list zip for an unzip tool
-    to extract "into" the way there would be for one packed with rar's
-    -ep1 (see dcc.py's own use of that flag), so Explorer named the result
+    to extract "into" the way there would be for a folder dcc.py packs
+    (it keeps the folder by its own name), so Explorer named the result
     after the zip itself. Removing the zip is the fix for that as much as
     for the disk space: the raw download was never the deliverable, the
     browsable list is, and it already exists on its own.
@@ -3398,6 +3588,22 @@ def _run_transfer(row, offer, dest_dir, stored_name, sock=None):
     wall_deadline = time.time() + float(_fetch_transfer_timeout(row.get("request_type")))
     # For the panel's Downloading speed (#1019); this transfer's own clock.
     row["receiving_since"] = time.time()
+
+    # Something other than a folder already under the folder's name - a file
+    # kept there from an earlier version, say - is not moved or replaced
+    # here: the operator decides what happens to it. The reason names it.
+    if (os.path.lexists(platform_compat.long_path(dest_dir))
+            and not os.path.isdir(platform_compat.long_path(dest_dir))):
+        reason = (f"a file is where the fetch folder goes: {dest_dir} - "
+                  "move or rename that file, then fetch again")
+        _mark_failed_locked(row, reason)
+        print(f"[FETCH] {reason}")
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
+        return
 
     try:
         os.makedirs(platform_compat.long_path(dest_dir), exist_ok=True)

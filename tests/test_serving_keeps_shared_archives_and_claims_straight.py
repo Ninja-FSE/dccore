@@ -124,9 +124,12 @@ class PackCase(security.PathSecurityBase):
                 "is_unpacked_rar_folder": True, "is_temporary_zip": True}
 
     def packed_row(self, nick):
+        # Packed under the rule a request for the folder follows (#1376), so
+        # a second request may be handed it.
         return {"file": "Album.rar", "path": self.archive, "source_path": self.album,
                 "channel": HERE, "user_raw": nick,
-                "is_unpacked_rar_folder": False, "is_temporary_zip": True}
+                "is_unpacked_rar_folder": False, "is_temporary_zip": True,
+                dcc.PACKED_WITHOUT_KEY: list(dcc.pack_leaves_out(self.folder_row(nick)))}
 
     def sends(self):
         """(nick, path, owns_packer) for every send the dispatcher started."""

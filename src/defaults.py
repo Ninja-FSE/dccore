@@ -21,7 +21,7 @@ import runtime
 # 1. SYSTEM AND GLOBAL ENGINE SETTINGS
 # ---------------------------------------------------------------------
 DEBUG_MODE: bool    = False        # Print every raw line the bot sends to the server in its own window; noisy, for chasing a protocol problem
-SCRIPT_VERSION: str = "DCCore v1.17.0"
+SCRIPT_VERSION: str = "DCCore v1.18.0"
 
 # Where this bot came from. Defined once because two things say it: the CTCP
 # VERSION reply, and the header of every generated list. Before this there was
@@ -285,6 +285,15 @@ RAR_EXTENSIONS: list = [
 # must never be reachable through that path. They are dashboard-download-only
 # (GET /api/fetch/<id>/download in webserver.py).
 FETCHED_FILES_DIR: str = "./data/fetched"
+# EACH BOT'S FILES IN A FOLDER OF ITS OWN (#1423), the way mIRC can file a
+# download under its sender's name: a file or a packed folder fetched from
+# SomeBot is saved in FETCHED_FILES_DIR/SomeBot/. Off by default - turned on,
+# it applies to new fetches only, and files already fetched stay where they
+# are. Fetched lists are not affected: they have their own place (lists/).
+# The folder's name is dcc_fetch.bot_folder_name(): tagged when the name
+# alone could be another nick's - cleaned, reserved, cut short, or already
+# looking tagged - so two bots do not share one by accident (#1438).
+FETCHED_FILES_PER_BOT: bool = False  # Save each bot's files in a folder named after it, inside the fetched files directory
 
 # Safe, normalised paths into the data/ subdirectory
 BANS_FILE: str      = "./data/bans.txt"
@@ -550,6 +559,15 @@ ON_CONNECT_CHECK_MINUTES: int = 5
 #
 # Your own debug line still records every send either way.
 ANNOUNCE_TRANSFERS: bool = True
+# Channels where a finished transfer is NOT announced, even with
+# ANNOUNCE_TRANSFERS on - for a channel that does not allow that kind of
+# message but still wants the advert. Comma-separated, each written with its
+# "#" (e.g. "#alpha, #beta"); names are compared the way the IRC server
+# compares them, so case does not matter. A channel's Quiet or Request only
+# mode stops the announcement too, but stops the advert with it.
+#
+# Empty announces in every channel.
+ANNOUNCE_TRANSFERS_EXCLUDE: list = []
 
 # ---------------------------------------------------------------------
 # 4. CHANNEL ADVERTISING (THE ADVERT CLOCK)
@@ -565,7 +583,9 @@ MAX_DCC_SLOTS: int      = 3      # Maximum simultaneous live downloads
 # connected, and a stop counts against MAX_SEND_FAILS like a stall. Only the
 # slowest send, and only while another one moves at least this much - proof
 # the bot's side can deliver - so with one slot it never fires. Not while
-# MAX_UPLOAD_KB is what holds the sends back. See dcc._SlowSendWatch.
+# MAX_UPLOAD_KB is what holds it back: a send moving about an even share of a
+# full cap is kept, one far under it while others take the rest is not (#1436).
+# See dcc._SlowSendWatch.
 SLOW_SEND_MIN_KB: int   = 0      # In KB/s, 0 = off
 LARGE_FILE_MB: int      = 0      # A file of at least this many MB is large, and only one large file is sent at a time (0 = off)
 MAX_USER_QUEUE: int     = 100    # Most files a single user may queue
@@ -1034,8 +1054,9 @@ MAX_SEND_FAILS: int = 3        # Attempts per queued file before it is dropped (
 # connection before it had the whole file. Not counted: a pack cancelled by
 # the operator or withdrawn by the user, a send the bot stops itself, or a
 # failure on the bot's side (the file vanished). Admins (ADMIN_NICK) are never
-# paused. Kept in memory: a restart forgives. The console's `status` shows who
-# is paused, and `unpause <nick>` lifts it.
+# paused. Kept in memory: a restart forgives. A nick change does not: the
+# count and the pause follow the nick, like its queue. The console's `status`
+# shows who is paused, and `unpause <nick>` lifts it.
 DAILY_SEND_FAILS_LIMIT: int = 0  # Failed sends in a day that pause a nick until midnight; 0 is off
 # HOW LONG AN OFFER STANDS. After the DCC SEND handshake the bot listens for
 # the receiver to connect; when nobody has by this deadline the offer is
@@ -1169,6 +1190,7 @@ whois_status      = runtime.whois_status       # Online status via WHO reply (Tr
 frozen_queues     = runtime.frozen_queues      # Saved timestamps for users in the freezer
 queue_waiting_since = runtime.queue_waiting_since  # When each nick began waiting for a slot
 kicked_channels   = runtime.kicked_channels    # Channels we were thrown out of, and rejoin refusals
+join_waits        = runtime.join_waits         # Refused JOINs and when they may be asked again (#1415)
 notices           = runtime.notices             # Operator-facing events, newest last
 notice_state      = runtime.notice_state        # {"seen_id": highest acknowledged}
 private_messages  = runtime.private_messages   # PMs nobody answered, newest last

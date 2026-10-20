@@ -43,12 +43,18 @@ import runtime  # noqa: E402
 
 from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase, parse_source  # noqa: E402
-from tests.test_dcc_resume_end_to_end import RecordingIrcSocket, loopback_is_usable  # noqa: E402
+from tests.test_dcc_resume_end_to_end import RecordingIrcSocket, loopback_is_usable as probe_loopback  # noqa: E402
 
 USER = "someuser"
 PORT_START, PORT_END = dcc_ports(51360, 51370)
 CONTENT = bytes(range(256)) * 2048          # 524,288 bytes: two 256 KB blocks
 OLD_FLOOR = 65536 / 60.0                    # bytes per second a send survives at 64 KB
+
+
+def loopback_is_usable():
+    """The shared probe, on the window this module's real sends use (#1469):
+    test_dcc_resume_end_to_end's own window can be free while this one is not."""
+    return probe_loopback(PORT_START, PORT_END)
 
 
 def shipped_default():

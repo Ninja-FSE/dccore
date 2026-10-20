@@ -13,11 +13,10 @@ has always batched its JOIN, and they go through oserve.queue_message() like
 every other line the bot says.
 """
 
-import io
 import os
-import re
 import sys
 import unittest
+from unittest import mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -28,7 +27,8 @@ import commands  # noqa: E402
 import defaults as config  # noqa: E402
 
 from tests.support import (DCCoreTestCase, RecordingSocket,  # noqa: E402
-                           install_fake_oserve, silence_debug)
+                           install_fake_oserve, rehash_with_the_reload_stood_in,
+                           silence_debug)
 
 # One IRC line is 512 bytes including the trailing CRLF.
 IRC_LINE_BYTES = 512
@@ -51,6 +51,22 @@ class ChannelSyncCase(DCCoreTestCase):
 
     def verbs(self, lines):
         return [line.split(" ", 1)[0] for line in lines]
+
+    def rehash(self, reload):
+        """The real handle_rehash_request(), with only its module reload stood
+        in for (tests.support.rehash_with_the_reload_stood_in), over this
+        fixture's socket: the sync block runs for real (#1469). The queue
+        wake it ends with is held to a no-op, so anything on the socket is
+        the sync's."""
+        import dcc
+        patch = mock.patch.object(dcc, "wake_restored_queues", lambda irc_sock: None)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.oserve.queued.clear()
+        return rehash_with_the_reload_stood_in(self, reload)
+
+    def queued_lines(self):
+        return [line for _user, line, _vip in self.oserve.queued]
 
 
 class TheBurstIsGone(ChannelSyncCase):
@@ -84,18 +100,20 @@ class TheBurstIsGone(ChannelSyncCase):
                          "the burst this fixes")
 
     def test_the_rehash_itself_no_longer_writes_to_the_socket(self):
-        """Read out of commands.py: reaching this block for real means
-        reloading every module in the daemon. Asserted as the STATEMENT - the
-        word irc_sock appears in the comment above it either way."""
-        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
-            code = handle.read()
-        body = code.split("def _handle_rehash_request(", 1)[1]
-        body = re.sub(chr(35) + "[^" + chr(10) + "]*", "", body)
+        """A real rehash that adds a channel: the JOIN goes through the
+        pacer's queue, and nothing reaches the raw socket (#1469; was read
+        out of commands.py)."""
+        self.set_config(CHANNEL="#one", DEBUG_CHANNEL="")
 
-        self.assertIn("sync_channels(", body)
-        # No paren: since #504 a direct write is spelled sendall(), and the
-        # old anchor would pass against one.
-        self.assertNotIn("irc_sock.send", body)
+        def reload_adding_a_channel(*_args, **_kwargs):
+            config.CHANNEL = "#one,#two"
+            return []
+
+        self.assertIs(self.rehash(reload_adding_a_channel), True)
+
+        self.assertIn("JOIN #two\r\n", self.queued_lines(), "the sync did not run")
+        self.assertEqual(self.sock.sent, [],
+                         "the rehash wrote to the raw socket, which is the burst this fixes")
 
     def test_a_failing_sync_does_not_report_the_reload_as_failed(self):
         """Everything the rehash exists to do has already happened by the time
@@ -104,15 +122,16 @@ class TheBurstIsGone(ChannelSyncCase):
         told their rehash failed when it succeeded.
 
         Found by the end-to-end fixture, whose oserve stand-in carried only
-        irc_connection: the first AttributeError took the whole rehash down."""
-        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
-            code = handle.read()
-        body = code.split("def _handle_rehash_request(", 1)[1]
-        body = re.sub(chr(35) + "[^" + chr(10) + "]*", "", body)
-        block = body.split("sync_channels(", 1)[0][-400:]
+        irc_connection: the first AttributeError took the whole rehash down.
+        Driven: a real rehash whose sync raises (#1469)."""
+        def failing_sync(*_args, **_kwargs):
+            raise AttributeError("example: the stand-in has no queue_message")
+        patch = mock.patch.object(commands, "sync_channels", failing_sync)
+        patch.start()
+        self.addCleanup(patch.stop)
 
-        self.assertIn("try:", block,
-                      "the sync can still take the whole reload down with it")
+        self.assertIs(self.rehash(lambda *_a, **_k: []), True,
+                      "a sync that raised was reported as a failed reload")
 
 
 class WhatGoesInEachLine(ChannelSyncCase):
@@ -363,23 +382,24 @@ class ASettingThatCameBackBlank(ChannelSyncCase):
     def test_the_rehash_hands_it_the_value_from_before_the_reload(self):
         """The fix is only a fix if the caller captures it at the right
         moment - after the reload it is the same blank the guard already had.
-        Asserted as a SEQUENCE: captured beside old_chans, used after."""
-        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
-            code = handle.read()
-        body = code.split("def _handle_rehash_request(", 1)[1]
-        body = re.sub(chr(35) + "[^" + chr(10) + "]*", "", body)
+        Driven: a real rehash whose reload blanks DEBUG_CHANNEL; the debug
+        channel is not parted (#1469; was read out of commands.py)."""
+        self.set_config(CHANNEL="#mainchan", DEBUG_CHANNEL="#somedebug")
 
-        self.assertIn("previous_debug_channel=old_debug_chan", body)
-        # The STATEMENT, not the name. A mutation that left the assignment
-        # exactly where it is and made it `old_debug_chan = ''` survived a
-        # check for the name plus its position - which is the same shape of
-        # hole a bare token always is.
-        self.assertIn("old_debug_chan = str(getattr(config, 'DEBUG_CHANNEL'", body,
-                      "the captured value is not read from the configuration")
-        self.assertLess(body.index("old_debug_chan ="),
-                        body.index("reload_modules_in_order("),
-                        "the value is captured after the reload, which is the "
-                        "blank the guard already could not see past")
+        def reload_that_blanks_it(*_args, **_kwargs):
+            config.DEBUG_CHANNEL = ""
+            return []
+
+        self.assertIs(self.rehash(reload_that_blanks_it), True)
+
+        self.assertIn("NAMES #mainchan\r\n", self.queued_lines(), "the sync did not run")
+        self.assertEqual([line for line in self.queued_lines() if "#somedebug" in line
+                          and line.startswith("PART")], [],
+                         "the debug channel was parted: the value before the reload was "
+                         "not what the sync was given")
+        # And the operator is told, through this fixture's own debug capture,
+        # which the rehash helper leaves in place.
+        self.assertTrue(any("came back blank" in msg for _cat, msg in self.debug), self.debug)
 
 
 class TheBatcherItself(unittest.TestCase):

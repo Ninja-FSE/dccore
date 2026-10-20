@@ -152,7 +152,9 @@ class EveryLinkResolves(SiteTestCase):
         self.assertGreaterEqual(len(checked), 6)
 
     def test_any_other_repository_link_is_a_page_github_has(self):
-        allowed = {PUBLIC_REPO, PUBLIC_REPO + "/releases", PUBLIC_REPO + "/releases/latest"}
+        allowed = {PUBLIC_REPO, PUBLIC_REPO + "/releases", PUBLIC_REPO + "/releases/latest",
+                   # the mIRC script's zip, a release asset with a fixed name (#1412)
+                   PUBLIC_REPO + "/releases/latest/download/dccore-mirc.zip"}
         for name, href in self.all_links():
             if href.startswith(PUBLIC_REPO) and "/blob/main/" not in href:
                 with self.subTest(page=name, href=href):
@@ -218,6 +220,35 @@ class EveryPageHasTheSameMenuAndFooter(SiteTestCase):
         for name in PAGES[1:]:
             with self.subTest(page=name):
                 self.assertEqual(self.footer(name), first)
+
+
+class TheVersionsOnThePageAreTheReleases(SiteTestCase):
+    """#1430: the overview says which version "Download the latest release"
+    is, and which script the mIRC download holds. Written into the page (it
+    loads nothing), so these hold it to the one place each fact lives: the
+    bot's SCRIPT_VERSION and the script's dccore.ver. A release roll that
+    bumps either fails here until the page follows."""
+
+    def version(self, which):
+        found = re.findall(r'data-version="%s">([^<]+)<' % which, self.page("index.html"))
+        self.assertEqual(len(found), 1, f"one {which} version on the page")
+        return found[0]
+
+    def test_the_bots_version_is_SCRIPT_VERSION(self):
+        import defaults
+        shipped = re.search(r"v\d+\.\d+\.\d+", defaults.SCRIPT_VERSION).group(0)
+        self.assertEqual(self.version("bot"), shipped)
+
+    def test_the_scripts_version_is_dccore_ver(self):
+        sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
+        try:
+            import build_mirc_zip
+        finally:
+            sys.path.remove(os.path.join(REPO_ROOT, "scripts"))
+        self.assertEqual(self.version("mirc"), "dccore.mrc " + build_mirc_zip.script_version())
+
+    def test_the_script_link_is_the_release_asset(self):
+        self.assertIn(PUBLIC_REPO + "/releases/latest/download/dccore-mirc.zip", self.links("index.html"))
 
 
 class TheSiteStaysOutOfThePublicTree(SiteTestCase):

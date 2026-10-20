@@ -36,9 +36,14 @@ JOIN that was never sent.
 import io
 import contextlib
 import os
+import shutil
+import socket
+import struct
 import sys
+import tempfile
 import threading
 import unittest
+from unittest import mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -52,7 +57,11 @@ import defaults as config  # noqa: E402
 import runtime  # noqa: E402
 import settings_file  # noqa: E402
 
-from tests.support import DCCoreTestCase, bots_in_the_channel  # noqa: E402
+from tests.support import (  # noqa: E402
+    DCCoreTestCase, RecordingSocket, bots_in_the_channel, rehash_with_the_reload_stood_in)
+from tests import test_dcc_resume_end_to_end as e2e  # noqa: E402
+from tests.test_the_send_loop_on_its_own import (  # noqa: E402
+    Connection as SendLoopConnection, changing_the_block)
 
 
 class TheDebugChannelIsSomewhereTheBotShouldBe(DCCoreTestCase):
@@ -125,8 +134,9 @@ class TheDebugChannelIsSomewhereTheBotShouldBe(DCCoreTestCase):
         case-insensitive. " #Bot-Debug " and "#bot-debug" are one channel."""
         self.set_config(CHANNEL=" #One , #two ", DEBUG_CHANNEL="  #Bot-Debug  ")
 
+        # The debug channel first, as channels_we_should_be_in() joins it (#1424).
         self.assertEqual(commands._channels_to_sync(self.config),
-                         ["#one", "#two", "#bot-debug"])
+                         ["#bot-debug", "#one", "#two"])
 
     def test_a_blank_channel_setting_does_not_raise(self):
         """CHANNEL is in settings_file.REQUIRED, but this runs on a config
@@ -325,29 +335,61 @@ class ARequiredSettingThatComesBackBlankIsKept(DCCoreTestCase):
         self.assertEqual(config.NICKNAME, "")
 
 
-class TheDashboardReadsUnderTheLock(unittest.TestCase):
-    """Read out of the source rather than by timing: the race is real but
-    winning it on demand in a test is not reliable, and a payload builder that
-    stopped taking the lock would pass every timing-based check on a fast
-    machine."""
+class TheDashboardReadsUnderTheLock(DCCoreTestCase):
+    """Not by timing: the race is real but winning it on demand in a test is
+    not reliable, and a payload builder that stopped taking the lock would
+    pass every timing-based check on a fast machine. So the reload is
+    modelled where it meets the reader, at the lock: the configuration is
+    left half reloaded, and whoever takes runtime.config_reload_lock gets it
+    only once the reload has finished - which is what waiting for a reload
+    that holds the lock means (#1469; was a search of web_settings.py)."""
+
+    class AReloadFinishesFirst(object):
+        """runtime.config_reload_lock, still the real lock, that completes
+        the reload in progress before it lets the reader in."""
+
+        def __init__(self, real, finish):
+            self.real = real
+            self.finish = finish
+            self.taken = 0
+
+        def acquire(self, *args, **kwargs):
+            got = self.real.acquire(*args, **kwargs)
+            if got:
+                self.taken += 1
+                self.finish()
+            return got
+
+        def release(self):
+            self.real.release()
+
+        def __enter__(self):
+            return self.acquire()
+
+        def __exit__(self, *_exc):
+            self.release()
 
     def test_build_settings_payload_takes_the_reload_lock(self):
-        # web_settings.py since #1320, step 5 of splitting webserver.py.
-        with io.open(os.path.join(REPO_ROOT, "src", "web_settings.py"),
-                     encoding="utf-8") as handle:
-            source = handle.read()
+        import web_settings
 
-        body = source.split("def build_settings_payload(", 1)[1]
-        body = body.split("\ndef ", 1)[0]
-        # The docstring names the lock too, and an assertion that matches prose
-        # passes on a function that has stopped taking it - which is exactly
-        # what the mutation run found. Look for the statement, not the noun.
-        body = body.split('"""', 2)[-1]
+        self.set_config(NICKNAME=None, ADMIN_NICK=None, CHANNEL=None)   # mid-reload
 
-        self.assertIn("with runtime.config_reload_lock:", body,
-                      "build_settings_payload() no longer reads under "
-                      "runtime.config_reload_lock - the Settings page can show "
-                      "a half-reloaded configuration again")
+        def the_reload_finishes():
+            config.NICKNAME, config.ADMIN_NICK, config.CHANNEL = "ExampleBot", "operator", "#example"
+        lock = self.AReloadFinishesFirst(runtime.config_reload_lock, the_reload_finishes)
+        patch = mock.patch.object(runtime, "config_reload_lock", lock)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        payload = web_settings.build_settings_payload()
+
+        shown = {field["name"]: field["value"]
+                 for category in payload["categories"] for field in category["fields"]}
+        self.assertEqual(lock.taken, 1, "build_settings_payload() did not take "
+                         "runtime.config_reload_lock")
+        self.assertEqual((shown.get("NICKNAME"), shown.get("ADMIN_NICK"), shown.get("CHANNEL")),
+                         ("ExampleBot", "operator", "#example"),
+                         "the Settings page showed a half-reloaded configuration")
 
 
 class ARehashDoesNotSpendTheQueuesRetries(DCCoreTestCase):
@@ -542,29 +584,21 @@ class ARehashWaitsForTransfersToFinish(DCCoreTestCase):
     def test_the_message_does_not_claim_the_list_is_rebuilding(self):
         """update_inprogress means "the list is being rebuilt" and its notice
         says so. Telling somebody that when it is not true is the kind of small
-        untruth that makes every other message less believable."""
-        # Scoped to the function that actually answers a USER, not to the
-        # first `if transfers_are_paused():` in the file. The gate now exists
-        # in two places - here, where a new request is refused with a notice,
-        # and in check_queue_and_send(), which simply returns because there is
-        # nobody to tell - and a whole-file split() read the wrong one the
-        # moment the second was added.
-        import inspect
+        untruth that makes every other message less believable. A request
+        made during the quiesce, through handle_download_request(), and the
+        notices it sent (#1469; was read out of the function's source)."""
+        config.transfers_paused = True
+        self.addCleanup(lambda: setattr(config, "transfers_paused", False))
+        self.oserve.queued = []
 
-        # Two levels of scoping, and both are load-bearing. The FUNCTION,
-        # because the gate now exists in two places - here, where a user is
-        # refused with a notice, and in check_queue_and_send(), which just
-        # returns since there is nobody to tell - and a whole-file split()
-        # read the wrong one as soon as the second appeared. Then the BRANCH,
-        # because this same function legitimately carries the rebuilding
-        # message for update_inprogress, which is a different condition with
-        # a different, true notice.
-        function = inspect.getsource(dcc.handle_download_request)
-        self.assertIn("if transfers_are_paused():", function)
-        branch = function.split("if transfers_are_paused():", 1)[1][:600]
+        with contextlib.redirect_stdout(io.StringIO()):
+            dcc.handle_download_request(None, "alice", "Some_Song.flac", config.CHANNEL)
 
-        self.assertIn("reloading its configuration", branch)
-        self.assertNotIn("MasterList is currently rebuilding", branch)
+        to_alice = [message for user, message, _vip in self.oserve.queued if user == "alice"]
+        self.assertTrue(any("reloading its configuration" in message for message in to_alice),
+                        to_alice)
+        self.assertFalse(any("MasterList is currently rebuilding" in message
+                             for message in to_alice), to_alice)
 
     def _queue_one_dispatchable_file(self):
         """A queue row this dispatcher will really act on.
@@ -695,65 +729,103 @@ class ARehashWaitsForTransfersToFinish(DCCoreTestCase):
 
         self.assertFalse(dcc.transfers_are_paused())
 
+    def rehash(self, reload):
+        """The real handle_rehash_request(), with only its module reload
+        stood in for (tests.support.rehash_with_the_reload_stood_in)."""
+        return rehash_with_the_reload_stood_in(self, reload)
+
     def test_the_rehash_waits_before_it_reloads(self):
         """Order is the whole point: waiting AFTER the reload would mean the
-        reload already happened inside somebody's transfer. Read out of the
-        source, because driving a real rehash means driving a real socket -
-        and asserted as a sequence, since the call alone in the wrong place
-        would pass a check for the call alone."""
-        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
-            # COMMENTS STRIPPED, and the search scoped to the rehash body.
-            # Whole-file index() found a COMMENT mentioning
-            # reload_modules_in_order() five hundred lines above the call, so
-            # the assertion compared the wait against a sentence about the
-            # reload rather than the reload itself - and failed while the
-            # order was perfectly correct.
-            code = chr(10).join(line.split("#", 1)[0]
-                                for line in handle.read().splitlines())
-        body = code.split("def handle_rehash_request(", 1)[1]
+        reload already happened inside somebody's transfer. Driven, with the
+        wait and the reload recorded as they happen (#1469; was read out of
+        the source)."""
+        events = []
+        real_wait = dcc.wait_for_transfers_to_finish
 
-        self.assertIn("wait_for_transfers_to_finish()", body,
-                      "the rehash does not wait for transfers at all")
-        self.assertLess(body.index("wait_for_transfers_to_finish()"),
-                        body.index("reload_modules_in_order()"),
-                        "the reload happens before the wait, which is the "
-                        "thing the wait exists to prevent")
+        def watched_wait(*args, **kwargs):
+            events.append("wait")
+            return real_wait(*args, **kwargs)
+        patch = mock.patch.object(dcc, "wait_for_transfers_to_finish", watched_wait)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        def reload(*_args, **_kwargs):
+            events.append(("reload", dcc.transfers_are_paused()))
+            return []
+
+        self.assertIs(self.rehash(reload), True)
+
+        self.assertEqual(events, ["wait", ("reload", True)],
+                         "the reload did not come after the wait, with sends held")
 
     def test_the_pause_is_lifted_before_the_queue_is_woken(self):
         """Waking the queue while still paused would have every dispatch
         refused by the gate the wait put up - and the wake is the thing that
-        restarts the queue the operator asked for."""
-        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
-            code = handle.read()
+        restarts the queue the operator asked for. The wake is run where the
+        rehash starts it, so what it sees is what it would see first."""
+        self.oserve.irc_connection = RecordingSocket()
+        woken = []
 
-        self.assertLess(code.index("_dcc_resume.resume_transfers()"),
-                        code.index("[REHASH-WAKE]"))
+        def wake(irc_sock):
+            woken.append(dcc.transfers_are_paused())
+        patch = mock.patch.object(dcc, "wake_restored_queues", wake)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        real_thread = threading.Thread
+
+        class RunsTheWakeInline(object):
+            """threading.Thread for every other target, read and written
+            through (`t.daemon = True` reaches the real thread); the wake
+            alone runs inline, where it is started."""
+
+            def __init__(self, *args, **kwargs):
+                own = object.__setattr__
+                own(self, "target", kwargs.get("target"))
+                own(self, "args", kwargs.get("args", ()))
+                own(self, "thread", None if kwargs.get("target") is wake else real_thread(*args, **kwargs))
+
+            def start(self):
+                if self.thread is None:
+                    self.target(*self.args)
+                else:
+                    self.thread.start()
+
+            def __getattr__(self, name):
+                return getattr(self.thread, name)
+
+            def __setattr__(self, name, value):
+                if self.thread is None:
+                    object.__setattr__(self, name, value)
+                else:
+                    setattr(self.thread, name, value)
+        patch = mock.patch.object(threading, "Thread", RunsTheWakeInline)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        self.assertIs(self.rehash(lambda *_a, **_k: []), True)
+
+        self.assertEqual(woken, [False], "the queue was woken while sends were still held")
 
     def test_the_pause_does_not_outlive_a_rehash_that_raised(self):
         """Otherwise the bot sits refusing every send for ever, with the only
-        clue a notice telling users to try again in a moment.
+        clue a notice telling users to try again in a moment. The reload
+        raises after the wait has put the pause up.
 
-        BOUNDED BY THE HANDLER, not by a character count. This used to read
-        the 800 characters before the message, which is not a property of
-        anything: a comment explaining that message moved the anchor several
-        hundred lines up the file, and widening the window instead reached
-        back far enough to find the SUCCESS path's resume and pass on that -
-        with the failure path's resume deleted. A count is not a property.
+        The control is recorded, not asserted, inside the reload: the rehash
+        catches whatever its reload raises, an AssertionError included, so
+        an assertion there could never fail the test."""
+        paused_during_the_reload = []
 
-        Comments are stripped for the reason the sibling test above gives.
-        The window is now everything between entering the handler and the
-        message it prints, which is exactly the span the resume has to be
-        in."""
-        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
-            code = chr(10).join(line.split("#", 1)[0]
-                                for line in handle.read().splitlines())
-        body = code.split("def _handle_rehash_request(", 1)[1]
-        handler = body.split("except Exception as e:", 1)
+        def broken_reload(*_args, **_kwargs):
+            paused_during_the_reload.append(dcc.transfers_are_paused())
+            raise SyntaxError("invalid syntax")
 
-        self.assertEqual(len(handler), 2, "the rehash's outer handler has moved")
-        failure_path = handler[1].split("[REHASH CRITICAL ERROR]", 1)[0]
+        self.assertIs(self.rehash(broken_reload), False)
 
-        self.assertIn("resume_transfers()", failure_path)
+        self.assertEqual(paused_during_the_reload, [True],
+                         "the control: the wait put up no pause before the reload")
+        self.assertFalse(dcc.transfers_are_paused(), "a failed rehash left every send held")
 
     def test_resume_lets_sends_start_again(self):
         config.transfers_paused = True
@@ -928,10 +1000,66 @@ class TheSocketSendBuffer(DCCoreTestCase):
         self.assertEqual(sock.options, [])
 
     def test_the_transfer_path_applies_it(self):
-        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
-            code = handle.read()
+        """A real send, received over loopback: the setting is applied to the
+        connection the file goes out on - the accepted one, whose peer is the
+        receiver - not to the listener, and not skipped. Driven through
+        start_dcc_send(), not read out of dcc.py (#1469); the real
+        _apply_send_buffer() still runs, only watched on the way."""
+        if not e2e.loopback_is_usable():
+            self.skipTest("this runner cannot bind a listener and dial loopback")
+        served = os.path.join(self.make_temp_dir(prefix="dccore-send-buffer-"), "Some_Album.zip")
+        content = bytes(range(256)) * 16
+        with io.open(served, "wb") as handle:
+            handle.write(content)
+        self.set_config(
+            active_transfers=[{"user": e2e.USER, "file": "Some_Album.zip", "bytes_sent": 0,
+                               "next_file_obj": "Some_Album.zip"}],
+            MAX_DCC_SLOTS=3, MY_IP_OR_DOCK="8.8.8.8", DCC_SEND_BUFFER=262144,
+            DCC_PORT_START=e2e.PORT_START, DCC_PORT_END=e2e.PORT_END)
+        runtime.dcc_send_offers.clear()
+        self.addCleanup(runtime.dcc_send_offers.clear)
 
-        self.assertIn("_apply_send_buffer(conn)", code)
+        applied_to = []
+        real_apply = dcc._apply_send_buffer
+
+        def watched(conn, *args, **kwargs):
+            try:
+                applied_to.append(conn.getpeername())
+            except OSError:          # a listener has no peer
+                applied_to.append(None)
+            return real_apply(conn, *args, **kwargs)
+        patcher = mock.patch.object(dcc, "_apply_send_buffer", watched)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        irc = e2e.RecordingIrcSocket()
+        self.oserve.irc_connection = irc
+        sender = threading.Thread(
+            target=dcc.start_dcc_send,
+            args=(irc, e2e.USER, served, "Some_Album.zip", "#somechannel", "Some_Album.zip"),
+            daemon=True)
+        sender.start()
+        self.addCleanup(sender.join, 30)
+        self.assertTrue(irc.handshake_seen.wait(20), "no DCC SEND handshake was ever sent")
+
+        received = bytearray()
+        client = socket.create_connection(("127.0.0.1", irc.port()), timeout=20)
+        try:
+            receiver = client.getsockname()
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                received.extend(chunk)
+                client.sendall(struct.pack("!I", len(received)))
+        finally:
+            client.close()
+        sender.join(30)
+
+        self.assertEqual(bytes(received), content)
+        self.assertEqual(applied_to, [receiver],
+                         "the send buffer was not applied, once, to the connection the "
+                         "receiver is on")
 
     def test_a_value_that_would_spin_the_loop_is_raised(self):
         """0 or a negative makes read() return nothing and the loop turn into
@@ -955,27 +1083,66 @@ class TheSocketSendBuffer(DCCoreTestCase):
 
         self.assertEqual(dcc.dcc_block_size(), 65536)
 
+    def _stream(self, content, **settings):
+        """stream_the_file() over `content`, with a receiver that acks it
+        all: the chunks the loop sent."""
+        tmp = tempfile.mkdtemp(prefix="dccore-send-block-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "Some_Album.zip")
+        with io.open(path, "wb") as handle:
+            handle.write(content)
+        row = {"user": "kilo", "file": "Some_Album.zip", "bytes_sent": 0}
+        self.set_config(active_transfers=[row], **settings)
+        conn = SendLoopConnection()
+        with mock.patch.object(dcc, "_drain_acks", changing_the_block()):
+            sent = dcc.stream_the_file(conn, path, 0, 0, dcc._AckTracker(), row, "kilo")
+        self.assertEqual(b"".join(conn.chunks), content)
+        self.assertEqual(sent, len(content))
+        return [len(chunk) for chunk in conn.chunks]
+
     def test_the_send_loop_uses_it(self):
-        """Read out of the source: driving a real transfer needs a peer on a
-        socket, and what matters is that the loop reads the setting rather
-        than the literal it replaced."""
-        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
-            code = handle.read()
+        """The loop sends in chunks of the setting, not of the 64 KB literal
+        it replaced - driven through stream_the_file(), not read out of it."""
+        content = bytes(range(256)) * 64          # 16 KB
 
-        self.assertIn("block = dcc_block_size()", code)
-        # Under a speed cap (#1352) a chunk is smaller, never larger than this.
-        self.assertIn("f.read(speed_cap.chunk_size(speed_cap.UPLOAD, block))", code)
-        self.assertNotIn("f.read(65536)", code,
-                         "the send loop still has the number hardcoded")
+        self.assertEqual(self._stream(content, DCC_BLOCK_SIZE=8192, MAX_UPLOAD_KB=0), [8192, 8192])
 
-    def test_it_is_resolved_once_per_transfer_not_once_per_pass(self):
-        """A getattr in the inner loop of a 4 GB send is a million lookups for
-        one answer that cannot change mid-file."""
-        with io.open(os.path.join(REPO_ROOT, "src", "dcc.py"), encoding="utf-8") as handle:
-            code = handle.read()
-        loop = code.split("block = dcc_block_size()", 1)[1].split("break", 1)[0]
+    def test_under_a_speed_cap_a_chunk_is_never_larger_than_the_setting(self):
+        """#1352: a cap makes a chunk smaller, never larger, than the block."""
+        content = bytes(range(256)) * 64
 
-        self.assertNotIn("dcc_block_size()", loop)
+        sizes = self._stream(content, DCC_BLOCK_SIZE=4096, MAX_UPLOAD_KB=100000)
+
+        self.assertTrue(sizes and max(sizes) <= 4096, sizes)
+
+    def test_a_rehash_reaches_a_send_already_running(self):
+        """#1461: the loop reads the setting every pass, not once per
+        transfer. This test used to grep the loop for the opposite - "a
+        getattr in the inner loop is a million lookups for one answer that
+        cannot change mid-file" - but a rehash does change it mid-file, and
+        a send that kept the block it started with took a bigger chunk of
+        the upload cap's shared clock than the sends started after it.
+
+        Driven through stream_the_file() itself: a send at 8 KB a pass whose
+        setting is lowered to 4 KB after the first chunk sends the rest in
+        4 KB chunks; read once per transfer it sent 8, 8."""
+        content = bytes(range(256)) * 64
+        tmp = tempfile.mkdtemp(prefix="dccore-rehash-block-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        path = os.path.join(tmp, "Some_Album.zip")
+        with io.open(path, "wb") as handle:
+            handle.write(content)
+        row = {"user": "kilo", "file": "Some_Album.zip", "bytes_sent": 0}
+        self.set_config(DCC_BLOCK_SIZE=8192, active_transfers=[row])
+        conn = SendLoopConnection()
+        acks = dcc._AckTracker()
+
+        with mock.patch.object(dcc, "_drain_acks", changing_the_block((1, 4096))):
+            sent = dcc.stream_the_file(conn, path, 0, 0, acks, row, "kilo")
+
+        self.assertEqual([len(chunk) for chunk in conn.chunks], [8192, 4096, 4096])
+        self.assertEqual(b"".join(conn.chunks), content)
+        self.assertEqual(sent, len(content))
 
 
 if __name__ == "__main__":

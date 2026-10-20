@@ -44,16 +44,16 @@ def password_branch():
 
 
 def mirc_sendpass(typed):
-    """What `dccore.sendpass $1-` sends for a line typed as `typed`, read
-    off the alias statement by statement: $1- is what a command's parameters
-    make of it, $editbox(@DCCore) the line as typed."""
+    """What `dccore.sendpass <window> $1-` sends for a line typed as `typed`
+    in that window, read off the alias statement by statement: $2- is what a
+    command's parameters make of it, $editbox($1) the line as typed."""
     body = settings_window.statements(settings_window.alias("dccore.sendpass"))
     assert body == [
-        "if ($gettok($editbox(@DCCore),1-,32) === $1-) && ($len($editbox(@DCCore)) > $len($1-)) {",
-        "dccore.send DCCORE PASSWORD $dccore.sw.enc($editbox(@DCCore))",
+        "if ($gettok($editbox($1),1-,32) === $2-) && ($len($editbox($1)) > $len($2-)) {",
+        "dccore.send DCCORE PASSWORD $dccore.sw.enc($editbox($1))",
         "return",
         "}",
-        "dccore.send $1-",
+        "dccore.send $2-",
     ], body
     params = settings_window.collapse(typed)
     gettok = " ".join(token for token in typed.split(" ") if token)
@@ -66,8 +66,11 @@ class TheScript(unittest.TestCase):
 
     def test_the_password_prompt_sends_through_sendpass(self):
         branch = password_branch()
-        self.assertIn("dccore.sendpass $1-", branch)
+        self.assertIn("dccore.typedpass @DCCore $1-", branch)
         self.assertNotIn("dccore.send $1-", branch)
+        typedpass = settings_window.statements(settings_window.alias("dccore.typedpass"))
+        self.assertEqual(typedpass[-1], "dccore.sendpass $1-")
+        self.assertNotIn("dccore.send $1-", typedpass)
         self.assertIn("dccore.echo $dccore.prompt ********", branch)
 
     def test_a_spaced_password_goes_encoded_and_comes_back_as_typed(self):

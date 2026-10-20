@@ -11,6 +11,10 @@ The one thing the move changed: the `finally` read the loop's bytes_sent,
 and a send that raises out of stream_the_file() never returns it. acks.sent
 is the same count after every chunk, and the ending reads that.
 
+#1461: the loop reads DCC_BLOCK_SIZE again every pass, so a rehash that
+changes it reaches a send already running from its next chunk on, with the
+socket timeout set for that chunk before it goes out (TheBlockIsReadEveryPass).
+
 Every nick and file name here is invented.
 """
 
@@ -40,12 +44,14 @@ CONTENT = bytes(range(256)) * 64            # 16,384 bytes: four blocks
 
 
 class Connection:
-    """What the loop sends on: records every sendall(), and fails the
-    chunk numbered `fail_at` (1-based) when asked to."""
+    """What the loop sends on: records every sendall(), and the timeout
+    that was set when it went out, and fails the chunk numbered `fail_at`
+    (1-based) when asked to."""
 
     def __init__(self, fail_at=None):
         self.chunks = []
         self.timeout = None
+        self.timeouts = []          # the timeout in force for each chunk
         self.fail_at = fail_at
 
     def settimeout(self, value):
@@ -55,11 +61,26 @@ class Connection:
         if self.fail_at is not None and len(self.chunks) + 1 == self.fail_at:
             raise ConnectionResetError("reset by peer")
         self.chunks.append(bytes(data))
+        self.timeouts.append(self.timeout)
 
 
 def acking_everything(conn, tracker, wait=0.0):
     """A receiver that acknowledges all it has been sent, at once."""
     tracker.feed(struct.pack("!I", tracker.sent & 0xFFFFFFFF))
+
+
+def changing_the_block(*changes):
+    """A receiver that acknowledges everything, while DCC_BLOCK_SIZE is set
+    as a rehash would set it: (after, value) puts `value` in place once
+    `after` chunks have gone out - between two passes of the loop, where a
+    reload on another thread lands."""
+    pending = dict(changes)
+
+    def drain(conn, tracker, wait=0.0):
+        acking_everything(conn, tracker, wait)
+        if len(conn.chunks) in pending:
+            config.DCC_BLOCK_SIZE = pending.pop(len(conn.chunks))
+    return drain
 
 
 def hanging_up_after(chunks):
@@ -72,7 +93,8 @@ def hanging_up_after(chunks):
     return drain
 
 
-class StreamTheFile(DCCoreTestCase):
+class LoopHarness(DCCoreTestCase):
+    """The file, the rows and stream(); no tests of its own."""
 
     def setUp(self):
         super().setUp()
@@ -95,6 +117,9 @@ class StreamTheFile(DCCoreTestCase):
             except Exception as raised:
                 return raised, acks
         return sent, acks
+
+
+class StreamTheFile(LoopHarness):
 
     def test_it_sends_the_whole_file_in_blocks_and_returns_the_count(self):
         conn = Connection()
@@ -160,6 +185,147 @@ class StreamTheFile(DCCoreTestCase):
         self.row["user"] = "kilo_away"
         self.stream(Connection())
         self.assertEqual(self.row["bytes_sent"], len(CONTENT))
+
+
+class TheBlockIsReadEveryPass(LoopHarness):
+    """#1461: a rehash that changes DCC_BLOCK_SIZE reaches a send already
+    running, from its next chunk on. Read once per transfer, a send started
+    before a rehash lowered it kept the bigger chunk, and under the upload
+    cap took more than an even share of speed_cap's shared clock from the
+    sends started after it (test_a_send_that_crawls_while_others_wait.py,
+    TheSharedClock). The timeout is set for the new block before the chunk
+    it covers goes out.
+
+    The receiver's acks and a resume's offset are byte counts, so a block
+    that changes mid-file changes nothing for the receiver: the bytes and
+    every count stay exact."""
+
+    def write(self, content):
+        with io.open(self.path, "wb") as handle:
+            handle.write(content)
+        return content
+
+    def sizes(self, conn):
+        return [len(chunk) for chunk in conn.chunks]
+
+    def test_a_lowered_block_takes_effect_from_the_next_chunk(self):
+        """16 KB, 8 KB a pass, lowered to 4 KB after the first chunk: 8, 4, 4.
+        Read once per transfer it was 8, 8."""
+        self.set_config(DCC_BLOCK_SIZE=8192)
+        conn = Connection()
+        sent, acks = self.stream(conn, drain=changing_the_block((1, 4096)))
+        self.assertEqual(self.sizes(conn), [8192, 4096, 4096])
+        self.assertEqual(b"".join(conn.chunks), CONTENT)
+        self.assertEqual(sent, len(CONTENT))
+        self.assertEqual((acks.sent, acks.acked), (len(CONTENT), len(CONTENT)))
+        self.assertEqual(conn.timeout, dcc._send_timeout(4096))
+        self.assertEqual(self.row["bytes_sent"], len(CONTENT))
+        self.assertEqual(self.oserve.total_sent_bytes, len(CONTENT))
+
+    def test_a_raised_block_takes_effect_from_the_next_chunk(self):
+        """4 KB a pass, raised to 8 KB after the first chunk: 4, 8, 4 (the
+        rest of the file). Read once per transfer it was 4, 4, 4, 4."""
+        conn = Connection()
+        sent, acks = self.stream(conn, drain=changing_the_block((1, 8192)))
+        self.assertEqual(self.sizes(conn), [4096, 8192, 4096])
+        self.assertEqual(b"".join(conn.chunks), CONTENT)
+        self.assertEqual(sent, len(CONTENT))
+        self.assertEqual((acks.sent, acks.acked), (len(CONTENT), len(CONTENT)))
+        self.assertEqual(conn.timeout, dcc._send_timeout(8192))
+
+    def test_above_64_kb_the_new_timeout_is_set_before_the_bigger_chunk_goes_out(self):
+        """128 KB raised to 256 KB: the timeout grows with the block above
+        64 KB (#1139), 120 s to 240 s, and the 256 KB sendall() must already
+        have its 240 s - with the old 120 s the slowest receiver a send
+        survives would rise from 64 KB a minute to 128 KB."""
+        self.assertEqual((dcc._send_timeout(131072), dcc._send_timeout(262144)), (120.0, 240.0))
+        content = self.write(os.urandom(131072 + 2 * 262144))
+        self.set_config(DCC_BLOCK_SIZE=131072)
+        conn = Connection()
+        sent, _acks = self.stream(conn, drain=changing_the_block((1, 262144)))
+        self.assertEqual(self.sizes(conn), [131072, 262144, 262144])
+        self.assertEqual(conn.timeouts, [120.0, 240.0, 240.0])
+        self.assertEqual(b"".join(conn.chunks), content)
+        self.assertEqual(sent, len(content))
+
+    def test_lowered_from_above_64_kb_the_timeout_comes_down_with_it(self):
+        content = self.write(os.urandom(262144 + 2 * 131072))
+        self.set_config(DCC_BLOCK_SIZE=262144)
+        conn = Connection()
+        self.stream(conn, drain=changing_the_block((1, 131072)))
+        self.assertEqual(self.sizes(conn), [262144, 131072, 131072])
+        self.assertEqual(conn.timeouts, [240.0, 120.0, 120.0])
+        self.assertEqual(b"".join(conn.chunks), content)
+
+    def test_a_resumed_send_keeps_every_count_exact_across_a_change(self):
+        """From byte 100, 8 KB lowered to 4 KB: 8192, 4096, then the 3,996
+        left. What the loop returns and what the tracker holds is the whole
+        file; the row and the bot's total moved by what went on the wire."""
+        offset = 100
+        self.set_config(DCC_BLOCK_SIZE=8192)
+        conn = Connection()
+        sent, acks = self.stream(conn, drain=changing_the_block((1, 4096)), resume_offset=offset)
+        self.assertEqual(self.sizes(conn), [8192, 4096, len(CONTENT) - offset - 8192 - 4096])
+        self.assertEqual(b"".join(conn.chunks), CONTENT[offset:])
+        self.assertEqual(sent, len(CONTENT))
+        self.assertEqual((acks.sent, acks.acked), (len(CONTENT), len(CONTENT)))
+        self.assertEqual(self.row["bytes_sent"], len(CONTENT) - offset)
+        self.assertEqual(self.oserve.total_sent_bytes, len(CONTENT) - offset)
+
+    def test_a_new_value_is_clamped_like_the_first(self):
+        """A mistyped value on a rehash is clamped as at the start of a send
+        (dcc_block_size()): 100 becomes MIN_DCC_BLOCK_SIZE, half a gigabyte
+        MAX_DCC_BLOCK_SIZE, with its timeout."""
+        low, high = dcc.MIN_DCC_BLOCK_SIZE, dcc.MAX_DCC_BLOCK_SIZE
+        with self.subTest(to=100):
+            self.set_config(DCC_BLOCK_SIZE=8192)
+            conn = Connection()
+            self.stream(conn, drain=changing_the_block((1, 100)))
+            self.assertEqual(self.sizes(conn), [8192, low, low])
+            self.assertEqual(b"".join(conn.chunks), CONTENT)
+            self.assertEqual(conn.timeout, dcc._send_timeout(low))
+        with self.subTest(to=500000000):
+            content = self.write(os.urandom(524288 + 2 * high))
+            self.set_config(DCC_BLOCK_SIZE=524288)
+            conn = Connection()
+            self.stream(conn, drain=changing_the_block((1, 500000000)))
+            self.assertEqual(self.sizes(conn), [524288, high, high])
+            self.assertEqual(conn.timeouts, [dcc._send_timeout(524288), dcc._send_timeout(high),
+                                             dcc._send_timeout(high)])
+            self.assertEqual(conn.timeout, 960.0)
+            self.assertEqual(b"".join(conn.chunks), content)
+
+    def test_a_rehash_window_moves_one_pass_at_the_default_and_the_next_goes_back(self):
+        """A !rehash re-executes defaults.py, and for its few milliseconds
+        DCC_BLOCK_SIZE is the shipped 64 KB (runtime.config_reload_lock). A
+        pass that reads it then moves 64 KB under a 60 s timeout - both
+        consistent with each other - and the next pass is back on the
+        operator's 128 KB and its 120 s."""
+        self.assertEqual(dcc.DEFAULT_DCC_BLOCK_SIZE, 65536)
+        content = self.write(os.urandom(2 * 131072 + 65536 + 131072))
+        self.set_config(DCC_BLOCK_SIZE=131072)
+        conn = Connection()
+        sent, acks = self.stream(conn, drain=changing_the_block((1, dcc.DEFAULT_DCC_BLOCK_SIZE),
+                                                                (2, 131072)))
+        self.assertEqual(self.sizes(conn), [131072, 65536, 131072, 131072])
+        self.assertEqual(conn.timeouts, [120.0, 60.0, 120.0, 120.0])
+        self.assertEqual(b"".join(conn.chunks), content)
+        self.assertEqual((sent, acks.acked), (len(content), len(content)))
+
+    def test_an_unchanged_block_sets_the_timeout_once(self):
+        """The timeout is set again only when the block changed: a send whose
+        block never changes sets it once, before its first chunk."""
+        calls = []
+
+        class Counting(Connection):
+            def settimeout(self, value):
+                calls.append(value)
+                super().settimeout(value)
+
+        conn = Counting()
+        self.stream(conn)
+        self.assertEqual(self.sizes(conn), [BLOCK] * 4)
+        self.assertEqual(calls, [dcc._send_timeout(BLOCK)])
 
 
 class TheEndingReadsTheTracker(unittest.TestCase):

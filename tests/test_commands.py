@@ -514,6 +514,11 @@ class RehashPreservesEveryRuntimeContainer(unittest.TestCase):
             "a setting too: the extra host names the dashboard answers to. "
             "An operator who adds one expects the next request under that "
             "name to be answered after the rehash, not after a restart",
+        "ANNOUNCE_TRANSFERS_EXCLUDE":
+            "a setting as well (#1444): the channels a finished transfer is "
+            "not announced in. An operator who adds a channel after it "
+            "complained expects the next Sent line to stay out of it after "
+            "the rehash, not after a restart",
         "fetch_request_queue":
             "transient OUTPUT like vip_queue: the requests for files from "
             "other bots, sent within seconds - and a request lost here "

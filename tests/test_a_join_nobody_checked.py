@@ -56,11 +56,13 @@ def join_body():
 class WhereTheBotBelongs(DCCoreTestCase):
     """One definition of the question, which is the whole of #193's lesson."""
 
-    def test_the_debug_channel_is_one_of_them(self):
+    def test_the_debug_channel_is_one_of_them_and_goes_first(self):
+        """First since #1424: the operator's channel is in before anything can
+        go wrong, and is not the JOIN a server cuts or refuses at the end."""
         self.set_config(CHANNEL="#alpha,#beta", DEBUG_CHANNEL="#thedebug")
 
         self.assertEqual(irc.channels_we_should_be_in(),
-                         ["#alpha", "#beta", "#thedebug"])
+                         ["#thedebug", "#alpha", "#beta"])
 
     def test_a_blank_debug_channel_is_not_a_channel_named_nothing(self):
         self.set_config(CHANNEL="#alpha", DEBUG_CHANNEL="")
@@ -283,6 +285,128 @@ class TheWatchdogSaysSoWhereItIsRead(WelcomeHarness):
             code = re.sub(chr(35) + "[^" + chr(10) + "]*", "", handle.read())
 
         self.assertIn("if target_channels.issubset(channels_confirmed):", code)
+
+
+class TheDebugChannelIsCheckedOnceTheAdvertRuns(WelcomeHarness):
+    """#1421: every CHANNEL answered, so the 366 handler activated the advert
+    before the watchdog woke - and the watchdog asked "what never confirmed"
+    only when it was the one activating. The debug channel is in the wider
+    set and not in what activation waits on, so one the bot did not get into
+    went unreported and was never asked for again. Seen at two restarts of a
+    real bot."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_config(CHANNEL="#alpha,#beta", DEBUG_CHANNEL="#thedebug",
+                        activation_triggered=True)
+        self.notices = []
+        self.patch(announce, "send_debug",
+                   lambda msg_text, category="INFO", notice=None: self.notices.append((notice, msg_text)))
+        self.conn.joined = True
+        self.conn.channels_confirmed.update({"#alpha", "#beta"})
+
+    def watch(self):
+        return self.quietly(irc.activation_watchdog, self.conn)[1]
+
+    def test_a_debug_channel_with_no_names_is_reported_and_retried(self):
+        said = self.watch()
+
+        self.assertIn("never confirmed via NAMES, though the advert is running: #thedebug", said)
+        self.assertEqual(config.kicked_channels["#thedebug"]["reason"], "never confirmed")
+        self.assertIn("#thedebug", irc.channels_to_rejoin())
+
+    def test_the_operator_hears_it_on_the_dashboard(self):
+        self.watch()
+
+        sent = [(notice, text) for notice, text in self.notices if "never confirmed via NAMES" in text]
+        self.assertEqual(len(sent), 1, self.notices)
+        self.assertEqual(sent[0][0], "error")
+        self.assertIn("#thedebug", sent[0][1])
+
+    def test_the_advert_is_not_started_a_second_time(self):
+        self.watch()
+
+        self.assertEqual(self.started(irc.delayed_activate), [])
+
+    def test_a_confirmed_debug_channel_says_nothing(self):
+        self.conn.channels_confirmed.add("#thedebug")
+        said = self.watch()
+
+        self.assertNotIn("never confirmed", said)
+        self.assertEqual(config.kicked_channels, {})
+        self.assertEqual(self.notices, [])
+
+    def test_with_no_debug_channel_nothing_changes(self):
+        self.set_config(DEBUG_CHANNEL="")
+        said = self.watch()
+
+        self.assertNotIn("never confirmed", said)
+        self.assertEqual(config.kicked_channels, {})
+
+    def test_a_dead_connection_is_left_alone(self):
+        self.set_config(connection_epoch=self.conn.epoch + 1)
+        self.watch()
+
+        self.assertEqual(config.kicked_channels, {})
+
+
+class AMemberListAfterActivationStillConfirms(WelcomeHarness):
+    """#1424: the debug channel was joined last, its 366 came after the last
+    CHANNEL's had activated the advert, and only the pre-activation handler
+    recorded a 366 - so the watchdog (#1421) called a channel the bot was in
+    missing, and asked for it again every advert, for ever. Seen live: the
+    bot was in, and opped, and said it was not."""
+
+    END = ":irc.example.net 366 alfa {} :End of /NAMES list."
+
+    def setUp(self):
+        super().setUp()
+        self.set_config(CHANNEL="#alpha,#beta", DEBUG_CHANNEL="#thedebug", activation_triggered=True)
+        self.notices = []
+        self.patch(announce, "send_debug",
+                   lambda msg_text, category="INFO", notice=None: self.notices.append((notice, msg_text)))
+        self.conn.joined = True
+        self.conn.channels_confirmed.update({"#alpha", "#beta"})
+
+    def end_of_names(self, channel):
+        return self.quietly(irc.answer_any_end_of_names, self.END.format(channel),
+                            self.conn, self.sock, self.conn.epoch)[0]
+
+    def test_a_late_366_is_recorded(self):
+        self.assertEqual(self.end_of_names("#TheDebug"), "#thedebug")
+        self.assertIn("#thedebug", self.conn.channels_confirmed)
+
+    def test_then_the_watchdog_finds_nothing_missing(self):
+        """The order from the live log: activation, the debug 366, the watchdog."""
+        self.end_of_names("#thedebug")
+        said = self.quietly(irc.activation_watchdog, self.conn)[1]
+
+        self.assertNotIn("never confirmed", said)
+        self.assertEqual(config.kicked_channels, {})
+        self.assertEqual(irc.channels_to_rejoin(), [])
+
+    def test_a_user_cannot_forge_one(self):
+        forged = ":someone!user@host PRIVMSG #alpha :look 366 alfa #thedebug"
+        result = self.quietly(irc.answer_any_end_of_names, forged, self.conn, self.sock, self.conn.epoch)[0]
+
+        self.assertIsNone(result)
+        self.assertNotIn("#thedebug", self.conn.channels_confirmed)
+
+    def test_a_name_no_target_can_be_confirms_nothing(self):
+        """A comma list, or a control character, is no one channel."""
+        before = set(self.conn.channels_confirmed)
+        self.assertIsNone(self.end_of_names("#a,#b"))
+        self.assertEqual(self.conn.channels_confirmed, before)
+
+    def test_a_channel_being_retried_is_cleared_and_said(self):
+        # Its JOIN was echoed; only the 366 was late (a 366 alone is no
+        # proof: test_a_names_reply_is_not_a_rejoin).
+        irc.note_own_join("#beta")
+        irc.note_join_unconfirmed("#beta")
+        self.end_of_names("#beta")
+
+        self.assertEqual(config.kicked_channels, {})
+        self.assertIn(("warning", "Rejoined #beta."), self.notices)
 
 
 class WhatTheServerSaidIsNoLongerDiscarded(unittest.TestCase):

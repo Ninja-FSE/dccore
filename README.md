@@ -1,6 +1,6 @@
 # DCCore
 
-**v1.17.0** · Python 3.10+ · Linux, Windows and macOS · [Project page](https://ninja-fse.github.io/dccore/)
+**v1.18.0** · Python 3.10+ · Linux, Windows and macOS · [Project page](https://ninja-fse.github.io/dccore/)
 
 An IRC DCC file-sharing daemon — a modern reimplementation of OmenServe, the mIRC script that has run these channels for twenty years.
 

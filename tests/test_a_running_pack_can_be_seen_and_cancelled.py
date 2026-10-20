@@ -38,6 +38,26 @@ SLOW_RAR = r'''
 import os, sys, time
 target = [a for a in sys.argv if a.endswith(".rar")][0]
 release = os.environ.get("FAKE_RAR_RELEASE", "")
+# What this pack was asked for, kept beside the release file: the packer
+# lists the archive once it is made (#1376), and is answered with it.
+names_file = os.path.join(os.path.dirname(release), os.path.basename(target) + ".names")
+if sys.argv[1:2] == ["lb"]:
+    if os.path.exists(names_file):
+        with open(names_file, "rb") as kept:
+            sys.stdout.buffer.write(kept.read())
+    sys.exit(0)
+asked = []
+base = os.path.dirname(os.path.abspath(sys.argv[-1]))
+for arg in sys.argv:
+    if arg.startswith("-n@") and os.path.exists(arg[3:]):
+        # Gone already when a pack is cancelled before this process reads it.
+        with open(arg[3:], "rb") as listed:
+            for line in listed.read().decode("utf-8" if "-scfl" in sys.argv else "utf-16").split("\n"):
+                line = line[:-1] if line.endswith("\r") else line
+                if line:
+                    asked.append(os.path.relpath(line, base).replace(os.sep, "/"))
+with open(names_file, "wb") as kept:
+    kept.write("".join(name + "\n" for name in asked).encode("utf-8"))
 with open(target, "wb") as out:
     while not (release and os.path.exists(release)):
         out.write(b"R" * 4096)
@@ -84,7 +104,8 @@ class RunningPackTests(DCCoreTestCase):
 
         def popen(cmd, *args, **kwargs):
             process = real_popen([sys.executable, script] + list(cmd[1:]), *args, **kwargs)
-            self.rars.append(process)
+            if cmd[1:2] != ["lb"]:
+                self.rars.append(process)
             return process
 
         subprocess.Popen = popen

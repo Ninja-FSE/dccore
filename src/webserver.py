@@ -39,8 +39,9 @@ authentication, not the workaround kind the module docstring used to warn
 against (an API key in a query string, a cookie nobody checks) - the password
 is verified against ADMIN_PASSWORD_HASH via adminchat.verify_password() on
 every login attempt, and nothing downstream trusts a request that has not
-passed require_login(). Repeated failures from one address are temporarily
-blocked (_note_bad_web_login()/_is_bad_web_ip(), same attempt-count and
+passed require_login(). Repeated failures from one address (for IPv6, one
+/64 network, and many from one /48: _login_counts()) are temporarily blocked
+(_note_bad_web_login()/_is_bad_web_ip(), same attempt-count and
 block-duration policy as adminchat.py's own DCC CHAT console tracker, reused
 from there directly) - in a POOL SEPARATE FROM adminchat.py's, on purpose:
 since the password is shared, a shared block budget would let a web attacker
@@ -441,6 +442,8 @@ from web_list_update import (  # noqa: F401
 from web_settings import (  # noqa: F401
     CHOICE_LABELS,
     EDITED_ELSEWHERE,
+    REHASH_FAILED_SAID,
+    REHASH_FAILED_WHY,
     SETTINGS_CATEGORIES,
     SETTINGS_LABELS,
     SETTINGS_RESTART_ONLY,
@@ -451,6 +454,7 @@ from web_settings import (  # noqa: F401
     _settings_payload_unlocked,
     apply_settings_changes,
     build_password_change_result,
+    build_save_rehash_payload,
     build_settings_payload,
     build_theme_preview,
     console_is_enabled,
@@ -550,17 +554,27 @@ from web_on_connect import (  # noqa: F401
 # name, so webserver.<name> still answers for each of them.
 from web_login import (  # noqa: F401
     LOGIN_PAGE,
+    WEB_LOGIN_IPV6_PREFIX,
+    WEB_LOGIN_IPV6_WIDE_PREFIX,
+    WEB_LOGIN_WIDE_ATTEMPTS,
     WEB_MAX_LIVE_SESSIONS,
     WEB_PASSWORD_CHECK_WAIT_SECONDS,
+    _NAT64_PREFIX,
+    _admin_password_hash,
+    _blocked_locked,
     _check_web_password,
     _clear_bad_web_ip,
+    _client_address,
     _configured_dashboard_names,
     _dashboard_host_ok,
     _host_name,
     _is_bad_web_ip,
+    _login_counts,
+    _login_key,
     _login_origin_ok,
     _machine_name_cache,
     _machine_names,
+    _network_key,
     _note_bad_web_login,
     _note_bad_web_login_locked,
     _origin_netloc,
@@ -793,7 +807,7 @@ if HAVE_FLASK:
             session["authenticated"] = True
             session["sid"] = sid
             session["pw"] = _password_stamp(
-                app.secret_key, getattr(config, "ADMIN_PASSWORD_HASH", ""))
+                app.secret_key, _admin_password_hash())
 
         def session_is_live():
             import hmac
@@ -802,8 +816,7 @@ if HAVE_FLASK:
             sid, stamp = session.get("sid"), session.get("pw")
             if not isinstance(sid, str) or not isinstance(stamp, str):
                 return False
-            current = _password_stamp(app.secret_key,
-                                      getattr(config, "ADMIN_PASSWORD_HASH", ""))
+            current = _password_stamp(app.secret_key, _admin_password_hash())
             if not hmac.compare_digest(stamp, current):
                 return False
             with runtime.web_sessions_lock:
@@ -820,7 +833,7 @@ if HAVE_FLASK:
             """After this session changed the password: it stays open, every
             other session opened with the old password does not."""
             session["pw"] = _password_stamp(
-                app.secret_key, getattr(config, "ADMIN_PASSWORD_HASH", ""))
+                app.secret_key, _admin_password_hash())
 
         @app.after_request
         def deny_framing(response):
@@ -893,13 +906,13 @@ if HAVE_FLASK:
                 if claim == "blocked":
                     error, status = "Too many failed attempts. Try again later.", 401
                 elif claim == "busy":
-                    error, status = ("Another login from this address is still being "
-                                     "checked. Try again in a moment."), 429
+                    error, status = ("Another login from this address or network is "
+                                     "still being checked. Try again in a moment."), 429
                 else:
                     outcome = None
                     try:
                         outcome = _check_web_password(
-                            getattr(config, "ADMIN_PASSWORD_HASH", ""),
+                            _admin_password_hash(),
                             request.form.get("password", ""))
                     finally:
                         _settle_web_login(ip, outcome)
@@ -1243,7 +1256,10 @@ if HAVE_FLASK:
             # touches the filesystem.
             with dcc_fetch._fetch_lock():
                 row = getattr(config, "fetch_queue", {}).get(request_id)
-                if row and row.get("state") == "complete" and row.get("stored_filename"):
+                # The row's own folder (#1423), read with its name.
+                directory = dcc_fetch.fetched_dir_of(row) if row else None
+                if (row and row.get("state") == "complete" and row.get("stored_filename")
+                        and directory is not None):
                     stored_filename = row["stored_filename"]
                     download_name = row.get("filename") or stored_filename
                 else:
@@ -1254,8 +1270,7 @@ if HAVE_FLASK:
             # selects a row, and the row's OWN already-validated
             # stored_filename (set by dcc_fetch.py after it ran the offer's
             # filename through dcc.is_safe_path()) is what actually gets
-            # opened.
-            directory = os.path.abspath(getattr(config, "FETCHED_FILES_DIR", "./data/fetched"))
+            # opened - in the folder the row was fetched into.
 
             # NOT send_from_directory(), and the reason is specific.
             #
@@ -1315,6 +1330,12 @@ if HAVE_FLASK:
             body = json_object(request.get_json(silent=True))
             status, result = apply_settings_changes(body)
             return jsonify(result), status
+
+        @app.route("/api/settings/rehash")
+        def api_settings_rehash():
+            # Whether the rehash a save started went through (#1462): the
+            # Settings page asks after its save, by the save's "rehash_seq".
+            return jsonify(build_save_rehash_payload())
 
         @app.route("/api/folders")
         def api_folders():
