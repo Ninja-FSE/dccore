@@ -74,8 +74,11 @@ class TheRefusalMarksTheToken(unittest.TestCase):
     def test_a_typed_password_is_recorded_as_typed_and_a_dial_forgets_it(self):
         typed = block("on *:INPUT:@DCCore: {")
         typed = typed[typed.index("if ($dccore.st(state) == password) {"):]
-        # dccore.sendpass: the typed password, its spaces kept (#1273).
-        self.assertIn("hadd dccore.live state auth\n    hadd dccore.live typed 1\n    dccore.sendpass $1-", typed)
+        # dccore.typedpass: auth, typed, then dccore.sendpass - the typed
+        # password, its spaces kept (#1273).
+        self.assertIn("dccore.typedpass @DCCore $1-", typed)
+        self.assertIn("hadd dccore.live state auth\n  hadd dccore.live typed 1\n  dccore.sendpass $1-",
+                      block("alias dccore.typedpass {"))
         connect = block("alias dccore.connect {")
         self.assertIn("hadd dccore.live tokentried 0\n  hadd dccore.live typed 0", connect)
 

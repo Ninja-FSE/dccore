@@ -32,6 +32,7 @@ if REPO_ROOT not in sys.path:
 
 import dcc  # noqa: E402
 import defaults as config  # noqa: E402
+import platform_compat  # noqa: E402
 import runtime  # noqa: E402
 
 from tests import dcc_ports  # noqa: E402
@@ -47,11 +48,19 @@ CONTENT = bytes(range(256)) * 400          # 102,400 bytes
 RESUME_AT = 40_000
 
 
-def loopback_is_usable():
-    """Bind and dial for real, on the range the test uses."""
-    for port in range(PORT_START, PORT_END + 1):
+def loopback_is_usable(port_start=PORT_START, port_end=PORT_END):
+    """Bind and dial for real, on the range the test uses: this module's own
+    by default. A module that sends on a window of its own passes that
+    window (#1469) - this one being free says nothing about it."""
+    for port in range(port_start, port_end + 1):
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
+            # The address-reuse option the daemon's own listener sets
+            # (dcc.py, through platform_compat.prepare_listener()): SO_REUSEADDR
+            # on POSIX, so a port a run has just used, still in TIME_WAIT, is
+            # usable here as it is to the code under test (#1469); the exclusive
+            # option on Windows, where SO_REUSEADDR means something else.
+            platform_compat.prepare_listener(listener)
             listener.bind(("0.0.0.0", port))
             listener.listen(1)
             client = socket.create_connection(("127.0.0.1", port), timeout=2)

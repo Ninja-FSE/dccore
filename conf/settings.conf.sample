@@ -403,6 +403,23 @@
 # (GET /api/fetch/<id>/download in webserver.py).
 #FETCHED_FILES_DIR = ./data/fetched
 
+# Save what you download from each bot in a folder named after it, inside the
+# fetched files directory - files from SomeBot go to SomeBot/. Applies to new
+# downloads; files already downloaded stay where they are. Fetched lists keep
+# their own place. A nick a folder name cannot hold gets a tag: [Bot] is Bot-
+# de3914ffb39e4938.
+#
+# EACH BOT'S FILES IN A FOLDER OF ITS OWN (#1423), the way mIRC can file a
+# download under its sender's name: a file or a packed folder fetched from
+# SomeBot is saved in FETCHED_FILES_DIR/SomeBot/. Off by default - turned on,
+# it applies to new fetches only, and files already fetched stay where they
+# are. Fetched lists are not affected: they have their own place (lists/).
+# The folder's name is dcc_fetch.bot_folder_name(): tagged when the name
+# alone could be another nick's - cleaned, reserved, cut short, or already
+# looking tagged - so two bots do not share one by accident (#1438).
+# Save each bot's files in a folder named after it, inside the fetched files directory
+#FETCHED_FILES_PER_BOT = false
+
 # Where timed bans are saved.
 #
 # Safe, normalised paths into the data/ subdirectory
@@ -809,6 +826,22 @@
 # Your own debug line still records every send either way.
 #ANNOUNCE_TRANSFERS = true
 
+# Channels, separated by commas and each with its # (for example #alpha,
+# #beta), where a finished transfer is not announced even with the
+# announcement switched on. Case does not matter; the advert still goes there.
+# Leave it empty to post the line in every channel. For channels whose rules
+# forbid that kind of message.
+#
+# Channels where a finished transfer is NOT announced, even with
+# ANNOUNCE_TRANSFERS on - for a channel that does not allow that kind of
+# message but still wants the advert. Comma-separated, each written with its
+# "#" (e.g. "#alpha, #beta"); names are compared the way the IRC server
+# compares them, so case does not matter. A channel's Quiet or Request only
+# mode stops the announcement too, but stops the advert with it.
+# 
+# Empty announces in every channel.
+#ANNOUNCE_TRANSFERS_EXCLUDE = 
+
 
 [channel advertising (the advert clock)]
 # How often the bot posts its advert in the channel, in seconds. 300 is every
@@ -837,15 +870,17 @@
 # connected, and a stop counts against MAX_SEND_FAILS like a stall. Only the
 # slowest send, and only while another one moves at least this much - proof
 # the bot's side can deliver - so with one slot it never fires. Not while
-# MAX_UPLOAD_KB is what holds the sends back. See dcc._SlowSendWatch.
+# MAX_UPLOAD_KB is what holds it back: a send moving about an even share of a
+# full cap is kept, one far under it while others take the rest is not (#1436).
+# See dcc._SlowSendWatch.
 # In KB/s, 0 = off
 #SLOW_SEND_MIN_KB = 0
 
 # Files of at least this many MB count as large, and only one is sent at a
 # time, so a few huge downloads cannot hold every slot for hours. Someone
 # whose next file is large keeps their place and waits; the slot goes to the
-# next in line. The bot's list and !rar folder packs are never held back. 0
-# means off.
+# next in line. The bot's list is never held back, nor a !rar folder before it
+# is packed. 0 means off.
 #
 # A file of at least this many MB is large, and only one large file is sent at a time (0 = off)
 #LARGE_FILE_MB = 0
@@ -1634,11 +1669,11 @@
 # Attempts per queued file before it is dropped (see dcc.release_queue_entry)
 #MAX_SEND_FAILS = 3
 
-# 0 means off. Otherwise, someone whose downloads failed this many times today
-# (never accepted, stalled, or closed before the end - their own cancel
-# included) is paused until midnight: their queue is removed and new requests
-# are refused, each with a notice saying why. Admins are never paused. A
-# restart forgives.
+# 0 means off. Someone whose downloads failed this many times today (never
+# accepted, stalled, or closed before the end - their own cancel included) is
+# paused until midnight: their queue is removed and new requests are refused,
+# with a notice saying why. Admins are never paused. A restart forgives, a new
+# nick does not.
 #
 # A NICK WHOSE SENDS KEEP FAILING (#1389). MAX_SEND_FAILS is per queued file,
 # so a nick with twenty files queued whose client never accepts an offer can
@@ -1650,8 +1685,9 @@
 # connection before it had the whole file. Not counted: a pack cancelled by
 # the operator or withdrawn by the user, a send the bot stops itself, or a
 # failure on the bot's side (the file vanished). Admins (ADMIN_NICK) are never
-# paused. Kept in memory: a restart forgives. The console's `status` shows who
-# is paused, and `unpause <nick>` lifts it.
+# paused. Kept in memory: a restart forgives. A nick change does not: the
+# count and the pause follow the nick, like its queue. The console's `status`
+# shows who is paused, and `unpause <nick>` lifts it.
 # Failed sends in a day that pause a nick until midnight; 0 is off
 #DAILY_SEND_FAILS_LIMIT = 0
 

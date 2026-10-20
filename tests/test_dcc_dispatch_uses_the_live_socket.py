@@ -22,8 +22,8 @@ import io
 import os
 import sys
 import tempfile
-import time
 import unittest
+from unittest import mock
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -194,16 +194,23 @@ class AFailedHandshakeReturnsImmediately(DCCoreTestCase):
             {"user": "dave", "file": "Song.flac", "bytes_sent": 0})
         self.oserve.irc_connection = DeadSocket()
 
-    def test_it_returns_quickly_rather_than_blocking_in_accept(self):
-        started = time.perf_counter()
+    def test_it_returns_rather_than_waiting_in_accept(self):
+        """The real condition, not a stopwatch (#1417): a loaded runner took
+        12 s over a send that never reached accept(). accept() is replaced
+        by one that records the call and gives up at once."""
+        import socket
+        reached = []
 
-        dcc.start_dcc_send(DeadSocket(), "dave", self.track, "Song.flac",
-                           "#chan", {"file": "Song.flac", "path": self.track})
+        def accept(self_sock):
+            reached.append(self_sock)
+            raise socket.timeout("no peer in this test")
 
-        elapsed = time.perf_counter() - started
-        self.assertLess(elapsed, 5.0,
-                        "start_dcc_send blocked as though it reached "
-                        "accept() after a handshake that never went out")
+        with mock.patch.object(socket.socket, "accept", accept):
+            dcc.start_dcc_send(DeadSocket(), "dave", self.track, "Song.flac",
+                               "#chan", {"file": "Song.flac", "path": self.track})
+
+        self.assertEqual(reached, [], "start_dcc_send went on to accept() after a "
+                                      "handshake that never went out")
 
     def test_the_slot_is_still_released(self):
         dcc.start_dcc_send(DeadSocket(), "dave", self.track, "Song.flac",

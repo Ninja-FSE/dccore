@@ -159,8 +159,15 @@ MAX_JOIN_LINE_BYTES = 510
 
 
 def channels_we_should_be_in():
-    """Every channel the bot belongs in: CHANNEL, in order, plus the debug
-    channel.
+    """Every channel the bot belongs in: the debug channel first, then CHANNEL,
+    in order.
+
+    THE DEBUG CHANNEL FIRST (#1424). It was last, and that put it where a
+    JOIN burst is most exposed: the line a server cuts (#510), the JOIN an
+    ircu target limit refuses at the end of the burst (#1415), and the 366
+    that arrives after the last CHANNEL's has already activated the advert.
+    First, the operator's own channel is in before anything can go wrong,
+    and is there to hear about it. Activation still does not wait for it.
 
     ONE DEFINITION, deliberately. irc.py's own connect path used to build this
     by joining CHANNEL and then sending a second JOIN for DEBUG_CHANNEL, and
@@ -178,7 +185,7 @@ def channels_we_should_be_in():
     seen = {irc_lower(name) for name in chans}
     debug_chan = str(getattr(config, "DEBUG_CHANNEL", "") or "").strip()
     if debug_chan and irc_lower(debug_chan) not in seen:
-        chans = chans + [debug_chan]
+        chans = [debug_chan] + chans
     return chans
 
 
@@ -490,6 +497,8 @@ def _answer_target_change(line):
         return None
     target, seconds = parsed
     runtime.outbound_pacer.hold_for(seconds)
+    # A channel the bot is not in: it was a JOIN that was refused (#1415).
+    note_join_target_wait(target, seconds)
     entry = runtime.take_paced_line(target, fold=irc_lower)
     if entry is None:
         outcome = "nothing to resend."
@@ -1151,6 +1160,16 @@ def note_nick_change(old_nick, new_nick):
     involved at all: `user_processing_lock` and the `"user"` field on any
     matching `active_transfers` row now move too.
 
+    The DAILY_SEND_FAILS_LIMIT count follows the nick as well (#1437), and the
+    pause with it: `failed_transfers` is keyed like `dcc_queue`, and the
+    request gate reads only the asking nick's key, so a nick paused at its
+    last failed send that typed /nick was served again at once with its count
+    back at 0. (A reconnect under another nick is a QUIT and a new JOIN, no
+    NICK line, so it does not come through here: it is a new nick to the
+    bot.) A pause is not a sanction in the sense below - it is the bot's own
+    state about a receiver that keeps failing, and a new name does not mend
+    the receiver.
+
     NOT the sanctions. `muted_until` and `banned_users` are keyed on the nick
     too, and carrying those across would be a change of policy rather than a
     fix: DCCore already answers nick-hopping with hard bans, which match a
@@ -1268,6 +1287,18 @@ def note_nick_change(old_nick, new_nick):
                 db.save_dcc_queue()
             except Exception as save_err:
                 print(f"[NICK] Could not save the queue after {old_nick} -> {new_nick}: {save_err}")
+
+    # The failed sends today and the pause they made (#1437). dcc.py owns the
+    # entry and takes its own lock, so this is after queue_lock is released:
+    # dcc.py never takes one inside the other.
+    if dcc.carry_send_fails(old_key, new_key):
+        moved.append("failed_transfers")
+    # The nicks of the never-connected streak follow the same way: one user
+    # renamed between two unanswered offers is one nick to
+    # dcc.never_connected_counts(), not two. Its own lock, also outside
+    # queue_lock.
+    if dcc.carry_never_connected_streak(old_key, new_key):
+        moved.append("never_connected_streak")
 
     # Unchanged behaviour, kept here so one function owns the whole rename.
     send_queue = getattr(config, "send_queue", None)
@@ -1487,6 +1518,7 @@ def note_kicked_from(channel, by=""):
     where it belongs.
     """
     name = channel_key(channel)
+    note_own_leave(name)
     if not name or name not in channels_we_should_be_in_set():
         return False
     with runtime.kicked_channels_lock:
@@ -1639,14 +1671,158 @@ def note_join_refused(channel):
     return count
 
 
+def note_own_join(channel):
+    """The server echoed the bot's own JOIN to `channel`: the bot is in it.
+
+    THE ECHO IS THE PROOF, NOT THE MEMBER LIST. A server answers NAMES for a
+    channel the client is not on as well - 366 always, 353 too for a public
+    channel - and the rehash's sync_channels() asks NAMES of every CHANNEL,
+    one the bot was kicked from included. Taking that 366 as a rejoin cleared
+    the kick, said "Rejoined", and stopped every attempt to get back in, while
+    the 353 filled a member list the bot then never saw a PART or QUIT from.
+    So a channel the bot knows it is out of counts as joined again only once
+    this echo has come (_known_out()).
+    """
+    with runtime.kicked_channels_lock:
+        runtime.joined_channels.add(channel_key(channel))
+
+
+def note_own_leave(channel):
+    """The bot was kicked from `channel`, or parted it: its JOIN no longer
+    vouches for it (note_own_join())."""
+    with runtime.kicked_channels_lock:
+        runtime.joined_channels.discard(channel_key(channel))
+
+
+def _known_out(name):
+    """Whether the bot knows it is not in channel `name` (a channel_key): it
+    is being retried or given up on - kicked, refused, or never confirmed -
+    or the server told it to wait, and no echo of its own JOIN vouches for it.
+
+    A channel retried as "never confirmed" whose JOIN was echoed is not out:
+    only its 366 was late, which is what answer_any_end_of_names() is there
+    to catch (#1424)."""
+    with runtime.kicked_channels_lock:
+        tracked = name in config.kicked_channels or name in runtime.join_waits
+        return tracked and name not in runtime.joined_channels
+
+
 def note_joined(channel):
     """A join succeeded, so stop tracking it. Returns what was cleared."""
     name = channel_key(channel)
     with runtime.kicked_channels_lock:
+        runtime.join_waits.pop(name, None)
         return config.kicked_channels.pop(name, None)
 
 
-def channels_to_rejoin(limit=None):
+# JOINS THE SERVER SAID TO WAIT FOR (#1415). ircu answers a JOIN with 439,
+# "target change too fast", when the client has no free target, and it
+# remembers how few a client had across a reconnect - so a bot restarted after
+# hours of advertising comes back with almost none. A channel it was refused
+# is asked for again only once the server's wait is over, plus this margin;
+# the advert worker's rejoin (channels_to_rejoin()) skips it until then, and
+# irc_loop() asks for it as soon as the wait ends (ask_again_after_join_waits()).
+# One target frees per wait, so a second channel refused in the same burst
+# waits for the first one's turn and then a wait of its own.
+JOIN_WAIT_MARGIN = 5.0
+
+
+def _in_channel(name):
+    """Whether the bot is in channel `name` (a channel_key) now: its member
+    list exists - NAMES (answer_names()) or the rehash's sync starts it - and
+    it is not one the bot was thrown out of or never got into."""
+    with runtime.channel_users_lock():
+        listed = name in config.channel_users
+    with runtime.kicked_channels_lock:
+        return listed and name not in config.kicked_channels
+
+
+def note_join_target_wait(target, seconds, now=None):
+    """The server refused `target` with "target change too fast" and asked for
+    `seconds`. When `target` is a channel the bot should be in and is not,
+    that was a JOIN: remember when it may be asked for again, and return that
+    time. None for anything else - a message to a nick, or to a channel the
+    bot is in, which only holds the pacer (_answer_target_change())."""
+    name = channel_key(target)
+    if not name or name not in channels_we_should_be_in_set() or _in_channel(name):
+        return None
+    now = time.time() if now is None else now
+    seconds = max(0.0, float(seconds))
+    with runtime.kicked_channels_lock:
+        waits = runtime.join_waits
+        waits.pop(name, None)
+        # After every channel already waiting: each needs a target of its own.
+        latest = max(waits.values(), default=0.0)
+        due = max(now + seconds, latest + seconds) + JOIN_WAIT_MARGIN
+        waits[name] = due
+        runtime.join_wait_seconds = seconds
+    print(f"[JOIN WAIT] {name}: the server refused the JOIN (target change too fast). "
+          f"Asking again in {due - now:.0f} s, at {time.strftime('%H:%M:%S', time.localtime(due))}.")
+    return due
+
+
+def defer_joins_after_a_refusal(channels, now=None):
+    """`channels`, about to be asked for in the rest of a JOIN burst, are put
+    behind the server's wait instead when a JOIN of this burst has just been
+    refused for "target change too fast" (#1415): sent now, they would only
+    spend the targets the refused ones are waiting for. Returns the channels
+    deferred - none when nothing is waiting."""
+    with runtime.kicked_channels_lock:
+        waiting = bool(runtime.join_waits)
+        seconds = runtime.join_wait_seconds
+    if not waiting:
+        return []
+    if seconds is None:
+        seconds = TARGET_CHANGE_HOLD_DEFAULT
+    deferred = []
+    for channel in channels:
+        if note_join_target_wait(channel, seconds, now) is not None:
+            deferred.append(channel_key(channel))
+    return deferred
+
+
+def forget_join_waits():
+    """A new connection: the old one's waits mean nothing to it, nor do the
+    JOINs it saw echoed (note_own_join())."""
+    with runtime.kicked_channels_lock:
+        runtime.join_waits.clear()
+        runtime.joined_channels.clear()
+        runtime.join_wait_seconds = None
+
+
+def ask_again_after_join_waits(now=None, send=None):
+    """Ask again for every channel whose server wait is over (#1415), and
+    return them. Called by irc_loop() on every pass, so a refused JOIN is
+    asked for again within one read timeout of its wait ending, not at the
+    next advert.
+
+    Only for a channel the bot never got into. One it was kicked from keeps
+    the advert worker's slower rhythm (channels_to_rejoin()), as a kick
+    always has: an instant rejoin after a kick reads as a fight."""
+    now = time.time() if now is None else now
+    with runtime.kicked_channels_lock:
+        due = sorted(name for name, when in runtime.join_waits.items() if when <= now)
+        for name in due:
+            runtime.join_waits.pop(name, None)
+        reasons = {name: (config.kicked_channels.get(name) or {}).get("reason") for name in due}
+    if send is None:
+        oserve_mod = sys.modules.get("oserve")
+        if oserve_mod is None:
+            return []
+        send = lambda line: oserve_mod.queue_message("channel_announce", line)  # noqa: E731
+    asked = []
+    for name in due:
+        if reasons[name] not in (None, "never confirmed") or _in_channel(name):
+            continue
+        if name not in channels_we_should_be_in_set():
+            continue
+        send(f"JOIN {name}\r\n")
+        asked.append(name)
+        print(f"[REJOIN] Asking for {name} again: the server's wait is over.")
+    return asked
+
+
+def channels_to_rejoin(limit=None, now=None):
     """The channels worth one more JOIN, in a stable order.
 
     A pure read, so the advert worker can ask this without holding anything
@@ -1665,10 +1841,14 @@ def channels_to_rejoin(limit=None):
     # gating on CHANNEL alone meant a debug channel that failed to join could
     # be tracked and never retried.
     wanted = channels_we_should_be_in_set()
+    # Not before the server's wait for it is over (#1415): asked earlier, it
+    # is refused again and the wait starts over.
+    now = time.time() if now is None else now
     with runtime.kicked_channels_lock:
         return sorted(name for name, entry in config.kicked_channels.items()
                       if name in wanted
-                      and int(entry.get("refusals", 0)) < limit)
+                      and int(entry.get("refusals", 0)) < limit
+                      and runtime.join_waits.get(name, 0.0) <= now)
 
 
 def channels_we_are_out_of():
@@ -1677,9 +1857,10 @@ def channels_we_are_out_of():
 
     A pure read, like channels_to_rejoin(). kicked_channels is exactly this
     set: an entry is written by a kick or by the watchdog for a JOIN that was
-    never answered, and note_joined() removes it the moment a 366 says the
-    bot is back. A channel past REJOIN_ATTEMPTS stays in it, which is the
-    point - that is the one nothing will ever put the bot back into.
+    never answered, and note_joined() removes it at the 366 that follows the
+    echo of the bot's own JOIN there (note_own_join()). A channel past
+    REJOIN_ATTEMPTS stays in it, which is the point - that is the one
+    nothing will ever put the bot back into.
 
     Audit M29 (#631): the advert worker sent the advert and the CTCP SLOTS
     line into every channel in CHANNEL regardless, so a channel the bot had
@@ -3428,6 +3609,8 @@ def answer_welcome(line, conn):
     if is_server_numeric(line, "001"):
         adopt_registered_nick(line)
     conn.joined = True
+    # The last connection's "wait before asking" (#1415) is not this one's.
+    forget_join_waits()
     print(f"[INFO] Connected to the server. Waiting 5 seconds to settle before JOIN...")
     # The DCC address, looked at again for this
     # connection (#1271): the network is plainly up now,
@@ -3541,6 +3724,15 @@ def delayed_join(conn, channels):
         for index, payload in enumerate(batches):
             if index:
                 time.sleep(JOIN_BATCH_GAP)
+                # A JOIN of this burst was refused for "target change too
+                # fast" (#1415): the rest would only spend the targets it is
+                # waiting for. They wait their turn behind it instead.
+                rest = [channel for batch in batches[index:] for channel in batch.split(",")]
+                deferred = defer_joins_after_a_refusal(rest)
+                if deferred:
+                    print(f"[JOIN] The server is refusing JOINs for now; "
+                          f"{len(deferred)} channel(s) wait their turn: {', '.join(deferred)}.")
+                    break
             socket_conn.sendall(
                 f"JOIN {payload}\r\n".encode(
                     "utf-8", errors="ignore"))
@@ -3585,41 +3777,70 @@ def activation_watchdog(conn):
     if config.connection_epoch != epoch:
         print("[WATCHDOG] Connection changed before the timeout elapsed. Standing down.")
         return
-    if conn.joined and not getattr(config, 'activation_triggered', False):
-        # THE WIDER SET (#510). target_channels is CHANNEL only, and
-        # deliberately so - activation must not wait on the debug
-        # channel, or one broken debug channel silences every advert.
-        # But "what never confirmed" is a different question from
-        # "may we start advertising", and answering it with the
-        # narrow set is why a debug channel lost to a truncated JOIN
-        # was not even in the list of things that went missing.
-        missing = channels_we_should_be_in_set() - conn.channels_confirmed
+    if not conn.joined:
+        return
+    # THE WIDER SET (#510). target_channels is CHANNEL only, and
+    # deliberately so - activation must not wait on the debug
+    # channel, or one broken debug channel silences every advert.
+    # But "what never confirmed" is a different question from
+    # "may we start advertising", and answering it with the
+    # narrow set is why a debug channel lost to a truncated JOIN
+    # was not even in the list of things that went missing.
+    missing = channels_we_should_be_in_set() - conn.channels_confirmed
+    if not getattr(config, 'activation_triggered', False):
         config.activation_triggered = True
-        if missing:
-            print(f"[WARNING] Activating the advert despite {len(missing)} unconfirmed channel(s): {', '.join(sorted(missing))}")
-            # TRIED AGAIN, not just reported (#510). This set is
-            # already exactly the right answer and was only ever
-            # printed; feeding it to the retry machinery gives a
-            # channel that never let us in the same bounded second
-            # chance a channel that threw us out has had since #191.
-            for unconfirmed in sorted(missing):
-                note_join_unconfirmed(unconfirmed)
-            try:
-                # notice="error", which send_debug() turns into a
-                # dashboard notice (#510). Without it the ONLY
-                # operator-facing copy of this went to the debug
-                # channel - which, when a truncated JOIN is the cause,
-                # is routinely one of the channels that went missing.
-                # The message about losing channels cannot be
-                # delivered only to one of them.
-                announce.send_debug(
-                    f"Activated after {int(ACTIVATION_TIMEOUT)}s with {config.C_BOLD}{len(missing)}{config.C_RESET} channel(s) never confirmed via NAMES: {', '.join(sorted(missing))}. Retrying them on the advert timer.",
-                    category="PART", notice="error")
-            except Exception as watchdog_debug_err:
-                print(f"[WARNING] Could not send the watchdog debug notice: {watchdog_debug_err}")
-        else:
+        if not report_unconfirmed_channels(missing, activating=True):
             print(f"[INFO] Watchdog: every channel confirmed just in time.")
         threading.Thread(target=delayed_activate, args=(conn,), daemon=True).start()
+    else:
+        # ACTIVATED ALREADY, AND STILL ASKED (#1421). Every CHANNEL
+        # answered, so answer_end_of_names() activated the advert before
+        # this woke - and the question above was never asked, because it
+        # sat behind "not activated yet". The debug channel is in the wider
+        # set and not in what activation waits on: one the bot did not get
+        # into went unreported and was never tried again.
+        report_unconfirmed_channels(missing, activating=False)
+
+
+def report_unconfirmed_channels(missing, activating):
+    """Say which channels never confirmed via NAMES, and hand them to the
+    retry machinery (note_join_unconfirmed(), so channels_to_rejoin() asks
+    for them again). `activating` says the watchdog is starting the advert
+    without them; otherwise the advert was started by every CHANNEL
+    answering, and only the others - the debug channel - are missing
+    (#1421). Returns the channels reported, sorted."""
+    import announce
+    missing = sorted(missing)
+    if not missing:
+        return []
+    names = ', '.join(missing)
+    if activating:
+        print(f"[WARNING] Activating the advert despite {len(missing)} unconfirmed channel(s): {names}")
+    else:
+        print(f"[WARNING] {len(missing)} channel(s) never confirmed via NAMES, though the advert is running: {names}")
+    # TRIED AGAIN, not just reported (#510). This set is
+    # already exactly the right answer and was only ever
+    # printed; feeding it to the retry machinery gives a
+    # channel that never let us in the same bounded second
+    # chance a channel that threw us out has had since #191.
+    for unconfirmed in missing:
+        note_join_unconfirmed(unconfirmed)
+    try:
+        # notice="error", which send_debug() turns into a
+        # dashboard notice (#510). Without it the ONLY
+        # operator-facing copy of this went to the debug
+        # channel - which, when a truncated JOIN is the cause,
+        # is routinely one of the channels that went missing.
+        # The message about losing channels cannot be
+        # delivered only to one of them.
+        lead = (f"Activated after {int(ACTIVATION_TIMEOUT)}s with" if activating
+                else f"{int(ACTIVATION_TIMEOUT)}s after the JOIN,")
+        announce.send_debug(
+            f"{lead} {config.C_BOLD}{len(missing)}{config.C_RESET} channel(s) never confirmed via NAMES: {names}. Retrying them on the advert timer.",
+            category="PART", notice="error")
+    except Exception as watchdog_debug_err:
+        print(f"[WARNING] Could not send the watchdog debug notice: {watchdog_debug_err}")
+    return missing
 
 
 def delayed_activate(conn):
@@ -3778,6 +3999,10 @@ def answer_names(line, sock):
         line)
     if name_match and is_valid_irc_target(name_match.group(1)):
         chan = channel_key(name_match.group(1))
+        # The server answers NAMES for a channel the bot is not on too: that
+        # list is not one the bot will see a PART or QUIT from (note_own_join()).
+        if _known_out(chan):
+            return
         names = [n.strip("@+~&%").lower() for n in name_match.group(2).split()]
         # A merge, except for the first line after a
         # kick - see learn_channel_names().
@@ -3870,6 +4095,8 @@ def answer_part(line):
     if part_match and is_valid_irc_target(part_match[1]):
         p_user = part_match[0].lower()
         p_chan = channel_key(part_match[1])
+        if p_user == str(config.NICKNAME).lower():
+            note_own_leave(p_chan)
         _forget_chat_peer(p_user, p_chan)
         with runtime.channel_users_lock():
             if p_chan in config.channel_users and p_user in config.channel_users[p_chan]:
@@ -3902,6 +4129,51 @@ def answer_quit(line):
             note_observed_departure(q_user, quit_chan)
 
 
+def answer_any_end_of_names(line, conn, sock, epoch):
+    """Every end of a member list (366), before the advert is activated and
+    after: the channel is confirmed, a channel being retried is cleared, and
+    a late member list may claim the channel sync. Returns the channel's key,
+    or None for a line that is not one, or for a channel the bot is out of.
+
+    CONFIRMED WHENEVER IT COMES (#1424). Only answer_end_of_names() - which
+    irc_loop() calls until activation - added to conn.channels_confirmed. A
+    366 after the last CHANNEL's (the debug channel's, joined last) was never
+    recorded, and since #1421 the watchdog read that set: it called a channel
+    the bot was in missing, and asked for it again every advert, for ever -
+    the server ignores a JOIN to a channel one is on, so nothing cleared it.
+    A server owes no order to its replies, so this does not rest on the
+    order the JOINs went out in.
+
+    A JOIN that worked, whether it was the first one or a rejoin, is cleared
+    here rather than in answer_end_of_names() because that one only runs
+    before activation - a channel rejoined hours later would otherwise stay
+    marked as kicked for the life of the process, and be retried on every
+    advert until it ran out of attempts.
+
+    NOT FOR A CHANNEL THE BOT IS OUT OF. A 366 also ends the answer to a
+    NAMES for a channel the bot is not on - the rehash asks one of every
+    CHANNEL - so a channel it was kicked from, refused, or told to wait for
+    is confirmed only once its own JOIN was echoed (note_own_join()).
+    """
+    import announce
+    # Anchored to the command's position, as is_server_numeric() is: channel
+    # text quoting "366" cannot confirm a channel.
+    back = re.match(r"^:\S+ 366 \S+ (\S+)", line)
+    if not back or not is_valid_irc_target(back.group(1)):
+        return None
+    channel = back.group(1)
+    if _known_out(channel_key(channel)):
+        return None
+    conn.channels_confirmed.add(channel_key(channel))
+    if note_joined(channel) is not None:
+        announce.send_debug(f"Rejoined {channel}.", category="JOIN", notice="warning")
+    # The member list an activation that found nobody was waiting for
+    # (#1271) - see claim_channel_sync().
+    if runtime.channel_sync_waiting == epoch:
+        claim_channel_sync(sock, epoch, late=True)
+    return channel_key(channel)
+
+
 def answer_end_of_names(line, conn):
     """The end of a channel's member list (366): mark the channel confirmed, and
     activate once every target channel is.
@@ -3922,7 +4194,8 @@ def answer_end_of_names(line, conn):
     # "^" in its name never had its 366 recognised, so it
     # never counted as confirmed at startup.
     m366 = re.match(r"^:\S+ 366 \S+ (\S+)", line)
-    if m366 and is_valid_irc_target(m366.group(1)):
+    # Not for a channel the bot is out of: see answer_any_end_of_names().
+    if m366 and is_valid_irc_target(m366.group(1)) and not _known_out(channel_key(m366.group(1))):
         confirmed_chan = channel_key(m366.group(1))
         channels_confirmed.add(confirmed_chan)
         print(f"[INFO] Received End of NAMES for {confirmed_chan} ({len(channels_confirmed & target_channels)}/{len(target_channels)} target channels confirmed)")
@@ -4645,6 +4918,13 @@ def irc_loop():
         # one function so the 366 handler and the watchdog share it (issue #9).
         while True:
             try:
+                # JOINs the server said to wait for (#1415), asked for again
+                # as soon as the wait is over - here, on every pass, so
+                # within one read timeout of it. Never the read loop's end.
+                try:
+                    ask_again_after_join_waits()
+                except Exception as wait_err:
+                    print(f"[REJOIN ERROR] Could not ask again after a wait: {wait_err}")
                 try:
                     data = s.recv(SOCKET_READ_BYTES)
                 except socket.timeout:
@@ -4870,15 +5150,7 @@ def irc_loop():
                     # kicked for the life of the process, and be retried on
                     # every advert until it ran out of attempts.
                     if " 366 " in line:
-                        back = re.match(r"^:\S+ 366 \S+ (\S+)", line)
-                        if back and note_joined(back.group(1)) is not None:
-                            announce.send_debug(
-                                f"Rejoined {back.group(1)}.", category="JOIN",
-                                notice="warning")
-                        # The member list an activation that found nobody
-                        # was waiting for (#1271) - see claim_channel_sync().
-                        if back and runtime.channel_sync_waiting == my_epoch:
-                            claim_channel_sync(s, my_epoch, late=True)
+                        answer_any_end_of_names(line, conn, s, my_epoch)
 
                     if conn.joined and not getattr(config, 'activation_triggered', False) and " 366 " in line:
                         # answer_end_of_names() since #1332.
@@ -4917,6 +5189,13 @@ def irc_loop():
                     elif is_user_event(line, "JOIN") and event_source_nick(line) != config.NICKNAME.lower():
                         # answer_join() since #1330.
                         answer_join(line, s)
+
+                    # The bot's own JOIN, echoed: the proof it is in the
+                    # channel - see note_own_join().
+                    elif is_user_event(line, "JOIN"):
+                        own_join = parse_join(line)
+                        if own_join and is_valid_irc_target(own_join[1]):
+                            note_own_join(own_join[1])
                                 
                     # Anchored: as JOIN. This one removes people from channel_users, which
                     # freezes their queue and starts the five-minute delete timer.

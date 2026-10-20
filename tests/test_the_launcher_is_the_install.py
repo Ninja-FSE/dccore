@@ -267,14 +267,39 @@ class TheMacLauncherIsAWrapper(unittest.TestCase):
         git's index - asked only if git is reachable (preflight's bare-runner
         pass hides host tooling on purpose), skipped otherwise. CI's Linux
         and macOS runners take the first branch, so the property is always
-        checked somewhere."""
+        checked somewhere.
+
+        Nor is there an index to ask in a tree that is not this checkout:
+        the release extraction runs the suite in a tree with no .git (#1441),
+        where `git ls-files` answers nothing, or answers for some other
+        repository the folder sits in. That skips, saying what git said; the
+        dev repository's extraction test checks the modes it reports, on every
+        OS."""
         if os.name != "nt":
             self.assertTrue(os.access(MACOS, os.X_OK))
             return
         if not shutil.which("git"):
             self.skipTest("no git on PATH to read the index mode with")
-        mode = subprocess.run(["git", "ls-files", "-s", "scripts/macos/start-dccore.command"],
-                              cwd=REPO_ROOT, capture_output=True, text=True).stdout.split()
+
+        def git(*args):
+            try:
+                return subprocess.run(["git"] + list(args), cwd=REPO_ROOT, capture_output=True,
+                                      encoding="utf-8", errors="replace", timeout=30)
+            except (OSError, subprocess.TimeoutExpired) as err:
+                self.skipTest(f"git could not run to read the index mode: {err}")
+
+        top = git("rev-parse", "--show-toplevel")
+        if top.returncode != 0:
+            self.skipTest("no git work tree here (an extracted tree has no .git), so no index mode"
+                          f" to read; git said: {(top.stderr or '').strip() or 'nothing'}")
+        try:
+            ours = os.path.samefile(top.stdout.strip(), REPO_ROOT)
+        except OSError:
+            ours = False
+        if not ours:
+            self.skipTest(f"git's work tree here is {top.stdout.strip()!r}, not this tree,"
+                          " so its index says nothing about it")
+        mode = git("ls-files", "-s", "scripts/macos/start-dccore.command").stdout.split()
         self.assertTrue(mode and mode[0] == "100755", mode)
 
     def test_the_linux_launcher_avoids_readlink_f(self):
@@ -290,6 +315,161 @@ class TheMacLauncherIsAWrapper(unittest.TestCase):
         body = self.read(LINUX)
         self.assertIn('"$candidate" -c "import sys"', body)
         self.assertIn("for candidate in python3 python", body)
+
+
+class _Over:
+    """A module with some names replaced: everything else is the real one."""
+
+    def __init__(self, real, **replaced):
+        self._real = real
+        self.__dict__.update(replaced)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+class TheExecutableCheckKnowsWhoseIndexItReads(unittest.TestCase):
+    """#1441: test_it_is_executable, run with git and the OS faked, so its
+    guard is evaluated on every runner and not only on a Windows one.
+
+    On Windows it asks git's index; in the release extraction's tree there
+    is no .git, `git ls-files` answers nothing, and the check used to fail
+    the whole release run. It must skip there, saying why - and still be a
+    real check in a checkout.
+
+    The fake decodes git's bytes the way subprocess.run would with the
+    arguments it was given, and a bare text=True as a Greek Windows box
+    does (cp1253), so the encoding of the call is part of what is tested."""
+
+    LAUNCHER_MODE = "100755 0123456789abcdef0123456789abcdef01234567 0\tscripts/macos/start-dccore.command\n"
+
+    @staticmethod
+    def decoded(text, kwargs):
+        raw = text.encode("utf-8")
+        if kwargs.get("encoding") or kwargs.get("errors"):
+            return raw.decode(kwargs.get("encoding") or "cp1253", kwargs.get("errors") or "strict")
+        if kwargs.get("text") or kwargs.get("universal_newlines"):
+            return raw.decode("cp1253")
+        return raw
+
+    def outcome(self, os_name="nt", toplevel=None, toplevel_code=0, listed="", git="git-placeholder",
+                executable=True, stderr="", raises=None, root=None):
+        calls = []
+        self.timeouts = []
+
+        def run(argv, **kwargs):
+            calls.append(argv[1])
+            self.timeouts.append(kwargs.get("timeout"))
+            if raises is not None:
+                raise raises
+            if argv[1] == "rev-parse":
+                return subprocess.CompletedProcess(argv, toplevel_code, self.decoded(toplevel or "", kwargs),
+                                                   self.decoded(stderr, kwargs))
+            if argv[1] == "ls-files":
+                return subprocess.CompletedProcess(argv, 0, self.decoded(listed, kwargs), self.decoded("", kwargs))
+            raise AssertionError(f"unexpected command {argv}")
+
+        module = sys.modules[__name__]
+        saved = (module.os, module.shutil, module.subprocess, module.REPO_ROOT)
+        module.os = _Over(os, name=os_name, access=lambda path, mode: executable)
+        module.shutil = _Over(shutil, which=lambda name: git if name == "git" else None)
+        module.subprocess = _Over(subprocess, run=run)
+        module.REPO_ROOT = root or REPO_ROOT
+        try:
+            result = unittest.TestResult()
+            TheMacLauncherIsAWrapper("test_it_is_executable").run(result)
+        finally:
+            module.os, module.shutil, module.subprocess, module.REPO_ROOT = saved
+        if result.errors:
+            self.fail(result.errors[0][1])
+        said = "skip" if result.skipped else "fail" if result.failures else "pass"
+        self.reason = result.skipped[0][1] if result.skipped else None
+        return said, calls
+
+    def ours(self):
+        """REPO_ROOT as git prints it on Windows: forward slashes, a newline."""
+        return REPO_ROOT.replace(os.sep, "/") + "\n"
+
+    def test_an_extracted_tree_with_no_git_skips(self):
+        """`git rev-parse` fails where there is no .git: a skip, not the
+        failure on empty `ls-files` output it was."""
+        said, calls = self.outcome(toplevel_code=128, listed="")
+        self.assertEqual(said, "skip")
+        self.assertNotIn("ls-files", calls)
+
+    def test_a_tree_inside_some_other_repository_skips(self):
+        """The extraction sits in a folder another checkout owns: that
+        index is not this tree's."""
+        elsewhere = os.path.dirname(REPO_ROOT).replace(os.sep, "/") + "\n"
+        said, calls = self.outcome(toplevel=elsewhere, listed="")
+        self.assertEqual(said, "skip")
+        self.assertNotIn("ls-files", calls)
+
+    def test_a_toplevel_that_is_not_there_skips(self):
+        """samefile() raising - a path that does not exist - is not ours."""
+        gone = os.path.join(REPO_ROOT, "no-such-folder-1441").replace(os.sep, "/") + "\n"
+        said, _calls = self.outcome(toplevel=gone, listed="")
+        self.assertEqual(said, "skip")
+
+    def test_this_checkout_still_reads_the_index_mode(self):
+        said, calls = self.outcome(toplevel=self.ours(), listed=self.LAUNCHER_MODE)
+        self.assertEqual(said, "pass")
+        self.assertEqual(calls, ["rev-parse", "ls-files"])
+
+    def test_this_checkout_still_fails_a_launcher_that_lost_its_bit(self):
+        """The guard did not turn the check into a skip: 100644 in this
+        checkout's own index is still red."""
+        said, _calls = self.outcome(toplevel=self.ours(), listed=self.LAUNCHER_MODE.replace("100755", "100644"))
+        self.assertEqual(said, "fail")
+
+    def test_this_checkout_fails_when_the_index_says_nothing(self):
+        said, _calls = self.outcome(toplevel=self.ours(), listed="")
+        self.assertEqual(said, "fail")
+
+    def test_no_git_still_skips(self):
+        said, calls = self.outcome(git=None)
+        self.assertEqual((said, calls), ("skip", []))
+
+    def test_posix_reads_the_bit_and_never_asks_git(self):
+        self.assertEqual(self.outcome(os_name="posix", executable=True), ("pass", []))
+        self.assertEqual(self.outcome(os_name="posix", executable=False), ("fail", []))
+
+    def test_the_skip_says_what_git_said(self):
+        said, _calls = self.outcome(toplevel_code=128,
+                                    stderr="fatal: not a git repository (or any of the parent directories): .git\n")
+        self.assertEqual(said, "skip")
+        self.assertIn("fatal: not a git repository", self.reason)
+
+    def test_the_skip_names_the_work_tree_git_reported(self):
+        elsewhere = os.path.dirname(REPO_ROOT).replace(os.sep, "/")
+        said, _calls = self.outcome(toplevel=elsewhere + "\n")
+        self.assertEqual(said, "skip")
+        self.assertIn(elsewhere, self.reason)
+
+    def test_git_that_hangs_or_cannot_start_skips(self):
+        """A skip with the reason, not an error out of the suite."""
+        for error in (subprocess.TimeoutExpired(["git", "rev-parse"], 30), OSError("placeholder: cannot start git")):
+            with self.subTest(error=type(error).__name__):
+                said, _calls = self.outcome(raises=error)
+                self.assertEqual(said, "skip")
+                self.assertIn(str(error), self.reason)
+
+    def test_every_git_call_has_a_timeout(self):
+        self.outcome(toplevel=self.ours(), listed=self.LAUNCHER_MODE)
+        self.assertEqual(len(self.timeouts), 2)
+        self.assertNotIn(None, self.timeouts)
+
+    def test_a_checkout_whose_path_is_not_ascii_is_still_checked(self):
+        """git prints the toplevel in UTF-8. Decoded in the console's code
+        page instead, it names no folder, and the real check would skip in
+        every such checkout without saying why."""
+        try:
+            root = tempfile.mkdtemp(prefix="dccore-δοκιμή-")
+        except (OSError, UnicodeError) as err:
+            self.skipTest(f"this filesystem cannot hold a non-ASCII folder name: {err}")
+        self.addCleanup(shutil.rmtree, root, True)
+        said, calls = self.outcome(toplevel=root.replace(os.sep, "/") + "\n", listed=self.LAUNCHER_MODE, root=root)
+        self.assertEqual((said, calls), ("pass", ["rev-parse", "ls-files"]), self.reason)
 
 
 class TheFlaskHook(unittest.TestCase):

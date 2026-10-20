@@ -474,6 +474,18 @@ def _move_aside(path):
     return aside
 
 
+# How long a reader waits for a startup backfill before answering as if
+# there were no index (#1416). A keystroke in the List Browser's filter is a
+# request thread each, and the backfill of a large index takes minutes.
+FILL_WAIT_SECONDS = 2.0
+
+
+def index_filling():
+    """Whether the startup backfill (#1296) is still putting held lists into
+    the index, so a filter cannot be answered from it yet (#1416)."""
+    return not runtime.list_index_backfill_done.is_set()
+
+
 def _prepare_to_read():
     """Open the index for a reader and run the rebuild a repair has flagged.
 
@@ -498,7 +510,13 @@ def _prepare_to_read():
     """
     global _rebuild_pending
     # A startup backfill still running (#1296): its rows are not all in yet.
-    runtime.list_index_backfill_done.wait()
+    # Waited for a moment, not for as long as it takes (#1416): on a large
+    # index that was minutes, with each keystroke of the filter holding a
+    # request thread for all of them. Still filling, this answers as if
+    # there were no index - never from the half-filled one, which would
+    # report every list it has not reached as having no match.
+    if not runtime.list_index_backfill_done.wait(FILL_WAIT_SECONDS):
+        return False
     available = _open_reader()
     pending = False
     if _rebuild_pending:

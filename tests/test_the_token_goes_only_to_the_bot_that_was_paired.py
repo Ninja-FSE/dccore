@@ -133,7 +133,7 @@ class AnAutomaticDialAsksNoStrangerForThePassword(unittest.TestCase):
     def test_a_chat_the_script_dialled_checks_the_peer_before_the_prompt(self):
         fallthrough = self.password_fallthrough()
         self.assertIn("if (!$dccore.st(byhand)) {", fallthrough)
-        self.assertIn("if (!$dccore.peerok password) { return }", fallthrough)
+        self.assertIn("if (!$dccore.peerok(password)) { return }", fallthrough)
 
     def test_the_check_is_nested_so_a_hand_dial_never_runs_it(self):
         """mIRC evaluates every identifier on an if-line, and peerok closes the
@@ -147,7 +147,7 @@ class AnAutomaticDialAsksNoStrangerForThePassword(unittest.TestCase):
         self.assertNotIn("peerok", first_line)
         self.assertIn("\n    }", guard)
         inner = guard[len(first_line):guard.index("\n    }")]
-        self.assertIn("if (!$dccore.peerok password) { return }", inner)
+        self.assertIn("if (!$dccore.peerok(password)) { return }", inner)
 
     def test_peerok_says_what_it_withholds(self):
         body = alias_body("dccore.peerok")

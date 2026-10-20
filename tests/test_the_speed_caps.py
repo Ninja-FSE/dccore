@@ -38,9 +38,17 @@ import speed_cap  # noqa: E402
 from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase, parse_source, silence_debug  # noqa: E402
 from tests.test_a_failing_bot_is_paused import TcpLike  # noqa: E402
-from tests.test_dcc_resume_end_to_end import RecordingIrcSocket, loopback_is_usable  # noqa: E402
+from tests.test_dcc_resume_end_to_end import RecordingIrcSocket, loopback_is_usable as probe_loopback  # noqa: E402
 
 UP, DOWN = speed_cap.UPLOAD, speed_cap.DOWNLOAD
+# The window ASendUnderACap sends on; a parallel run moves it (#1146).
+PORT_START, PORT_END = dcc_ports(51340, 51350)
+
+
+def loopback_is_usable():
+    """The shared probe, on the window this module's real sends use (#1469):
+    test_dcc_resume_end_to_end's own window can be free while this one is not."""
+    return probe_loopback(PORT_START, PORT_END)
 
 
 class Clock:
@@ -300,12 +308,11 @@ class ASendUnderACap(DCCoreTestCase):
         self.served = os.path.join(self.tmp, "Some_Album.zip")
         with io.open(self.served, "wb") as handle:
             handle.write(self.CONTENT)
-        port_start, port_end = dcc_ports(51340, 51350)
         self.set_config(
             active_transfers=[{"user": "kilo", "file": "Some_Album.zip", "bytes_sent": 0,
                                "next_file_obj": "Some_Album.zip"}],
-            MAX_DCC_SLOTS=3, MY_IP_OR_DOCK="8.8.8.8", DCC_PORT_START=port_start,
-            DCC_PORT_END=port_end, MAX_UPLOAD_KB=200)
+            MAX_DCC_SLOTS=3, MY_IP_OR_DOCK="8.8.8.8", DCC_PORT_START=PORT_START,
+            DCC_PORT_END=PORT_END, MAX_UPLOAD_KB=200)
         runtime.dcc_send_offers.clear()
         self.addCleanup(runtime.dcc_send_offers.clear)
         self.debug_lines = []

@@ -751,6 +751,12 @@ def nicks_problem(value):
 CHANNEL_PREFIXES = ("#", "&")
 CHANNEL_LIST_SETTINGS = frozenset({"CHANNEL"})
 ONE_CHANNEL_SETTINGS = frozenset({"DEBUG_CHANNEL", "BROADCAST_SEARCH_CHANNEL"})
+# Declared `list`, unlike CHANNEL: every entry a channel by the same rule, but
+# empty is allowed - it names none. An entry repeated in another case is
+# kept once, as first written; str.lower() is enough for that, since the
+# daemon compares the names under the server's casemapping anyway (announce.
+# _channel_excluded_from_announce()), and this module cannot know it.
+CHANNEL_NAMES_SETTINGS = frozenset({"ANNOUNCE_TRANSFERS_EXCLUDE"})
 
 
 def channel_problem(channel):
@@ -789,6 +795,24 @@ def channels_problem(value):
         if problem:
             return problem
     return None
+
+
+def channel_names(value):
+    """A comma-separated list of channels (CHANNEL_NAMES_SETTINGS) as a list:
+    blanks dropped, each entry once whatever its case. Raises ValueError
+    with channel_problem()'s reason for an entry that is not a channel."""
+    names, seen = [], set()
+    for part in str(value).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        problem = channel_problem(part)
+        if problem:
+            raise ValueError(f"not a channel list: {problem}")
+        if part.lower() not in seen:
+            seen.add(part.lower())
+            names.append(part)
+    return names
 
 
 # LIST_BASE_NAME names every generated list file, "<name>-<date>.txt", so it
@@ -968,6 +992,9 @@ def coerce(name, raw, default, declared=None):
         if problem:
             raise ValueError(f"not a channel name: {problem}")
 
+    if name in CHANNEL_NAMES_SETTINGS:
+        return channel_names(text)
+
     if name == "LIST_BASE_NAME" and text:
         problem = list_base_name_problem(text)
         if problem:
@@ -1047,6 +1074,8 @@ def coerce(name, raw, default, declared=None):
 #
 #   CHANNEL           the entries that are channels are joined; the others
 #                     are dropped. Refused only when none is a channel.
+#   ANNOUNCE_TRANSFERS_EXCLUDE
+#                     the same: the channels are kept, the rest dropped.
 #   LIST_BASE_NAME    kept where it is a usable file name on THIS system (a
 #                     "|" is fine on Linux, and renaming it would rename the
 #                     published list); otherwise sanitised, as the name
@@ -1072,6 +1101,27 @@ def _file_name_works_here(name, windows=None):
     return True
 
 
+def _keep_the_channels(name, text, default, declared, verb, writers):
+    """load_value()'s answer for a channel list read with some entries that
+    are not channels: (value, note), the value from the ones that are. None
+    when there is nothing to drop, or nothing to keep - coerce() then says
+    what it says. `verb` is what the bot does with what is kept ("joining"),
+    `writers` the places that only save a list of channels."""
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    kept = [part for part in parts if channel_problem(part) is None]
+    dropped = [part for part in parts if channel_problem(part) is not None]
+    if not (kept and dropped):
+        return None
+    value = coerce(name, ",".join(kept), default, declared)
+    # The value as it will be used: a list setting has dropped a repeat.
+    shown = value if isinstance(value, list) else kept
+    return value, (
+        f"ignoring {', '.join(repr(part) for part in dropped)} "
+        f"({channel_problem(dropped[0])}) and {verb} {', '.join(shown)}. "
+        f"Correct the line; {writers} only "
+        f"save a list where every entry is a channel")
+
+
 def load_value(name, raw, default, declared=None, windows=None):
     """coerce() for a value READ from settings.conf: (value, note).
 
@@ -1082,16 +1132,16 @@ def load_value(name, raw, default, declared=None, windows=None):
     text = raw.strip()
 
     if name in CHANNEL_LIST_SETTINGS and text and channels_problem(text):
-        parts = [part.strip() for part in text.split(",") if part.strip()]
-        kept = [part for part in parts if channel_problem(part) is None]
-        dropped = [part for part in parts if channel_problem(part) is not None]
-        if kept and dropped:
-            value = coerce(name, ",".join(kept), default, declared)
-            return value, (
-                f"ignoring {', '.join(repr(part) for part in dropped)} "
-                f"({channel_problem(dropped[0])}) and joining {', '.join(kept)}. "
-                f"Correct the line; the Settings page and configure.py only "
-                f"save a list where every entry is a channel")
+        found = _keep_the_channels(name, text, default, declared, "joining",
+                                   "the Settings page and configure.py")
+        if found:
+            return found
+
+    if name in CHANNEL_NAMES_SETTINGS and text:
+        found = _keep_the_channels(name, text, default, declared, "keeping",
+                                   "the Settings page, the console and the mIRC settings window")
+        if found:
+            return found
 
     if name == "LIST_BASE_NAME" and text:
         problem = list_base_name_problem(text)

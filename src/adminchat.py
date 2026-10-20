@@ -384,27 +384,73 @@ def reserve_password_attempt(ip):
     the check before any of them had been counted, and got more guesses than
     MAX_PASSWORD_ATTEMPTS between them. The attempt that reaches the limit
     sets the block here, so nothing from that address is verified after it
-    until it is settled: a right password clears the address (clear_bad_ip),
-    a wrong one leaves the count and the block as they are.
+    until it is settled: the admin password clears the address
+    (clear_bad_ip), a paired token takes back this one attempt and nothing
+    more (release_password_attempt()), and a wrong one leaves the count and
+    the block as they are.
     """
+    return _reserve_attempt(ip)[0]
+
+
+def _reserve_attempt(ip):
+    """reserve_password_attempt(), and what release_password_attempt()
+    needs to take the attempt back: (counted, reservation). `reservation`
+    is None when nothing was counted (a blocked address, or no address);
+    otherwise (entry, count, last_failure): the record this attempt was
+    counted on, and its count and last-failure time ahead of it (0 and
+    None for a record this attempt created)."""
     if not ip:
-        return True
+        return True, None
     with _bad_lock:
         now = time.time()
         forget_stale_failures(_bad_ips, now)
         entry = _bad_ips.get(ip)
         if entry and entry[1]:
             if now < entry[1]:
-                return False
+                return False, None
             del _bad_ips[ip]      # block expired, as in is_bad_ip()
             entry = None
+        reservation_before = (entry[0], entry[2]) if entry else (0, None)
         entry = entry or [0, 0.0, now]
         entry[0] += 1
         entry[2] = now
         if entry[0] >= MAX_PASSWORD_ATTEMPTS:
             entry[1] = now + BAD_IP_BLOCK_SECONDS
         _bad_ips[ip] = entry
-        return True
+        return True, (entry,) + reservation_before
+
+
+def release_password_attempt(ip, reservation):
+    """Take back the one attempt _reserve_attempt() counted for `ip`, when
+    it turned out to be a paired token: a right token is not a failure,
+    and it is not the password either, so the address's earlier failures
+    stay as they were. `reservation` is what _reserve_attempt() answered.
+
+    Only on the record the attempt was counted on: one cleared since (by
+    the password, or as stale) and perhaps made again by a later attempt
+    holds none of this attempt, and is left alone. The count goes down by
+    one, and a block is lifted when, without this attempt, the count is
+    under the limit. The last-failure time goes back to what it was when no
+    other attempt was counted meanwhile; token logins side by side can
+    still move it forward, which only keeps the failures longer, or, with a
+    wrong attempt counted between their releases, back by at most one token
+    check - which gives no attempt more."""
+    if not ip or reservation is None:
+        return
+    entry, count_before, last_before = reservation
+    with _bad_lock:
+        if _bad_ips.get(ip) is not entry:
+            return                # not the record this attempt was counted on
+        entry[0] -= 1
+        if entry[0] <= 0:
+            del _bad_ips[ip]
+            return
+        # Always so - a blocked address is refused before it is counted -
+        # but kept as a guard.
+        if entry[0] < MAX_PASSWORD_ATTEMPTS:
+            entry[1] = 0.0
+        if last_before is not None and entry[0] == count_before:
+            entry[2] = last_before
 
 
 def is_bad_ip(ip):
@@ -421,7 +467,8 @@ def is_bad_ip(ip):
 
 
 def clear_bad_ip(ip):
-    """A successful login clears the record for that address."""
+    """The admin password, verified, clears the record for that address.
+    A paired token does not: see release_password_attempt()."""
     with _bad_lock:
         _bad_ips.pop(ip, None)
 
@@ -1795,6 +1842,11 @@ def _cmd_checkupdates(session, args):
     if not arg:
         session.send(_checkupdates_reply(session, getattr(config, "CHECK_FOR_UPDATES", True)))
         return
+    # With an argument this saves a setting, so a token session needs
+    # `unlock <password>` first, as `set` does. Reporting it does not.
+    import console_settings
+    if console_settings.refused_while_locked(session, "checkupdates"):
+        return
     wanted = arg == "on"
 
     def apply():
@@ -1846,6 +1898,10 @@ def _cmd_consolefeed(session, args):
         return
     if not arg:
         session.send(_consolefeed_reply(session, getattr(config, "DEBUG_TO_CONSOLE", True)))
+        return
+    # Saves a setting, so locked as checkupdates is.
+    import console_settings
+    if console_settings.refused_while_locked(session, "consolefeed"):
         return
     wanted = arg == "on"
 
@@ -3230,7 +3286,8 @@ def _check_password(session, line):
     # Counted before it is verified (see reserve_password_attempt()): a second
     # login from the same address cannot slip past the block while this one
     # is still being checked.
-    if not reserve_password_attempt(session.peer_ip):
+    reserved, reservation = _reserve_attempt(session.peer_ip)
+    if not reserved:
         print(f"[ADMINCHAT] Password attempt from {session.nick} ({session.peer_ip}) refused: "
               f"the address is blocked after {MAX_PASSWORD_ATTEMPTS} failed attempts.")
         session.close(announce_text="Too many failed password attempts from this address. Try again later.")
@@ -3251,7 +3308,13 @@ def _check_password(session, line):
         session.read_only = read_only
         session.unlocked = not paired
         session.last_activity = time.time()
-        clear_bad_ip(session.peer_ip)
+        # Only the admin password clears the address's failed attempts. A
+        # token takes back its own attempt and leaves the earlier ones, which
+        # `unlock` counts on the same address, as they were.
+        if paired:
+            release_password_attempt(session.peer_ip, reservation)
+        else:
+            clear_bad_ip(session.peer_ip)
         replaced = _promote(session)
         if replaced is _SUPERSEDED:
             session.authenticated = False

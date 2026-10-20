@@ -216,13 +216,15 @@ class Unlocking(LockCase):
 
 def hold_the_rehash(case, release):
     """Stand in for the rehash a save starts: it reloads nothing and returns
-    when `release` is set. Its threads are released and joined when the test
-    ends, so none outlives it."""
+    when `release` is set, answering True as a reload that worked does - a
+    save counts only an explicit True as applied (#1434). Its threads are
+    released and joined when the test ends, so none outlives it."""
     threads = []
 
     def rehash(*_args, **_kwargs):
         threads.append(threading.current_thread())
         release.wait(10)
+        return True
 
     def finish():
         release.set()

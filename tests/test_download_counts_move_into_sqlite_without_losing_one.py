@@ -500,7 +500,11 @@ class _DiskLockSpy:
 class ASend(_CountsCase):
 
     def test_concurrent_sends_lose_nothing(self):
-        threads_n, calls = 8, 25
+        # Eight threads at once is the race; how many sends each makes is not
+        # (#1417). Every send opens the database and commits under one lock,
+        # so 25 each - 400 commits in a row - outlasted the joins below on a
+        # loaded Windows runner. Five each still interleave the eight.
+        threads_n, calls = 8, 5
 
         def sender(index):
             for call in range(calls):

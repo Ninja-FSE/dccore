@@ -139,6 +139,7 @@
     filelistsHistory: [],
     settingsLoaded: false, settingsCategories: [], settingsActiveCategory: null,
     settingsBaseline: {}, settingsDirty: {}, settingsAdminPasswordSet: false,
+    settingsRehashWait: null,
     consoleCursor: 0
   };
 
@@ -289,6 +290,7 @@
     settingsSavebarText:  document.getElementById("settings-savebar-text"),
     settingsRestartNote:  document.getElementById("settings-restart-note"),
     settingsSaveStatus:   document.getElementById("settings-save-error"),
+    settingsRehashNote:   document.getElementById("settings-rehash-note"),
     consoleLog:     document.getElementById("console-log"),
     consoleForm:    document.getElementById("console-form"),
     consoleInput:   document.getElementById("console-input"),
@@ -3738,6 +3740,11 @@
           // is two phrases whichever side you split it on.
           state.filelistsMatchTerms = filter ? (payload.terms || []) : [];
           renderFilelistGroups(groups, !!filter);
+          // Still being filled after a restart (#1416): said here, rather
+          // than "no matches", which it is not.
+          if (filter && payload && payload.filling) {
+            el.filelistsBody.innerHTML = emptyRow(5, t("filelists.indexFilling"));
+          }
         })
         .catch(function (err) {
           markConnection(false);
@@ -4970,6 +4977,7 @@
     MAX_RAR_FOLDER_SIZE: "settings.field.MAX_RAR_FOLDER_SIZE",
     LOCAL_LIST_DIR: "settings.field.LOCAL_LIST_DIR",
     FETCHED_FILES_DIR: "settings.field.FETCHED_FILES_DIR",
+    FETCHED_FILES_PER_BOT: "settings.field.FETCHED_FILES_PER_BOT",
     BANS_FILE: "settings.field.BANS_FILE",
     STATS_FILE: "settings.field.STATS_FILE",
     HARD_BANS_FILE: "settings.field.HARD_BANS_FILE",
@@ -5012,6 +5020,7 @@
     CUSTOM_THEME_ALERT: "settings.field.CUSTOM_THEME_ALERT",
     CUSTOM_THEME_ACCENT: "settings.field.CUSTOM_THEME_ACCENT",
     ANNOUNCE_TRANSFERS: "settings.field.ANNOUNCE_TRANSFERS",
+    ANNOUNCE_TRANSFERS_EXCLUDE: "settings.field.ANNOUNCE_TRANSFERS_EXCLUDE",
     REJOIN_ATTEMPTS: "settings.field.REJOIN_ATTEMPTS",
     ON_CONNECT_CHECK_MINUTES: "settings.field.ON_CONNECT_CHECK_MINUTES",
     ANNOUNCE_INTERVAL: "settings.field.ANNOUNCE_INTERVAL",
@@ -6529,6 +6538,70 @@
     });
   }
 
+  // #1462: A SAVE'S ANSWER CAN ONLY SAY "REHASH STARTED". The rehash runs on
+  // a thread of its own and first waits up to REHASH_TRANSFER_WAIT for
+  // transfers, so whether it reloaded the settings - or failed, on a syntax
+  // error in admin_config.py, say - is asked for afterwards, by the number
+  // the save was given. A later save's answer counts as this one's: its
+  // rehash started after both were written, so it read both. A newer save
+  // from this page ends the older wait (state.settingsRehashWait) only once
+  // the server has accepted it: a refused one, or a save of folders or lists
+  // alone, starts no rehash, so the older wait runs on. The outcome has a
+  // note of its own (el.settingsRehashNote), so it never covers another
+  // save's note or a refusal in el.settingsSaveStatus.
+  var SETTINGS_REHASH_POLL_MS = 1500;
+  // The cap is twice REHASH_TRANSFER_WAIT plus this margin. The rehash waits
+  // its turn for rehash_lock, and the rehash holding it may itself be in its
+  // transfer wait; then this one has its own. The margin is for the reloads.
+  var SETTINGS_REHASH_MARGIN_S = 60;
+
+  // Called only for a save the server accepted: that ends any older wait
+  // and clears the older outcome's note.
+  function awaitSettingsRehash(saved) {
+    state.settingsRehashWait = null;
+    el.settingsRehashNote.style.display = "none";
+    var seq = saved && saved.rehash_seq;
+    // No number, no rehash started: nothing to wait for.
+    if (typeof seq !== "number") { return; }
+    var wait = Number(saved.rehash_wait);
+    if (!isFinite(wait) || wait < 0) { wait = 0; }
+    var deadline = Date.now() + (2 * wait + SETTINGS_REHASH_MARGIN_S) * 1000;
+    // settingsRestartNote names them; "in effect" must not claim them too.
+    var restartNeeded = !!(saved.restart_required && saved.restart_required.length);
+    var token = {};
+    state.settingsRehashWait = token;
+
+    function finish(text, isError) {
+      state.settingsRehashWait = null;
+      showSettingsStatus(el.settingsRehashNote, text, isError);
+    }
+    function ask() {
+      if (state.settingsRehashWait !== token) { return; }
+      if (Date.now() > deadline) {
+        finish(t("settings.rehashNotFinished"), false);
+        return;
+      }
+      fetchJson("/api/settings/rehash").then(function (outcome) {
+        if (state.settingsRehashWait !== token) { return; }
+        var known = outcome && typeof outcome.seq === "number" && outcome.seq >= seq
+          && (outcome.ok === true || outcome.ok === false);
+        if (!known) { setTimeout(ask, SETTINGS_REHASH_POLL_MS); return; }
+        if (outcome.ok === true) {
+          finish(t(restartNeeded ? "settings.rehashAppliedRestart" : "settings.rehashApplied"), false);
+        } else {
+          // The sentence is the server's, the same one the console says.
+          finish(t("settings.rehashFailed") + " " + String(outcome.message || ""), true);
+        }
+        // What the bot runs now, which after a failed reload may not be
+        // what was saved.
+        loadSettings(true);
+      }, function () {
+        setTimeout(ask, SETTINGS_REHASH_POLL_MS);
+      });
+    }
+    setTimeout(ask, SETTINGS_REHASH_POLL_MS);
+  }
+
   function saveTheSettings(dirty, clearingDebugChannel) {
     var payload = {};
     for (var dirtyKey in dirty) {
@@ -6539,6 +6612,13 @@
     el.settingsSaveBtn.disabled = true;
     el.settingsSaveStatus.style.display = "none";
     el.settingsRestartNote.style.display = "none";
+    // A finished outcome that is not a failure answers an earlier save: left
+    // up under a refusal of this one, it would read as this click's answer.
+    // A wait still running keeps its note, and a failure stays - still true.
+    if (state.settingsRehashWait === null &&
+        (" " + (el.settingsRehashNote.className || "") + " ").indexOf(" is-error ") === -1) {
+      el.settingsRehashNote.style.display = "none";
+    }
     el.settingsSavebarText.textContent = t("settings.saving");
 
     postJson("/api/settings", payload)
@@ -6554,6 +6634,7 @@
               t("settings.restartRequiredToApply").replace("{list}", res.data.restart_required.join(", ")), true);
           }
           loadSettings(true);
+          awaitSettingsRehash(res.data);
         } else {
           showSettingsStatus(el.settingsSaveStatus,
             (res.data && res.data.error) || t("settings.couldNotSaveSettings"), true);

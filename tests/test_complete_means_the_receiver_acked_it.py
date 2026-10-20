@@ -41,13 +41,19 @@ import announce  # noqa: E402
 
 from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
-from tests.test_dcc_resume_end_to_end import RecordingIrcSocket, loopback_is_usable  # noqa: E402
+from tests.test_dcc_resume_end_to_end import RecordingIrcSocket, loopback_is_usable as probe_loopback  # noqa: E402
 
 USER = "someuser"
 # Through dcc_ports(): in a parallel run each shard moves it into a window
 # of its own, so no two shards ever listen on one port (#1146).
 PORT_START, PORT_END = dcc_ports(51300, 51310)
 CONTENT = bytes(range(256)) * 400          # 102,400 bytes
+
+
+def loopback_is_usable():
+    """The shared probe, on the window this module's real sends use (#1469):
+    test_dcc_resume_end_to_end's own window can be free while this one is not."""
+    return probe_loopback(PORT_START, PORT_END)
 
 
 class TheAckTracker(unittest.TestCase):

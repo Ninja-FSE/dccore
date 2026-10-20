@@ -549,6 +549,15 @@ def build_crosslist_search_payload(term, limit=None, online_only=False):
     if not terms or not held:
         return empty_payload
 
+    # THE INDEX IS STILL BEING FILLED (#1416): the startup backfill has not
+    # reached every list yet. Said, not waited for - and no held list is
+    # called empty, which the sidebar would dim as "no match" when the
+    # index simply has not got to it. Only the offline ones, as always.
+    if list_index.index_filling():
+        payload = dict(empty_payload)
+        payload.update({"empty": sorted(offline), "filling": True})
+        return payload
+
     names = list(held.values())
     rows = list_index.search(terms, limit=limit, bots=names)
     matched, empty = list_index.bots_with_a_match(terms, names)

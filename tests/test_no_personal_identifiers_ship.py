@@ -1,8 +1,9 @@
 """Nothing that ships names a real person, bot, channel or address.
 
-`.gitattributes` export-ignores exactly two files - `docs/UPDATES.md` and
-`docs/PUBLIC-REPO-WORKFLOW.md`. EVERYTHING else in the repository reaches the
-public tree, `tests/` very much included, and this project has shipped
+`.gitattributes` export-ignores only development-only documents and the
+project page's source - see its export-ignore rules. EVERYTHING else in the
+repository reaches the public tree, `tests/` very much included, and this
+project has shipped
 identifiers six times already: a serving bot's nick in two test files, a
 real channel in a changelog, an operator's own paths in fixtures, the
 fourth time three of an operator's real channel names plus a real bot's
@@ -16,7 +17,9 @@ fixture. Every one of the six arrived the same way: a realistic-sounding
 example is, every time, somebody's actual nick.
 
 Greps done by hand keep missing them, because they are written to find the
-thing already known about. This asks the export itself.
+thing already known about. This asks the export itself - and, since the
+development repository is public as well, every other tracked file too
+(NothingIdentifyingIsTracked).
 
 WHY THE CO-MAINTAINER'S HANDLE COUNTS
 
@@ -51,21 +54,30 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # No positive property distinguishes a person's handle from any other word,
 # so the next best thing is a denylist nobody can read.
 #
-# AND HASHING WAS NOT ENOUGH. THE LIST LIVES OUTSIDE THE EXPORT
-# (tests/forbidden_identifiers.py, export-ignore'd), and so does the recipe
-# for adding to it.
+# AND HASHING WAS NOT ENOUGH. THE LIST IS NOT IN THE REPOSITORY AT ALL
+# (tests/forbidden_identifiers.py, untracked and named in .gitignore), and
+# neither is the recipe for adding to it.
 #
 # It used to be right here: the hashes, the recipe for making one on the line
 # above them, and a label beside every entry saying what it was. That is a
-# puzzle whose answer is the maintainers' identity - a truncated unsalted
-# hash of a single lowercased word falls to any wordlist. During the
-# pre-publication sweep two of this operator's channels were recovered from
-# the shipped list by hand, without a wordlist, in three guesses.
+# puzzle whose answer is the maintainers' identity.
 #
-# ABSENT IS A VALID STATE, not an error: that is exactly what the published
-# tree looks like. The denylist tests skip there and say why; every
-# structural check below still runs, because those are the half that
-# generalises to a contributor nobody has met.
+# NOT TRACKED, rather than tracked and export-ignored. export-ignore keeps a
+# file out of the release tree and does nothing else: the development
+# repository is public too, and every file tracked there can be read by
+# anyone. So each maintainer keeps a local copy, and CI writes one from the
+# FORBIDDEN_IDENTIFIERS secret before the suite runs
+# (.github/workflows/tests.yml).
+#
+# ABSENT IS A VALID STATE, not an error: that is what the published tree, a
+# fresh clone and a CI run without the secret (a pull request from a fork)
+# all look like. The denylist test skips there and says the sweep did not
+# run; every structural check below still runs, because those are the half
+# that generalises to a contributor nobody has met.
+#
+# DENYLIST is that file's path, for messages: scripts/preflight.py asks this
+# module for it rather than keeping a copy of its own.
+DENYLIST = "tests/forbidden_identifiers.py"
 try:
     from tests.forbidden_identifiers import FORBIDDEN
 except ImportError:  # pragma: no cover - the published tree takes this path
@@ -255,17 +267,121 @@ def dashed_addresses(text):
     return found
 
 
-# .mrc (the mIRC script) and .command (the macOS launcher) are shipped text
-# too: a suffix missing from this list is a file nobody scans. Shared with
-# tests/test_no_conflict_marker_is_left_behind.py, which imports it, so a
-# new file type joins both sweeps with one edit.
-TEXT_SUFFIXES = (".py", ".js", ".md", ".css", ".html", ".txt", ".sample",
-                 ".conf", ".bat", ".sh", ".yml", ".yaml", ".json",
-                 ".mrc", ".command")
+# EVERY FILE IS READ UNLESS IT IS KNOWN NOT TO BE TEXT (#1443).
+#
+# This used to be the other way round: a list of TEXT suffixes, and a file
+# whose suffix was missing from it was a file nobody scanned. .mrc and
+# .command each shipped unscanned that way until somebody noticed, and the
+# mIRC DLL's C sources, the dotfiles and LICENSE were still unscanned when an
+# audit found the list. A list of what to read fails OPEN on every new kind
+# of file; a list of what to skip fails CLOSED, because a binary nobody listed
+# does not decode and read_text_files() reports it.
+#
+# Skipped by suffix without being opened, compared lowercased. Shared with
+# tests/test_no_conflict_marker_is_left_behind.py, which imports it. Every
+# `*.<suffix> binary` line in .gitattributes must have its suffix here too;
+# tests/test_every_shipped_text_file_is_swept.py checks that.
+BINARY_SUFFIXES = (".dll", ".exe", ".pyd", ".so", ".dylib", ".pyc",
+                   ".png", ".ico", ".gif", ".jpg", ".jpeg", ".bmp", ".webp",
+                   ".ttf", ".otf", ".woff", ".woff2",
+                   ".zip", ".rar", ".7z", ".gz", ".tar", ".pdf",
+                   ".flac", ".mp3", ".ogg", ".wav", ".m4a")
+
+# Files with no binary suffix that are allowed not to decode. EMPTY, and an
+# entry needs a reason: a file named here is never read, so a text file in an
+# encoding nobody expected must be re-saved as UTF-8, not listed.
+UNDECODABLE_BY_DESIGN = frozenset()
 
 
-def shipped_paths():
-    """Every tracked file that would ship, or (None, reason).
+def is_binary_name(name):
+    """True if `name` is skipped by suffix, unread."""
+    return name.lower().endswith(BINARY_SUFFIXES)
+
+
+def decode_text(data):
+    """`data` as text, or None if it is not text this sweep can read.
+
+    UTF-8, or UTF-16 when a byte-order mark says so - which is how Visual
+    Studio saves a resource script (.rc), the likeliest next file type in the
+    DLL's sources. Anything else is None, never a lossy errors="replace"
+    read: a file the sweep only half-read must not count as scanned.
+
+    A NUL in the result is None too. UTF-16 WITHOUT a byte-order mark is
+    valid UTF-8 whenever its text is ASCII - every other byte a NUL - and
+    WORD reads each letter between the NULs as a word of its own, so a name
+    in it would pass unseen. Most binaries carry NULs as well, so one that
+    is missing from BINARY_SUFFIXES is reported rather than read as text.
+    No tracked text file contains one.
+    """
+    text = _decode(data)
+    return None if text is None or "\0" in text else text
+
+
+def _decode(data):
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        try:
+            return data.decode("utf-16")
+        except UnicodeDecodeError:
+            return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def read_text_files(names, root):
+    """({name: text}, unread) for the paths in `names`, relative to `root`.
+
+    THE ONE DEFINITION of which tracked file is scanned as text, for both
+    sweeps. A file is skipped unread if is_binary_name() says so, and read
+    otherwise. `unread` lists the files that were read but did not decode
+    and are not in UNDECODABLE_BY_DESIGN: each one is a file the sweep did
+    not look at, so the callers fail on it rather than pass it by silently.
+
+    `root` has no default on purpose: it must be the directory the caller
+    asked git for `names` in, and a default bound here would be a second
+    copy of that fact (CONVENTIONS rule 2).
+
+    A SYMLINK IS READ AS ITS LINK TEXT. That is what git stores and what
+    `git archive` ships, so it is what can carry a name; opening the path
+    would follow the link instead - to some other file's content, to a
+    directory (raises), or to nothing at all (a dangling link, which would
+    look like a deleted file and be skipped). A submodule (mode 160000) is a
+    directory and raises on open, loudly; none is tracked.
+    """
+    texts, unread = {}, []
+    for name in names:
+        path = os.path.join(root, name)
+        if os.path.islink(path):
+            texts[name] = os.readlink(path)
+            continue
+        if is_binary_name(name):
+            continue
+        try:
+            with io.open(path, "rb") as handle:
+                text = decode_text(handle.read())
+        except FileNotFoundError:
+            if os.path.lexists(path):
+                # Something is there and could not be opened: not scanned.
+                raise
+            if "\ufffd" in name:
+                # Not a deleted file: a name git listed in bytes that are
+                # not UTF-8, decoded with "replace" into a path that does
+                # not exist. Whatever is under the real name was not read.
+                unread.append(name)
+            # Otherwise tracked but deleted from the working tree and not
+            # yet committed: nothing there to ship or to scan.
+            continue
+        if text is not None:
+            texts[name] = text
+        elif name not in UNDECODABLE_BY_DESIGN:
+            unread.append(name)
+    return texts, unread
+
+
+def tracked_paths():
+    """(every tracked file, the set of those export-ignored, None), or
+    (None, None, reason) when git cannot answer.
 
     THE WORKING TREE, not `git archive HEAD`. The archive reads the last
     COMMIT, so a guard built on it cannot see the change being made - it
@@ -293,9 +409,85 @@ def shipped_paths():
             if fields[index + 2] == "set":
                 ignored.add(fields[index])
     except Exception as err:  # noqa: BLE001 - git may not be available
-        return None, f"could not list the shipped files ({err})"
+        return None, None, f"could not list the tracked files ({err})"
+    return names, ignored, None
 
+
+def shipped_paths():
+    """Every tracked file that would ship, or (None, reason). See
+    tracked_paths()."""
+    names, ignored, reason = tracked_paths()
+    if reason:
+        return None, reason
     return [name for name in names if name not in ignored], None
+
+
+def forbidden_hits(texts, forbidden):
+    """{label: ["path:line", ...]} for every token in `texts` ({path: text})
+    whose hash is a key of `forbidden` ({hash: label})."""
+    found = {}
+    for path, text in texts.items():
+        # WORDS AND CHANNELS ARE DIFFERENT TOKENS. A channel may legally
+        # contain "&", "^" and more, which WORD stops at - so a real
+        # channel was split into pieces no hash could ever match. Asked
+        # separately rather than by widening WORD; see channel_tokens().
+        for word, offset in list(words(text)) + channel_tokens(text):
+            why = forbidden.get(word_hash(word))
+            if why is None:
+                continue
+            line = text.count("\n", 0, offset) + 1
+            found.setdefault(why, []).append(f"{path}:{line}")
+    return found
+
+
+# THE LABEL STAYS OFF A PUBLIC LOG. Each denylist entry carries a label
+# saying what kind of identifier it is, and locally that label is what makes
+# a hit quick to act on. The development repository's CI logs can be read
+# by anyone, so on GitHub Actions a hit is reported by place alone -
+# file:line and "a listed identifier" - and not grouped by entry either,
+# since even the number of distinct entries hit says more than a public log
+# needs to.
+def hits_report(found, environ=None,
+                heading="these ship to the public repository:"):
+    """The failure message for forbidden_hits()'s `found`, fit for where the
+    run's output goes: without labels when GITHUB_ACTIONS is "true"."""
+    environ = os.environ if environ is None else environ
+    if environ.get("GITHUB_ACTIONS") == "true":
+        places = sorted({place for where in found.values() for place in where})
+        return (heading + "\n  "
+                + "\n  ".join(f"{place}  a listed identifier" for place in places))
+    return (heading + "\n  "
+            + "\n  ".join(f"{why}\n    {sorted(set(where))[:6]}"
+                           for why, where in found.items()))
+
+
+# THE DEVELOPMENT REPOSITORY'S OWN NAMES, allowed where the release does not
+# reach. A few denylist entries are names that development-only documents
+# carry by right: the development repository's name and the maintainers'
+# public account names. They are listed so that nothing in the release names
+# them; in an export-ignored file - the internal changelog, the workflow and
+# project-board notes - they are what the text is about. Held as word_hash()
+# values, so this file spells none of them. Every other entry is reported
+# wherever it is, and in a file that ships these are reported too.
+ALLOWED_OUTSIDE_THE_RELEASE = frozenset({
+    "13ea59307fc3f4ec",
+    "f0756a8e416936e7",
+    "73ef176d9f12809e",
+})
+
+
+def tracked_hits(texts, ignored, forbidden):
+    """forbidden_hits() over every tracked file in `texts`, with the entries
+    in ALLOWED_OUTSIDE_THE_RELEASE left out for the paths in `ignored` (the
+    export-ignored ones) and kept for every other path."""
+    found = forbidden_hits({path: text for path, text in texts.items()
+                            if path not in ignored}, forbidden)
+    outside = {key: why for key, why in forbidden.items()
+               if key not in ALLOWED_OUTSIDE_THE_RELEASE}
+    for why, where in forbidden_hits({path: text for path, text in texts.items()
+                                      if path in ignored}, outside).items():
+        found.setdefault(why, []).extend(where)
+    return found
 
 
 class NothingIdentifyingShips(unittest.TestCase):
@@ -303,6 +495,14 @@ class NothingIdentifyingShips(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.shipped, cls.reason = shipped_paths()
+        # Read once for every test below, not once per test.
+        cls.texts, cls.unread = read_text_files(cls.shipped or [], REPO_ROOT)
+
+    @classmethod
+    def tearDownClass(cls):
+        # Every shipped file's text - about 13 MB - is not kept for the rest
+        # of the process once these tests are done.
+        del cls.texts, cls.unread
 
     def setUp(self):
         if self.reason:
@@ -314,40 +514,39 @@ class NothingIdentifyingShips(unittest.TestCase):
         # to contain every forbidden string was the one file never checked -
         # and it shipped them. Hashing removed the exemption and the leak in
         # the same change.
-        for name in self.shipped:
-            if name.endswith(TEXT_SUFFIXES):
-                yield name
+        return iter(self.texts)
 
     def read(self, path):
-        with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", path), os.path.join(REPO_ROOT, "conf", path), os.path.join(REPO_ROOT, path)) if os.path.exists(p)), os.path.join(REPO_ROOT, path))), encoding="utf-8",
-                     errors="replace") as handle:
-            return handle.read()
+        return self.texts[path]
+
+    def test_every_shipped_file_is_read_or_known_binary(self):
+        """The half that makes reading everything fail closed (#1443).
+
+        A file that does not decode is a file no check below looked at. If
+        it is a binary, its suffix belongs on BINARY_SUFFIXES (or, with no
+        suffix to go by, its path in UNDECODABLE_BY_DESIGN); if it is text
+        in another encoding, it belongs in UTF-8.
+        """
+        self.assertEqual(self.unread, [],
+                         "these ship but were not scanned: they do not "
+                         "decode as UTF-8 text and their suffix is not on "
+                         "BINARY_SUFFIXES")
 
     def test_no_forbidden_identifier_is_in_the_export(self):
         if FORBIDDEN is None:
-            self.skipTest("the denylist is export-ignored, so it is absent "
-                          "from the published tree by design - see "
-                          "tests/forbidden_identifiers.py. Every structural "
-                          "check in this file still runs there")
-        found = {}
-        for path in self.files():
-            text = self.read(path)
-            # WORDS AND CHANNELS ARE DIFFERENT TOKENS. A channel may legally
-            # contain "&", "^" and more, which WORD stops at - so a real
-            # channel was split into pieces no hash could ever match. Asked
-            # separately rather than by widening WORD; see channel_tokens().
-            for word, offset in list(words(text)) + channel_tokens(text):
-                why = FORBIDDEN.get(word_hash(word))
-                if why is None:
-                    continue
-                line = text.count("\n", 0, offset) + 1
-                found.setdefault(why, []).append(f"{path}:{line}")
-
-        self.assertEqual(
-            found, {},
-            "these ship to the public repository:\n  "
-            + "\n  ".join(f"{why}\n    {sorted(set(where))[:6]}"
-                          for why, where in found.items()))
+            self.skipTest("the identifier sweep did not run: "
+                          f"{DENYLIST} is absent or defines no "
+                          "FORBIDDEN. It is not "
+                          "tracked - a maintainer keeps a local copy, and CI "
+                          "writes it from the FORBIDDEN_IDENTIFIERS secret "
+                          "(see .gitignore). Every structural check in this "
+                          "file still runs")
+        found = forbidden_hits({path: self.read(path) for path in self.files()},
+                               FORBIDDEN)
+        # self.fail, not assertEqual(found, {}): assertEqual would print the
+        # dict itself, labels and all, whatever the message says.
+        if found:
+            self.fail(hits_report(found))
 
     def test_no_real_ip_address_is_in_the_export(self):
         found = []
@@ -389,6 +588,57 @@ class NothingIdentifyingShips(unittest.TestCase):
                            "tests/ is missing from the scan - if it ever "
                            "stopped shipping, this file's premise changed")
 
+
+class NothingIdentifyingIsTracked(unittest.TestCase):
+    """The same denylist over EVERY tracked text file, export-ignored ones
+    included.
+
+    NothingIdentifyingShips reads what the release carries, and export-ignore
+    is all that decides that. The development repository is public too, so
+    the internal changelog, the workflow notes and the changelog fragments
+    can be read by anyone although they never ship - and that sweep never
+    reads them. This one does, with ALLOWED_OUTSIDE_THE_RELEASE left out for
+    the export-ignored files only.
+
+    Needs git: in the extracted public tree there is no repository to ask,
+    and it skips saying so.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tracked, cls.ignored, cls.reason = tracked_paths()
+        if not cls.reason and not cls.tracked:
+            cls.reason = "git lists no tracked file here, so there is nothing to sweep"
+        cls.texts, cls.unread = read_text_files(cls.tracked or [], REPO_ROOT)
+
+    @classmethod
+    def tearDownClass(cls):
+        del cls.texts, cls.unread
+
+    def setUp(self):
+        if self.reason:
+            self.skipTest(self.reason)
+
+    def test_every_tracked_file_is_read_or_known_binary(self):
+        """As test_every_shipped_file_is_read_or_known_binary, for the files
+        that do not ship: one that does not decode was not swept."""
+        self.assertEqual(self.unread, [],
+                         "these are tracked but were not scanned: they do not "
+                         "decode as UTF-8 text and their suffix is not on "
+                         "BINARY_SUFFIXES")
+
+    def test_no_forbidden_identifier_is_tracked(self):
+        if FORBIDDEN is None:
+            self.skipTest("the identifier sweep of the tracked files did not "
+                          f"run: {DENYLIST} is absent or defines no FORBIDDEN "
+                          "(see .gitignore)")
+        found = tracked_hits(self.texts, self.ignored, FORBIDDEN)
+        # self.fail, not assertEqual(found, {}), as in the export's sweep:
+        # assertEqual would print the labels with the dict.
+        if found:
+            self.fail(hits_report(
+                found, heading="these are in the development repository, "
+                               "which anyone can read:"))
 
 
 class TheTokenisersThisGuardNeeded(unittest.TestCase):

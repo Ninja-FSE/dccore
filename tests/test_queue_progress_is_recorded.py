@@ -39,6 +39,7 @@ import webserver  # noqa: E402
 
 from tests import dcc_ports  # noqa: E402
 from tests.support import DCCoreTestCase  # noqa: E402
+from tests.test_dcc_resume_end_to_end import loopback_is_usable as probe_loopback  # noqa: E402
 
 USER = "someuser"
 # Through dcc_ports(): in a parallel run each shard moves it into a window
@@ -48,24 +49,8 @@ CONTENT = bytes(range(256)) * 100000  # 25,600,000 bytes (~24MB)
 
 
 def loopback_is_usable():
-    for port in range(PORT_START, PORT_END + 1):
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            listener.bind(("0.0.0.0", port))
-            listener.listen(1)
-            client = socket.create_connection(("127.0.0.1", port), timeout=2)
-            conn, _ = listener.accept()
-            conn.close()
-            client.close()
-            return True
-        except OSError:
-            continue
-        finally:
-            try:
-                listener.close()
-            except OSError:
-                pass
-    return False
+    """The shared probe, on the window this module's real sends use (#1469)."""
+    return probe_loopback(PORT_START, PORT_END)
 
 
 class RecordingIrcSocket:

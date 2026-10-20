@@ -22,7 +22,6 @@ that line, and none exists here; if one is ever wanted, make the heading text
 longer or use a dash rule.
 """
 
-import io
 import os
 import re
 import subprocess
@@ -33,10 +32,11 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-# The identifier sweep's list, not a copy: a suffix missing from it is a
-# file nobody scans, and .mrc and .command each shipped unscanned once
-# because that list had to be told. One list, one place to tell.
-from tests.test_no_personal_identifiers_ship import TEXT_SUFFIXES  # noqa: E402
+# The identifier sweep's definition of a text file, not a copy: every
+# tracked file is read unless its suffix is on that sweep's BINARY_SUFFIXES.
+# The opposite rule - a list of text suffixes - let .mrc, .command and the
+# DLL's C sources go unscanned, each until somebody noticed (#1443).
+from tests.test_no_personal_identifiers_ship import read_text_files  # noqa: E402
 
 # Built from parts so this file does not contain a marker itself.
 START = "<" * 7
@@ -47,13 +47,18 @@ MARKER = re.compile(
 
 
 def tracked_text_files():
+    """({name: text}, unread) for every tracked file, or None without git.
+
+    `unread` is what read_text_files() could not decode - see there. The
+    files are read from the same root git was asked in, passed rather than
+    left to the other module's own REPO_ROOT."""
     try:
         listed = subprocess.run(["git", "ls-files", "-z"], cwd=REPO_ROOT, check=True,
                                 capture_output=True, timeout=120)
     except Exception:  # noqa: BLE001 - no git, or not a checkout
         return None
     names = [n for n in listed.stdout.decode("utf-8", "replace").split("\0") if n]
-    return [n for n in names if n.endswith(TEXT_SUFFIXES)]
+    return read_text_files(names, REPO_ROOT)
 
 
 def markers_in(text):
@@ -84,22 +89,27 @@ class TheMarkerDetector(unittest.TestCase):
 class NothingTrackedCarriesOne(unittest.TestCase):
 
     def test_no_tracked_text_file_has_a_conflict_marker(self):
-        files = tracked_text_files()
-        if files is None:
+        listed = tracked_text_files()
+        if listed is None:
             self.skipTest("could not list the tracked files")
+        files, unread = listed
         self.assertGreater(len(files), 50, "the file list came back nearly empty")
 
         found = {}
-        for name in files:
-            with io.open((next((p for p in (os.path.join(REPO_ROOT, "src", name), os.path.join(REPO_ROOT, "conf", name), os.path.join(REPO_ROOT, name)) if os.path.exists(p)), os.path.join(REPO_ROOT, name))), encoding="utf-8",
-                         errors="replace") as handle:
-                hits = markers_in(handle.read())
+        for name, text in files.items():
+            hits = markers_in(text)
             if hits:
                 found[name] = [number for number, _line in hits]
 
         self.assertEqual(found, {},
                          "conflict markers left in tracked files (file: lines) - "
                          "a merge was committed unresolved")
+        # A file that did not decode was not looked at, and a marker in it
+        # would pass. Tracked files, not only shipped ones: docs/UPDATES.md
+        # and the other export-ignored files are where merges happen.
+        self.assertEqual(unread, [],
+                         "tracked but not scanned: these do not decode as "
+                         "text and their suffix is not on BINARY_SUFFIXES")
 
 
 if __name__ == "__main__":

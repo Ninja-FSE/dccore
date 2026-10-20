@@ -84,6 +84,14 @@ class InsideTheHarness(DCCoreTestCase):
 
 class AfterTheHarness(unittest.TestCase):
 
+    # The case run below is a DCCoreTestCase, so the settings its harness
+    # sets are set inside this test too - on purpose, and not this test's
+    # leak. Its teardown parks DCC_QUEUE_FILE, DOWNLOAD_COUNTS_FILE and
+    # TRANSFER_LOG_FILE on dead sinks for the rest of the process; run first
+    # in a process (this module alone), they move from the shipped values,
+    # and after any earlier DCCoreTestCase they were there already (#1469).
+    SETTINGS_THE_HARNESS_SETS = DCCoreTestCase.SETTINGS_THE_HARNESS_SETS
+
     def test_the_constant_is_put_back(self):
         """A plain TestCase after a DCCoreTestCase: the module constant is
         the real path again, so nothing outside the harness is redirected

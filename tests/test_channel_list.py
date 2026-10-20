@@ -162,7 +162,7 @@ class TheJoinUsesIt(WelcomeHarness):
         self.set_config(CHANNEL="#alpha, #beta", DEBUG_CHANNEL="#thedebug")
         self.quietly(irc.answer_welcome, ":irc.example.net 001 alfa :Welcome", self.conn)
 
-        self.assertEqual(self.started(irc.delayed_join), [(self.conn, ["#alpha", "#beta", "#thedebug"])],
+        self.assertEqual(self.started(irc.delayed_join), [(self.conn, ["#thedebug", "#alpha", "#beta"])],
                          "the JOIN thread is not being handed channels_we_should_be_in() - "
                          "if it takes config.CHANNEL directly, the space bug is back")
 

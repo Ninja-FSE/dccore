@@ -94,3 +94,10 @@ admin_config.py
 # untracked file the moment this line is ever removed.
 local_config.py
 settings.conf
+
+# The identifier denylist read by tests/test_no_personal_identifiers_ship.py.
+# Not tracked: each maintainer keeps a local copy, and CI writes one from the
+# FORBIDDEN_IDENTIFIERS secret (.github/workflows/tests.yml). Without it the
+# guard's denylist test skips and says so. docs/PUBLIC-REPO-WORKFLOW.md,
+# "Identity scrubbing", has how to keep the copies in step.
+tests/forbidden_identifiers.py

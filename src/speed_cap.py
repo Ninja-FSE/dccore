@@ -16,7 +16,11 @@ from the second.
 SMALL CHUNKS UNDER A CAP. A 64 KB block is half a second of a 128 KB/s line,
 and a transfer moving in steps that size reads as a stutter on the dashboard.
 Under a cap a chunk is a tenth of a second of line, never under MIN_CHUNK and
-never over the transfer's own block.
+never over the transfer's own block. The even split rests on every transfer
+in a direction asking for the same chunk, so the block passed in must be one
+every one of them shares: a send reads DCC_BLOCK_SIZE again every pass, so a
+send started before a rehash lowered it does not keep the bigger chunk
+(#1461), and every fetch uses dcc_fetch.RECV_CHUNK.
 
 READ PER CHUNK, so a changed cap applies to transfers already running. A cap
 changed mid-reservation is not chased: a chunk waits out the reservation it

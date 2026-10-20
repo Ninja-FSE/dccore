@@ -20,7 +20,6 @@ test_complete_means_the_receiver_acked_it.py does.
 
 import json
 import os
-import socket
 import sys
 import tempfile
 import unittest
@@ -40,28 +39,9 @@ from tests import test_complete_means_the_receiver_acked_it as ack  # noqa: E402
 
 
 
-def loopback_is_usable():
-    """Bind and dial for real on the range THIS file's sends use. (The shared
-    check probes another range, which a bot running on the same machine may
-    be holding - and then skips tests whose own ports are free.)"""
-    for port in range(ack.PORT_START, ack.PORT_END + 1):
-        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        # The ports a run has just used sit in TIME_WAIT; without this the
-        # second run in a minute finds none free and skips its own tests.
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            listener.bind(("0.0.0.0", port))
-            listener.listen(1)
-            client = socket.create_connection(("127.0.0.1", port), timeout=2)
-            conn, _ = listener.accept()
-            conn.close()
-            client.close()
-            return True
-        except OSError:
-            continue
-        finally:
-            listener.close()
-    return False
+# Probed on the window THIS file's sends use - they are ack.ARealReceiver's -
+# not on the shared probe's own (#1469).
+loopback_is_usable = ack.loopback_is_usable
 
 
 CONTENT = ack.CONTENT

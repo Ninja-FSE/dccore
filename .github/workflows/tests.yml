@@ -51,6 +51,57 @@ jobs:
       - name: Install the optional web dashboard dependency
         run: pip install -r requirements-web.txt
 
+      - name: Put the identifier denylist in place
+        # tests/forbidden_identifiers.py is not tracked (.gitignore). Where the
+        # FORBIDDEN_IDENTIFIERS secret is set, it holds that file base64-encoded
+        # and this writes it back, so the identifier sweep in
+        # tests/test_no_personal_identifiers_ship.py runs. Where it is not - a
+        # pull request from a fork, or a repository without the secret - this
+        # does nothing and that test skips, saying the sweep did not run.
+        #
+        # Unless the repository says the sweep must run: with the
+        # REQUIRE_IDENTIFIER_SWEEP repository variable set to anything, a run
+        # without the secret FAILS here instead - a deleted or renamed secret
+        # must not turn the sweep into a quiet skip. A pull request from a fork
+        # still skips, since GitHub gives it no secrets at all; so does any
+        # repository without the variable (a fork's own CI, the public one).
+        #
+        # Bash on all three runners (Git Bash on Windows), and the value only
+        # ever reaches Python through the environment: it is never echoed, and
+        # a failure reports the kind of error only, never a line of the file.
+        shell: bash
+        env:
+          FORBIDDEN_IDENTIFIERS: ${{ secrets.FORBIDDEN_IDENTIFIERS }}
+          REQUIRE_IDENTIFIER_SWEEP: ${{ vars.REQUIRE_IDENTIFIER_SWEEP }}
+          FROM_A_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          python - <<'PY'
+          import base64, binascii, os, sys
+          value = "".join(os.environ.get("FORBIDDEN_IDENTIFIERS", "").split())
+          if not value:
+              if (os.environ.get("REQUIRE_IDENTIFIER_SWEEP", "").strip()
+                      and os.environ.get("FROM_A_FORK") != "true"):
+                  sys.exit("No FORBIDDEN_IDENTIFIERS secret, but REQUIRE_IDENTIFIER_SWEEP"
+                           " is set: the identifier sweep must run here.")
+              print("No FORBIDDEN_IDENTIFIERS secret here: the identifier sweep will skip.")
+              sys.exit(0)
+          try:
+              data = base64.b64decode(value, validate=True)
+          except (binascii.Error, ValueError) as err:
+              sys.exit(f"FORBIDDEN_IDENTIFIERS is not valid base64 ({type(err).__name__})")
+          path = os.path.join("tests", "forbidden_identifiers.py")
+          with open(path, "wb") as handle:
+              handle.write(data)
+          sys.path.insert(0, os.getcwd())
+          try:
+              from tests.forbidden_identifiers import FORBIDDEN
+          except BaseException as err:
+              sys.exit(f"the decoded denylist does not import ({type(err).__name__})")
+          if not isinstance(FORBIDDEN, dict) or not FORBIDDEN:
+              sys.exit("the decoded denylist holds no FORBIDDEN entries")
+          print("The identifier denylist is in place.")
+          PY
+
       - name: Every module imports cleanly
         # Catches a syntax error or a bad import before the suite even starts.
         #

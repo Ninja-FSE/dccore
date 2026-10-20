@@ -91,7 +91,7 @@ GROUPS = (
             )),
         )),
         ("Advertising", (
-            ("Advert", ("ANNOUNCE_INTERVAL",)),
+            ("Advert", ("ANNOUNCE_INTERVAL", "ANNOUNCE_TRANSFERS_EXCLUDE")),
             ("Broadcast search", ("BROADCAST_SEARCH_CHANNEL", "BROADCAST_SEARCH_COOLDOWN")),
             ("Timing", ("MSG_DELAY", "DEBUG_MSG_DELAY")),
         )),
@@ -162,6 +162,9 @@ GROUPS = (
             ("Size limits", ("MAX_FETCH_FILE_SIZE", "MAX_FETCH_FOLDER_FILE_SIZE", "MAX_FETCH_LIST_FILE_SIZE",
                              "MAX_LIST_TEXT_SIZE")),
             ("History", ("FETCH_HISTORY_DAYS", "FETCH_HISTORY_MAX_ROWS")),
+            # #1423: where a fetched file is saved - FETCHED_FILES_DIR itself is
+            # with the other paths, on the Advanced page.
+            ("Where files go", ({"key": "FETCHED_FILES_PER_BOT", "label": "A folder for each bot's files"},)),
         )),
         ("Queue", (
             ("Fetch queue", ("FETCH_MAX_PER_BOT", "FETCH_QUEUED_TIMEOUT", "FETCH_BOT_MAX_FAILS",

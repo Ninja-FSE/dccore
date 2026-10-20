@@ -116,9 +116,11 @@ def video_companion_extensions():
 def pack_size_over(path, cap):
     """Is packing `path` going to exceed `cap` bytes? Returns (over, measured).
 
-    RECURSIVE, because the pack is: `rar a <dir>` takes the directory and
-    everything under it, so a check that only looked at the top level would
-    measure something other than what gets packed.
+    RECURSIVE, because the pack is: it takes every file under the directory
+    that the list lists (pack_members()), so a check that only looked at the
+    top level would measure something other than what gets packed. Every
+    file is counted here, listed or not, so this is an upper bound on the
+    pack - a folder is never let through for being smaller than it is.
 
     STOPS AS SOON AS THE CAP IS PASSED. The answer wanted here is a yes or no,
     not a total, and the folder this is most useful on is the one that is
@@ -442,7 +444,7 @@ def rar_row_folder(rel_dir):
     return "/".join(segments)
 
 
-def folder_holds_packable(path, packable=None):
+def folder_holds_packable(path, packable=None, ignored=None):
     """Does a !rar request for `path` have anything to pack?
 
     True when a file in RAR_EXTENSIONS sits directly in `path`, or in a disc
@@ -452,11 +454,21 @@ def folder_holds_packable(path, packable=None):
     and a folder of films or a whole artist does not become packable because
     something packable sits further down.
 
+    ONLY A FILE THE LIST LISTS COUNTS. `ignored` is the list's left-out
+    types, ignored_extensions(<list>) - the primary's without one - and a
+    file of one of them gives its folder no row in the scan, which asks
+    is_listed_file() first and is_packable_file() second, as this does. A
+    folder whose only packable files the list leaves out has no row, and
+    nothing here to pack either. Nor does a file whose size cannot be read,
+    or one in a disc folder with a backslash in its name: the scan lists
+    neither, and pack_members() walks by the scan's rules.
+
     Stops at the first match. An unreadable `path` raises OSError, as the
     scandir it replaces did; an unreadable disc folder below it is skipped.
     Links and junctions are not followed, as the scan does not follow them.
     """
     packable = rar_extensions() if packable is None else packable
+    ignored = ignored_extensions() if ignored is None else ignored
     pending = [platform_compat.long_path(path)]
     first = True
     while pending:
@@ -472,14 +484,55 @@ def folder_holds_packable(path, packable=None):
         for entry in entries:
             try:
                 if entry.is_file():
-                    if is_packable_file(entry.name, packable):
+                    if is_listed_file(entry.name, ignored) and is_packable_file(entry.name, packable):
+                        # The scan leaves out a file whose size cannot be
+                        # read, so it gives its folder no row either.
+                        entry.stat()
                         return True
                 elif (entry.is_dir() and not is_link_dir(entry)
-                      and _BOX_WORD_RE.match(entry.name.strip())):
+                      and _BOX_WORD_RE.match(entry.name.strip())
+                      and not has_backslash_component(entry.name)):
+                    # Nor is a folder with a backslash in its name listed (#464).
                     pending.append(entry.path)
             except OSError:
                 continue
     return False
+
+
+def pack_members(path, ignored=None):
+    """The files a !rar pack of `path` holds: [(relative path, size), ...].
+
+    EXACTLY WHAT THE LIST LISTS BELOW `path`, by the scan's own rules: the
+    walk is walk_with_sizes(), so links and junctions are not followed; a
+    folder whose path below `path` has a backslash in a name is left out,
+    as has_backslash_component() leaves it out of the list (#464); a file
+    whose size cannot be read is left out, as the scan leaves it out; and
+    is_listed_file() with `ignored` - the list's left-out types,
+    ignored_extensions(<list>), the primary's without one - decides the
+    rest. Every subfolder is walked, not only disc folders: the whole folder
+    is packed, as it always was, less what the list does not list.
+
+    Relative paths use os.sep, sorted. An unreadable `path` raises OSError,
+    as folder_holds_packable() does; an unreadable folder below it is
+    skipped, as it is there.
+    """
+    ignored = ignored_extensions() if ignored is None else ignored
+    top = platform_compat.long_path(path)
+    errors = []
+    members = []
+    for root, files in walk_with_sizes(top, onerror=errors.append, workers=1):
+        below = relative_folder(root, top)
+        below = "" if below == "." else below
+        if below and has_backslash_component(below):
+            continue
+        for name, size in files:
+            if size is None or not is_listed_file(name, ignored):
+                continue
+            members.append((os.path.join(below, name) if below else name, size))
+    for err in errors:
+        if err.filename is not None and os.path.normcase(str(err.filename)) == os.path.normcase(top):
+            raise err
+    return sorted(members)
 
 
 # The reparse tag a directory junction (mklink /J) carries - and a volume

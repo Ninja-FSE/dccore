@@ -533,6 +533,8 @@ class PoisonedQueueRowTests(PathSecurityBase):
         invoked = os.path.basename(self.rar_calls[0][0]).lower()
         self.assertIn(invoked, ("rar", "rar.exe"), self.rar_calls[0][0])
         self.assertIn(os.path.abspath(self.tree.album), self.rar_calls[0])
+        # And only the files the list lists are kept from it (#1376).
+        self.assertTrue(any(part.startswith("-n@") for part in self.rar_calls[0]), self.rar_calls[0])
         # The stubbed rar failed, so the row is kept for retry rather than dropped.
         self.assertEqual(config.dcc_queue.get("dave", []), [row])
         self.assertEqual(row.get("send_fails"), 1)

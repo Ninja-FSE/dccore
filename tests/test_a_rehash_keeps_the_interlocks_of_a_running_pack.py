@@ -87,35 +87,6 @@ class TheDecision(unittest.TestCase):
         self.assertEqual(cfg.user_processing_lock, {USER})
 
 
-class TheRehashAsksBeforeAndAfterTheReload(unittest.TestCase):
-    """handle_rehash_request() reloads half the daemon and cannot be run
-    here (see test_rehash_config_window.py); the wiring is read: the answer
-    is taken before the reload and checked again after it, and the decision
-    is the function above with that answer."""
-
-    def rehash(self):
-        with io.open(os.path.join(REPO_ROOT, "src", "commands.py"), encoding="utf-8") as handle:
-            return handle.read().split("def handle_rehash_request(", 1)[1]
-
-    def test_the_answer_is_read_right_after_the_wait(self):
-        body = self.rehash()
-        wait = body.index("_dcc_quiesce.wait_for_transfers_to_finish()")
-        asked = body.index("_pack_still_running = _dcc_quiesce.a_pack_is_running()")
-        # The call on its own line - the docstring above it mentions the name too.
-        reload_at = body.index("\n        reload_modules_in_order()\n")
-
-        self.assertLess(wait, asked)
-        self.assertLess(asked, reload_at)
-
-    def test_and_the_clear_is_the_conditional_one(self):
-        body = self.rehash()
-
-        self.assertIn("clear_or_keep_pack_interlocks(", body)
-        self.assertIn("_pack_still_running and _dcc_pack.a_pack_is_running()", body)
-        self.assertNotIn("\n        config.rar_inprogress = False\n", body,
-                         "the unconditional clear is back")
-
-
 class TheThreadIsTheAnswer(DCCoreTestCase):
     """A real pack, driven to the point where `rar` is running - the
     subprocess call blocks on an Event - and released. The interlocks and
@@ -213,6 +184,67 @@ class TheThreadIsTheAnswer(DCCoreTestCase):
         self.assertFalse(config.rar_inprogress)
 
 
+class TheRehashAsksBeforeAndAfterTheReload(TheThreadIsTheAnswer):
+    """The real handle_rehash_request(), with only its module reload stood in
+    for (tests.support.rehash_with_the_reload_stood_in), around a real pack
+    whose rar is still running (#1469; this was read out of commands.py).
+    The quiesce wait gives up at once - REHASH_TRANSFER_WAIT is 0 - which is
+    the audit's case: the wait gave up under a running pack."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_config(REHASH_TRANSFER_WAIT=0)
+
+    @staticmethod
+    def what_the_reload_does():
+        """defaults.py re-executes `rar_inprogress = False`."""
+        config.rar_inprogress = False
+        return []
+
+    def test_a_pack_still_running_keeps_its_interlocks(self):
+        self.start_a_pack()
+
+        self.assertIs(support.rehash_with_the_reload_stood_in(self, lambda *_a, **_k: self.what_the_reload_does()),
+                      True)
+
+        self.assertTrue(dcc.a_pack_is_running(), "the control: rar is still running")
+        self.assertTrue(config.rar_inprogress, "the rehash cleared the interlock of a running pack")
+        self.assertIn(USER, config.user_processing_lock)
+
+    def test_with_no_pack_the_stale_interlocks_are_cleared(self):
+        """The escape hatch: flags set, nobody packing."""
+        config.rar_inprogress = True
+        config.user_processing_lock.add(USER)
+
+        self.assertIs(support.rehash_with_the_reload_stood_in(self, lambda *_a, **_k: []), True)
+
+        self.assertFalse(config.rar_inprogress, "a wedged packer's interlock survived the rehash")
+        self.assertNotIn(USER, config.user_processing_lock)
+
+    def test_a_pack_that_ends_during_the_reload_is_asked_about_again(self):
+        """Asked before the reload, and again after it: a pack that finished
+        meanwhile has released the interlocks itself, and keeping them on the
+        first answer would latch them again with nobody left to release
+        them."""
+        self.start_a_pack()
+        thread = runtime.packer_thread
+
+        def reload_while_the_pack_ends(*_args, **_kwargs):
+            self.let_rar_finish.set()
+            thread.join(10)
+            return self.what_the_reload_does()
+
+        self.assertIs(support.rehash_with_the_reload_stood_in(self, reload_while_the_pack_ends), True)
+
+        self.assertFalse(dcc.a_pack_is_running(), "the control: the pack has ended")
+        self.assertFalse(config.rar_inprogress, "the interlock was latched again after the pack ended")
+        self.assertNotIn(USER, config.user_processing_lock)
+
+
+for _name in [n for n in dir(TheThreadIsTheAnswer) if n.startswith("test")]:
+    setattr(TheRehashAsksBeforeAndAfterTheReload, _name, None)
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -222,6 +254,12 @@ class TheFixtureLeavesNoPackerBehind(unittest.TestCase):
     no thread of its own alive. With the cleanups the wrong way round the
     packer thread was released but never joined, and ran its finally into
     the next test."""
+
+    # The case run below is a DCCoreTestCase, so the settings its harness
+    # sets are set inside this test too - on purpose, and not this test's
+    # leak. Run first in a process (this module alone), they move from the
+    # shipped values (#1469).
+    SETTINGS_THE_HARNESS_SETS = DCCoreTestCase.SETTINGS_THE_HARNESS_SETS
 
     def test_a_pack_test_joins_its_packer_before_it_ends(self):
         before = set(threading.enumerate())

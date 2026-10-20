@@ -793,8 +793,12 @@ class TheExamplesAreInvented(unittest.TestCase):
 
 class TheVersion(unittest.TestCase):
 
-    def test_the_script_is_1_20_0(self):
-        self.assertIn("\nalias dccore.ver { return 1.20.0 }\n", code())
+    def test_the_script_is_at_least_1_20_0(self):
+        """The window came with 1.20.0: a later release moves the version on,
+        and this only refuses one that went back."""
+        found = re.search(r"\nalias dccore\.ver \{ return ([0-9.]+) \}\n", code())
+        self.assertIsNotNone(found, "dccore.ver has no plain version")
+        self.assertGreaterEqual(tuple(int(n) for n in found.group(1).split(".")), (1, 20, 0))
 
 
 class TheReviewOfTheFirstVersion(unittest.TestCase):
@@ -1178,7 +1182,7 @@ class TheAuditOfBothHalves(unittest.TestCase):
     #    until `unlock <password>`.
 
     LOCKABLE = ("setcommit", "set", "served commit", "folders commit", "onconnect commit", "onconnect resend",
-                "onconnect", "pair", "unpair")
+                "onconnect", "checkupdates", "consolefeed", "pair", "unpair")
 
     def locked_line(self, what):
         session = FakeSession()
@@ -1394,6 +1398,63 @@ def script_version():
     with io.open(SCRIPT, encoding="utf-8") as handle:
         found = re.search(r"^alias dccore\.ver \{ return (\S+) \}$", handle.read(), re.M)
     return found.group(1) if found else None
+
+
+# ---------------------------------------------------------------------------
+# A lint over the whole script: /var and commas
+# ---------------------------------------------------------------------------
+
+def without_parens(text):
+    """`text` without anything inside parentheses, at any depth."""
+    out, depth = [], 0
+    for ch in text:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
+def var_statements(source):
+    """Every `var` statement in `source`: one after a `|`, and one opening
+    a one-line block (`if (...) { var ... }`), too."""
+    found = []
+    for line in source.split("\n"):
+        for part in line.strip().split(" | "):
+            statement = re.search(r"(?:^|\{ )(var(?: -\w+)? %.*)$", part.strip())
+            if statement:
+                found.append(statement.group(1).rstrip("}").strip())
+    return found
+
+
+def literal_commas(statement):
+    """The values of a `var` statement that hold a literal comma. A comma
+    inside an identifier's parentheses separates its arguments, and
+    `, %name` starts the next variable: neither counts."""
+    return [value for value in re.split(r", (?=%)", without_parens(statement)) if "," in value]
+
+
+class NoVarHoldsALiteralComma(unittest.TestCase):
+    """mIRC's /var reads a literal comma as the start of another variable
+    (`var %a = 1, %b = 2`), so a sentence with a comma in it is cut short
+    there (#1434's review)."""
+
+    def test_no_var_in_the_script_has_one(self):
+        found = var_statements(code())
+        self.assertGreater(len(found), 100)
+        for statement in found:
+            with self.subTest(statement=statement[:80]):
+                self.assertEqual(literal_commas(statement), [], statement)
+
+    def test_the_check_bites(self):
+        self.assertEqual(literal_commas("var %said = Saved, but not applied. $2-"),
+                         ["var %said = Saved, but not applied. $2-"])
+        self.assertEqual(literal_commas("var %a = $iif(%x,1,2), %b = 2"), [])
+        self.assertEqual(var_statements("  if (%x) { var %a = 1 | var -n %b = 2 }"),
+                         ["var %a = 1", "var -n %b = 2"])
+
 
 if __name__ == "__main__":
     unittest.main()

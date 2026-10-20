@@ -444,6 +444,9 @@ def startup(setup_page=None):
 
     # Read every saved queue slot back from disk at boot.
     db.load_dcc_queue()
+    # An archive an earlier version packed is packed again under the list's
+    # rule, wherever it sits in its queue (#1376).
+    dcc.pack_again_every_row_packed_before()
 
     # Other bots we have seen advertising. Rebuilt from channel traffic anyway,
     # so this only spares the wait: without it the dashboard's bot list is empty
